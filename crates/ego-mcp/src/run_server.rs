@@ -282,7 +282,14 @@ where
             request.budget,
             request.profile,
         );
-        let start = StartRequest::new(root, request_id, digest, selections, request.prompt);
+        let start = StartRequest::new(
+            RequestId::session_id(request_id),
+            root,
+            request_id,
+            digest,
+            selections,
+            request.prompt,
+        );
         match self
             .controller
             .start(start, bindings.clone())

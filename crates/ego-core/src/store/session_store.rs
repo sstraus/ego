@@ -228,7 +228,8 @@ pub trait SessionStore: Send + Sync {
     ///
     /// `None` means that no run transaction may exist. A successful first
     /// append either publishes its header and transaction as one atomic image,
-    /// or adopts a matching event-first log with a revision-one admission.
+    /// or adopts a matching header-only or event-first log with a
+    /// revision-one admission.
     /// Run revisions count only `RunTransaction` entries; interleaved
     /// conversation events never advance the compare value.
     fn compare_and_append_run(

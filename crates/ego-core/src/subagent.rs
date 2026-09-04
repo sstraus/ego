@@ -1016,6 +1016,7 @@ async fn admit(
         .controller
         .start(
             StartRequest::new(
+                RequestId::session_id(request_id(invocation)),
                 inner.root.clone(),
                 request_id(invocation),
                 RequestDigest::parse(&format!(

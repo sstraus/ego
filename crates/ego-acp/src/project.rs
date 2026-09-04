@@ -186,6 +186,7 @@ use ego_core::event::id::ItemId;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::public::{ItemKind, PublicEvent};
 use ego_core::run::{DeniedBy, RunTermination};
+use ego_core::session_lifecycle::ReplayFrame;
 use ego_core::state::SessionState;
 
 /// The bare-string wire form ACP ids use (`MessageId`, `ToolCallId`, …).
@@ -366,6 +367,34 @@ pub fn project_acp_v1(
         update = update.cost(Some(v1::Cost::new(amount, currency)));
     }
     Some(v1::SessionUpdate::UsageUpdate(update))
+}
+
+/// Project ordered durable history for `session/load`.
+///
+/// Stateless updates retain their event order. Usage-shaped history is reduced
+/// to at most one final update because only the final durable state and the
+/// latest admitted model's durable context window describe the session being
+/// attached now.
+pub fn project_replay_v1(
+    frames: &[ReplayFrame],
+    context_window: Option<u64>,
+) -> Vec<v1::SessionUpdate> {
+    let mut updates = frames
+        .iter()
+        .filter_map(|frame| project_v1(&frame.event))
+        .collect::<Vec<_>>();
+    let Some(state) = frames.last().map(|frame| &frame.state) else {
+        return updates;
+    };
+    if let (Some(used), Some(size)) = (state.context.used_tokens, context_window) {
+        let mut usage = v1::UsageUpdate::new(used, size);
+        if let Some(total) = state.cost.known() {
+            let (amount, currency) = acp_cost(total);
+            usage = usage.cost(Some(v1::Cost::new(amount, currency)));
+        }
+        updates.push(v1::SessionUpdate::UsageUpdate(usage));
+    }
+    updates
 }
 
 /// Project one `PublicEvent` onto ACP v2, using the state it produced.

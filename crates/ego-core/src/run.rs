@@ -752,6 +752,7 @@ pub enum RunAppend {
 /// First prompt and immutable selections for a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartRequest {
+    session_id: SessionId,
     root: RunRoot,
     request_id: RequestId,
     digest: RequestDigest,
@@ -762,6 +763,7 @@ pub struct StartRequest {
 
 impl StartRequest {
     pub fn new(
+        session_id: SessionId,
         root: RunRoot,
         request_id: RequestId,
         digest: RequestDigest,
@@ -769,6 +771,7 @@ impl StartRequest {
         prompt: impl Into<String>,
     ) -> Self {
         Self {
+            session_id,
             root,
             request_id,
             digest,
@@ -1489,7 +1492,7 @@ where
         request: StartRequest,
         bindings: RunExecutionBindings,
     ) -> Result<RunCommandOutcome, RunError> {
-        let session_id = RequestId::session_id(request.request_id);
+        let session_id = request.session_id;
         match self.read_folded(session_id).await {
             Ok(folded) => return self.replay_start(&request, folded),
             Err(RunError::Store(StoreError::NotFound)) => {}
@@ -1791,10 +1794,13 @@ where
 
     /// Resolve the one run stream targeted by a deterministic start request.
     pub async fn status_by_request(&self, request_id: RequestId) -> Result<RunSnapshot, RunError> {
-        Ok(self
-            .read_folded(RequestId::session_id(request_id))
-            .await?
-            .snapshot)
+        self.status_by_session(RequestId::session_id(request_id))
+            .await
+    }
+
+    /// Resolve the one run stream owned by a durable session.
+    pub async fn status_by_session(&self, session_id: SessionId) -> Result<RunSnapshot, RunError> {
+        Ok(self.read_folded(session_id).await?.snapshot)
     }
 
     pub async fn recover(

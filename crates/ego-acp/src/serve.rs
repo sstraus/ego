@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::negotiate::{SERVED, negotiate};
-use crate::project::stop_reason_v1;
+use crate::project::{project_replay_v1, stop_reason_v1};
 use crate::question::{AcpQuestionAdapter, CapabilityCapture};
 use agent_client_protocol::{
     Agent, AgentProtocolRouter, Client, ConnectionTo, Error, ErrorCode, JsonRpcMessage,
@@ -22,11 +22,16 @@ use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::run::{
     CancelKey, ContinueRequest, EventSinkFactory, IdSource, RequestDigest, RequestId,
-    RunCommandOutcome, RunController, RunExecutor, RunRoot, RunSelections, RunSettlement,
-    RunSnapshot, StartRequest,
+    RunCommandOutcome, RunController, RunError, RunExecution, RunExecutionBindings, RunExecutor,
+    RunRecoveryOutcome, RunRoot, RunSelections, RunSettlement, RunSnapshot, RunStatus,
+    RunSubscription, StartRequest,
+};
+use ego_core::session_lifecycle::{
+    LifecycleError, SessionAttachment, SessionCursor, SessionLifecycle, SessionLifecycleStore,
+    SessionPage,
 };
 use ego_core::sink::EventSink;
-use ego_core::store::session_store::SessionStore;
+use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use ego_core::turn::AdmittedToolSource;
 use serde::{Deserialize, Serialize};
 
@@ -143,10 +148,22 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
     }
 }
 
-fn capabilities(compaction: bool) -> v1::AgentCapabilities {
+fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
     let capabilities = v1::AgentCapabilities::new()
-        .load_session(false)
+        .load_session(lifecycle)
         .mcp_capabilities(v1::McpCapabilities::new().http(true).sse(false));
+    let capabilities = if lifecycle {
+        capabilities.session_capabilities(
+            v1::SessionCapabilities::new()
+                .list(v1::SessionListCapabilities::new())
+                .delete(v1::SessionDeleteCapabilities::new())
+                .fork(v1::SessionForkCapabilities::new())
+                .resume(v1::SessionResumeCapabilities::new())
+                .close(v1::SessionCloseCapabilities::new()),
+        )
+    } else {
+        capabilities
+    };
     if !compaction {
         return capabilities;
     }
@@ -217,7 +234,7 @@ impl From<CompactionReceipt> for AcpCompactResponse {
 
 struct Registered {
     root: RunRoot,
-    start_request: RequestId,
+    start_request: Option<RequestId>,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
     busy: bool,
     active_cancel: Option<CancelKey>,
@@ -245,10 +262,14 @@ impl Sessions {
         &self,
         id: v1::SessionId,
         root: RunRoot,
-        start_request: RequestId,
+        start_request: Option<RequestId>,
         mcp: Option<Arc<dyn SessionMcpAdmission>>,
-    ) {
-        self.lock().insert(
+    ) -> bool {
+        let mut sessions = self.lock();
+        if sessions.get(&id).is_some_and(|session| session.busy) {
+            return false;
+        }
+        sessions.insert(
             id,
             Registered {
                 root,
@@ -259,6 +280,7 @@ impl Sessions {
                 mcp,
             },
         );
+        true
     }
 
     fn begin(&self, id: &v1::SessionId, ids: &dyn IdSource) -> BeginPrompt {
@@ -271,7 +293,9 @@ impl Sessions {
         }
         session.busy = true;
         let request_id = if session.run.is_none() {
-            session.start_request
+            session
+                .start_request
+                .unwrap_or_else(|| RequestId::from_uuid(ids.next_uuid()))
         } else {
             RequestId::from_uuid(ids.next_uuid())
         };
@@ -293,6 +317,7 @@ impl Sessions {
         if let Some(session) = self.lock().get_mut(id) {
             session.run = Some((run_id, revision));
             session.active_cancel = Some(key);
+            session.busy = true;
         }
     }
 
@@ -315,6 +340,14 @@ impl Sessions {
         self.lock()
             .get(id)
             .and_then(|session| session.active_cancel.clone())
+    }
+
+    fn is_busy(&self, id: &v1::SessionId) -> bool {
+        self.lock().get(id).is_some_and(|session| session.busy)
+    }
+
+    fn close(&self, id: &v1::SessionId) {
+        self.lock().remove(id);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<v1::SessionId, Registered>> {
@@ -413,6 +446,131 @@ fn validate_mcp_servers(servers: &[v1::McpServer]) -> Result<(), McpSessionAdmis
     Ok(())
 }
 
+async fn admit_mcp(
+    admitter: &dyn McpSessionAdmitter,
+    servers: Vec<v1::McpServer>,
+) -> Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError> {
+    validate_mcp_servers(&servers)?;
+    let supplied = !servers.is_empty();
+    match admitter.admit(servers).await {
+        Ok(Some(admission)) if supplied => Ok(Some(admission)),
+        Ok(Some(_)) => Err(McpSessionAdmissionError::new(
+            "an empty ACP MCP selection unexpectedly produced live authority",
+        )),
+        Ok(None) if !supplied => Ok(None),
+        Ok(None) => Err(McpSessionAdmissionError::new(
+            "the supplied MCP servers did not produce live session authority",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn session_bindings(
+    builder: &dyn RunBindingsBuilder,
+    connection: ConnectionTo<Client>,
+    session: v1::SessionId,
+    capabilities: CapabilityCapture,
+    mcp: Option<&Arc<dyn SessionMcpAdmission>>,
+) -> RunExecutionBindings {
+    let bindings = builder.build(connection, session, capabilities);
+    match mcp {
+        Some(mcp) => bindings.with_mcp(
+            mcp.admitted_tools(),
+            mcp.mcp_errors().to_vec(),
+            mcp.mcp_runtime(),
+        ),
+        None => bindings,
+    }
+}
+
+async fn current_run<S, E, C, I>(
+    controller: &RunController<S, E, C, I>,
+    session: SessionId,
+) -> Result<Option<(ego_core::run::RunId, ego_core::run::RunRevision)>, RunError>
+where
+    S: SessionStore,
+    E: RunExecutor,
+    C: Clock,
+    I: IdSource,
+{
+    match controller.status_by_session(session).await {
+        Ok(snapshot) => Ok(Some((snapshot.run_id(), snapshot.revision()))),
+        Err(RunError::Store(StoreError::NotFound)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+struct RecoveredSessionRun {
+    run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
+    active: Option<(CancelKey, RunSubscription, RunExecution)>,
+}
+
+async fn recover_current_run<S, E, C, I>(
+    controller: &RunController<S, E, C, I>,
+    session: SessionId,
+    bindings: RunExecutionBindings,
+) -> Result<RecoveredSessionRun, String>
+where
+    S: SessionStore,
+    E: RunExecutor,
+    C: Clock,
+    I: IdSource,
+{
+    let Some((run_id, revision)) = current_run(controller, session)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(RecoveredSessionRun {
+            run: None,
+            active: None,
+        });
+    };
+    let snapshot = controller
+        .status(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !matches!(
+        snapshot.status(),
+        RunStatus::Running | RunStatus::Cancelling
+    ) {
+        return Ok(RecoveredSessionRun {
+            run: Some((run_id, revision)),
+            active: None,
+        });
+    }
+    match controller
+        .recover(run_id, bindings)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        RunRecoveryOutcome::Reattached(reattachment) => {
+            let snapshot = reattachment.snapshot().clone();
+            let key = reattachment.cancel_key().clone();
+            let subscription = reattachment.subscription();
+            let execution = reattachment.into_execution();
+            Ok(RecoveredSessionRun {
+                run: Some((snapshot.run_id(), snapshot.revision())),
+                active: Some((key, subscription, execution)),
+            })
+        }
+        RunRecoveryOutcome::Observed(observation) => {
+            let snapshot = observation.snapshot();
+            if matches!(
+                snapshot.status(),
+                RunStatus::Running | RunStatus::Cancelling
+            ) {
+                return Err(format!(
+                    "session {session} already has a live turn attached to this process"
+                ));
+            }
+            Ok(RecoveredSessionRun {
+                run: Some((snapshot.run_id(), snapshot.revision())),
+                active: None,
+            })
+        }
+    }
+}
+
 fn prompt_text(blocks: &[v1::ContentBlock]) -> Result<String, String> {
     let mut parts = Vec::new();
     for block in blocks {
@@ -463,6 +621,121 @@ fn prompt_result(snapshot: &RunSnapshot) -> Result<v1::StopReason, String> {
     }
 }
 
+type LifecycleFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, LifecycleError>> + Send + 'a>>;
+
+/// Consumer-owned semantic port used only to compose optional ACP lifecycle
+/// capability handlers without coupling the legacy router constructor to a
+/// concrete outer store. It contains no ACP DTOs and owns no durable policy.
+trait LifecycleOperations: Send + Sync {
+    fn create_with_id(&self, id: SessionId, root: std::path::PathBuf)
+    -> Result<(), LifecycleError>;
+    fn list(
+        &self,
+        cursor: Option<&SessionCursor>,
+        root: Option<&Path>,
+    ) -> Result<SessionPage, LifecycleError>;
+    fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment>;
+    fn resume<'a>(
+        &'a self,
+        id: SessionId,
+        root: &'a Path,
+    ) -> LifecycleFuture<'a, SessionAttachment>;
+    fn fork(
+        &self,
+        id: SessionId,
+    ) -> LifecycleFuture<'_, ego_core::session_lifecycle::CreatedSession>;
+    fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
+    fn close(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
+}
+
+const SESSION_PAGE_SIZE: usize = 50;
+
+impl<S> LifecycleOperations for SessionLifecycle<S>
+where
+    S: SessionLifecycleStore + 'static,
+{
+    fn create_with_id(
+        &self,
+        id: SessionId,
+        root: std::path::PathBuf,
+    ) -> Result<(), LifecycleError> {
+        SessionLifecycle::create_with_id(self, id, root).map(|_| ())
+    }
+
+    fn list(
+        &self,
+        cursor: Option<&SessionCursor>,
+        root: Option<&Path>,
+    ) -> Result<SessionPage, LifecycleError> {
+        SessionLifecycle::list(self, cursor, SESSION_PAGE_SIZE, root)
+    }
+
+    fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment> {
+        Box::pin(SessionLifecycle::load(self, id, root))
+    }
+
+    fn resume<'a>(
+        &'a self,
+        id: SessionId,
+        root: &'a Path,
+    ) -> LifecycleFuture<'a, SessionAttachment> {
+        Box::pin(SessionLifecycle::resume(self, id, root))
+    }
+
+    fn fork(
+        &self,
+        id: SessionId,
+    ) -> LifecycleFuture<'_, ego_core::session_lifecycle::CreatedSession> {
+        Box::pin(SessionLifecycle::fork(self, id))
+    }
+
+    fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()> {
+        Box::pin(async move { SessionLifecycle::delete(self, id).await.map(|_| ()) })
+    }
+
+    fn close(&self, id: SessionId) -> LifecycleFuture<'_, ()> {
+        Box::pin(async move { SessionLifecycle::close(self, id).await.map(|_| ()) })
+    }
+}
+
+fn parse_session(id: &v1::SessionId) -> Result<SessionId, Error> {
+    id.to_string()
+        .parse::<SessionId>()
+        .map_err(|_| Error::invalid_params().data(format!("invalid ACP session id {id}")))
+}
+
+fn lifecycle_error(error: impl fmt::Display) -> Error {
+    Error::invalid_params().data(error.to_string())
+}
+
+fn session_info(meta: SessionMeta) -> v1::SessionInfo {
+    v1::SessionInfo::new(meta.id.to_string(), meta.workspace_root).title(meta.title)
+}
+
+fn emit_info(
+    connection: &ConnectionTo<Client>,
+    id: &v1::SessionId,
+    meta: &SessionMeta,
+) -> Result<(), Error> {
+    connection.send_notification(v1::SessionNotification::new(
+        id.clone(),
+        v1::SessionUpdate::SessionInfoUpdate(
+            v1::SessionInfoUpdate::new().title(meta.title.clone()),
+        ),
+    ))
+}
+
+fn emit_attachment(
+    connection: &ConnectionTo<Client>,
+    id: &v1::SessionId,
+    attachment: &SessionAttachment,
+) -> Result<(), Error> {
+    for update in project_replay_v1(&attachment.replay, attachment.context_window) {
+        connection.send_notification(v1::SessionNotification::new(id.clone(), update))?;
+    }
+    emit_info(connection, id, &attachment.meta)
+}
+
 /// Build the ACP router over one concrete core controller.
 pub fn agent<S, E, C, I>(
     controller: Arc<RunController<S, E, C, I>>,
@@ -486,6 +759,35 @@ where
         bindings_builder,
         mcp_admitter,
         None,
+        None,
+    ))
+}
+
+/// Build the ACP router composed with the shared durable session lifecycle.
+pub fn durable_agent<S, E, C, I>(
+    controller: Arc<RunController<S, E, C, I>>,
+    lifecycle: Arc<SessionLifecycle<S>>,
+    roots: Arc<dyn RootResolver>,
+    spawner: Arc<dyn ExecutionSpawner>,
+    ids: Arc<dyn IdSource>,
+    bindings_builder: Arc<dyn RunBindingsBuilder>,
+    mcp_admitter: Arc<dyn McpSessionAdmitter>,
+) -> AgentProtocolRouter
+where
+    S: SessionLifecycleStore + 'static,
+    E: RunExecutor + 'static,
+    C: Clock + 'static,
+    I: IdSource + 'static,
+{
+    Agent.protocol_router().with_v1(v1_agent(
+        controller,
+        roots,
+        spawner,
+        ids,
+        bindings_builder,
+        mcp_admitter,
+        None,
+        Some(lifecycle),
     ))
 }
 
@@ -513,9 +815,41 @@ where
         bindings_builder,
         mcp_admitter,
         Some(compaction),
+        None,
     ))
 }
 
+/// Build the durable ACP router with the versioned compaction extension.
+#[allow(clippy::too_many_arguments)]
+pub fn durable_agent_with_compaction<S, E, C, I>(
+    controller: Arc<RunController<S, E, C, I>>,
+    lifecycle: Arc<SessionLifecycle<S>>,
+    roots: Arc<dyn RootResolver>,
+    spawner: Arc<dyn ExecutionSpawner>,
+    ids: Arc<dyn IdSource>,
+    bindings_builder: Arc<dyn RunBindingsBuilder>,
+    mcp_admitter: Arc<dyn McpSessionAdmitter>,
+    compaction: Arc<dyn CompactionCommand>,
+) -> AgentProtocolRouter
+where
+    S: SessionLifecycleStore + 'static,
+    E: RunExecutor + 'static,
+    C: Clock + 'static,
+    I: IdSource + 'static,
+{
+    Agent.protocol_router().with_v1(v1_agent(
+        controller,
+        roots,
+        spawner,
+        ids,
+        bindings_builder,
+        mcp_admitter,
+        Some(compaction),
+        Some(lifecycle),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn v1_agent<S, E, C, I>(
     controller: Arc<RunController<S, E, C, I>>,
     roots: Arc<dyn RootResolver>,
@@ -524,6 +858,7 @@ fn v1_agent<S, E, C, I>(
     bindings_builder: Arc<dyn RunBindingsBuilder>,
     mcp_admitter: Arc<dyn McpSessionAdmitter>,
     compaction: Option<Arc<dyn CompactionCommand>>,
+    lifecycle: Option<Arc<dyn LifecycleOperations>>,
 ) -> impl agent_client_protocol::ConnectTo<Client>
 where
     S: SessionStore + 'static,
@@ -534,6 +869,7 @@ where
     let sessions = Sessions::default();
     let client_capabilities = Arc::new(Mutex::new(CapabilityCapture::default()));
     let advertises_compaction = compaction.is_some();
+    let advertises_lifecycle = lifecycle.is_some();
     Agent
         .builder()
         .name("ego")
@@ -555,7 +891,10 @@ where
                         .capture_initialize(&request.client_capabilities);
                     responder.respond(
                         v1::InitializeResponse::new(answer)
-                            .agent_capabilities(capabilities(advertises_compaction))
+                            .agent_capabilities(capabilities(
+                                advertises_compaction,
+                                advertises_lifecycle,
+                            ))
                             .agent_info(Some(v1::Implementation::new(
                                 "ego",
                                 env!("CARGO_PKG_VERSION"),
@@ -571,11 +910,12 @@ where
                 let roots = Arc::clone(&roots);
                 let ids = Arc::clone(&ids);
                 let mcp_admitter = Arc::clone(&mcp_admitter);
-                async move |request: v1::NewSessionRequest, responder, _cx| {
-                    if let Err(error) = validate_mcp_servers(&request.mcp_servers) {
-                        return responder.respond_with_error(
-                            Error::invalid_params().data(error.to_string()),
-                        );
+                let lifecycle = lifecycle.clone();
+                async move |request: v1::NewSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    if !request.additional_directories.is_empty() {
+                        return responder.respond_with_error(Error::invalid_params().data(
+                            "this agent does not support additionalDirectories",
+                        ));
                     }
                     let root = match roots.resolve(&request.cwd) {
                         Ok(root) => root,
@@ -585,31 +925,352 @@ where
                             );
                         }
                     };
-                    let supplied_mcp = !request.mcp_servers.is_empty();
-                    let mcp = match mcp_admitter.admit(request.mcp_servers).await {
-                        Ok(Some(admission)) if supplied_mcp => Some(admission),
-                        Ok(Some(_)) => {
-                            return responder.respond_with_error(Error::invalid_params().data(
-                                "an empty ACP MCP selection unexpectedly produced live authority",
-                            ));
-                        }
-                        Ok(None) if !supplied_mcp => None,
-                        Ok(None) => {
-                            return responder.respond_with_error(Error::invalid_params().data(
-                                "the supplied MCP servers did not produce live session authority",
-                            ));
-                        }
-                        Err(error) => {
-                            return responder.respond_with_error(
-                                Error::invalid_params().data(error.to_string()),
-                            );
-                        }
+                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
+                        Ok(mcp) => mcp,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
                     };
                     let start_request = RequestId::from_uuid(ids.next_uuid());
                     let session = RequestId::session_id(start_request);
                     let id = v1::SessionId::new(session.to_string());
-                    sessions.open(id.clone(), root, start_request, mcp);
+                    if let Some(lifecycle) = &lifecycle
+                        && let Err(error) =
+                            lifecycle.create_with_id(session, root.as_path().to_path_buf())
+                    {
+                        return responder.respond_with_error(lifecycle_error(error));
+                    }
+                    let attachment_root = root.clone();
+                    let _ = sessions.open(id.clone(), root, Some(start_request), mcp);
+                    if let Some(lifecycle) = &lifecycle {
+                        match lifecycle.resume(session, attachment_root.as_path()).await {
+                            Ok(attachment) => {
+                                if let Err(error) = emit_info(&cx, &id, &attachment.meta) {
+                                    return responder.respond_with_error(error);
+                                }
+                            }
+                            Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        }
+                    }
                     responder.respond(v1::NewSessionResponse::new(id))
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let lifecycle = lifecycle.clone();
+                let roots = Arc::clone(&roots);
+                async move |request: v1::ListSessionsRequest, responder, _cx| {
+                    let Some(lifecycle) = &lifecycle else {
+                        return responder.respond_with_error(Error::method_not_found());
+                    };
+                    let root = match request.cwd.as_deref().map(|cwd| roots.resolve(cwd)).transpose() {
+                        Ok(root) => root,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let cursor = match request.cursor.map(SessionCursor::parse).transpose() {
+                        Ok(cursor) => cursor,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    match lifecycle.list(cursor.as_ref(), root.as_ref().map(RunRoot::as_path)) {
+                        Ok(page) => responder.respond(
+                            v1::ListSessionsResponse::new(
+                                page.items.into_iter().map(session_info).collect(),
+                            )
+                            .next_cursor(page.next_cursor.map(|cursor| cursor.to_string())),
+                        ),
+                        Err(error) => responder.respond_with_error(lifecycle_error(error)),
+                    }
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let lifecycle = lifecycle.clone();
+                let sessions = sessions.clone();
+                let controller = Arc::clone(&controller);
+                let roots = Arc::clone(&roots);
+                let ids = Arc::clone(&ids);
+                let mcp_admitter = Arc::clone(&mcp_admitter);
+                let spawner = Arc::clone(&spawner);
+                let bindings_builder = Arc::clone(&bindings_builder);
+                let client_capabilities = Arc::clone(&client_capabilities);
+                async move |request: v1::LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    if !request.additional_directories.is_empty() {
+                        return responder.respond_with_error(Error::invalid_params().data(
+                            "this agent does not support additionalDirectories",
+                        ));
+                    }
+                    let Some(lifecycle) = &lifecycle else {
+                        return responder.respond_with_error(Error::method_not_found());
+                    };
+                    let id = match parse_session(&request.session_id) {
+                        Ok(id) => id,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    if sessions.is_busy(&request.session_id) {
+                        return responder.respond_with_error(Error::invalid_request().data(
+                            format!("session {} already has a turn running", request.session_id),
+                        ));
+                    }
+                    let root = match roots.resolve(&request.cwd) {
+                        Ok(root) => root,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let attachment = match lifecycle.load(id, root.as_path()).await {
+                        Ok(attachment) => attachment,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
+                        Ok(mcp) => mcp,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let capabilities = *client_capabilities
+                        .lock()
+                        .expect("initialize capability lock poisoned");
+                    let bindings = session_bindings(
+                        bindings_builder.as_ref(),
+                        cx.clone(),
+                        request.session_id.clone(),
+                        capabilities,
+                        mcp.as_ref(),
+                    );
+                    let recovered = match recover_current_run(controller.as_ref(), id, bindings).await {
+                        Ok(run) => run,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    if !sessions.open(
+                        request.session_id.clone(),
+                        root,
+                        recovered.run.is_none().then(|| RequestId::from_uuid(ids.next_uuid())),
+                        mcp,
+                    ) {
+                        return responder.respond_with_error(Error::invalid_request().data(
+                            format!("session {} already has a turn running", request.session_id),
+                        ));
+                    }
+                    if let Some((run_id, revision)) = recovered.run {
+                        sessions.lock().get_mut(&request.session_id).expect("just opened").run =
+                            Some((run_id, revision));
+                    }
+                    if let Some((key, subscription, execution)) = recovered.active {
+                        let (run_id, revision) = recovered.run.expect("active recovery has a run");
+                        sessions.install_admission(&request.session_id, run_id, revision, key);
+                        let controller = Arc::clone(&controller);
+                        spawner.spawn(Box::pin(async move {
+                            if let Err(error) = controller.execute(execution).await {
+                                tracing::warn!(%error, "reattached ACP execution failed");
+                            }
+                        }));
+                        let watched = sessions.clone();
+                        let watched_id = request.session_id.clone();
+                        spawner.spawn(Box::pin(async move {
+                            let snapshot = subscription.await;
+                            watched.finish(&watched_id, &snapshot);
+                        }));
+                    }
+                    if let Err(error) = emit_attachment(&cx, &request.session_id, &attachment) {
+                        return responder.respond_with_error(error);
+                    }
+                    responder.respond(v1::LoadSessionResponse::new())
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let lifecycle = lifecycle.clone();
+                let sessions = sessions.clone();
+                let controller = Arc::clone(&controller);
+                let roots = Arc::clone(&roots);
+                let ids = Arc::clone(&ids);
+                let mcp_admitter = Arc::clone(&mcp_admitter);
+                let spawner = Arc::clone(&spawner);
+                let bindings_builder = Arc::clone(&bindings_builder);
+                let client_capabilities = Arc::clone(&client_capabilities);
+                async move |request: v1::ResumeSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    if !request.additional_directories.is_empty() {
+                        return responder.respond_with_error(Error::invalid_params().data(
+                            "this agent does not support additionalDirectories",
+                        ));
+                    }
+                    let Some(lifecycle) = &lifecycle else {
+                        return responder.respond_with_error(Error::method_not_found());
+                    };
+                    let id = match parse_session(&request.session_id) {
+                        Ok(id) => id,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    if sessions.is_busy(&request.session_id) {
+                        return responder.respond_with_error(Error::invalid_request().data(
+                            format!("session {} already has a turn running", request.session_id),
+                        ));
+                    }
+                    let root = match roots.resolve(&request.cwd) {
+                        Ok(root) => root,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let attachment = match lifecycle.resume(id, root.as_path()).await {
+                        Ok(attachment) => attachment,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
+                        Ok(mcp) => mcp,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let capabilities = *client_capabilities
+                        .lock()
+                        .expect("initialize capability lock poisoned");
+                    let bindings = session_bindings(
+                        bindings_builder.as_ref(),
+                        cx.clone(),
+                        request.session_id.clone(),
+                        capabilities,
+                        mcp.as_ref(),
+                    );
+                    let recovered = match recover_current_run(controller.as_ref(), id, bindings).await {
+                        Ok(run) => run,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    if !sessions.open(
+                        request.session_id.clone(),
+                        root,
+                        recovered.run.is_none().then(|| RequestId::from_uuid(ids.next_uuid())),
+                        mcp,
+                    ) {
+                        return responder.respond_with_error(Error::invalid_request().data(
+                            format!("session {} already has a turn running", request.session_id),
+                        ));
+                    }
+                    if let Some((run_id, revision)) = recovered.run {
+                        sessions.lock().get_mut(&request.session_id).expect("just opened").run =
+                            Some((run_id, revision));
+                    }
+                    if let Some((key, subscription, execution)) = recovered.active {
+                        let (run_id, revision) = recovered.run.expect("active recovery has a run");
+                        sessions.install_admission(&request.session_id, run_id, revision, key);
+                        let controller = Arc::clone(&controller);
+                        spawner.spawn(Box::pin(async move {
+                            if let Err(error) = controller.execute(execution).await {
+                                tracing::warn!(%error, "reattached ACP execution failed");
+                            }
+                        }));
+                        let watched = sessions.clone();
+                        let watched_id = request.session_id.clone();
+                        spawner.spawn(Box::pin(async move {
+                            let snapshot = subscription.await;
+                            watched.finish(&watched_id, &snapshot);
+                        }));
+                    }
+                    if let Err(error) = emit_attachment(&cx, &request.session_id, &attachment) {
+                        return responder.respond_with_error(error);
+                    }
+                    responder.respond(v1::ResumeSessionResponse::new())
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let lifecycle = lifecycle.clone();
+                let sessions = sessions.clone();
+                let roots = Arc::clone(&roots);
+                let ids = Arc::clone(&ids);
+                let mcp_admitter = Arc::clone(&mcp_admitter);
+                async move |request: v1::ForkSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    if !request.additional_directories.is_empty() {
+                        return responder.respond_with_error(Error::invalid_params().data(
+                            "this agent does not support additionalDirectories",
+                        ));
+                    }
+                    let Some(lifecycle) = &lifecycle else {
+                        return responder.respond_with_error(Error::method_not_found());
+                    };
+                    let source = match parse_session(&request.session_id) {
+                        Ok(id) => id,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    let root = match roots.resolve(&request.cwd) {
+                        Ok(root) => root,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    if let Err(error) = lifecycle.resume(source, root.as_path()).await {
+                        return responder.respond_with_error(lifecycle_error(error));
+                    }
+                    // Admission precedes publication of the child so an MCP
+                    // refusal cannot leave an unexplained durable fork. If
+                    // the later lifecycle transition refuses, this temporary
+                    // connection authority is dropped without attachment.
+                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
+                        Ok(mcp) => mcp,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let child = match lifecycle.fork(source).await {
+                        Ok(child) => child.id,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let attachment = match lifecycle.resume(child, root.as_path()).await {
+                        Ok(attachment) => attachment,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                    };
+                    let child_id = v1::SessionId::new(child.to_string());
+                    let _ = sessions.open(
+                        child_id.clone(),
+                        root,
+                        Some(RequestId::from_uuid(ids.next_uuid())),
+                        mcp,
+                    );
+                    if let Err(error) = emit_info(&cx, &child_id, &attachment.meta) {
+                        sessions.close(&child_id);
+                        return responder.respond_with_error(error);
+                    }
+                    responder.respond(v1::ForkSessionResponse::new(child_id))
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let lifecycle = lifecycle.clone();
+                let sessions = sessions.clone();
+                async move |request: v1::DeleteSessionRequest, responder, _cx| {
+                    let Some(lifecycle) = &lifecycle else {
+                        return responder.respond_with_error(Error::method_not_found());
+                    };
+                    let id = match parse_session(&request.session_id) {
+                        Ok(id) => id,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    match lifecycle.delete(id).await {
+                        Ok(()) => {
+                            sessions.close(&request.session_id);
+                            responder.respond(v1::DeleteSessionResponse::new())
+                        }
+                        Err(error) => responder.respond_with_error(lifecycle_error(error)),
+                    }
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let lifecycle = lifecycle.clone();
+                let sessions = sessions.clone();
+                async move |request: v1::CloseSessionRequest, responder, _cx| {
+                    let Some(lifecycle) = &lifecycle else {
+                        return responder.respond_with_error(Error::method_not_found());
+                    };
+                    let id = match parse_session(&request.session_id) {
+                        Ok(id) => id,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    match lifecycle.close(id).await {
+                        Ok(()) => {
+                            sessions.close(&request.session_id);
+                            responder.respond(v1::CloseSessionResponse::new())
+                        }
+                        Err(error) => responder.respond_with_error(lifecycle_error(error)),
+                    }
                 }
             },
             on_receive_request!(),
@@ -639,6 +1300,10 @@ where
                 let client_capabilities = Arc::clone(&client_capabilities);
                 async move |request: v1::PromptRequest, responder, cx: ConnectionTo<Client>| {
                     let id = request.session_id.clone();
+                    let durable_session = match parse_session(&id) {
+                        Ok(id) => id,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
                     let correlation = match sessions.begin(&id, ids.as_ref()) {
                         BeginPrompt::Ready(correlation) => correlation,
                         BeginPrompt::Busy => {
@@ -686,6 +1351,7 @@ where
                             controller
                                 .start(
                                     StartRequest::new(
+                                        durable_session,
                                         correlation.root,
                                         correlation.request_id,
                                         digest,

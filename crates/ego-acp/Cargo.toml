@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation", "unstable_protocol_v2"] }
+agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation", "unstable_protocol_v2", "unstable_session_fork"] }
 agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation", "unstable_protocol_v2", "unstable_session_fork"] }
 ego-core.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }

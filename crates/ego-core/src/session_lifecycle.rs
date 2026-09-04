@@ -13,6 +13,7 @@ use crate::ceiling::Ceilings;
 use crate::event::domain::{DomainEvent, Envelope, EventKind};
 use crate::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use crate::event::time::{Clock, Timestamp};
+use crate::evidence::{EvidenceLogSource, ManifestEvidence, ManifestEvidenceError};
 use crate::goal::{GoalOwner, GoalRecord, GoalRefusal, GoalState, GoalTransition};
 use crate::public::{PublicEvent, project_public};
 use crate::session::{
@@ -60,7 +61,7 @@ impl From<TargetPublication> for LifecyclePublication {
 
 /// Atomic effects the existing append/read store does not express.
 pub trait SessionLifecycleStore:
-    SessionStore + ReplaySource + SessionBlobSource + Send + Sync
+    SessionStore + ReplaySource + SessionBlobSource + EvidenceLogSource + Send + Sync
 {
     fn publish_empty_session(
         &self,
@@ -226,6 +227,8 @@ pub struct ReplayFrame {
 pub struct SessionAttachment {
     pub id: SessionId,
     pub root: PathBuf,
+    pub meta: SessionMeta,
+    pub context_window: Option<u64>,
     pub replay: Vec<ReplayFrame>,
 }
 
@@ -328,6 +331,7 @@ pub enum LifecycleError {
     Fork(ForkError),
     Ancestry(ReplayError),
     Replay(ReplaySourceError),
+    Evidence(ManifestEvidenceError),
     Store(StoreError),
     Run(String),
     NotPublished(String),
@@ -355,6 +359,7 @@ impl fmt::Display for LifecycleError {
             Self::Fork(error) => error.fmt(formatter),
             Self::Ancestry(error) => error.fmt(formatter),
             Self::Replay(error) => error.fmt(formatter),
+            Self::Evidence(error) => error.fmt(formatter),
             Self::Store(error) => error.fmt(formatter),
             Self::Run(diagnostic) => formatter.write_str(diagnostic),
             Self::NotPublished(diagnostic) => formatter.write_str(diagnostic),
@@ -371,6 +376,11 @@ impl From<StoreError> for LifecycleError {
 impl From<ReplaySourceError> for LifecycleError {
     fn from(value: ReplaySourceError) -> Self {
         Self::Replay(value)
+    }
+}
+impl From<ManifestEvidenceError> for LifecycleError {
+    fn from(value: ManifestEvidenceError) -> Self {
+        Self::Evidence(value)
     }
 }
 impl From<ForkError> for LifecycleError {
@@ -568,6 +578,7 @@ where
                         reason: "semantic event sequence is not contiguous".to_owned(),
                     }));
                 }
+                semantic = event.env.seq;
                 state.apply(&event);
                 if let Some(public) = project_public(&event) {
                     frames.push(ReplayFrame {
@@ -716,9 +727,15 @@ where
         if self.runs.activity(id).await? == SessionActivity::Uncertain {
             return Err(LifecycleError::EffectUncertain);
         }
+        let context_window = ManifestEvidence::rebuild(&*self.metadata.store, &id)?
+            .generations()
+            .last()
+            .and_then(|generation| generation.capabilities().max_context_tokens);
         Ok(SessionAttachment {
             id,
             root: root.to_path_buf(),
+            meta,
+            context_window,
             replay: if replay { frames } else { Vec::new() },
         })
     }

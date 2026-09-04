@@ -19,6 +19,7 @@ use ego_core::event::domain::CancelCause;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::run::{IdSource, RunController, RunRetention, RunRoot, RunTermination};
+use ego_core::session_lifecycle::{SessionLifecycle, SessionRunLifecycle};
 use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::{AdmittedToolSource, CancelToken};
 use ego_mcp::{
@@ -327,13 +328,20 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             evidence,
         ));
     let ids = Arc::new(UuidIds);
+    let clock = Arc::new(SystemClock);
     let controller = Arc::new(RunController::new(
         Arc::clone(&store),
         executor,
-        Arc::new(SystemClock),
+        Arc::clone(&clock),
         Arc::clone(&ids),
         RunRetention::new(NonZeroUsize::new(64).expect("non-zero retention"))
             .expect("valid retention"),
+    ));
+    let run_lifecycle: Arc<dyn SessionRunLifecycle> = controller.clone();
+    let lifecycle = Arc::new(SessionLifecycle::new(
+        Arc::clone(&store),
+        run_lifecycle,
+        clock,
     ));
 
     let mcp_cancel = CancelToken::new();
@@ -357,8 +365,9 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         MCP_DEFAULT_OPERATION_TIMEOUT,
     ));
 
-    let agent = ego_acp::serve::agent_with_compaction(
+    let agent = ego_acp::serve::durable_agent_with_compaction(
         controller,
+        lifecycle,
         Arc::new(CanonicalRoots { base: root }),
         Arc::new(TokioExecutionSpawner),
         ids,

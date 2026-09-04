@@ -150,7 +150,6 @@ impl EvidenceIndex {
 struct RunLogState {
     revision: Option<RunRevision>,
     last_position: Seq,
-    has_event: bool,
 }
 
 /// What [`JsonlStore::recover`] actually had to repair.
@@ -542,7 +541,6 @@ impl JsonlStore {
     ) -> Result<RunLogState, StoreError> {
         let mut revision = None;
         let mut last_position = Seq::ZERO;
-        let mut has_event = false;
         for line in lines {
             let record = match decode_line(line) {
                 Ok(StoreLine::Record(record)) => record,
@@ -563,10 +561,7 @@ impl JsonlStore {
                 .map_err(|error| StoreError::Codec(CodecError::Malformed(error.to_string())))?;
             let transaction = match entry {
                 SessionEntry::RunTransaction(transaction) => transaction,
-                SessionEntry::Event(_) => {
-                    has_event = true;
-                    continue;
-                }
+                SessionEntry::Event(_) => continue,
                 SessionEntry::Evidence(_) => continue,
             };
             let expected = revision
@@ -580,7 +575,6 @@ impl JsonlStore {
         Ok(RunLogState {
             revision,
             last_position,
-            has_event,
         })
     }
 
@@ -1644,15 +1638,9 @@ impl JsonlStore {
                         ..
                     }
                 );
-                if !state.has_event {
-                    return Err(StoreError::Io(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        "an initial run append requires an absent or event-first session log",
-                    )));
-                }
                 if transaction.revision() != RunRevision::new(1) || !first_admission {
                     return Err(invalid_log(
-                        "event-first adoption requires a revision-one initial admission",
+                        "durable session adoption requires a revision-one initial admission",
                     ));
                 }
                 RunRevision::new(1)
