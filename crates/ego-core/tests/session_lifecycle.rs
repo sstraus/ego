@@ -7,9 +7,19 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
-use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+use ego_core::config::ModelRef;
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
+use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::evidence::{
+    EvidenceLogSource, EvidenceRecord, GenerationAdmissionEvidence, GenerationTarget,
+    ManifestEvidenceError, PricingEvidence, RunInvocationId,
+};
+use ego_core::generator::attempt::AttemptRef;
+use ego_core::generator::capabilities::{
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
+};
 use ego_core::goal::{GoalOwner, GoalRefusal, GoalState, GoalTransition};
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::session::{
@@ -58,6 +68,15 @@ impl FakeStoreControl {
             .unwrap()
             .entries
             .push((session, SessionEntry::Event(event)));
+    }
+
+    fn append_evidence(&self, session: SessionId, evidence: EvidenceRecord) {
+        self.0
+            .0
+            .lock()
+            .unwrap()
+            .entries
+            .push((session, SessionEntry::Evidence(evidence)));
     }
 
     fn set_metadata(&self, metadata: Vec<SessionMeta>) {
@@ -118,6 +137,27 @@ impl SessionStore for FakeStore {
     }
 }
 
+impl EvidenceLogSource for FakeStore {
+    fn evidence_records(
+        &self,
+        _session: &SessionId,
+    ) -> Result<Vec<EvidenceRecord>, ManifestEvidenceError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| match entry {
+                SessionEntry::Evidence(evidence) if id == _session => Some(evidence.clone()),
+                SessionEntry::Event(_)
+                | SessionEntry::RunTransaction(_)
+                | SessionEntry::Evidence(_) => None,
+            })
+            .collect())
+    }
+}
+
 impl SessionBlobSource for FakeStore {
     fn read(&self, _session: &SessionId, reference: &BlobRef) -> Result<Vec<u8>, BlobError> {
         Err(BlobError::NotFound {
@@ -140,8 +180,8 @@ impl LeasedLifecycleAppend for FakeLease {
         _expected: Seq,
         event: DomainEvent,
     ) -> Result<LifecyclePublication, LifecycleAppendError> {
-        if let EventKind::SessionTitleChanged { title } = &event.kind {
-            if let Some(meta) = self
+        if let EventKind::SessionTitleChanged { title } = &event.kind
+            && let Some(meta) = self
                 .store
                 .0
                 .lock()
@@ -149,9 +189,8 @@ impl LeasedLifecycleAppend for FakeLease {
                 .metadata
                 .iter_mut()
                 .find(|meta| meta.id == self.session)
-            {
-                meta.title = title.clone();
-            }
+        {
+            meta.title = title.clone();
         }
         let result = self
             .store
@@ -360,6 +399,40 @@ fn event(text: &str, seq: u64) -> DomainEvent {
     }
 }
 
+fn generation_evidence(session: SessionId, context_window: u64) -> EvidenceRecord {
+    let capabilities = ModelCapabilities {
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
+        max_context_tokens: Some(context_window),
+        max_output_tokens: None,
+        max_tools: None,
+        supports_parallel_tool_calls: false,
+        reasoning_carryover: ReasoningCarryover::Unsupported,
+        reasoning_efforts: ReasoningEffortSupport::Any,
+        reasoning_state_dialect: None,
+        cancel: CancelSemantics::Unsupported,
+        cache: CacheRetention::None,
+        transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
+    };
+    let invocation = RunInvocationId::new();
+    EvidenceRecord::GenerationAdmission(GenerationAdmissionEvidence::new(
+        session,
+        invocation,
+        AttemptRef::first(GenerationId::new()),
+        GenerationRole::Main,
+        GenerationTarget::new(
+            "provider",
+            ModelRef("provider/model".to_owned()),
+            "wire-model",
+        ),
+        capabilities,
+        PricingEvidence::Unpriced {
+            source: "fixture".to_owned(),
+            reason: "not relevant".to_owned(),
+        },
+    ))
+}
+
 fn metadata(id: SessionId, root: &Path, created: u64) -> SessionMeta {
     SessionMeta {
         id,
@@ -403,10 +476,25 @@ fn load_replays_events_while_resume_emits_no_history() {
         futures::executor::block_on(service.load(id, PathBuf::from("/workspace").as_path()))
             .unwrap();
     assert_eq!(loaded.replay.len(), 2);
+    assert_eq!(loaded.meta.id, id);
+    assert_eq!(loaded.context_window, None);
     let resumed =
         futures::executor::block_on(service.resume(id, PathBuf::from("/workspace").as_path()))
             .unwrap();
     assert!(resumed.replay.is_empty());
+}
+
+#[test]
+fn attachment_reports_the_latest_durable_generation_context_window() {
+    let (service, store, _runs) = service();
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    store.append_evidence(id, generation_evidence(id, 8_192));
+    store.append_evidence(id, generation_evidence(id, 200_000));
+
+    let attachment =
+        futures::executor::block_on(service.resume(id, Path::new("/workspace"))).unwrap();
+
+    assert_eq!(attachment.context_window, Some(200_000));
 }
 
 #[test]

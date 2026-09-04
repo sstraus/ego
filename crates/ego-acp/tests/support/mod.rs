@@ -1,5 +1,8 @@
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ego_acp::serve::{
@@ -11,24 +14,392 @@ use ego_core::compact::{
     CompactionTransitionRequest,
 };
 use ego_core::config::ModelRef;
-use ego_core::event::domain::DomainEvent;
-use ego_core::event::id::Seq;
-use ego_core::event::id::SessionId;
+use ego_core::event::domain::{
+    DomainEvent, Envelope, EventKind, GenerationRole, OccupancyProvenance,
+};
+use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
-use ego_core::evidence::{EvidenceError, EvidenceWrite};
+use ego_core::evidence::{
+    EvidenceError, EvidenceLogSource, EvidenceRecord, EvidenceWrite, GenerationAdmissionEvidence,
+    GenerationTarget, ManifestEvidenceError, PricingEvidence, RunInvocationId,
+};
+use ego_core::generator::attempt::AttemptRef;
+use ego_core::generator::capabilities::{
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
+};
+use ego_core::public::PublicEvent;
 use ego_core::run::{
     IdSource, RequestId, RunAppend, RunController, RunExecutionBindings, RunExecutor,
     RunExecutorError, RunFuture, RunHandle, RunPreparation, RunPrepared, RunRetention, RunRevision,
-    RunRoot, RunSettlement, RunStart, RunTransaction,
+    RunRoot, RunSelections, RunSettlement, RunStart, RunStatus, RunTransaction, StartRequest,
 };
-use ego_core::session::TargetPublication;
+use ego_core::session::{
+    ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
+    TargetSeed,
+};
+use ego_core::session_lifecycle::{
+    ActivityFuture, CloseFuture, ClosedSession, InactiveSessionLease, LeasedLifecycleAppend,
+    LifecycleAppendError, LifecyclePublication, SessionActivity, SessionLifecycle,
+    SessionLifecycleStore, SessionRunLifecycle,
+};
+use ego_core::sink::EventSink;
+use ego_core::state::SessionState;
+use ego_core::store::blob::{BlobError, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
+use tokio::sync::Notify;
+
+pub const SESSION_PAGE_SIZE: usize = 50;
+
+pub struct SeededReplay {
+    pub session_id: String,
+    pub expected_replay_updates: Vec<serde_json::Value>,
+}
+
+pub struct DurableAcpFixture {
+    store: Arc<Store>,
+    ids: Arc<TestIds>,
+    effects: Arc<EffectCounts>,
+    executor: Arc<Executor>,
+}
 
 #[derive(Default)]
+struct EffectCounts {
+    roots: AtomicUsize,
+    mcp: AtomicUsize,
+    lifecycle: AtomicUsize,
+}
+
+struct InactiveRuns;
+
+impl SessionRunLifecycle for InactiveRuns {
+    fn activity(&self, _session: SessionId) -> ActivityFuture<'_> {
+        Box::pin(async { Ok(SessionActivity::Inactive) })
+    }
+
+    fn cancel_and_settle(&self, session: SessionId) -> CloseFuture<'_> {
+        Box::pin(async move {
+            Ok(ClosedSession {
+                id: session,
+                cancelled: false,
+            })
+        })
+    }
+}
+
+impl DurableAcpFixture {
+    pub fn new() -> Self {
+        let effects = Arc::new(EffectCounts::default());
+        Self {
+            store: Arc::new(Store::with_effects(Arc::clone(&effects))),
+            ids: Arc::new(TestIds::default()),
+            effects,
+            executor: Arc::new(Executor::default()),
+        }
+    }
+
+    pub fn router(&self) -> agent_client_protocol::AgentProtocolRouter {
+        let clock = Arc::new(TestClock);
+        let controller = Arc::new(RunController::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.executor),
+            Arc::clone(&clock),
+            Arc::clone(&self.ids),
+            RunRetention::new(std::num::NonZeroUsize::new(2).unwrap()).unwrap(),
+        ));
+        let runs: Arc<dyn SessionRunLifecycle> = controller.clone();
+        let lifecycle = Arc::new(SessionLifecycle::new(Arc::clone(&self.store), runs, clock));
+        ego_acp::serve::durable_agent(
+            controller,
+            lifecycle,
+            Arc::new(TestRoots::with_effects(Arc::clone(&self.effects))),
+            Arc::new(TestSpawner),
+            self.ids.clone(),
+            Arc::new(AcpRunBindingsBuilder),
+            Arc::new(RejectingMcpAdmitter::with_effects(Arc::clone(
+                &self.effects,
+            ))),
+        )
+    }
+
+    pub fn seed_sessions(&self, root: &str, count: usize) {
+        let runs: Arc<dyn SessionRunLifecycle> = Arc::new(InactiveRuns);
+        let lifecycle = SessionLifecycle::new(Arc::clone(&self.store), runs, Arc::new(TestClock));
+        for _ in 0..count {
+            lifecycle.create(PathBuf::from(root)).unwrap();
+        }
+    }
+
+    pub fn seed_replay_session(
+        &self,
+        root: &str,
+        title: &str,
+        context_window: u64,
+    ) -> SeededReplay {
+        let runs: Arc<dyn SessionRunLifecycle> = Arc::new(InactiveRuns);
+        let lifecycle = SessionLifecycle::new(Arc::clone(&self.store), runs, Arc::new(TestClock));
+        let session = lifecycle.create(PathBuf::from(root)).unwrap().id;
+        let event = DomainEvent {
+            env: Envelope {
+                seq: serde_json::from_value(serde_json::json!(1)).unwrap(),
+                id: EventId::new(),
+                turn: TurnId::new(),
+                item: Some(ItemId::new()),
+                parent: None,
+                ts: Timestamp::EPOCH,
+                producer: Producer::Main,
+            },
+            kind: EventKind::UserPrompt {
+                text: "durable prompt".to_owned(),
+                images: Vec::new(),
+                queued_prompt: None,
+            },
+        };
+        self.store.append(&session, &event).unwrap();
+        let mut next = event.env.seq;
+        let context = DomainEvent {
+            env: Envelope {
+                seq: next.next(),
+                id: EventId::new(),
+                turn: event.env.turn,
+                item: None,
+                parent: Some(event.env.id),
+                ts: Timestamp::EPOCH,
+                producer: Producer::Main,
+            },
+            kind: EventKind::ContextWindowUpdated {
+                used_tokens: 1_234,
+                provenance: OccupancyProvenance::GenerationBoundary,
+            },
+        };
+        self.store.append(&session, &context).unwrap();
+        self.store
+            .entries
+            .lock()
+            .expect("support entries")
+            .entry(session)
+            .or_default()
+            .push(SessionEntry::Evidence(generation_evidence(
+                session,
+                context_window,
+            )));
+        let lease = self.store.acquire_inactive_lease(session).unwrap();
+        ego_core::session_lifecycle::SessionMetadata::new(
+            Arc::clone(&self.store),
+            Arc::new(TestClock),
+        )
+        .set_title(lease.as_ref(), context.env.seq, Some(title.to_owned()))
+        .unwrap();
+        let attachment =
+            futures::executor::block_on(lifecycle.load(session, Path::new(root))).unwrap();
+        SeededReplay {
+            session_id: session.to_string(),
+            expected_replay_updates: ego_acp::project::project_replay_v1(
+                &attachment.replay,
+                attachment.context_window,
+            )
+            .into_iter()
+            .map(|update| serde_json::to_value(update).unwrap())
+            .collect(),
+        }
+    }
+
+    pub fn seed_running_session(&self, root: &str) -> String {
+        self.seed_pending_session(root, false)
+    }
+
+    pub fn seed_cancelling_session(&self, root: &str) -> String {
+        self.seed_pending_session(root, true)
+    }
+
+    fn seed_pending_session(&self, root: &str, cancelling: bool) -> String {
+        let runs: Arc<dyn SessionRunLifecycle> = Arc::new(InactiveRuns);
+        let lifecycle = SessionLifecycle::new(Arc::clone(&self.store), runs, Arc::new(TestClock));
+        let session = lifecycle.create(PathBuf::from(root)).unwrap().id;
+        let controller = RunController::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.executor),
+            Arc::new(TestClock),
+            Arc::clone(&self.ids),
+            RunRetention::new(std::num::NonZeroUsize::new(2).unwrap()).unwrap(),
+        );
+        let request_id = RequestId::from_uuid(self.ids.next_uuid());
+        let root = RunRoot::new(PathBuf::from(root)).unwrap();
+        let outcome = futures::executor::block_on(controller.start(
+            StartRequest::new(
+                session,
+                root,
+                request_id,
+                ego_core::run::RequestDigest::parse("seed-running").unwrap(),
+                RunSelections::empty(),
+                "seed running recovery",
+            ),
+            RunExecutionBindings::new(Arc::new(NullSinkFactory), None),
+        ))
+        .unwrap();
+        let ego_core::run::RunCommandOutcome::Admitted(admission) = outcome else {
+            panic!("the recovery fixture must admit its seed run");
+        };
+        if cancelling {
+            futures::executor::block_on(controller.cancel_admitted(admission.cancel_key()))
+                .unwrap();
+        }
+        session.to_string()
+    }
+
+    pub fn run_status(&self, session: &str) -> RunStatus {
+        let session = session.parse::<SessionId>().unwrap();
+        let controller = RunController::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.executor),
+            Arc::new(TestClock),
+            Arc::clone(&self.ids),
+            RunRetention::new(std::num::NonZeroUsize::new(2).unwrap()).unwrap(),
+        );
+        futures::executor::block_on(controller.status_by_session(session))
+            .unwrap()
+            .status()
+    }
+
+    pub fn lineage_source(&self, child: &str) -> Option<String> {
+        let id = child.parse::<SessionId>().ok()?;
+        let meta = self.store.metadata.lock().ok()?.get(&id)?.clone();
+        match meta.lineage? {
+            SessionLineage::Fork { source, .. } | SessionLineage::Compaction { source, .. } => {
+                Some(source.to_string())
+            }
+        }
+    }
+
+    pub fn effect_counts(&self) -> (usize, usize, usize) {
+        (
+            self.effects.roots.load(Ordering::SeqCst),
+            self.effects.mcp.load(Ordering::SeqCst),
+            self.effects.lifecycle.load(Ordering::SeqCst),
+        )
+    }
+
+    pub fn has_run(&self, session: &str) -> bool {
+        let Ok(session) = session.parse::<SessionId>() else {
+            return false;
+        };
+        self.store
+            .entries
+            .lock()
+            .expect("support entries")
+            .get(&session)
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| matches!(entry, SessionEntry::RunTransaction(_)))
+            })
+    }
+
+    pub fn block_next_turn(&self) {
+        self.executor.block_next.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn turn_began(&self) {
+        self.executor.started.notified().await;
+    }
+
+    pub fn release_turn(&self) {
+        self.executor.release.notify_one();
+    }
+
+    pub fn enable_running_recovery(&self) {
+        self.executor.recover_running.store(true, Ordering::SeqCst);
+    }
+
+    pub fn block_recovery_observe(&self) {
+        self.executor.block_observe.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn recovery_observe_began(&self) {
+        self.executor.observe_started.notified().await;
+    }
+
+    pub fn release_recovery_observe(&self) {
+        self.executor.observe_release.notify_one();
+    }
+
+    pub async fn wait_for_run_status(&self, session: &str, expected: RunStatus) {
+        for _ in 0..1_000 {
+            if self.run_status(session) == expected {
+                for _ in 0..4 {
+                    tokio::task::yield_now().await;
+                }
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("run {session} did not reach {expected:?}");
+    }
+}
+
+struct NullSink;
+
+impl EventSink for NullSink {
+    fn publish(&self, _event: &PublicEvent, _state: &SessionState) {}
+}
+
+struct NullSinkFactory;
+
+impl ego_core::run::EventSinkFactory for NullSinkFactory {
+    fn create(&self, _capabilities: &ModelCapabilities) -> Arc<dyn EventSink> {
+        Arc::new(NullSink)
+    }
+}
+
+fn generation_evidence(session: SessionId, context_window: u64) -> EvidenceRecord {
+    EvidenceRecord::GenerationAdmission(GenerationAdmissionEvidence::new(
+        session,
+        RunInvocationId::new(),
+        AttemptRef::first(GenerationId::new()),
+        GenerationRole::Main,
+        GenerationTarget::new(
+            "fixture-provider",
+            ModelRef("fixture-provider/model".to_owned()),
+            "fixture-model",
+        ),
+        ModelCapabilities {
+            schema_version: ModelCapabilities::SCHEMA_VERSION,
+            max_context_tokens: Some(context_window),
+            max_output_tokens: None,
+            max_tools: None,
+            supports_parallel_tool_calls: false,
+            reasoning_carryover: ReasoningCarryover::Unsupported,
+            reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
+            cancel: CancelSemantics::Unsupported,
+            cache: CacheRetention::None,
+            transport: Transport::Sse,
+            image_input: ImageInputSupport::Unknown,
+        },
+        PricingEvidence::Unpriced {
+            source: "fixture".to_owned(),
+            reason: "not relevant to the ACP replay fixture".to_owned(),
+        },
+    ))
+}
+
+#[derive(Clone, Default)]
 struct Store {
-    entries: Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>,
+    entries: Arc<Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>>,
+    metadata: Arc<Mutex<BTreeMap<SessionId, SessionMeta>>>,
+    effects: Arc<EffectCounts>,
+}
+
+impl Store {
+    fn with_effects(effects: Arc<EffectCounts>) -> Self {
+        Self {
+            entries: Arc::default(),
+            metadata: Arc::default(),
+            effects,
+        }
+    }
 }
 
 impl SessionStore for Store {
@@ -60,19 +431,11 @@ impl SessionStore for Store {
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
         Ok(self
-            .entries
+            .metadata
             .lock()
-            .expect("support entries")
-            .keys()
-            .map(|id| SessionMeta {
-                id: *id,
-                workspace_root: PathBuf::from("/tmp"),
-                model: None,
-                created: Timestamp::EPOCH,
-                updated: Timestamp::EPOCH,
-                title: None,
-                lineage: None,
-            })
+            .expect("support metadata")
+            .values()
+            .cloned()
             .collect())
     }
 
@@ -105,9 +468,197 @@ impl SessionStore for Store {
     }
 }
 
+impl EvidenceLogSource for Store {
+    fn evidence_records(
+        &self,
+        session: &SessionId,
+    ) -> Result<Vec<EvidenceRecord>, ManifestEvidenceError> {
+        Ok(self
+            .entries
+            .lock()
+            .expect("support entries")
+            .get(session)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| match entry {
+                SessionEntry::Evidence(value) => Some(value.clone()),
+                _ => None,
+            })
+            .collect())
+    }
+}
+
+impl ReplaySource for Store {
+    fn lineage(&self, id: &SessionId) -> Result<Option<SessionLineage>, ReplaySourceError> {
+        Ok(self
+            .metadata
+            .lock()
+            .expect("support metadata")
+            .get(id)
+            .and_then(|meta| meta.lineage))
+    }
+
+    fn entries(&self, id: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
+        Ok(self
+            .entries
+            .lock()
+            .expect("support entries")
+            .get(id)
+            .cloned())
+    }
+}
+
+impl SessionBlobSource for Store {
+    fn read(&self, _session: &SessionId, reference: &BlobRef) -> Result<Vec<u8>, BlobError> {
+        Err(BlobError::NotFound {
+            reference: reference.id.clone(),
+        })
+    }
+}
+
+struct SupportLease {
+    session: SessionId,
+    store: Store,
+}
+
+impl LeasedLifecycleAppend for SupportLease {
+    fn session_id(&self) -> SessionId {
+        self.session
+    }
+
+    fn compare_and_append_lifecycle(
+        &self,
+        _expected: Seq,
+        event: DomainEvent,
+    ) -> Result<LifecyclePublication, LifecycleAppendError> {
+        if let EventKind::SessionTitleChanged { title } = &event.kind
+            && let Some(meta) = self
+                .store
+                .metadata
+                .lock()
+                .expect("support metadata")
+                .get_mut(&self.session)
+        {
+            meta.title = title.clone();
+            meta.updated = event.env.ts;
+        }
+        self.store
+            .append(&self.session, &event)
+            .map_err(LifecycleAppendError::Store)?;
+        Ok(LifecyclePublication::Published)
+    }
+}
+
+impl InactiveSessionLease for SupportLease {}
+
+impl SessionLifecycleStore for Store {
+    fn publish_empty_session(
+        &self,
+        id: SessionId,
+        root: &Path,
+        created: Timestamp,
+    ) -> Result<LifecyclePublication, StoreError> {
+        self.effects.lifecycle.fetch_add(1, Ordering::SeqCst);
+        self.entries
+            .lock()
+            .expect("support entries")
+            .insert(id, Vec::new());
+        self.metadata.lock().expect("support metadata").insert(
+            id,
+            SessionMeta {
+                id,
+                workspace_root: root.to_path_buf(),
+                model: None,
+                created,
+                updated: created,
+                title: None,
+                lineage: None,
+            },
+        );
+        Ok(LifecyclePublication::Published)
+    }
+
+    fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {
+        Ok(self
+            .metadata
+            .lock()
+            .expect("support metadata")
+            .get(&id)
+            .cloned())
+    }
+
+    fn acquire_inactive_lease(
+        &self,
+        id: SessionId,
+    ) -> Result<Box<dyn InactiveSessionLease + '_>, LifecycleAppendError> {
+        Ok(Box::new(SupportLease {
+            session: id,
+            store: self.clone(),
+        }))
+    }
+
+    fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication {
+        self.effects.lifecycle.fetch_add(1, Ordering::SeqCst);
+        let source = match seed.lineage() {
+            SessionLineage::Fork { source, .. } | SessionLineage::Compaction { source, .. } => {
+                source
+            }
+        };
+        let Some(source_meta) = self
+            .metadata
+            .lock()
+            .expect("support metadata")
+            .get(&source)
+            .cloned()
+        else {
+            return TargetPublication::NotPublished {
+                diagnostic: "source missing".to_owned(),
+            };
+        };
+        let entries = seed
+            .events()
+            .cloned()
+            .map(SessionEntry::Event)
+            .collect::<Vec<_>>();
+        let title = entries.iter().rev().find_map(|entry| match entry {
+            SessionEntry::Event(DomainEvent {
+                kind: EventKind::SessionTitleChanged { title },
+                ..
+            }) => title.clone(),
+            _ => None,
+        });
+        self.entries
+            .lock()
+            .expect("support entries")
+            .insert(id, entries);
+        self.metadata.lock().expect("support metadata").insert(
+            id,
+            SessionMeta {
+                id,
+                workspace_root: source_meta.workspace_root,
+                model: source_meta.model,
+                created: Timestamp::EPOCH,
+                updated: Timestamp::EPOCH,
+                title,
+                lineage: Some(seed.lineage()),
+            },
+        );
+        TargetPublication::PublishedDurably { diagnostic: None }
+    }
+}
+
 // Shared by integration crates; some crates exercise only the alternate injected adapters.
 #[allow(dead_code)]
-struct Executor;
+#[derive(Default)]
+struct Executor {
+    block_next: AtomicBool,
+    recover_running: AtomicBool,
+    block_observe: AtomicBool,
+    started: Notify,
+    release: Notify,
+    observe_started: Notify,
+    observe_release: Notify,
+}
 
 #[allow(dead_code)]
 struct Prepared;
@@ -156,14 +707,19 @@ impl RunExecutor for Executor {
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
         Box::pin(future::ready(Ok(RunHandle::new(
             request.run_id,
-            std::sync::Arc::new(()),
+            Arc::new(AtomicBool::new(false)),
         ))))
     }
 
     fn recover<'a>(
         &'a self,
-        _run: &'a ego_core::run::RunId,
+        run: &'a ego_core::run::RunId,
     ) -> BoxFuture<'a, Result<ego_core::run::RecoveryEvidence, RunExecutorError>> {
+        if self.recover_running.load(Ordering::SeqCst) {
+            return Box::pin(future::ready(Ok(ego_core::run::RecoveryEvidence::Running(
+                RunHandle::new(*run, Arc::new(AtomicBool::new(false))),
+            ))));
+        }
         Box::pin(future::ready(Ok(
             ego_core::run::RecoveryEvidence::Ambiguous,
         )))
@@ -171,26 +727,62 @@ impl RunExecutor for Executor {
 
     fn observe<'a>(
         &'a self,
-        _handle: &'a RunHandle,
+        handle: &'a RunHandle,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
-        Box::pin(future::ready(Ok(RunSettlement::completed())))
+        Box::pin(async move {
+            if self.block_observe.swap(false, Ordering::SeqCst) {
+                self.observe_started.notify_one();
+                self.observe_release.notified().await;
+            }
+            let cancelled = handle
+                .authority::<Arc<AtomicBool>>()
+                .expect("support cancel authority")
+                .load(Ordering::SeqCst);
+            if cancelled {
+                handle
+                    .authority::<Arc<AtomicBool>>()
+                    .expect("support cancel authority")
+                    .store(false, Ordering::SeqCst);
+                Ok(RunSettlement::cancelled(ego_core::run::CancelReason::User))
+            } else {
+                Ok(RunSettlement::completed())
+            }
+        })
     }
 
     fn submit<'a>(
         &'a self,
-        _handle: &'a RunHandle,
+        handle: &'a RunHandle,
         _prompt: &'a str,
         _prepared: Self::Prepared,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
-        Box::pin(future::ready(Ok(RunSettlement::completed())))
+        Box::pin(async move {
+            if self.block_next.swap(false, Ordering::SeqCst) {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            let cancelled = handle
+                .authority::<Arc<AtomicBool>>()
+                .expect("support cancel authority")
+                .load(Ordering::SeqCst);
+            if cancelled {
+                Ok(RunSettlement::cancelled(ego_core::run::CancelReason::User))
+            } else {
+                Ok(RunSettlement::completed())
+            }
+        })
     }
 
     fn interrupt<'a>(
         &'a self,
-        _handle: &'a RunHandle,
+        handle: &'a RunHandle,
     ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        handle
+            .authority::<Arc<AtomicBool>>()
+            .expect("support cancel authority")
+            .store(true, Ordering::SeqCst);
         Box::pin(future::ready(Ok(())))
     }
 }
@@ -220,10 +812,23 @@ impl IdSource for TestIds {
 }
 
 #[derive(Default)]
-struct TestRoots;
+struct TestRoots {
+    effects: Option<Arc<EffectCounts>>,
+}
+
+impl TestRoots {
+    fn with_effects(effects: Arc<EffectCounts>) -> Self {
+        Self {
+            effects: Some(effects),
+        }
+    }
+}
 
 impl RootResolver for TestRoots {
     fn resolve(&self, cwd: &Path) -> Result<RunRoot, ego_acp::serve::RootResolveError> {
+        if let Some(effects) = &self.effects {
+            effects.roots.fetch_add(1, Ordering::SeqCst);
+        }
         RunRoot::new(cwd.to_path_buf())
             .map_err(|error| ego_acp::serve::RootResolveError::new(error.to_string()))
     }
@@ -243,7 +848,7 @@ pub fn agent() -> agent_client_protocol::AgentProtocolRouter {
     let ids = Arc::new(TestIds::default());
     agent_with_compaction(
         Arc::new(Store::default()),
-        Arc::new(Executor),
+        Arc::new(Executor::default()),
         Arc::new(TestClock),
         ids,
         Arc::new(CompactionCommandFixture),
@@ -273,17 +878,27 @@ where
     ));
     ego_acp::serve::agent_with_compaction(
         controller,
-        Arc::new(TestRoots),
+        Arc::new(TestRoots::default()),
         Arc::new(TestSpawner),
         ids,
         Arc::new(AcpRunBindingsBuilder),
-        Arc::new(RejectingMcpAdmitter),
+        Arc::new(RejectingMcpAdmitter::default()),
         compaction,
     )
 }
 
 #[derive(Default)]
-struct RejectingMcpAdmitter;
+struct RejectingMcpAdmitter {
+    effects: Option<Arc<EffectCounts>>,
+}
+
+impl RejectingMcpAdmitter {
+    fn with_effects(effects: Arc<EffectCounts>) -> Self {
+        Self {
+            effects: Some(effects),
+        }
+    }
+}
 
 impl McpSessionAdmitter for RejectingMcpAdmitter {
     fn admit(
@@ -291,6 +906,9 @@ impl McpSessionAdmitter for RejectingMcpAdmitter {
         _servers: Vec<agent_client_protocol_schema::v1::McpServer>,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
+        if let Some(effects) = &self.effects {
+            effects.mcp.fetch_add(1, Ordering::SeqCst);
+        }
         Box::pin(future::ready(Ok(None)))
     }
 }
@@ -318,7 +936,7 @@ where
     ));
     ego_acp::serve::agent(
         controller,
-        Arc::new(TestRoots),
+        Arc::new(TestRoots::default()),
         Arc::new(TestSpawner),
         ids,
         Arc::new(AcpRunBindingsBuilder),

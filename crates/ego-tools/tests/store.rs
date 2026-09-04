@@ -17,6 +17,7 @@ use ego_core::evidence::{
     ConfigProvenance, EvidenceAdmissionService, RunContextEvidence, RunInvocationId,
 };
 use ego_core::run::{RunAppend, RunId, RunRevision, RunTransaction};
+use ego_core::session_lifecycle::SessionLifecycleStore;
 use ego_core::store::codec::{CODEC_VERSION, CodecError, StoreLine, decode_line, encode_record};
 use ego_core::store::session_store::{SessionEntry, SessionStore, StoreError};
 use ego_tools::store::{AtomicReplacePublication, JsonlStore, LeaseInputs, OsIo, StoreIo};
@@ -685,6 +686,26 @@ mod store {
         assert_eq!(metadata.len(), 1);
         assert_eq!(metadata[0].id, session);
         assert_eq!(metadata[0].workspace_root, PathBuf::from("/workspace"));
+    }
+
+    #[test]
+    fn initial_run_adopts_a_matching_header_only_durable_session() {
+        let dir = tempdir().unwrap();
+        let session = SessionId::new();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        store
+            .publish_empty_session(
+                session,
+                PathBuf::from("/workspace").as_path(),
+                Timestamp::EPOCH,
+            )
+            .expect("header-only session");
+        let initial = admitted_run_transaction(&session, 1, None, true);
+
+        assert!(matches!(
+            store.compare_and_append_run(&session, None, initial),
+            Ok(RunAppend::Committed { revision }) if revision == RunRevision::new(1)
+        ));
     }
 
     #[test]

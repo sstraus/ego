@@ -321,6 +321,9 @@ mod regression_case {
 
     fn start_request(origin: RunOrigin, digest: &str) -> StartRequest {
         StartRequest::new(
+            RequestId::session_id(RequestId::from_uuid(
+                uuid::Uuid::parse_str(INVOCATION).unwrap(),
+            )),
             RunRoot::new("/workspace").unwrap(),
             RequestId::from_uuid(uuid::Uuid::parse_str(INVOCATION).unwrap()),
             RequestDigest::parse(digest).unwrap(),

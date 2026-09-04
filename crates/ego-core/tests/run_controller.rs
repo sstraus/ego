@@ -612,6 +612,7 @@ fn digest(value: &str) -> RequestDigest {
 
 fn start(root: &str, value: u128, body: &str) -> StartRequest {
     StartRequest::new(
+        RequestId::session_id(request(value)),
         RunRoot::new(root).expect("absolute run root"),
         request(value),
         digest(body),
@@ -636,6 +637,7 @@ fn selections_are_persisted_folded_and_pin_the_continuation_model() {
     let executor = Arc::new(ScriptedRunExecutor::default());
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
     let request = StartRequest::new(
+        RequestId::session_id(request_id(58)),
         RunRoot::new("/selected").expect("root"),
         request_id(58),
         digest("selected"),
@@ -669,6 +671,36 @@ fn selections_are_persisted_folded_and_pin_the_continuation_model() {
     assert_eq!(
         continuation.snapshot().selections(),
         &selections_with_model()
+    );
+}
+
+#[test]
+fn explicit_durable_session_target_is_independent_of_request_identity() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let command = request_id(5_800);
+    let target: SessionId = "00000000-0000-0000-0000-000000005801"
+        .parse()
+        .expect("session id");
+    assert_ne!(target, RequestId::session_id(command));
+    let request = StartRequest::new(
+        target,
+        RunRoot::new("/explicit").expect("root"),
+        command,
+        digest("explicit target"),
+        selections(),
+        "prompt",
+    );
+
+    let admission = admitted_start(&controller, request);
+
+    assert_eq!(admission.session_id(), target);
+    assert_eq!(
+        futures::executor::block_on(controller.status_by_session(target))
+            .expect("status by durable session")
+            .session_id(),
+        target
     );
 }
 

@@ -811,6 +811,9 @@ fn test_controller(store: Arc<FakeSessionStore>, executor: Arc<FakeRunExecutor>)
 
 fn start_request() -> StartRequest {
     StartRequest::new(
+        ego_core::run::RequestId::session_id(ego_core::run::RequestId::from_uuid(
+            uuid::Uuid::from_u128(0x6600_0000_0000_0000_0000_0000_0000_0001),
+        )),
         RunRoot::new("/workspace").unwrap(),
         ego_core::run::RequestId::from_uuid(uuid::Uuid::from_u128(
             0x6600_0000_0000_0000_0000_0000_0000_0001,
