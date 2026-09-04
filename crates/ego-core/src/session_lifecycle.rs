@@ -21,6 +21,7 @@ use crate::session::{
 };
 use crate::state::SessionState;
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use crate::turn::{Journal, SharedJournal, SharedJournalError};
 
 /// Publication at a lifecycle boundary. Visibility, not a later cache write,
 /// decides whether retrying could create a second transition.
@@ -28,6 +29,7 @@ use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, Store
 pub enum LifecyclePublication {
     NotPublished { diagnostic: String },
     Published,
+    PublishedWithProjectionWarning { diagnostic: String },
     PublishedDurabilityUncertain { diagnostic: String },
 }
 
@@ -45,7 +47,10 @@ impl From<TargetPublication> for LifecyclePublication {
     fn from(value: TargetPublication) -> Self {
         match value {
             TargetPublication::NotPublished { diagnostic } => Self::NotPublished { diagnostic },
-            TargetPublication::PublishedDurably { .. } => Self::Published,
+            TargetPublication::PublishedDurably { diagnostic: None } => Self::Published,
+            TargetPublication::PublishedDurably {
+                diagnostic: Some(diagnostic),
+            } => Self::PublishedWithProjectionWarning { diagnostic },
             TargetPublication::PublishedDurabilityUncertain { diagnostic } => {
                 Self::PublishedDurabilityUncertain { diagnostic }
             }
@@ -87,6 +92,60 @@ pub trait LeasedLifecycleAppend: Send + Sync {
         expected: Seq,
         event: DomainEvent,
     ) -> Result<LifecyclePublication, LifecycleAppendError>;
+}
+
+/// The session's single journal shared by ordinary and lifecycle appends.
+pub struct LeasedSharedJournal<'s, S>
+where
+    S: SessionStore + LeasedLifecycleAppend,
+{
+    append: &'s S,
+    journal: SharedJournal<'s>,
+}
+
+impl<'s, S> LeasedSharedJournal<'s, S>
+where
+    S: SessionStore + LeasedLifecycleAppend,
+{
+    pub fn new(
+        append: &'s S,
+        clock: &'s dyn Clock,
+        sink: &'s dyn crate::sink::EventSink,
+        producer: Producer,
+        state: SessionState,
+    ) -> Self {
+        let journal = Journal::new(append.session_id(), append, clock, sink, producer, state);
+        Self {
+            append,
+            journal: SharedJournal::new(journal),
+        }
+    }
+
+    pub fn shared(&self) -> SharedJournal<'s> {
+        self.journal.clone()
+    }
+
+    pub fn try_into_state(self) -> Result<SessionState, SharedJournalError> {
+        self.journal.try_into_state()
+    }
+}
+
+impl<S> LeasedLifecycleAppend for LeasedSharedJournal<'_, S>
+where
+    S: SessionStore + LeasedLifecycleAppend,
+{
+    fn session_id(&self) -> SessionId {
+        self.append.session_id()
+    }
+
+    fn compare_and_append_lifecycle(
+        &self,
+        expected: Seq,
+        event: DomainEvent,
+    ) -> Result<LifecyclePublication, LifecycleAppendError> {
+        self.journal
+            .compare_and_append_lifecycle(self.append, expected, event)
+    }
 }
 
 /// Exclusive, session-bound authority to append while no writer can attach.
@@ -382,10 +441,16 @@ where
             self.clock.now(),
             EventKind::SessionTitleChanged { title },
         );
+        let state = self.state(id)?;
+        let mut prepared_state = state.clone();
+        prepared_state.apply(&event);
+        let mut prepared = current;
+        prepared.updated = event.env.ts;
+        prepared.title = prepared_state.title;
         let publication = append.compare_and_append_lifecycle(expected, event)?;
         require_publication(publication.clone())?;
         Ok(LifecycleMutation {
-            value: self.meta(id)?,
+            value: prepared,
             publication: Some(publication),
         })
     }
@@ -425,12 +490,15 @@ where
                 derived_from: None,
             },
         );
+        let mut prepared_state = state.clone();
+        prepared_state.apply(&event);
+        let prepared = prepared_state
+            .goal
+            .ok_or_else(|| LifecycleError::from(GoalRefusal::NoActiveGoal))?;
         let publication = append.compare_and_append_lifecycle(expected, event)?;
         require_publication(publication.clone())?;
         Ok(LifecycleMutation {
-            value: self
-                .goal(session)?
-                .ok_or_else(|| LifecycleError::from(GoalRefusal::NoActiveGoal))?,
+            value: prepared,
             publication: Some(publication),
         })
     }
@@ -460,12 +528,15 @@ where
                 transition,
             },
         );
+        let mut prepared_state = state.clone();
+        prepared_state.apply(&event);
+        let prepared = prepared_state
+            .goal
+            .ok_or_else(|| LifecycleError::from(GoalRefusal::NoActiveGoal))?;
         let publication = append.compare_and_append_lifecycle(expected, event)?;
         require_publication(publication.clone())?;
         Ok(LifecycleMutation {
-            value: self
-                .goal(session)?
-                .ok_or_else(|| LifecycleError::from(GoalRefusal::NoActiveGoal))?,
+            value: prepared,
             publication: Some(publication),
         })
     }
@@ -754,6 +825,7 @@ fn require_publication(publication: LifecyclePublication) -> Result<(), Lifecycl
             Err(LifecycleError::NotPublished(diagnostic))
         }
         LifecyclePublication::Published
+        | LifecyclePublication::PublishedWithProjectionWarning { .. }
         | LifecyclePublication::PublishedDurabilityUncertain { .. } => Ok(()),
     }
 }

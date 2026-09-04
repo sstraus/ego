@@ -60,7 +60,7 @@ fn execute_inner(args: &SessionMetadataArgs, out: &Stdout) -> Result<(), RunTerm
             };
             match metadata.set_title(&opened.writer, expected, title) {
                 Ok(changed) => {
-                    warn_if_uncertain(changed.publication.as_ref());
+                    warn_if_publication_issue(changed.publication.as_ref());
                     render_name(args, &changed.value, out);
                 }
                 Err(error) => return mutation_refusal(&metadata, args, out, error),
@@ -101,7 +101,7 @@ fn execute_inner(args: &SessionMetadataArgs, out: &Stdout) -> Result<(), RunTerm
             };
             match changed {
                 Ok(changed) => {
-                    warn_if_uncertain(changed.publication.as_ref());
+                    warn_if_publication_issue(changed.publication.as_ref());
                     render_goal(args, Some(&changed.value), out);
                 }
                 Err(error) => return mutation_refusal(&metadata, args, out, error),
@@ -155,11 +155,21 @@ fn failed(error: impl std::fmt::Display) -> RunTermination {
     }
 }
 
-fn warn_if_uncertain(publication: Option<&LifecyclePublication>) {
-    if let Some(LifecyclePublication::PublishedDurabilityUncertain { diagnostic }) = publication {
-        output::note(&format!(
-            "metadata is visible, but its durability is uncertain: {diagnostic}"
-        ));
+fn warn_if_publication_issue(publication: Option<&LifecyclePublication>) {
+    match publication {
+        Some(LifecyclePublication::PublishedWithProjectionWarning { diagnostic }) => {
+            output::note(&format!(
+                "metadata is visible, but its manifest projection failed: {diagnostic}"
+            ));
+        }
+        Some(LifecyclePublication::PublishedDurabilityUncertain { diagnostic }) => {
+            output::note(&format!(
+                "metadata is visible, but its durability is uncertain: {diagnostic}"
+            ));
+        }
+        Some(LifecyclePublication::NotPublished { .. })
+        | Some(LifecyclePublication::Published)
+        | None => {}
     }
 }
 

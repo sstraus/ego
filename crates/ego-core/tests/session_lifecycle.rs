@@ -29,6 +29,8 @@ use futures::stream::{self, BoxStream};
 struct DurableState {
     metadata: Vec<SessionMeta>,
     entries: Vec<(SessionId, SessionEntry)>,
+    fail_meta: bool,
+    inject_meta_failure: bool,
 }
 
 #[derive(Clone, Default)]
@@ -73,6 +75,9 @@ impl FakeStoreControl {
             .unwrap()
             .metadata
             .retain(|meta| meta.id != id);
+    }
+    fn fail_metadata_readback(&self) {
+        self.0.0.lock().unwrap().inject_meta_failure = true;
     }
 }
 
@@ -148,10 +153,16 @@ impl LeasedLifecycleAppend for FakeLease {
                 meta.title = title.clone();
             }
         }
-        self.store
+        let result = self
+            .store
             .append(&self.session, &event)
             .map(|_| LifecyclePublication::Published)
-            .map_err(LifecycleAppendError::Store)
+            .map_err(LifecycleAppendError::Store);
+        let mut state = self.store.0.lock().unwrap();
+        if state.inject_meta_failure {
+            state.fail_meta = true;
+        }
+        result
     }
 }
 impl InactiveSessionLease for FakeLease {}
@@ -175,6 +186,9 @@ impl SessionLifecycleStore for FakeStore {
         Ok(LifecyclePublication::Published)
     }
     fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {
+        if self.0.lock().unwrap().fail_meta {
+            return Err(StoreError::NotFound);
+        }
         Ok(self
             .0
             .lock()
@@ -786,4 +800,21 @@ fn operator_text_is_trimmed_bounded_and_shared_by_title_goal_and_blocker() {
     let goal = meta.goal(id).unwrap().unwrap();
     assert_eq!(goal.blocker_reason.as_deref(), Some("API   unavailable"));
     assert_eq!(goal.blocker_observations, 2);
+}
+
+#[test]
+fn visible_metadata_mutation_returns_prepared_value_without_readback() {
+    let (service, control, _runs) = service();
+    let metadata = metadata_fixture(&control);
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    control.fail_metadata_readback();
+    let mutation = metadata
+        .set_title(
+            &lease(&control, id),
+            expected(&control, id),
+            Some("named".into()),
+        )
+        .expect("visible append returns prepared value");
+    assert_eq!(mutation.value.title.as_deref(), Some("named"));
+    assert_eq!(control.event_count(id), 1);
 }

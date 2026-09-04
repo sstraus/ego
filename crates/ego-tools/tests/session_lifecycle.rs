@@ -17,8 +17,8 @@ use ego_core::event::time::Timestamp;
 use ego_core::goal::{GoalOwner, GoalTransition};
 use ego_core::session_lifecycle::LeasedLifecycleAppend;
 use ego_core::session_lifecycle::{
-    ActivityFuture, CloseFuture, ClosedSession, LifecycleAppendError,
-    SessionActivity, SessionLifecycle, SessionLifecycleStore, SessionMetadata, SessionRunLifecycle,
+    ActivityFuture, CloseFuture, ClosedSession, LifecycleAppendError, SessionActivity,
+    SessionLifecycle, SessionLifecycleStore, SessionMetadata, SessionRunLifecycle,
 };
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionStore};
@@ -66,6 +66,7 @@ enum PublicationCut {
 struct CutControl {
     cut: Mutex<PublicationCut>,
     publication_calls: Mutex<usize>,
+    fail_manifest: Mutex<bool>,
 }
 
 impl CutControl {
@@ -75,6 +76,9 @@ impl CutControl {
 
     fn publication_calls(&self) -> usize {
         *self.publication_calls.lock().unwrap()
+    }
+    fn fail_manifest(&self) {
+        *self.fail_manifest.lock().unwrap() = true;
     }
 }
 
@@ -97,6 +101,9 @@ impl StoreIo for CutIo {
         self.inner.exists(path)
     }
     fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        if *self.control.fail_manifest.lock().unwrap() {
+            return Err(io::Error::other("injected manifest rebuild failure"));
+        }
         self.inner.replace_atomic(path, bytes)
     }
     fn replace_atomic_publication(
@@ -450,6 +457,7 @@ fn lifecycle_create_prepublication_failure_is_hidden_and_retry_safe() {
             control: Arc::new(CutControl {
                 cut: Mutex::new(PublicationCut::BeforeRename),
                 publication_calls: Mutex::new(0),
+                fail_manifest: Mutex::new(false),
             }),
         }),
     );
@@ -476,6 +484,7 @@ fn lifecycle_create_postpublication_uncertainty_remains_visible_and_nonretryable
             control: Arc::new(CutControl {
                 cut: Mutex::new(PublicationCut::AfterRename),
                 publication_calls: Mutex::new(0),
+                fail_manifest: Mutex::new(false),
             }),
         }),
     );
@@ -787,4 +796,28 @@ fn reopened_fork_seed_accepts_active_goal_with_and_without_title() {
         assert_eq!(inherited.owner, source_goal.value.owner);
         assert_eq!(inherited.ceilings, source_goal.value.ceilings);
     }
+}
+
+#[test]
+fn lifecycle_log_visible_when_manifest_projection_rebuild_fails() {
+    let dir = tempdir().unwrap();
+    let control = Arc::new(CutControl::default());
+    let store = cut_store(dir.path(), Arc::clone(&control));
+    let id = SessionId::new();
+    store
+        .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
+        .unwrap();
+    control.fail_manifest();
+    let metadata_store = cut_store(dir.path(), Arc::clone(&control));
+    let metadata = SessionMetadata::new(Arc::new(metadata_store), Arc::new(FixedClock));
+    let writer_store = cut_store(dir.path(), control);
+    let writer = writer_store.open_writer(&id, lease()).unwrap();
+    let mutation = metadata
+        .set_title(&writer.writer, Seq::ZERO, Some("new title".into()))
+        .unwrap();
+    let publication = mutation.publication.expect("publication");
+    let debug = format!("{publication:?}");
+    assert!(debug.contains("manifest cache update failed"));
+    assert!(publication.is_visible());
+    assert!(!publication.retry_safe());
 }

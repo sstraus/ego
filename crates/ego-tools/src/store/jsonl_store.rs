@@ -276,6 +276,25 @@ fn invalid_log(message: impl Into<String>) -> StoreError {
     ))
 }
 
+fn lifecycle_publication(
+    publication: AtomicReplacePublication,
+    manifest_diagnostic: Option<String>,
+) -> LifecyclePublication {
+    match publication {
+        AtomicReplacePublication::PublishedDurably => match manifest_diagnostic {
+            Some(diagnostic) => LifecyclePublication::PublishedWithProjectionWarning { diagnostic },
+            None => LifecyclePublication::Published,
+        },
+        AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+            let diagnostic = match manifest_diagnostic {
+                Some(manifest) => format!("{diagnostic}; {manifest}"),
+                None => diagnostic,
+            };
+            LifecyclePublication::PublishedDurabilityUncertain { diagnostic }
+        }
+    }
+}
+
 fn accept_physical_position(current: &mut Seq, actual: Seq) -> Result<(), StoreError> {
     let expected = current.next();
     if actual != expected {
@@ -1865,19 +1884,18 @@ impl JsonlStore {
             let mut image = encode_header(&Header::new(id, created, root.to_path_buf()));
             image.push(b'\n');
             let publication = self.io.replace_atomic_publication(&log_path, &image)?;
-            if let Err(error) = self.rebuild_manifest_from_log(&id, &image) {
-                tracing::warn!(
-                    session = %session_dir_name(&id),
-                    error = %error,
-                    "created session is visible but its manifest projection failed"
-                );
-            }
-            Ok(match publication {
-                AtomicReplacePublication::PublishedDurably => LifecyclePublication::Published,
-                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
-                    LifecyclePublication::PublishedDurabilityUncertain { diagnostic }
-                }
-            })
+            let manifest_diagnostic =
+                self.rebuild_manifest_from_log(&id, &image)
+                    .err()
+                    .map(|error| {
+                        tracing::warn!(
+                            session = %session_dir_name(&id),
+                            error = %error,
+                            "created session is visible but its manifest projection failed"
+                        );
+                        format!("manifest cache update failed: {error}")
+                    });
+            Ok(lifecycle_publication(publication, manifest_diagnostic))
         })
     }
 }
@@ -1957,19 +1975,18 @@ impl JsonlStore {
             )?);
             image.push(b'\n');
             let publication = self.io.replace_atomic_publication(&log_path, &image)?;
-            if let Err(error) = self.rebuild_manifest_from_log(&id, &image) {
-                tracing::warn!(
-                    session = %session_dir_name(&id),
-                    error = %error,
-                    "lifecycle event is visible but its manifest projection failed"
-                );
-            }
-            Ok(Ok(match publication {
-                AtomicReplacePublication::PublishedDurably => LifecyclePublication::Published,
-                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
-                    LifecyclePublication::PublishedDurabilityUncertain { diagnostic }
-                }
-            }))
+            let manifest_diagnostic =
+                self.rebuild_manifest_from_log(&id, &image)
+                    .err()
+                    .map(|error| {
+                        tracing::warn!(
+                            session = %session_dir_name(&id),
+                            error = %error,
+                            "lifecycle event is visible but its manifest projection failed"
+                        );
+                        format!("manifest cache update failed: {error}")
+                    });
+            Ok(Ok(lifecycle_publication(publication, manifest_diagnostic)))
         })
         .map_err(LifecycleAppendError::Store)?
     }

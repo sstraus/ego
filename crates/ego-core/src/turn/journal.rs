@@ -21,6 +21,7 @@ use crate::hook::{
     HookRunError, HookSettledEvidence, HookSpec, HookStartError, HookStartedEvidence,
 };
 use crate::public::{PublicEvent, project_public};
+use crate::session_lifecycle::{LeasedLifecycleAppend, LifecycleAppendError, LifecyclePublication};
 use crate::sink::EventSink;
 use crate::state::{ItemKind, SessionState};
 use crate::store::session_store::{SessionStore, StoreError};
@@ -159,6 +160,19 @@ impl<'s> SharedJournal<'s> {
         self.lock()?
             .append(turn, item, parent, kind)
             .map_err(Into::into)
+    }
+
+    /// Compare, append, and fold one lease-bound lifecycle event while the
+    /// session's sole journal authority is locked.
+    pub(crate) fn compare_and_append_lifecycle(
+        &self,
+        append: &dyn LeasedLifecycleAppend,
+        expected: Seq,
+        event: DomainEvent,
+    ) -> Result<LifecyclePublication, LifecycleAppendError> {
+        self.lock()
+            .map_err(|error| LifecycleAppendError::Store(error.into()))?
+            .compare_and_append_lifecycle(append, expected, event)
     }
 
     /// Fold and project one exact event that the store reveals after an
@@ -463,6 +477,29 @@ impl<'a> Journal<'a> {
         }
         self.commit(event);
         Ok(id)
+    }
+
+    fn compare_and_append_lifecycle(
+        &mut self,
+        append: &dyn LeasedLifecycleAppend,
+        expected: Seq,
+        event: DomainEvent,
+    ) -> Result<LifecyclePublication, LifecycleAppendError> {
+        if self.uncertain_append.is_some() {
+            return Err(LifecycleAppendError::Store(uncertain_append_error(
+                "the journal has an unresolved uncertain append",
+            )));
+        }
+        let mut next = expected;
+        if expected != self.seq || self.state.last_seq != self.seq || event.env.seq != next.next() {
+            return Err(LifecycleAppendError::Conflict);
+        }
+
+        let publication = append.compare_and_append_lifecycle(expected, event.clone())?;
+        if publication.is_visible() {
+            self.commit(event);
+        }
+        Ok(publication)
     }
 
     fn append_or_retry_settlement(
