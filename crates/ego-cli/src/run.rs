@@ -59,7 +59,9 @@ use ego_core::permit::{
 use ego_core::public::{
     InstructionDescriptor, PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport, project_public,
 };
-use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
+use ego_core::question::{
+    AskQuestionTool, Elicitor, QuestionAnswer, QuestionError, QuestionOutcome, QuestionTarget,
+};
 use ego_core::run::{
     CancelReason, DeniedBy, IdSource, RecoveryEvidence, RequestId, RunController,
     RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
@@ -319,12 +321,23 @@ impl std::fmt::Display for RunModelSwitchError {
 
 impl std::error::Error for RunModelSwitchError {}
 
-/// Validate and apply the sole answer batch against one already-opened
-/// durable session. Validation is complete before the first journal append.
-pub fn apply_resume_answers_once(
-    opened: &mut Opened<'_>,
+enum ResumePlan {
+    Model {
+        answer: QuestionAnswer,
+        continuation: QuestionContinuation,
+        request_event: EventId,
+    },
+    Foreign {
+        question: ItemId,
+        continuation_id: String,
+        answer: QuestionAnswer,
+    },
+}
+
+fn plan_resume_answer(
+    state: &SessionState,
     answers: &[ResumeAnswer],
-) -> Result<QuestionContinuation, RunTermination> {
+) -> Result<ResumePlan, RunTermination> {
     let usage = |message: String| RunTermination::UsageError { message };
     if answers.is_empty() {
         return Err(usage("resume answer batch is empty".to_string()));
@@ -344,19 +357,60 @@ pub fn apply_resume_answers_once(
         ));
     }
 
-    let state = opened.state();
     let supplied = &answers[0];
     let answer = state
         .answer_pending(supplied.id, &supplied.json)
         .map_err(|error| usage(error.to_string()))?;
-    let continuation = state
-        .resume_question(supplied.id, answer.clone())
-        .map_err(|error| usage(error.to_string()))?;
     let pending = state
         .pending_question()
         .expect("answer validation found the pending question");
-    let request_event = pending.request_event();
+    match pending.target() {
+        QuestionTarget::ModelTool { .. } => {
+            let continuation = state
+                .resume_question(supplied.id, answer.clone())
+                .map_err(|error| usage(error.to_string()))?;
+            Ok(ResumePlan::Model {
+                answer,
+                continuation,
+                request_event: pending.request_event(),
+            })
+        }
+        QuestionTarget::ForeignContinuation {
+            continuation_id, ..
+        } => Ok(ResumePlan::Foreign {
+            question: pending.item_id(),
+            continuation_id: continuation_id.clone(),
+            answer,
+        }),
+    }
+}
 
+/// Validate and apply the sole answer batch against one already-opened
+/// durable session. Validation is complete before the first journal append.
+pub fn apply_resume_answers_once(
+    opened: &mut Opened<'_>,
+    answers: &[ResumeAnswer],
+) -> Result<QuestionContinuation, RunTermination> {
+    let state = opened.state();
+    match plan_resume_answer(&state, answers)? {
+        ResumePlan::Model {
+            answer,
+            continuation,
+            request_event,
+        } => apply_model_resume_once(opened, answer, continuation, request_event),
+        ResumePlan::Foreign { .. } => Err(RunTermination::UsageError {
+            message: QuestionError::ForeignContinuationRequired.to_string(),
+        }),
+    }
+}
+
+fn apply_model_resume_once(
+    opened: &mut Opened<'_>,
+    answer: QuestionAnswer,
+    continuation: QuestionContinuation,
+    request_event: EventId,
+) -> Result<QuestionContinuation, RunTermination> {
+    let state = opened.state();
     let Opened::Durable(open) = opened;
     let clock = SystemClock;
     let sink = NullSink;
@@ -371,7 +425,7 @@ pub fn apply_resume_answers_once(
     let settlement = journal
         .append(
             continuation.turn,
-            Some(supplied.id),
+            Some(continuation.question),
             Some(request_event),
             EventKind::QuestionSettled {
                 outcome: QuestionOutcome::Answered(answer),
@@ -491,9 +545,20 @@ async fn run_process(
     };
 
     let announce = Announce::new(out, capabilities, quiet);
-    announce.opening(args.prompt.as_deref());
+    let opening_prompt = args.prompt.clone();
 
-    let ended = run_with_registry(args, |_| sink, cancel, mcp_runtime, evidence, preflight).await;
+    let ended = run_with_registry(
+        args,
+        |_| {
+            announce.opening(opening_prompt.as_deref());
+            sink
+        },
+        cancel,
+        mcp_runtime,
+        evidence,
+        preflight,
+    )
+    .await;
 
     // Draws the last block and closes the last line. A no-op unless text mode
     // has something outstanding, which is why it can run on the refusal path
@@ -1339,9 +1404,10 @@ struct Materials {
 
 /// Everything a turn needs that comes from a file, a flag or stdin.
 ///
-/// Gathered before a store is chosen and before a model is resolved, so a run
-/// naming a schema that will not compile or a tool this build does not have
-/// refuses without creating a session or reaching a network.
+/// Ordinary runs gather these before choosing a store or resolving a model.
+/// Resume answers gather them only after confidential policy recovery, so
+/// their filesystem, diagnostics and skill-discovery effects cannot precede
+/// that recovery gate.
 fn materials(
     settings: &Settings,
     args: &Args,
@@ -1864,6 +1930,20 @@ pub fn cancelled_termination(cancel: &CancelToken) -> RunTermination {
 enum HeadlessInput<'a> {
     Prompt(&'a str),
     Resumed(ego_core::event::id::TurnId),
+    Answered {
+        question: ItemId,
+        answer: QuestionAnswer,
+        policy: Arc<PolicyEngine>,
+    },
+}
+
+enum RuntimeResume {
+    Model(TurnId),
+    Foreign {
+        question: ItemId,
+        answer: QuestionAnswer,
+        policy: Arc<PolicyEngine>,
+    },
 }
 
 struct SessionHookComposition<'a> {
@@ -1910,7 +1990,7 @@ async fn compose_session_hooks<'a>(
     trust: Trust,
     source: Arc<model::CliGenerationModelSource>,
     ports: Arc<RunEffectPorts>,
-    policy_source: &dyn GenerationPolicySource,
+    policy: Arc<PolicyEngine>,
     effects: ToolEffectPorts<'a>,
     mcp_runtime: Option<Arc<dyn McpRuntimeBinding>>,
     cancel: CancelToken,
@@ -2008,9 +2088,6 @@ async fn compose_session_hooks<'a>(
         cancel,
         deadline.unwrap_or_else(unbounded_hook_deadline),
     );
-    let policy = policy_source
-        .current()
-        .map_err(|message| RunTermination::Failed { message })?;
     let invoker = binding
         .bind(policy, mcp_runtime.as_deref())
         .map_err(|message| RunTermination::Failed { message })?;
@@ -2576,6 +2653,10 @@ async fn drive_headless_turn(
     input: HeadlessInput<'_>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<(RunTermination, SessionState, Value), RunTermination> {
+    let recovered_policy = match &input {
+        HeadlessInput::Answered { policy, .. } => Some(Arc::clone(policy)),
+        HeadlessInput::Prompt(_) | HeadlessInput::Resumed(_) => None,
+    };
     let (ports, observation) =
         effect_scope(confinement, active.evidence(), cancel, run_deadline).await?;
     let images = acquire_attachments(
@@ -2617,6 +2698,12 @@ async fn drive_headless_turn(
         ports.one_hop_handle(),
         ports.duplex_handle(),
     );
+    let hook_policy = match recovered_policy.as_ref() {
+        Some(policy) => Arc::clone(policy),
+        None => policy_source
+            .current()
+            .map_err(|message| RunTermination::Failed { message })?,
+    };
     let hooks = compose_session_hooks(
         active.id(),
         journal.clone(),
@@ -2629,7 +2716,7 @@ async fn drive_headless_turn(
         hook_trust,
         Arc::clone(&source),
         Arc::clone(&ports),
-        policy_source.as_ref(),
+        hook_policy,
         effect_ports.clone(),
         mcp_runtime.as_ref().map(Arc::clone),
         cancel.clone(),
@@ -2689,6 +2776,12 @@ async fn drive_headless_turn(
         message: error.to_string(),
     })?
     .with_skill_invocation_port(skill_owner.clone());
+    let loop_ = match recovered_policy.as_ref() {
+        Some(policy) => loop_
+            .with_hook_policy(Arc::clone(policy))
+            .map_err(|message| RunTermination::Failed { message })?,
+        None => loop_,
+    };
     let loop_ = match inherited_effect_tools {
         Some(tools) => loop_.with_effect_tool_ceiling(tools),
         None => loop_,
@@ -2721,6 +2814,13 @@ async fn drive_headless_turn(
                 .drive_resumed(&mut loop_, turn, cancel, diagnostics)
                 .await
         }
+        HeadlessInput::Answered {
+            question, answer, ..
+        } => {
+            turns
+                .drive_answered(&mut loop_, question, answer, cancel, diagnostics)
+                .await
+        }
     };
     drop(loop_);
     skill_owner
@@ -2730,7 +2830,11 @@ async fn drive_headless_turn(
             message: error.to_string(),
         })?;
     drop(skill_owner);
-    let session_end = match hooks.bind_current(policy_source.as_ref()) {
+    let session_end_runtime = match recovered_policy {
+        Some(policy) => hooks.bind_policy(policy),
+        None => hooks.bind_current(policy_source.as_ref()),
+    };
+    let session_end = match session_end_runtime {
         Ok(runtime) => {
             dispatch_session_hook(&runtime, active.id(), hooks.turn, HookLifecycle::SessionEnd)
                 .await
@@ -3859,7 +3963,7 @@ struct ExecutionPreflight {
     settings: Settings,
     ci: Option<CiInvocation>,
     refresh: ego_mcp::McpRegistryRefresh,
-    ready: ExecutionReady,
+    ready: Option<ExecutionReady>,
 }
 
 struct ExecutionReady {
@@ -3882,8 +3986,8 @@ struct GenerationReady {
 pub struct DirectPreflight(ExecutionPreflight);
 
 /// Complete direct-CI preflight before the process opens its MCP journals or
-/// any durable session. The returned value is consumed by the run; no input
-/// is resolved a second time.
+/// any durable session. Resume answers retain only settings and MCP selection
+/// here so policy recovery can precede material and generation preparation.
 pub async fn preflight_ci(
     args: &Args,
     cancel: &CancelToken,
@@ -3920,6 +4024,14 @@ async fn execution_preflight(
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?;
+    if !args.answers.is_empty() {
+        return Ok(ExecutionPreflight {
+            settings,
+            ci,
+            refresh,
+            ready: None,
+        });
+    }
     let Materials {
         system,
         registry,
@@ -3962,7 +4074,7 @@ async fn execution_preflight(
         settings,
         ci,
         refresh,
-        ready: ExecutionReady {
+        ready: Some(ExecutionReady {
             system,
             registry,
             skills,
@@ -3974,7 +4086,7 @@ async fn execution_preflight(
                 main_capabilities,
                 judge_available,
             },
-        },
+        }),
     })
 }
 
@@ -3983,10 +4095,11 @@ async fn execution_preflight(
 /// What is left here after the four steps above is the *order* they happen in,
 /// which is the part that is genuinely this function's: settings, explicit CI
 /// posture and MCP selection are established before a session is chosen. A
-/// direct CI token already contains material and generation readiness; every
-/// ordinary run preserves the historical order by opening the selected
-/// session before materials, then admitting run context and reconciling MCP
-/// before generation readiness.
+/// direct CI token without answers already contains material and generation
+/// readiness; every prompt or model resume admits its run context before MCP
+/// reconciliation. A foreign resume restores and pins its durable generation
+/// policy around that reconciliation before admitting the run context or
+/// starting the session.
 async fn execute<S: EventSink>(
     mut args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
@@ -4012,7 +4125,7 @@ async fn execute<S: EventSink>(
             ci,
             refresh,
             ready,
-        }) => (settings, ci, refresh, Some(ready)),
+        }) => (settings, ci, refresh, ready),
         None => {
             let settings = settings(&args, |root| run_trust(&args, &driver, root), diagnostics)
                 .map_err(usage)?;
@@ -4061,6 +4174,56 @@ async fn execute<S: EventSink>(
     } else {
         None
     };
+    let mode = settings.effective.mode.unwrap_or(Mode::Default);
+    // An untrusted workspace resolves to `Mode::Default`; a trusted
+    // interactive run may obtain its mode from the admitted config layers.
+    let human: Option<Arc<dyn HumanApprover>> = match &driver {
+        Driver::Interactive { seat, .. } if seat.has_human() => Some(Arc::new(SeatApprover {
+            seat: Arc::clone(seat),
+        })),
+        Driver::Once | Driver::Interactive { .. } => None,
+    };
+    let policy_selection =
+        GenerationPolicySelection::new(mode, settings.effective.permissions.clone());
+    let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(CliGenerationPolicySource::new(
+        policy_selection.clone(),
+        CanonPath::new(&settings.root),
+        human,
+    ));
+    let invocation = RunInvocationId::new();
+    let run_id = RunId::new(session_id, invocation.uuid());
+    let finalize = |termination| {
+        finalize_ci_error(
+            jsonl_store.as_ref(),
+            artifact_store.as_ref(),
+            run_id,
+            termination,
+            diagnostics,
+        )
+    };
+    let resume_plan = if args.answers.is_empty() {
+        None
+    } else {
+        let opened = early_opened
+            .as_ref()
+            .expect("a resume answer opens its session before planning");
+        Some(plan_resume_answer(&opened.state(), &args.answers).map_err(&finalize)?)
+    };
+    let recovered_capture = match resume_plan.as_ref() {
+        Some(ResumePlan::Foreign {
+            continuation_id, ..
+        }) => {
+            let snapshot = mcp_runtime
+                .load_pending_foreign_policy(continuation_id)
+                .map_err(|message| finalize(RunTermination::Failed { message }))?;
+            Some(
+                policy_source
+                    .restore(snapshot)
+                    .map_err(|message| finalize(RunTermination::Failed { message }))?,
+            )
+        }
+        Some(ResumePlan::Model { .. }) | None => None,
+    };
 
     let (system, registry, skills, compiled, text, slug, generation) = match ready {
         Some(ExecutionReady {
@@ -4098,14 +4261,6 @@ async fn execute<S: EventSink>(
         }
     };
     let mut registry = registry;
-    if let (Some(status), Some(skills)) = (status.as_ref(), skills.as_ref()) {
-        let actions = status.seat.action_registry();
-        actions
-            .bind_skill_view(skills.view())
-            .map_err(|error| RunTermination::Failed {
-                message: format!("interactive skill actions could not be installed: {error:?}"),
-            })?;
-    }
     let skill_trust = settings.trust;
     let skill_profile_layers = settings.profile_layers.clone();
     let Settings {
@@ -4116,7 +4271,6 @@ async fn execute<S: EventSink>(
         effective,
         ..
     } = settings;
-    let mode = effective.mode.unwrap_or(Mode::Default);
     let skill_resource_roots = crate::config::ego_home().map(|user| {
         ego_core::skill::SkillResourceRoots::new(PathBuf::from("/etc/ego"), user, root.join(".ego"))
     });
@@ -4132,12 +4286,6 @@ async fn execute<S: EventSink>(
             })?,
         )),
     };
-    if let Some(note_text) = opened.repair_note() {
-        diagnostics.note(&note_text);
-    }
-
-    let invocation = RunInvocationId::new();
-    let run_id = RunId::new(session_id, invocation.uuid());
     let child_root = RunRoot::new(root.clone()).map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?;
@@ -4161,62 +4309,99 @@ async fn execute<S: EventSink>(
         .as_ref()
         .map(|prompt| prompt.sources.clone())
         .unwrap_or_default();
-    let context = complete_run_context(
-        &args,
-        &effective,
-        &confinement,
-        &cwd,
-        invocation,
-        run_id,
-        instruction_descriptors,
-    )
-    .map_err(usage)?;
-    let Opened::Durable(opened_session) = &opened;
-    match evidence.admit_run_context(&opened_session.writer, context) {
-        Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
-            diagnostics.note(&format!(
-                "run evidence was durable but its manifest projection failed: {diagnostic}"
-            ));
-        }
-        Ok(EvidenceWrite::Published | EvidenceWrite::AlreadyRecorded) => {}
-        Err(error) => {
-            return Err(RunTermination::Failed {
-                message: error.to_string(),
-            });
-        }
-    }
-    let resume = if args.answers.is_empty() {
-        None
-    } else {
-        Some(
-            apply_resume_answers_once(&mut opened, &args.answers).map_err(|termination| {
-                finalize_ci_error(
-                    jsonl_store.as_ref(),
-                    artifact_store.as_ref(),
-                    run_id,
-                    termination,
-                    diagnostics,
-                )
-            })?,
+    let mut context = Some(
+        complete_run_context(
+            &args,
+            &effective,
+            &confinement,
+            &cwd,
+            invocation,
+            run_id,
+            instruction_descriptors,
         )
+        .map_err(usage)?,
+    );
+    let admit_context = |opened: &Opened<'_>, context: RunContextEvidence| {
+        let Opened::Durable(opened_session) = opened;
+        match evidence.admit_run_context(&opened_session.writer, context) {
+            Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
+                diagnostics.note(&format!(
+                    "run evidence was durable but its manifest projection failed: {diagnostic}"
+                ));
+                Ok(())
+            }
+            Ok(EvidenceWrite::Published | EvidenceWrite::AlreadyRecorded) => Ok(()),
+            Err(error) => Err(RunTermination::Failed {
+                message: error.to_string(),
+            }),
+        }
     };
+    if recovered_capture.is_none() {
+        admit_context(
+            &opened,
+            context
+                .take()
+                .expect("the run context is admitted exactly once"),
+        )?;
+    }
+    let (mut resume, foreign_plan) = match resume_plan {
+        Some(ResumePlan::Model {
+            answer,
+            continuation,
+            request_event,
+        }) => {
+            let continuation =
+                apply_model_resume_once(&mut opened, answer, continuation, request_event)
+                    .map_err(&finalize)?;
+            (Some(RuntimeResume::Model(continuation.turn)), None)
+        }
+        Some(plan @ ResumePlan::Foreign { .. }) => (None, Some(plan)),
+        None => (None, None),
+    };
+    mcp_registry.reconcile(refresh).await.map_err(|error| {
+        finalize(RunTermination::Failed {
+            message: error.to_string(),
+        })
+    })?;
+    if let Some(ResumePlan::Foreign {
+        question,
+        continuation_id,
+        answer,
+    }) = foreign_plan
+    {
+        let capture = recovered_capture.expect("foreign recovery loaded its policy capture");
+        mcp_runtime
+            .bind_pending_foreign_continuation(&continuation_id, capture.snapshot())
+            .map_err(|message| finalize(RunTermination::Failed { message }))?;
+        admit_context(
+            &opened,
+            context
+                .take()
+                .expect("the foreign run context is admitted after recovery"),
+        )?;
+        resume = Some(RuntimeResume::Foreign {
+            question,
+            answer,
+            policy: capture.policy(),
+        });
+    }
+    if let (Some(status), Some(skills)) = (status.as_ref(), skills.as_ref()) {
+        let actions = status.seat.action_registry();
+        actions
+            .bind_skill_view(skills.view())
+            .map_err(|error| RunTermination::Failed {
+                message: format!("interactive skill actions could not be installed: {error:?}"),
+            })?;
+    }
+    if let Some(note_text) = opened.repair_note() {
+        diagnostics.note(&note_text);
+    }
     if !text.trim().is_empty()
         && let Driver::Interactive { seat, .. } = &driver
     {
         seat.busy();
     }
-
-    mcp_registry.reconcile(refresh).await.map_err(|error| {
-        finalize_ci_error(
-            jsonl_store.as_ref(),
-            artifact_store.as_ref(),
-            run_id,
-            RunTermination::Failed {
-                message: error.to_string(),
-            },
-            diagnostics,
-        )
-    })?;
+    debug_assert!(context.is_none());
     let mcp_status = mcp_registry.status();
     let mcp_errors = mcp_status.mcp_errors();
     let admitted_tools = Some(mcp_registry.admitted_tools());
@@ -4255,7 +4440,7 @@ async fn execute<S: EventSink>(
                     jsonl_store.as_ref(),
                     artifact_store.as_ref(),
                     run_id,
-                    termination,
+                    ci_preflight_termination(ci.is_some(), termination),
                     diagnostics,
                 )
             })?;
@@ -4334,20 +4519,6 @@ async fn execute<S: EventSink>(
         &opening,
     );
 
-    // An untrusted workspace resolves to `Mode::Default`; a trusted
-    // interactive run may obtain its mode from the admitted config layers.
-    let human: Option<Arc<dyn HumanApprover>> = match &driver {
-        Driver::Interactive { seat, .. } if seat.has_human() => Some(Arc::new(SeatApprover {
-            seat: Arc::clone(seat),
-        })),
-        Driver::Once | Driver::Interactive { .. } => None,
-    };
-    let policy_selection = GenerationPolicySelection::new(mode, effective.permissions.clone());
-    let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(CliGenerationPolicySource::new(
-        policy_selection.clone(),
-        CanonPath::new(&root),
-        human,
-    ));
     let fs = OsFs;
     let gate = SharedBudgetGate::new(budget::gate(
         &effective.ceilings,
@@ -4457,7 +4628,7 @@ async fn execute<S: EventSink>(
     }
 
     macro_rules! open_session_hooks {
-        ($active:expr, $state:expr, $hook_ports:ident) => {{
+        ($active:expr, $state:expr, $hook_ports:ident, $policy:expr) => {{
             let hook_effects = ToolEffectPorts::new(
                 &fs,
                 $hook_ports.process(),
@@ -4486,7 +4657,7 @@ async fn execute<S: EventSink>(
                 skill_trust,
                 Arc::clone(&source),
                 Arc::clone(&$hook_ports),
-                policy_source.as_ref(),
+                $policy,
                 hook_effects,
                 Some(Arc::clone(&mcp_runtime) as Arc<dyn McpRuntimeBinding>),
                 cancel.clone(),
@@ -4522,8 +4693,17 @@ async fn execute<S: EventSink>(
 
     match driver {
         Driver::Once => {
-            let input = match resume.as_ref() {
-                Some(continuation) => HeadlessInput::Resumed(continuation.turn),
+            let input = match resume {
+                Some(RuntimeResume::Model(turn)) => HeadlessInput::Resumed(turn),
+                Some(RuntimeResume::Foreign {
+                    question,
+                    answer,
+                    policy,
+                }) => HeadlessInput::Answered {
+                    question,
+                    answer,
+                    policy,
+                },
                 None => HeadlessInput::Prompt(&text),
             };
             let driven = drive_headless_turn(
@@ -4642,7 +4822,7 @@ async fn execute<S: EventSink>(
             // alone starts at the prompt. Both are one session — the argument
             // is a first thing to say, not a different mode.
             let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
-            let mut resumed = resume.as_ref().map(|continuation| continuation.turn);
+            let mut resumed = resume;
             let mut pending_attachments = args.attach.clone();
             let mut epoch_start = EpochStart::Initial;
 
@@ -4654,8 +4834,22 @@ async fn execute<S: EventSink>(
                     let (session_hook_ports, _) =
                         effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
                             .await?;
-                    let (session_journal, session_hooks) =
-                        open_session_hooks!(active, active.state().clone(), session_hook_ports);
+                    let recovered_epoch_policy = match resumed.as_ref() {
+                        Some(RuntimeResume::Foreign { policy, .. }) => Some(Arc::clone(policy)),
+                        Some(RuntimeResume::Model(_)) | None => None,
+                    };
+                    let session_policy = match recovered_epoch_policy.as_ref() {
+                        Some(policy) => Arc::clone(policy),
+                        None => policy_source
+                            .current()
+                            .map_err(|message| RunTermination::Failed { message })?,
+                    };
+                    let (session_journal, session_hooks) = open_session_hooks!(
+                        active,
+                        active.state().clone(),
+                        session_hook_ports,
+                        session_policy
+                    );
                     let mut child_bindings = RunExecutionBindings::new(
                         Arc::new(CliChildSinkFactory),
                         elicitor.as_ref().map(Arc::clone),
@@ -5529,7 +5723,7 @@ async fn execute<S: EventSink>(
                                 } else {
                                     Vec::new()
                                 };
-                            let mut loop_ = build!(
+                            let loop_ = build!(
                                 active,
                                 &turn_cancel,
                                 ports,
@@ -5537,12 +5731,32 @@ async fn execute<S: EventSink>(
                                 session_hooks,
                                 session_journal,
                                 skill_owner
-                            )
-                            .with_interactive_control(&mut control);
+                            );
+                            let loop_ = match resumed_turn.as_ref() {
+                                Some(RuntimeResume::Foreign { policy, .. }) => loop_
+                                    .with_hook_policy(Arc::clone(policy))
+                                    .map_err(|message| RunTermination::Failed { message })?,
+                                Some(RuntimeResume::Model(_)) | None => loop_,
+                            };
+                            let mut loop_ = loop_.with_interactive_control(&mut control);
                             let driven = match resumed_turn {
-                                Some(turn) => {
+                                Some(RuntimeResume::Model(turn)) => {
                                     let (termination, result) = turns
                                         .drive_resumed(&mut loop_, turn, &turn_cancel, diagnostics)
+                                        .await;
+                                    Some((termination, result))
+                                }
+                                Some(RuntimeResume::Foreign {
+                                    question, answer, ..
+                                }) => {
+                                    let (termination, result) = turns
+                                        .drive_answered(
+                                            &mut loop_,
+                                            question,
+                                            answer,
+                                            &turn_cancel,
+                                            diagnostics,
+                                        )
                                         .await;
                                     Some((termination, result))
                                 }
@@ -5653,18 +5867,24 @@ async fn execute<S: EventSink>(
 
                     drop(model_switch_owner);
                     let session_end = match skill_owner.drain().await {
-                        Ok(()) => match session_hooks.bind_current(policy_source.as_ref()) {
-                            Ok(runtime) => {
-                                dispatch_session_hook(
-                                    &runtime,
-                                    active.id(),
-                                    session_hooks.turn,
-                                    HookLifecycle::SessionEnd,
-                                )
-                                .await
+                        Ok(()) => {
+                            let runtime = match recovered_epoch_policy {
+                                Some(policy) => session_hooks.bind_policy(policy),
+                                None => session_hooks.bind_current(policy_source.as_ref()),
+                            };
+                            match runtime {
+                                Ok(runtime) => {
+                                    dispatch_session_hook(
+                                        &runtime,
+                                        active.id(),
+                                        session_hooks.turn,
+                                        HookLifecycle::SessionEnd,
+                                    )
+                                    .await
+                                }
+                                Err(error) => Err(error),
                             }
-                            Err(error) => Err(error),
-                        },
+                        }
                         Err(error) => Err(RunTermination::Failed {
                             message: error.to_string(),
                         }),
@@ -5903,8 +6123,15 @@ struct Turns<'a> {
 }
 
 enum TurnStart {
-    Prompt { text: String, images: Vec<ImageRef> },
+    Prompt {
+        text: String,
+        images: Vec<ImageRef>,
+    },
     Resumed(ego_core::event::id::TurnId),
+    Answered {
+        question: ItemId,
+        answer: QuestionAnswer,
+    },
     Skill(AdmittedSkillOperation),
 }
 
@@ -5956,6 +6183,23 @@ impl Turns<'_> {
             .await
     }
 
+    async fn drive_answered<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        question: ItemId,
+        answer: QuestionAnswer,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        self.drive_from(
+            loop_,
+            TurnStart::Answered { question, answer },
+            cancel,
+            diagnostics,
+        )
+        .await
+    }
+
     async fn drive_from<'session: 'turn, 'turn>(
         &self,
         loop_: &mut TurnLoop<'session, 'turn>,
@@ -5973,6 +6217,9 @@ impl Turns<'_> {
             let outcome = match next {
                 TurnStart::Prompt { text, images } => self.one(loop_, &text, images, cancel).await,
                 TurnStart::Resumed(turn) => self.one_resumed(loop_, turn, cancel).await,
+                TurnStart::Answered { question, answer } => {
+                    self.one_answered(loop_, question, answer, cancel).await
+                }
                 TurnStart::Skill(operation) => self.one_skill(loop_, operation, cancel).await,
             };
             let outcome = match outcome {
@@ -6072,6 +6319,17 @@ impl Turns<'_> {
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
         self.one_running(loop_.resume_turn(turn), cancel).await
+    }
+
+    async fn one_answered<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        question: ItemId,
+        answer: QuestionAnswer,
+        cancel: &CancelToken,
+    ) -> Result<TurnOutcome, RunTermination> {
+        self.one_running(loop_.resume_question(question, answer), cancel)
+            .await
     }
 
     async fn one_skill<'session: 'turn, 'turn>(
@@ -6772,6 +7030,9 @@ mod tests {
     use ego_core::hook::{
         HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort, HookInvocationRequest,
     };
+    use ego_core::question::{
+        QuestionAnswer, QuestionMode, QuestionOption, QuestionRequest, QuestionTarget,
+    };
     use ego_core::run::RunOrigin;
     use ego_core::store::session_store::{SessionStore, StoreError};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6825,6 +7086,46 @@ mod tests {
                 None,
             ))))
         }
+    }
+
+    fn pending_resume_state(
+        target: QuestionTarget,
+    ) -> (SessionState, ResumeAnswer, TurnId, EventId) {
+        let question = ItemId::new();
+        let turn = TurnId::new();
+        let request_event = EventId::new();
+        let request = QuestionRequest::new(
+            "Continue?",
+            QuestionMode::Single,
+            vec![QuestionOption::new("yes", "Yes")],
+            false,
+        );
+        let mut state = SessionState::default();
+        state.apply(&DomainEvent {
+            env: Envelope {
+                seq: Seq::default(),
+                id: request_event,
+                turn,
+                item: Some(question),
+                parent: None,
+                ts: Timestamp::from_millis(1_000),
+                producer: Producer::Main,
+            },
+            kind: EventKind::QuestionRequested { request, target },
+        });
+        assert_eq!(
+            state.pending_question().map(|pending| pending.item_id()),
+            Some(question)
+        );
+        (
+            state,
+            ResumeAnswer {
+                id: question,
+                json: r#""yes""#.to_owned(),
+            },
+            turn,
+            request_event,
+        )
     }
 
     #[derive(Default, Clone)]
@@ -7688,5 +7989,57 @@ mod tests {
         assert!(rendered.contains(&invocation.to_string()));
         assert!(rendered.contains("skill:"));
         assert!(!rendered.contains("private handler payload"));
+    }
+
+    #[test]
+    fn resume_plan_parses_one_answer_and_leaves_classification_pure() {
+        let model_tool = ItemId::new();
+        let (model_state, model_answer, model_turn, model_request_event) =
+            pending_resume_state(QuestionTarget::ModelTool {
+                tool_call: model_tool,
+            });
+        let model_before = model_state.clone();
+        let model_plan = plan_resume_answer(&model_state, std::slice::from_ref(&model_answer))
+            .expect("one model answer is planned");
+        assert_eq!(model_state, model_before);
+        match model_plan {
+            ResumePlan::Model {
+                answer,
+                continuation,
+                request_event,
+            } => {
+                assert_eq!(answer, QuestionAnswer::single("yes"));
+                assert_eq!(continuation.question, model_answer.id);
+                assert_eq!(continuation.turn, model_turn);
+                assert_eq!(continuation.tool_call, model_tool);
+                assert_eq!(request_event, model_request_event);
+            }
+            ResumePlan::Foreign { .. } => panic!("model answer was misclassified as foreign"),
+        }
+
+        let foreign_tool = ItemId::new();
+        let continuation_id = "mcp-generation-policy-restart";
+        let (foreign_state, foreign_answer, _, _) =
+            pending_resume_state(QuestionTarget::ForeignContinuation {
+                tool_call: foreign_tool,
+                continuation_id: continuation_id.to_owned(),
+            });
+        let foreign_before = foreign_state.clone();
+        let foreign_plan =
+            plan_resume_answer(&foreign_state, std::slice::from_ref(&foreign_answer))
+                .expect("one foreign answer is planned");
+        assert_eq!(foreign_state, foreign_before);
+        match foreign_plan {
+            ResumePlan::Foreign {
+                question,
+                continuation_id: planned_id,
+                answer,
+            } => {
+                assert_eq!(question, foreign_answer.id);
+                assert_eq!(planned_id, continuation_id);
+                assert_eq!(answer, QuestionAnswer::single("yes"));
+            }
+            ResumePlan::Model { .. } => panic!("foreign answer was misclassified as model"),
+        }
     }
 }
