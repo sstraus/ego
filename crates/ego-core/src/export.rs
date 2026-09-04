@@ -797,9 +797,9 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                     dropped_blocks: *dropped_blocks,
                     dialects: dialects.clone(),
                 },
-                FallbackDecision::Skipped { gaps } => ExportFallbackDecision::Skipped {
-                    gaps: gaps.clone(),
-                },
+                FallbackDecision::Skipped { gaps } => {
+                    ExportFallbackDecision::Skipped { gaps: gaps.clone() }
+                }
                 FallbackDecision::ExpressibilitySkipped { .. } => {
                     redactions.opaque_prose += 1;
                     ExportFallbackDecision::ExpressibilitySkipped

@@ -588,7 +588,10 @@ mod lifecycle {
     /// exactly why `UsageReport` is an enum rather than an `Option`.
     #[test]
     fn a_missing_usage_report_charges_the_bound_while_a_reported_zero_charges_nothing() {
-        let (_, missing) = run(vec![AiEvent::Stop(StopReason::Stop)]);
+        let (_, missing) = run(vec![
+            AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
+            AiEvent::Stop(StopReason::Stop),
+        ]);
         assert_eq!(missing.outcome.usage(), UsageReport::Missing);
         assert_eq!(missing.reconciled.charged, Some(bound()));
         assert!(!missing.reconciled.exact);

@@ -129,10 +129,9 @@ struct Unavailable {
 ///
 /// `ARCHITECTURE.md`'s milestone table (line 424 onwards) is the source for
 /// every `waiting_on` here: these are subsystems, and the sentence says which.
-const UNAVAILABLE: &[Unavailable] = &[
-    Unavailable {
-        flags: &["-v", "--verbose"],
-        waiting_on: "a decision about what it shows. Every other entry here \
+const UNAVAILABLE: &[Unavailable] = &[Unavailable {
+    flags: &["-v", "--verbose"],
+    waiting_on: "a decision about what it shows. Every other entry here \
                      waits on a subsystem; this one waits on a meaning. \
                      `CLI.md` §4.7 says exactly what `-q` suppresses and \
                      nothing says what `-v` adds — and the obvious answer, \
@@ -140,8 +139,7 @@ const UNAVAILABLE: &[Unavailable] = &[
                      build installs no subscriber, and adding one puts a \
                      second writer on the stream the marks and the \
                      notification already own",
-    },
-];
+}];
 
 /// The commands of `CLI.md` §2 this build implements.
 ///

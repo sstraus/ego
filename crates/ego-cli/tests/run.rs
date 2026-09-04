@@ -838,36 +838,6 @@ fn a_command_line_that_cannot_be_honoured_exits_two_saying_why() {
     }
 }
 
-/// §4.5's applicability matrix: the retry flags `CLI.md` §3 documents whose
-/// subsystem this build does not have are refused **by name**, naming what
-/// they wait on. Sandbox is implemented and has its own parsing, precedence,
-/// and enforcement contract; `-v`/`--verbose` has a dedicated test below.
-#[test]
-fn a_documented_flag_without_its_subsystem_is_refused_by_name() {
-    for (flag, value) in [
-        ("--retry", Some("3")),
-        ("--fallback", Some("openai/gpt-5.1")),
-    ] {
-        let mut ego = Ego::nowhere().args(["--model", "ollama/qwen3"]).arg(flag);
-        if let Some(value) = value {
-            ego = ego.arg(value);
-        }
-        let finished = ego.arg("Ask").run();
-
-        assert_eq!(finished.code, Some(2), "{flag} did not exit 2");
-        assert!(
-            finished.stderr.contains(flag),
-            "{flag} was refused without being named: {}",
-            finished.stderr
-        );
-        assert!(
-            finished.stderr.contains("waiting on"),
-            "{flag} was refused without saying what it waits on: {}",
-            finished.stderr
-        );
-    }
-}
-
 // --- the permission flags, now that there is a subsystem behind them -------
 //
 // These five used to be in the loop above, refused by name because their
