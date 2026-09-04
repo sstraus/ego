@@ -1621,37 +1621,22 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)),
                 ));
             }
-            let has_mcp_binding = self
-                .hook_binding
-                .as_ref()
-                .is_some_and(|binding| binding.mcp.is_some());
-            if has_mcp_binding {
-                let bound = self
-                    .policy_source
-                    .current()
-                    .and_then(|policy| self.bind_hook_policy(policy));
-                if let Err(error) = bound {
-                    tracing::warn!(%error, "the active foreign question policy could not be bound");
-                    let driven = match self.refuse_drive(turn, error, ExitReason::Internal) {
-                        Ok(driven) => driven,
-                        Err(cause) => return Err(self.abandon(turn, cause)),
-                    };
-                    return match self.finish_turn(turn, driven).await {
-                        Ok(outcome) => Ok(outcome),
-                        Err(cause) => Err(self.abandon(turn, cause)),
-                    };
-                }
-            }
             let Some(port) = self.foreign_question_port.as_ref().map(Arc::clone) else {
-                self.close_control();
-                self.refresh_control_status();
-                return Ok(TurnOutcome {
+                let reason =
+                    "the captured policy binding for this foreign continuation is unavailable";
+                tracing::warn!("foreign question resume has no captured policy binding");
+                let driven = match self.refuse_drive(
                     turn,
-                    ok: false,
-                    exit_reason: ExitReason::PermissionRequired,
-                    denied: None,
-                    skill: None,
-                });
+                    reason.to_owned(),
+                    ExitReason::Internal,
+                ) {
+                    Ok(driven) => driven,
+                    Err(cause) => return Err(self.abandon(turn, cause)),
+                };
+                return match self.finish_turn(turn, driven).await {
+                    Ok(outcome) => Ok(outcome),
+                    Err(cause) => Err(self.abandon(turn, cause)),
+                };
             };
             let progress = match self
                 .settle_foreign_question(

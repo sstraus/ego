@@ -951,7 +951,6 @@ async fn probe(
     let registry: Vec<Arc<dyn Tool>> = vec![Arc::new(Typed(crate::tools::ExecTool))];
     let tools = Tools::new(
         &registry,
-        &policy,
         ToolEffectPorts::new(
             &fs,
             ports.process(),
@@ -972,10 +971,13 @@ async fn probe(
     let Ok((tool, call)) = tools.prepare("exec", &arguments) else {
         return false;
     };
-    let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
         return false;
     };
-    tools.execute(tool.as_ref(), authorized, None).await.is_ok()
+    tools
+        .execute(&policy, tool.as_ref(), authorized, None)
+        .await
+        .is_ok()
 }
 
 #[cfg(test)]

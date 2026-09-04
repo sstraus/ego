@@ -8,6 +8,7 @@ mod keys;
 mod seat;
 
 pub mod actions;
+pub mod policy_controls;
 pub mod selector;
 pub mod status;
 pub mod surface;

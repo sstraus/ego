@@ -42,6 +42,7 @@ use ego_core::hook::{
     HookInvocationPort, HookInvocationRequest, HookJournalPort, HookLifecycleDispatcher,
     HookOccurrence, HookReachError, HookReachOutcome, HookReachedEvidence, HookRunError,
     HookRunner, HookSpec, HookStartError, HookStartedEvidence, SessionHookRuntime,
+    SessionHookState,
 };
 use ego_core::sink::NullSink;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -335,13 +336,13 @@ where
         ego_core::event::id::Producer::Main,
         ego_core::state::SessionState::default(),
     ));
-    SessionHookRuntime::new(
+    SessionHookState::new(
         HookLifecycleDispatcher::new(HookRunner::new(), hook_catalogue()),
         journal,
-        Arc::new(port),
         CancelToken::new(),
         std::time::Instant::now() + Duration::from_secs(30),
     )
+    .bind(Arc::new(port))
 }
 
 fn capabilities() -> ModelCapabilities {

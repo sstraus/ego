@@ -504,7 +504,6 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
     let tools = TurnTools::new(
         &registry,
-        &policy,
         ToolEffectPorts::new(
             &fs,
             run.ports.process(),
@@ -540,14 +539,14 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     assert_eq!(prepared_spec.cwd(), Some(&root));
     assert_eq!(prepared_spec.timeout(), Some(Duration::from_millis(1000)));
     assert_eq!(prepared_spec.env_policy(), &EnvPolicy::Inherited);
-    let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
         panic!("the exact prepared exec must be authorized by its rule");
     };
     assert_eq!(authorized.call(), &expected_call);
     assert_eq!(authorized.call().tool(), "exec");
     assert_eq!(authorized.call().ops().len(), 1);
     assert!(format!("{:?}", authorized.call()).contains("composite literal * ; $(false)"));
-    let result = block_on(tools.execute(tool.as_ref(), authorized, None)).unwrap();
+    let result = block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap();
     let debug = format!("{result:?}");
     assert!(debug.contains("composite literal * ; $(false)"));
 }
@@ -579,7 +578,6 @@ fn exec_tool_policy_denial_stops_before_guarded_effects() {
     let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
     let tools = TurnTools::new(
         &registry,
-        &policy,
         ToolEffectPorts::new(
             &fs,
             run.ports.process(),
@@ -604,7 +602,7 @@ fn exec_tool_policy_denial_stops_before_guarded_effects() {
         "timeout_ms": 1000
     });
     let (_tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
-    match tools.authorize(call) {
+    match tools.authorize(&policy, call) {
         Classification::Settled(Err(PolicyDenied::Denied { tool, .. })) => {
             assert_eq!(tool, "exec");
         }

@@ -682,6 +682,24 @@ impl ActionRegistry {
                     }
                 };
             }
+            let policy_action = self
+                .resolve_slash(name)
+                .or_else(|| self.resolve_alias(name))
+                .filter(|id| {
+                    matches!(
+                        id,
+                        ActionId::Mode | ActionId::Plan | ActionId::Yolo | ActionId::Permissions
+                    )
+                });
+            if let Some(id) = policy_action {
+                return if raw_arguments.is_empty() {
+                    Dispatch::Action(id)
+                } else {
+                    Dispatch::Refused {
+                        reason: "usage: /mode, /plan, /yolo, and /permissions take no arguments",
+                    }
+                };
+            }
             if boundary == command.len()
                 && let Some(id) = self
                     .resolve_slash(name)

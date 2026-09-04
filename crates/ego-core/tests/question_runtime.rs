@@ -782,14 +782,12 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
         .find(|item| item.call_id.as_deref() == Some("sibling-call"))
         .expect("the unstarted sibling remains represented");
     assert_eq!(sibling.ok, Some(false));
-    assert!(
-        sibling
-            .tool_result
-            .as_ref()
-            .expect("sibling closure result")
-            .model_text()
-            .contains("interrupted: not run")
-    );
+    assert!(sibling
+        .tool_result
+        .as_ref()
+        .expect("sibling closure result")
+        .model_text()
+        .contains("interrupted: not run"));
 
     let events = store.events();
     let question = events
@@ -906,20 +904,15 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
                 )]
             );
             let labels = trace.lock().expect("question trace").clone();
-            assert!(labels.starts_with(&[
-                "current",
-                "bind",
-                "foreign-factory",
-                "question-settled",
-                "foreign-port",
-            ]));
-            if let Some(capture) = labels.iter().position(|label| *label == "capture") {
-                let foreign_port = labels
-                    .iter()
-                    .position(|label| *label == "foreign-port")
-                    .expect("foreign adapter resumes");
-                assert!(foreign_port < capture);
-            }
+            assert!(labels.starts_with(&["question-settled", "foreign-port"]));
+            let foreign_port_index = labels
+                .iter()
+                .position(|label| *label == "foreign-port")
+                .expect("foreign adapter resumes");
+            assert!(labels[..foreign_port_index].iter().all(|label| !matches!(
+                *label,
+                "current" | "bind" | "foreign-factory" | "capture"
+            )));
             let completed = store
                 .events()
                 .into_iter()
@@ -976,50 +969,137 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
 }
 
 #[test]
-fn resume_binding_failure_refuses_before_foreign_adapter_or_effect() {
+fn reconstructed_resume_without_captured_policy_fails_closed_before_settlement() {
     let trace = Arc::new(Mutex::new(Vec::new()));
-    let foreign_port = Arc::new(RecordingForeignQuestionPort::scripted(
+    let original_foreign = Arc::new(RecordingForeignQuestionPort::scripted(
         Vec::new(),
         Some(trace.clone()),
     ));
-    let generator = foreign_input_generator();
     with_foreign_turn(
-        generator.clone(),
+        foreign_input_generator(),
         Arc::new(UnavailableElicitor),
-        foreign_port.clone(),
+        original_foreign,
         Some(trace.clone()),
-        Some(3),
-        false,
-        |mut turn, store| {
+        None,
+        true,
+        |turn, store| {
+            let mut turn = turn;
             let outcome = futures::executor::block_on(turn.run("invoke the MCP operation"))
                 .expect("foreign input suspension is handled");
             assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
-            let state = turn.state();
-            let pending = state
+            let turn_state = turn.state();
+            let pending = turn_state
                 .pending_question()
-                .expect("foreign continuation is durable");
+                .expect("durable pending question");
             let question = pending.item_id();
             let answer = QuestionAnswer::from_json(pending.request(), r#"{"target":"staging"}"#)
                 .expect("schema-valid form answer");
-            let provider_calls = generator.calls().len();
-            trace.lock().expect("question trace").clear();
 
-            let resumed = futures::executor::block_on(turn.resume_question(question, answer))
-                .expect("binding refusal is a handled outcome");
+            // A restarted coordinator sees the same durable journal, but has no
+            // generation capture or bound foreign port to restore.
+            let restart_trace = Arc::new(Mutex::new(Vec::new()));
+            let restart_foreign = Arc::new(RecordingForeignQuestionPort::scripted(
+                Vec::new(),
+                Some(restart_trace.clone()),
+            ));
+            let restart_generator = Arc::new(FakeGenerator::new(vec![vec![AiEvent::Stop(
+                StopReason::Stop,
+            )]]));
+            let gate = SharedBudgetGate::new(BudgetGate::new(Money::new(
+                "1000".parse::<Amount>().expect("amount"),
+                CurrencyCode::new("USD").expect("currency"),
+            )));
+            let fs = FakeFs::default();
+            let process = NoProcess;
+            let evidence: &'static NoEvidence = Box::leak(Box::new(NoEvidence));
+            let resolver = Arc::new(NoResolver);
+            let one_hop = Arc::new(NoHop);
+            let duplex = Arc::new(NoDuplex);
+            let registry = vec![RegisteredTool::Effect(Arc::new(ForeignInputTool {
+                request: foreign_question_request(),
+            }) as Arc<dyn Tool>)];
+            let tools = Tools::from_registry(
+                &registry,
+                ToolEffectPorts::new(&fs, &process, evidence, resolver, one_hop, duplex),
+                CanonPath::new("/ws"),
+            );
+            let policy = Arc::new(PolicyEngine::new(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::default(),
+            ));
+            let policy_source: Arc<dyn ego_core::turn::GenerationPolicySource> =
+                Arc::new(TracingPolicySource {
+                    policy,
+                    trace: restart_trace.clone(),
+                });
+            let runtime = GenerationRuntime {
+                policy_source,
+                source: Arc::new(FixedSource {
+                    generator: restart_generator.clone(),
+                }),
+                gate,
+                config: TurnConfig {
+                    system: None,
+                    token_ceiling: None,
+                },
+                admission: Arc::new(EvidenceAdmissionService::new()),
+                invocation: RunInvocationId::new(),
+            };
+            let state = SessionHookState::new(
+                HookLifecycleDispatcher::new(
+                    HookRunner::new(),
+                    HookCatalogue::admit_typed(&[], &[], ego_core::config::Trust::Trusted)
+                        .expect("empty hook catalogue"),
+                ),
+                turn.journal(),
+                CancelToken::new(),
+                Instant::now() + std::time::Duration::from_secs(60),
+            );
+            let mut restarted = TurnLoop::from_shared_journal(
+                ego_core::event::id::SessionId::new(),
+                turn.journal(),
+                evidence,
+                CancelToken::new(),
+                runtime,
+                tools,
+            )
+            .expect("restart budget gate is available")
+            .with_elicitor(Arc::new(UnavailableElicitor))
+            .with_hook_binding(
+                state,
+                Arc::new(QuestionHookBinding {
+                    trace: Some(restart_trace.clone()),
+                    bind_calls: AtomicUsize::new(0),
+                    fail_at: None,
+                }),
+                Some(Arc::new(QuestionMcpRuntime {
+                    foreign: restart_foreign.clone(),
+                    trace: Some(restart_trace.clone()),
+                })),
+            )
+            .expect("restart hook and foreign binding shares the journal");
+
+            restart_trace.lock().expect("restart trace").clear();
+            let resumed = futures::executor::block_on(restarted.resume_question(question, answer))
+                .expect("restart refusal is a handled outcome");
             assert_eq!(resumed.exit_reason, ExitReason::Internal);
             assert!(!resumed.ok);
-            assert_eq!(
-                trace.lock().expect("question trace").as_slice(),
-                ["current", "bind"]
-            );
-            assert!(foreign_port.calls().is_empty());
-            assert_eq!(generator.calls().len(), provider_calls);
+            drop(restarted);
+            assert!(restart_trace
+                .lock()
+                .expect("restart trace")
+                .iter()
+                .all(|label| *label != "question-settled"));
+            assert!(restart_foreign.calls().is_empty());
             assert!(
-                store
-                    .events()
-                    .iter()
-                    .all(|event| !matches!(event.kind, EventKind::ToolCallCompleted { .. }))
+                turn.state().pending_question().is_some(),
+                "failed restart must leave the durable question pending"
             );
+            assert!(store.events().iter().all(|event| !matches!(
+                event.kind,
+                EventKind::QuestionSettled { .. } | EventKind::ToolCallCompleted { .. }
+            )));
         },
     );
 }

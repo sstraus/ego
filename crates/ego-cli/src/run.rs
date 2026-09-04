@@ -46,8 +46,8 @@ use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::port::RequestExpressibilityError;
 use ego_core::generator::types::{GenRequest, ImageRef, ThinkingLevel, ToolDescriptor};
 use ego_core::hook::{
-    HookCatalogue, HookCausality, HookEvent, HookLifecycleDispatcher, HookOccurrence, HookRunner,
-    HookStartedEvidence, SessionHookRuntime,
+    HookCatalogue, HookCausality, HookEvent, HookInvocationBinding, HookLifecycleDispatcher,
+    HookOccurrence, HookRunner, HookStartedEvidence, SessionHookRuntime, SessionHookState,
 };
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
@@ -85,9 +85,10 @@ use ego_core::subagent::{
     ChildTaskReader, ChildWait, RecoveryCut,
 };
 use ego_core::turn::{
-    AdmittedToolSource, CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext,
-    QueueStatus, RegisteredTool, Session, SharedJournal, ToolEffectPorts, ToollessGenerationOwner,
-    Tools, TurnAbandoned, TurnConfig, TurnLoop, TurnOutcome, interactive_control,
+    AdmittedToolSource, CancelToken, GenerationPolicySource, GenerationRuntime, InteractiveControl,
+    Journal, JudgeContext, QueueStatus, RegisteredTool, Session, SharedJournal, ToolEffectPorts,
+    ToollessGenerationOwner, Tools, TurnAbandoned, TurnConfig, TurnLoop, TurnOutcome,
+    interactive_control,
 };
 use ego_core::usage::{UsagePeriod, UsageReportService};
 use ego_mcp::{McpRegistryController, McpRegistryRuntime};
@@ -107,7 +108,7 @@ use crate::cli::{
     Args, CompactArgs, ExportArgs, ExportFormat, ForkArgs, ModelsArgs, Output, ResumeAnswer,
     SessionChoice, UsageError,
 };
-use crate::hook::{HookPortAdapter, RunToollessGenerationService};
+use crate::hook::{CliHookInvocationBinding, RunToollessGenerationService};
 use crate::model_picker::{ModelPicker, ModelSwitchRequest};
 use crate::models;
 use crate::output::{
@@ -116,6 +117,7 @@ use crate::output::{
 use crate::provider_http::{ProviderHttpAdapter, run_effect_ports};
 use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
 use crate::render::osc::{Osc, Progress, State};
+use crate::repl::policy_controls::{CliGenerationPolicySource, GenerationPolicySelection};
 use crate::session::{self, ActiveSession, Opened};
 use crate::{attachment, config, hooks, model, prompt, repl, schema};
 
@@ -1626,7 +1628,7 @@ struct GenerationPreflight {
     source: Arc<model::CliGenerationModelSource>,
     selection: Arc<model::GenerationSelection>,
     capabilities: ModelCapabilities,
-    judge_enabled: bool,
+    judge_available: bool,
     proof_directory: tempfile::TempDir,
     proof_evidence: SessionEvidenceStore,
 }
@@ -1697,19 +1699,12 @@ async fn generation_preflight_inner(
     let http = Arc::new(ProviderHttpAdapter::new(proof_ports)) as Arc<dyn ego_ai::http::Http>;
 
     let mode = effective.mode.unwrap_or(Mode::Default);
-    let judge_identity = if mode == Mode::Auto {
-        Some(
-            effective
-                .judge
-                .clone()
-                .ok_or_else(|| RunTermination::UsageError {
-                    message: "`auto` mode requires `[permissions] judge = \"provider/model\"`"
-                        .to_string(),
-                })?,
-        )
-    } else {
-        None
-    };
+    if mode == Mode::Auto && effective.judge.is_none() {
+        return Err(RunTermination::UsageError {
+            message: "`auto` mode requires `[permissions] judge = \"provider/model\"`".to_string(),
+        });
+    }
+    let judge_identity = effective.judge.clone();
     let source = Arc::new(model::CliGenerationModelSource::new(
         ego_core::config::ModelRef(slug),
         effective.thinking.unwrap_or(ThinkingLevel::Off),
@@ -1775,8 +1770,8 @@ async fn generation_preflight_inner(
         .await
         .map_err(generation_refusal)?;
     let capabilities = main.capabilities.clone();
-    let judge_enabled = mode == Mode::Auto;
-    if judge_enabled {
+    let judge_available = effective.judge.is_some();
+    if mode == Mode::Auto {
         let judge = bound
             .resolve(GenerationModelRequest::new(GenerationRole::Judge))
             .await
@@ -1788,7 +1783,7 @@ async fn generation_preflight_inner(
         source,
         selection,
         capabilities,
-        judge_enabled,
+        judge_available,
         proof_directory,
         proof_evidence,
     })
@@ -1872,8 +1867,34 @@ enum HeadlessInput<'a> {
 }
 
 struct SessionHookComposition<'a> {
+    state: SessionHookState<'a>,
+    binding: Arc<dyn HookInvocationBinding + 'a>,
+    mcp: Option<Arc<dyn McpRuntimeBinding>>,
     runtime: SessionHookRuntime<'a>,
     turn: TurnId,
+}
+
+impl<'a> SessionHookComposition<'a> {
+    fn bind_policy(
+        &self,
+        policy: Arc<PolicyEngine>,
+    ) -> Result<SessionHookRuntime<'a>, RunTermination> {
+        let invoker = self
+            .binding
+            .bind(policy, self.mcp.as_deref())
+            .map_err(|message| RunTermination::Failed { message })?;
+        Ok(self.state.bind(invoker))
+    }
+
+    fn bind_current(
+        &self,
+        source: &dyn GenerationPolicySource,
+    ) -> Result<SessionHookRuntime<'a>, RunTermination> {
+        let policy = source
+            .current()
+            .map_err(|message| RunTermination::Failed { message })?;
+        self.bind_policy(policy)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1889,7 +1910,7 @@ async fn compose_session_hooks<'a>(
     trust: Trust,
     source: Arc<model::CliGenerationModelSource>,
     ports: Arc<RunEffectPorts>,
-    policy: &'a PolicyEngine,
+    policy_source: &dyn GenerationPolicySource,
     effects: ToolEffectPorts<'a>,
     mcp_runtime: Option<Arc<dyn McpRuntimeBinding>>,
     cancel: CancelToken,
@@ -1976,27 +1997,36 @@ async fn compose_session_hooks<'a>(
         source,
         ports,
     ));
-    let mcp = mcp_runtime
-        .map(|runtime| runtime.hook_invocation_port(policy, effects.clone()))
-        .transpose()
-        .map_err(|message| RunTermination::Failed { message })?;
-    let invoker = Arc::new(HookPortAdapter::new(policy, effects, mcp, prompt));
-    let runtime = SessionHookRuntime::new(
+    let binding: Arc<dyn HookInvocationBinding + 'a> =
+        Arc::new(CliHookInvocationBinding::new(effects, prompt));
+    let state = SessionHookState::new(
         HookLifecycleDispatcher::new(
             HookRunner::new_with_durable_started(durable_started),
             catalogue,
         ),
         journal,
-        invoker,
         cancel,
         deadline.unwrap_or_else(unbounded_hook_deadline),
     );
+    let policy = policy_source
+        .current()
+        .map_err(|message| RunTermination::Failed { message })?;
+    let invoker = binding
+        .bind(policy, mcp_runtime.as_deref())
+        .map_err(|message| RunTermination::Failed { message })?;
+    let runtime = state.bind(invoker);
     let _ = dispatch_session_hook(&runtime, session, turn, HookLifecycle::SessionStart).await?;
     if instructions_loaded {
         let _ = dispatch_session_hook(&runtime, session, turn, HookLifecycle::InstructionsLoaded)
             .await?;
     }
-    Ok(SessionHookComposition { runtime, turn })
+    Ok(SessionHookComposition {
+        state,
+        binding,
+        mcp: mcp_runtime,
+        runtime,
+        turn,
+    })
 }
 
 async fn dispatch_session_hook(
@@ -2385,7 +2415,7 @@ impl<'a> CliSkillInvocationOwner<'a> {
                     continue;
                 }
             };
-            if let Err(error) = hooks.replace_skill_sources(turn, &[source]) {
+            if let Err(error) = hooks.hook_state().replace_skill_sources(turn, &[source]) {
                 first_error.get_or_insert_with(|| SkillError::new(error.to_string()));
                 continue;
             }
@@ -2394,6 +2424,7 @@ impl<'a> CliSkillInvocationOwner<'a> {
                 .await
                 .map_err(|error| SkillError::new(error.to_string()));
             let cleared = hooks
+                .hook_state()
                 .replace_skill_sources(turn, &[])
                 .map_err(|error| SkillError::new(error.to_string()));
             if let Err(error) = collected {
@@ -2535,12 +2566,12 @@ async fn drive_headless_turn(
     turns: &Turns<'_>,
     registry: &[RegisteredTool],
     admitted_tools: Option<Arc<dyn AdmittedToolSource>>,
-    policy: &PolicyEngine,
+    policy_source: Arc<dyn GenerationPolicySource>,
     cwd: &Path,
     confinement: &RunConfinement,
     run_deadline: Option<std::time::Instant>,
     elicitor: Option<Arc<dyn Elicitor>>,
-    judge_enabled: bool,
+    judge_available: bool,
     attachment_specs: &[String],
     input: HeadlessInput<'_>,
     diagnostics: &dyn Diagnostics,
@@ -2571,6 +2602,7 @@ async fn drive_headless_turn(
     let instructions_loaded = config.system.is_some();
     let runtime = GenerationRuntime {
         source: source.bind(http, cancel.clone(), run_deadline),
+        policy_source: Arc::clone(&policy_source),
         gate: gate.clone(),
         config,
         admission: Arc::clone(&admission),
@@ -2597,7 +2629,7 @@ async fn drive_headless_turn(
         hook_trust,
         Arc::clone(&source),
         Arc::clone(&ports),
-        policy,
+        policy_source.as_ref(),
         effect_ports.clone(),
         mcp_runtime.as_ref().map(Arc::clone),
         cancel.clone(),
@@ -2628,25 +2660,14 @@ async fn drive_headless_turn(
         hooks.runtime.clone(),
         cancel.clone(),
     ));
-    let foreign_question_port = mcp_runtime.map(|runtime| {
-        runtime.foreign_question_port(
-            hooks.runtime.clone(),
-            policy.resume_floor(),
-            effect_ports.clone(),
-        )
-    });
     let tools = match admitted_tools {
-        Some(source) => Tools::from_registry_with_source(
-            registry,
-            source,
-            policy,
-            effect_ports,
-            CanonPath::new(cwd),
-        )
-        .map_err(|error| RunTermination::Failed {
-            message: format!("the admitted MCP tool catalogue is invalid: {error}"),
-        })?,
-        None => Tools::from_registry(registry, policy, effect_ports, CanonPath::new(cwd)),
+        Some(source) => {
+            Tools::from_registry_with_source(registry, source, effect_ports, CanonPath::new(cwd))
+                .map_err(|error| RunTermination::Failed {
+                    message: format!("the admitted MCP tool catalogue is invalid: {error}"),
+                })?
+        }
+        None => Tools::from_registry(registry, effect_ports, CanonPath::new(cwd)),
     };
     let loop_ = TurnLoop::from_shared_journal(
         active.id(),
@@ -2659,7 +2680,11 @@ async fn drive_headless_turn(
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?
-    .with_hook_runtime(hooks.runtime.clone())
+    .with_hook_binding(
+        hooks.state.clone(),
+        Arc::clone(&hooks.binding),
+        hooks.mcp.as_ref().map(Arc::clone),
+    )
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?
@@ -2676,11 +2701,7 @@ async fn drive_headless_turn(
         Some(elicitor) => loop_.with_elicitor(elicitor),
         None => loop_,
     };
-    let loop_ = match foreign_question_port {
-        Some(port) => loop_.with_foreign_question_port(port),
-        None => loop_,
-    };
-    let mut loop_ = if judge_enabled {
+    let mut loop_ = if judge_available {
         loop_.with_judge(JudgeContext {
             confinement: confinement.clone(),
             exec_caps: execution_capabilities,
@@ -2709,13 +2730,13 @@ async fn drive_headless_turn(
             message: error.to_string(),
         })?;
     drop(skill_owner);
-    let session_end = dispatch_session_hook(
-        &hooks.runtime,
-        active.id(),
-        hooks.turn,
-        HookLifecycle::SessionEnd,
-    )
-    .await;
+    let session_end = match hooks.bind_current(policy_source.as_ref()) {
+        Ok(runtime) => {
+            dispatch_session_hook(&runtime, active.id(), hooks.turn, HookLifecycle::SessionEnd)
+                .await
+        }
+        Err(error) => Err(error),
+    };
     drop(hooks);
     let state = journal.try_into_state().map_err(hook_journal_termination)?;
     session_end?;
@@ -2899,7 +2920,7 @@ impl CliPrepared {
             source,
             selection: _,
             capabilities: model_capabilities,
-            judge_enabled,
+            judge_available,
             proof_directory,
             proof_evidence,
         } = generation_preflight(
@@ -2948,10 +2969,10 @@ impl CliPrepared {
         );
 
         let mode = self.effective.mode.unwrap_or(Mode::Default);
-        let policy = PolicyEngine::new(
-            CanonPath::new(&self.root),
-            mode,
-            self.effective.permissions.clone(),
+        let policy_selection =
+            GenerationPolicySelection::new(mode, self.effective.permissions.clone());
+        let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
+            CliGenerationPolicySource::new(policy_selection, CanonPath::new(&self.root), None),
         );
         let config = TurnConfig {
             system: self.system,
@@ -2995,12 +3016,12 @@ impl CliPrepared {
             &turns,
             &self.registry,
             admitted_tools,
-            &policy,
+            policy_source,
             &self.cwd,
             &self.confinement,
             self.run_deadline,
             bindings.elicitor,
-            judge_enabled,
+            judge_available,
             &[],
             HeadlessInput::Prompt(prompt),
             &Stderr,
@@ -3461,7 +3482,7 @@ impl CliCompactionCommand {
             source,
             selection: _,
             capabilities: _,
-            judge_enabled,
+            judge_available,
             proof_directory,
             proof_evidence,
         } = generation_preflight(
@@ -3485,7 +3506,10 @@ impl CliCompactionCommand {
         let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
             .map_err(CompactionError::Internal)?;
         let mode = effective.mode.unwrap_or(Mode::Default);
-        let policy = PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone());
+        let policy_selection = GenerationPolicySelection::new(mode, effective.permissions.clone());
+        let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
+            CliGenerationPolicySource::new(policy_selection, CanonPath::new(&root), None),
+        );
         let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
         let gate = SharedBudgetGate::new(budget::gate(
             &effective.ceilings,
@@ -3515,6 +3539,7 @@ impl CliCompactionCommand {
             Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
         let runtime = GenerationRuntime {
             source: source.bind(http, cancel.clone(), run_deadline),
+            policy_source,
             gate,
             config,
             admission: Arc::clone(&self.admission),
@@ -3528,13 +3553,13 @@ impl CliCompactionCommand {
             ports.one_hop_handle(),
             ports.duplex_handle(),
         );
-        let tools = Tools::from_registry(&registry, &policy, effect_ports, CanonPath::new(&cwd));
+        let tools = Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd));
         let mut loop_ = TurnLoop::new(session, runtime, tools)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
         if let Some(replayed) = active.replayed() {
             loop_ = loop_.with_ancestor_conversation(replayed.conversation().clone());
         }
-        if judge_enabled {
+        if judge_available {
             loop_ = loop_.with_judge(JudgeContext {
                 confinement: confinement.clone(),
                 exec_caps: observation.capabilities(),
@@ -3850,7 +3875,7 @@ struct GenerationReady {
     source: Arc<model::CliGenerationModelSource>,
     selection: Arc<model::GenerationSelection>,
     main_capabilities: ModelCapabilities,
-    judge_enabled: bool,
+    judge_available: bool,
 }
 
 /// Opaque result of the single direct-CI preflight pass.
@@ -3913,7 +3938,7 @@ async fn execution_preflight(
         source,
         selection,
         capabilities: main_capabilities,
-        judge_enabled,
+        judge_available,
         proof_directory,
         proof_evidence,
     } = generation_preflight(
@@ -3947,7 +3972,7 @@ async fn execution_preflight(
                 source,
                 selection,
                 main_capabilities,
-                judge_enabled,
+                judge_available,
             },
         },
     })
@@ -4200,7 +4225,7 @@ async fn execute<S: EventSink>(
         source,
         selection,
         main_capabilities,
-        judge_enabled,
+        judge_available,
     } = match generation {
         Some(generation) => generation,
         None => {
@@ -4208,7 +4233,7 @@ async fn execute<S: EventSink>(
                 source,
                 selection,
                 capabilities: main_capabilities,
-                judge_enabled,
+                judge_available,
                 proof_directory,
                 proof_evidence,
             } = generation_preflight(
@@ -4240,7 +4265,7 @@ async fn execute<S: EventSink>(
                 source,
                 selection,
                 main_capabilities,
-                judge_enabled,
+                judge_available,
             }
         }
     };
@@ -4311,22 +4336,18 @@ async fn execute<S: EventSink>(
 
     // An untrusted workspace resolves to `Mode::Default`; a trusted
     // interactive run may obtain its mode from the admitted config layers.
-    let policy = match &driver {
-        Driver::Once => {
-            PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone())
-        }
-        Driver::Interactive { seat, .. } if seat.has_human() => PolicyEngine::with_human(
-            CanonPath::new(&root),
-            mode,
-            effective.permissions.clone(),
-            Arc::new(SeatApprover {
-                seat: Arc::clone(seat),
-            }),
-        ),
-        Driver::Interactive { .. } => {
-            PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone())
-        }
+    let human: Option<Arc<dyn HumanApprover>> = match &driver {
+        Driver::Interactive { seat, .. } if seat.has_human() => Some(Arc::new(SeatApprover {
+            seat: Arc::clone(seat),
+        })),
+        Driver::Once | Driver::Interactive { .. } => None,
     };
+    let policy_selection = GenerationPolicySelection::new(mode, effective.permissions.clone());
+    let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(CliGenerationPolicySource::new(
+        policy_selection.clone(),
+        CanonPath::new(&root),
+        human,
+    ));
     let fs = OsFs;
     let gate = SharedBudgetGate::new(budget::gate(
         &effective.ceilings,
@@ -4364,6 +4385,7 @@ async fn execute<S: EventSink>(
                 as Arc<dyn ego_ai::http::Http>;
             let runtime = GenerationRuntime {
                 source: source.bind(http, $cancel.clone(), run_deadline),
+                policy_source: Arc::clone(&policy_source),
                 gate: gate.clone(),
                 config: config.clone(),
                 admission: Arc::clone(&evidence),
@@ -4377,25 +4399,17 @@ async fn execute<S: EventSink>(
                 $ports.one_hop_handle(),
                 $ports.duplex_handle(),
             );
-            let foreign_question_port = mcp_runtime.foreign_question_port(
-                ($hooks).runtime.clone(),
-                policy.resume_floor(),
-                effect_ports.clone(),
-            );
             let tools = match admitted_tools.as_ref() {
                 Some(source) => Tools::from_registry_with_source(
                     &registry,
                     Arc::clone(source),
-                    &policy,
                     effect_ports,
                     CanonPath::new(&cwd),
                 )
                 .map_err(|error| RunTermination::Failed {
                     message: format!("the admitted MCP tool catalogue is invalid: {error}"),
                 })?,
-                None => {
-                    Tools::from_registry(&registry, &policy, effect_ports, CanonPath::new(&cwd))
-                }
+                None => Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd)),
             };
             let tools = match skill_resource_roots.as_ref() {
                 Some(roots) => tools.with_skill_resource_roots(roots.clone()),
@@ -4412,11 +4426,14 @@ async fn execute<S: EventSink>(
             .map_err(|error| RunTermination::Failed {
                 message: error.to_string(),
             })?
-            .with_hook_runtime(($hooks).runtime.clone())
+            .with_hook_binding(
+                ($hooks).state.clone(),
+                Arc::clone(&($hooks).binding),
+                ($hooks).mcp.as_ref().map(Arc::clone),
+            )
             .map_err(|error| RunTermination::Failed {
                 message: error.to_string(),
-            })?
-            .with_foreign_question_port(foreign_question_port);
+            })?;
             let skill_owner: Arc<dyn SkillInvocationPort + '_> = ($skill_owner).clone();
             let loop_ = loop_.with_skill_invocation_port(skill_owner);
             let loop_ = match $active.replayed() {
@@ -4427,7 +4444,7 @@ async fn execute<S: EventSink>(
                 Some(elicitor) => loop_.with_elicitor(Arc::clone(elicitor)),
                 None => loop_,
             };
-            let loop_ = if judge_enabled {
+            let loop_ = if judge_available {
                 loop_.with_judge(JudgeContext {
                     confinement: confinement.clone(),
                     exec_caps: $observation.capabilities(),
@@ -4469,7 +4486,7 @@ async fn execute<S: EventSink>(
                 skill_trust,
                 Arc::clone(&source),
                 Arc::clone(&$hook_ports),
-                &policy,
+                policy_source.as_ref(),
                 hook_effects,
                 Some(Arc::clone(&mcp_runtime) as Arc<dyn McpRuntimeBinding>),
                 cancel.clone(),
@@ -4531,12 +4548,12 @@ async fn execute<S: EventSink>(
                 &turns,
                 &registry,
                 admitted_tools.clone(),
-                &policy,
+                Arc::clone(&policy_source),
                 &cwd,
                 &confinement,
                 run_deadline,
                 elicitor,
-                judge_enabled,
+                judge_available,
                 &args.attach,
                 input,
                 diagnostics,
@@ -4685,7 +4702,7 @@ async fn execute<S: EventSink>(
                             error.exit_reason()
                         ));
                     }
-                    state = session_hooks.runtime.state();
+                    state = session_hooks.state.state();
                     last.session = active.id();
                     last.state = state.clone();
                     last.result = Value::String(String::new());
@@ -4965,7 +4982,7 @@ async fn execute<S: EventSink>(
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Hooks) => {
-                                        match session_hooks.runtime.catalogue_snapshot() {
+                                        match session_hooks.state.catalogue_snapshot() {
                                             Ok(catalogue) => match hooks::render(&catalogue, false) {
                                                 Ok(rendered) => diagnostics.note(&rendered),
                                                 Err(error) => diagnostics.note(&format!(
@@ -5295,6 +5312,7 @@ async fn execute<S: EventSink>(
                                                     compaction_cancel.clone(),
                                                     run_deadline,
                                                 ),
+                                                policy_source: Arc::clone(&policy_source),
                                                 gate: gate.clone(),
                                                 config: config.clone(),
                                                 admission: Arc::clone(&evidence),
@@ -5308,17 +5326,10 @@ async fn execute<S: EventSink>(
                                                 ports.one_hop_handle(),
                                                 ports.duplex_handle(),
                                             );
-                                            let foreign_question_port = mcp_runtime
-                                                .foreign_question_port(
-                                                    session_hooks.runtime.clone(),
-                                                    policy.resume_floor(),
-                                                    effect_ports.clone(),
-                                                );
                                             let compaction_tools = match admitted_tools.as_ref() {
                                                 Some(source) => Tools::from_registry_with_source(
                                                     &target_registry,
                                                     Arc::clone(source),
-                                                    &policy,
                                                     effect_ports,
                                                     CanonPath::new(&cwd),
                                                 )
@@ -5327,7 +5338,6 @@ async fn execute<S: EventSink>(
                                                 })?,
                                                 None => Tools::from_registry(
                                                     &target_registry,
-                                                    &policy,
                                                     effect_ports,
                                                     CanonPath::new(&cwd),
                                                 ),
@@ -5349,11 +5359,14 @@ async fn execute<S: EventSink>(
                                             .map_err(|error| {
                                                 CompactionError::Internal(error.to_string())
                                             })?
-                                            .with_hook_runtime(session_hooks.runtime.clone())
+                                            .with_hook_binding(
+                                                session_hooks.state.clone(),
+                                                Arc::clone(&session_hooks.binding),
+                                                session_hooks.mcp.as_ref().map(Arc::clone),
+                                            )
                                             .map_err(|error| {
                                                 CompactionError::Internal(error.to_string())
-                                            })?
-                                            .with_foreign_question_port(foreign_question_port);
+                                            })?;
                                             if let Some(replayed) = active.replayed() {
                                                 compaction = compaction.with_ancestor_conversation(
                                                     replayed.conversation().clone(),
@@ -5363,7 +5376,7 @@ async fn execute<S: EventSink>(
                                                 compaction =
                                                     compaction.with_elicitor(Arc::clone(elicitor));
                                             }
-                                            if judge_enabled {
+                                            if judge_available {
                                                 compaction = compaction.with_judge(JudgeContext {
                                                     confinement: confinement.clone(),
                                                     exec_caps: observation.capabilities(),
@@ -5379,7 +5392,7 @@ async fn execute<S: EventSink>(
                                                 )
                                                 .await;
                                             drop(compaction);
-                                            state = session_hooks.runtime.state();
+                                            state = session_hooks.state.state();
                                             seat.refresh_queue(control.status());
                                             if !state.unacknowledged_prompts().is_empty()
                                                 || state.pending_question().is_some()
@@ -5599,7 +5612,7 @@ async fn execute<S: EventSink>(
                                 },
                             };
                             drop(loop_);
-                            state = session_hooks.runtime.state();
+                            state = session_hooks.state.state();
                             if let Some(status) = status.as_ref()
                                 && status.human
                             {
@@ -5640,15 +5653,18 @@ async fn execute<S: EventSink>(
 
                     drop(model_switch_owner);
                     let session_end = match skill_owner.drain().await {
-                        Ok(()) => {
-                            dispatch_session_hook(
-                                &session_hooks.runtime,
-                                active.id(),
-                                session_hooks.turn,
-                                HookLifecycle::SessionEnd,
-                            )
-                            .await
-                        }
+                        Ok(()) => match session_hooks.bind_current(policy_source.as_ref()) {
+                            Ok(runtime) => {
+                                dispatch_session_hook(
+                                    &runtime,
+                                    active.id(),
+                                    session_hooks.turn,
+                                    HookLifecycle::SessionEnd,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        },
                         Err(error) => Err(RunTermination::Failed {
                             message: error.to_string(),
                         }),
@@ -5898,9 +5914,9 @@ impl Turns<'_> {
             .is_some_and(|deadline| std::time::Instant::now() >= deadline)
     }
 
-    async fn drive_with_images(
+    async fn drive_with_images<'session: 'turn, 'turn>(
         &self,
-        loop_: &mut TurnLoop<'_, '_>,
+        loop_: &mut TurnLoop<'session, 'turn>,
         first: &str,
         images: Vec<ImageRef>,
         cancel: &CancelToken,
@@ -5918,9 +5934,9 @@ impl Turns<'_> {
         .await
     }
 
-    async fn drive_admitted_skill(
+    async fn drive_admitted_skill<'session: 'turn, 'turn>(
         &self,
-        loop_: &mut TurnLoop<'_, '_>,
+        loop_: &mut TurnLoop<'session, 'turn>,
         operation: AdmittedSkillOperation,
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
@@ -5929,9 +5945,9 @@ impl Turns<'_> {
             .await
     }
 
-    async fn drive_resumed(
+    async fn drive_resumed<'session: 'turn, 'turn>(
         &self,
-        loop_: &mut TurnLoop<'_, '_>,
+        loop_: &mut TurnLoop<'session, 'turn>,
         turn: ego_core::event::id::TurnId,
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
@@ -5940,9 +5956,9 @@ impl Turns<'_> {
             .await
     }
 
-    async fn drive_from(
+    async fn drive_from<'session: 'turn, 'turn>(
         &self,
-        loop_: &mut TurnLoop<'_, '_>,
+        loop_: &mut TurnLoop<'session, 'turn>,
         mut next: TurnStart,
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
@@ -6038,9 +6054,9 @@ impl Turns<'_> {
     /// the run stop waiting and report from the cause. Dropping the future
     /// immediately would abandon an unsettled reservation; waiting forever
     /// would make `--timeout` advisory.
-    async fn one(
+    async fn one<'session: 'turn, 'turn>(
         &self,
-        loop_: &mut TurnLoop<'_, '_>,
+        loop_: &mut TurnLoop<'session, 'turn>,
         prompt: &str,
         images: Vec<ImageRef>,
         cancel: &CancelToken,
@@ -6049,18 +6065,18 @@ impl Turns<'_> {
             .await
     }
 
-    async fn one_resumed(
+    async fn one_resumed<'session: 'turn, 'turn>(
         &self,
-        loop_: &mut TurnLoop<'_, '_>,
+        loop_: &mut TurnLoop<'session, 'turn>,
         turn: ego_core::event::id::TurnId,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
         self.one_running(loop_.resume_turn(turn), cancel).await
     }
 
-    async fn one_skill(
+    async fn one_skill<'session: 'turn, 'turn>(
         &self,
-        loop_: &mut TurnLoop<'_, '_>,
+        loop_: &mut TurnLoop<'session, 'turn>,
         operation: AdmittedSkillOperation,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
@@ -7049,13 +7065,13 @@ mod tests {
         ));
         let catalogue = HookCatalogue::admit_typed(&[], &[], Trust::Trusted)
             .expect("empty launch barrier hook catalogue");
-        SessionHookRuntime::new(
+        SessionHookState::new(
             HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
             journal,
-            Arc::new(HookCaptureInvoker),
             CancelToken::new(),
             Instant::now() + Duration::from_secs(30),
         )
+        .bind(Arc::new(HookCaptureInvoker))
     }
 
     #[tokio::test]
@@ -7652,17 +7668,19 @@ mod tests {
             Producer::Main,
             SessionState::default(),
         ));
-        let runtime = SessionHookRuntime::new(
+        let runtime = SessionHookState::new(
             ego_core::hook::HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
             journal,
-            Arc::new(HookCaptureInvoker),
             CancelToken::new(),
             Instant::now() + Duration::from_secs(30),
-        );
+        )
+        .bind(Arc::new(HookCaptureInvoker));
         let exact = runtime
+            .hook_state()
             .catalogue_snapshot()
             .expect("runtime hook catalogue snapshot");
         let exact_again = runtime
+            .hook_state()
             .catalogue_snapshot()
             .expect("runtime hook catalogue snapshot remains stable");
         assert!(Arc::ptr_eq(&exact, &exact_again));

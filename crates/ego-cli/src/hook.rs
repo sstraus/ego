@@ -12,8 +12,9 @@ use ego_core::event::id::TurnId;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::{
     EffectScope, HookFuture, HookHandlerConfig, HookHandlerRequestV1, HookHandlerResultV1,
-    HookInvocationPort, HookInvocationRequest,
+    HookInvocationBinding, HookInvocationPort, HookInvocationRequest,
 };
+use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::{
     Classification, HttpRoute, HttpScheme, NetworkTarget, PolicyEngine, PreparedCall,
 };
@@ -285,13 +286,13 @@ impl ToollessGenerationService for RunToollessGenerationService<'_, '_> {
     }
 }
 
-/// The sole production-facing hook invocation adapter for one session.
+/// The sole production-facing hook invocation adapter for one policy binding.
 ///
 /// Handler-specific parsing and execution stays in the typed lower adapters;
 /// this owner binds each prepared effect to the run policy and converts the
 /// settlement into the core hook result vocabulary.
 pub struct HookPortAdapter<'a> {
-    policy: &'a PolicyEngine,
+    policy: Arc<PolicyEngine>,
     effects: ToolEffectPorts<'a>,
     mcp: Option<Arc<dyn HookInvocationPort + 'a>>,
     prompt: Arc<dyn ToollessGenerationService + 'a>,
@@ -299,7 +300,7 @@ pub struct HookPortAdapter<'a> {
 
 impl<'a> HookPortAdapter<'a> {
     pub fn new(
-        policy: &'a PolicyEngine,
+        policy: Arc<PolicyEngine>,
         effects: ToolEffectPorts<'a>,
         mcp: Option<Arc<dyn HookInvocationPort + 'a>>,
         prompt: Arc<dyn ToollessGenerationService + 'a>,
@@ -516,6 +517,42 @@ impl<'a> HookPortAdapter<'a> {
             .map_err(|_| Box::new(HookFailure::new(HookFailureKind::EvidenceFailed, None)))?;
         HookFeedback::bounded(request.hook(), reference, text)
             .map_err(|_| Box::new(HookFailure::new(HookFailureKind::EvidenceFailed, None)))
+    }
+}
+
+/// Builds one immutable CLI hook authority from one generation policy capture.
+pub(crate) struct CliHookInvocationBinding<'a> {
+    effects: ToolEffectPorts<'a>,
+    prompt: Arc<dyn ToollessGenerationService + 'a>,
+}
+
+impl<'a> CliHookInvocationBinding<'a> {
+    pub(crate) fn new(
+        effects: ToolEffectPorts<'a>,
+        prompt: Arc<dyn ToollessGenerationService + 'a>,
+    ) -> Self {
+        Self { effects, prompt }
+    }
+}
+
+impl<'binding> HookInvocationBinding for CliHookInvocationBinding<'binding> {
+    fn bind<'a>(
+        &self,
+        policy: Arc<PolicyEngine>,
+        mcp: Option<&dyn McpRuntimeBinding>,
+    ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
+    where
+        Self: 'a,
+    {
+        let mcp = mcp
+            .map(|runtime| runtime.hook_invocation_port(Arc::clone(&policy), self.effects.clone()))
+            .transpose()?;
+        Ok(Arc::new(HookPortAdapter::new(
+            policy,
+            self.effects.clone(),
+            mcp,
+            Arc::clone(&self.prompt),
+        )))
     }
 }
 

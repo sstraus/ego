@@ -57,7 +57,8 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::turn::{
-    CancelToken, GenerationRuntime, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
+    CancelToken, GenerationPolicySource, GenerationRuntime, Session, ToolEffectPorts, Tools,
+    TurnConfig, TurnLoop,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::fs::OsFs;
@@ -1693,6 +1694,20 @@ mod rogue {
 mod end_to_end {
     use super::*;
 
+    struct FixedPolicySource {
+        policy: Arc<PolicyEngine>,
+    }
+
+    impl GenerationPolicySource for FixedPolicySource {
+        fn current(&self) -> Result<Arc<PolicyEngine>, String> {
+            Ok(Arc::clone(&self.policy))
+        }
+
+        fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
+            Ok(Arc::clone(&self.policy))
+        }
+    }
+
     struct FixedSource {
         generator: Arc<FakeGenerator>,
     }
@@ -1757,6 +1772,13 @@ mod end_to_end {
                     cancel: CancelToken::new(),
                 },
                 GenerationRuntime {
+                    policy_source: Arc::new(FixedPolicySource {
+                        policy: Arc::new(PolicyEngine::new(
+                            ws.cwd(),
+                            Mode::Default,
+                            Ruleset::default(),
+                        )),
+                    }),
                     source: Arc::new(FixedSource {
                         generator: Arc::clone(&generator),
                     }),
@@ -1770,7 +1792,6 @@ mod end_to_end {
                 },
                 Tools::new(
                     &ws.registry,
-                    &ws.policy,
                     ToolEffectPorts::new(
                         &ws.fs,
                         &ws.process,
@@ -1857,6 +1878,13 @@ mod end_to_end {
                     cancel: CancelToken::new(),
                 },
                 GenerationRuntime {
+                    policy_source: Arc::new(FixedPolicySource {
+                        policy: Arc::new(PolicyEngine::new(
+                            ws.cwd(),
+                            Mode::Default,
+                            Ruleset::default(),
+                        )),
+                    }),
                     source: Arc::new(FixedSource {
                         generator: Arc::clone(&generator),
                     }),
@@ -1870,7 +1898,6 @@ mod end_to_end {
                 },
                 Tools::new(
                     &ws.registry,
-                    &ws.policy,
                     ToolEffectPorts::new(
                         &ws.fs,
                         &ws.process,
