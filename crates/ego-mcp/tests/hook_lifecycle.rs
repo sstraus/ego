@@ -26,7 +26,7 @@ use ego_core::hook::{
     HookInvocationPort, HookInvocationRequest, HookLifecycleDispatcher, HookRunner,
     HookStartedEvidence, SessionHookRuntime, SessionHookState,
 };
-use ego_core::mcp::{ForeignQuestionPort, ToolExecution};
+use ego_core::mcp::{ForeignInputRequired, ForeignQuestionPort, ToolExecution};
 use ego_core::permit::{
     Authorized, CanonPath, Classification, CleanupCertainty, DnsResolution, DuplexEnd,
     DuplexHandle, DuplexSession, DuplexSpawner, GuardedEffects, OneHop, OneHopResponse,
@@ -44,19 +44,22 @@ use ego_core::store::evidence::{
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::suspension::{
     ClaimedContinuation, ContinuationError, ContinuationJournal, ContinuationRecord,
-    ContinuationState, McpResumeContext, ResumeKeySource, ResumeSealer,
+    ContinuationState, GuardedMcpResume, McpResumeContext, ResumeKeySource, ResumeSealer,
 };
 use ego_core::turn::{
-    CancelToken, GenerationPolicyCapture, GenerationPolicyDigest, GenerationPolicySnapshot,
+    CancelToken, GenerationPolicyCapture, GenerationPolicyCaptureStore,
+    GenerationPolicyCaptureStoreError, GenerationPolicyCaptureStoreErrorKind,
+    GenerationPolicyCaptureStoreOperation, GenerationPolicyDigest, GenerationPolicySnapshot,
     Journal as SessionJournal, McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError,
     SharedJournal, ToolEffectPorts,
 };
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
     McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpCaptureResolver,
-    McpContinuationOwner, McpFuture, McpInputMapping, McpInputRequired, McpRegistryCandidate,
-    McpRegistryCapture, McpRegistryController, McpRegistryRefresh, McpServerAdmission,
-    McpStdioOperationFactory, McpTransportMaterial, RegistryScope, RegistryTrigger,
+    McpContinuationOwner, McpError, McpFailure, McpFuture, McpInputMapping, McpInputRequired,
+    McpRegistryCandidate, McpRegistryCapture, McpRegistryController, McpRegistryRefresh,
+    McpServerAdmission, McpStdioOperationFactory, McpTransportMaterial, RegistryScope,
+    RegistryTrigger,
 };
 use futures::executor::block_on;
 use futures::future::BoxFuture;
@@ -81,6 +84,7 @@ impl Trace {
 enum HookMode {
     #[default]
     Continue,
+    BlockElicitation,
     BlockResult,
     UncertainResult,
 }
@@ -106,7 +110,8 @@ impl HookInvocationPort for RecordingPort {
         self.calls.lock().expect("hook calls").push(lifecycle);
         self.trace.push(lifecycle.as_str());
         let decision = match (self.mode, lifecycle) {
-            (HookMode::BlockResult, HookLifecycle::ElicitationResult) => HookDecision::Block,
+            (HookMode::BlockElicitation, HookLifecycle::Elicitation)
+            | (HookMode::BlockResult, HookLifecycle::ElicitationResult) => HookDecision::Block,
             _ => HookDecision::Continue,
         };
         Box::pin(std::future::ready(Ok(HookOutcome::new(decision, None))))
@@ -313,14 +318,22 @@ fn settled_continuation_causality(
 #[derive(Default)]
 struct Journal {
     events: Mutex<Vec<&'static str>>,
-    record: Mutex<Option<ContinuationRecord>>,
+    records: Mutex<BTreeMap<String, ContinuationRecord>>,
+    latest: Mutex<Option<String>>,
+    fail_record: Mutex<bool>,
+    fail_pending: Mutex<bool>,
+    fail_settle: Mutex<bool>,
     trace: Trace,
 }
 impl Journal {
     fn with_trace(trace: Trace) -> Self {
         Self {
             events: Mutex::default(),
-            record: Mutex::default(),
+            records: Mutex::default(),
+            latest: Mutex::default(),
+            fail_record: Mutex::default(),
+            fail_pending: Mutex::default(),
+            fail_settle: Mutex::default(),
             trace,
         }
     }
@@ -328,39 +341,66 @@ impl Journal {
         self.events.lock().expect("journal events").clone()
     }
     fn state(&self) -> Option<ContinuationState> {
-        self.record
+        let latest = self.latest.lock().expect("latest record").clone()?;
+        self.state_for(&latest)
+    }
+    fn state_for(&self, id: &str) -> Option<ContinuationState> {
+        self.records
             .lock()
-            .expect("record")
-            .as_ref()
+            .expect("records")
+            .get(id)
             .map(ContinuationRecord::state)
     }
     fn id(&self) -> String {
-        self.record
+        self.latest
             .lock()
-            .expect("record")
+            .expect("latest record")
             .as_ref()
             .expect("recorded continuation")
-            .id()
             .to_owned()
     }
     fn recorded_capture(&self) -> String {
-        self.record
+        let id = self.id();
+        self.records
             .lock()
-            .expect("record")
-            .as_ref()
+            .expect("records")
+            .get(&id)
             .expect("recorded continuation")
             .fingerprints()
             .capture()
             .to_owned()
     }
     fn recorded_policy_digest(&self) -> GenerationPolicyDigest {
-        self.record
+        let id = self.id();
+        self.records
             .lock()
-            .expect("record")
-            .as_ref()
+            .expect("records")
+            .get(&id)
             .expect("recorded continuation")
             .generation_policy_digest()
             .clone()
+    }
+    fn replace_policy_digest(&self, id: &str, digest: &GenerationPolicyDigest) {
+        let mut records = self.records.lock().expect("records");
+        let mut wire = serde_json::to_value(records.get(id).expect("recorded continuation"))
+            .expect("continuation wire");
+        wire.as_object_mut().expect("continuation object").insert(
+            "generation_policy_digest".to_owned(),
+            serde_json::to_value(digest).expect("policy digest wire"),
+        );
+        records.insert(
+            id.to_owned(),
+            serde_json::from_value(wire).expect("continuation with replacement policy digest"),
+        );
+    }
+    fn fail_next_record(&self) {
+        *self.fail_record.lock().expect("record failure") = true;
+    }
+    fn fail_next_pending_failure(&self) {
+        *self.fail_pending.lock().expect("pending failure") = true;
+    }
+    fn fail_next_settlement(&self) {
+        *self.fail_settle.lock().expect("settlement failure") = true;
     }
     fn push(&self, event: &'static str) {
         self.events.lock().expect("journal events").push(event);
@@ -369,13 +409,34 @@ impl Journal {
 }
 impl ContinuationJournal for Journal {
     fn record(&self, record: ContinuationRecord) -> Result<(), ContinuationError> {
-        let mut slot = self.record.lock().expect("record");
-        if slot.is_some() {
+        self.push("record");
+        if std::mem::take(&mut *self.fail_record.lock().expect("record failure")) {
+            return Err(ContinuationError::Unavailable(
+                "scripted continuation record failure".into(),
+            ));
+        }
+        let id = record.id().to_owned();
+        let mut records = self.records.lock().expect("records");
+        if records.contains_key(&id) {
             return Err(ContinuationError::InvalidTransition);
         }
-        *slot = Some(record);
-        self.push("record");
+        records.insert(id.clone(), record);
+        *self.latest.lock().expect("latest record") = Some(id);
         Ok(())
+    }
+    fn fail_pending(&self, id: &str) -> Result<(), ContinuationError> {
+        self.push("fail_pending");
+        if std::mem::take(&mut *self.fail_pending.lock().expect("pending failure")) {
+            return Err(ContinuationError::Unavailable(
+                "scripted pending terminalization failure".into(),
+            ));
+        }
+        self.records
+            .lock()
+            .expect("records")
+            .get_mut(id)
+            .ok_or(ContinuationError::NotFound)?
+            .fail_pending()
     }
     fn accept_answer(
         &self,
@@ -383,54 +444,211 @@ impl ContinuationJournal for Journal {
         answer: &[u8],
         now: Timestamp,
     ) -> Result<(), ContinuationError> {
-        let mut slot = self.record.lock().expect("record");
-        let record = slot.as_mut().ok_or(ContinuationError::NotFound)?;
-        if record.id() != id {
-            return Err(ContinuationError::NotFound);
-        }
+        let mut records = self.records.lock().expect("records");
+        let record = records.get_mut(id).ok_or(ContinuationError::NotFound)?;
         record.accept_answer(answer.to_vec(), now)?;
         self.push("accepted_answer");
         Ok(())
     }
     fn load(&self, id: &str) -> Result<ContinuationRecord, ContinuationError> {
-        let slot = self.record.lock().expect("record");
-        let record = slot
-            .as_ref()
-            .filter(|record| record.id() == id)
-            .ok_or(ContinuationError::NotFound)?;
+        let records = self.records.lock().expect("records");
+        let record = records.get(id).ok_or(ContinuationError::NotFound)?;
         serde_json::from_slice(
             &serde_json::to_vec(record).map_err(|_| ContinuationError::Corrupt("encode".into()))?,
         )
         .map_err(|_| ContinuationError::Corrupt("decode".into()))
     }
     fn claim(&self, id: &str, now: Timestamp) -> Result<ClaimedContinuation, ContinuationError> {
-        let mut slot = self.record.lock().expect("record");
-        let record = slot.take().ok_or(ContinuationError::NotFound)?;
-        if record.id() != id {
-            *slot = Some(record);
-            return Err(ContinuationError::NotFound);
-        }
+        let mut records = self.records.lock().expect("records");
+        let record = records.remove(id).ok_or(ContinuationError::NotFound)?;
         let bytes =
             serde_json::to_vec(&record).map_err(|_| ContinuationError::Corrupt("encode".into()))?;
         let claimed = match record.claim(now) {
             Ok(claimed) => claimed,
             Err(error) => {
-                *slot = Some(
+                records.insert(
+                    id.to_owned(),
                     serde_json::from_slice(&bytes)
                         .map_err(|_| ContinuationError::Corrupt("decode".into()))?,
                 );
                 return Err(error);
             }
         };
+        records.insert(
+            id.to_owned(),
+            serde_json::from_slice(
+                &serde_json::to_vec(claimed.record())
+                    .map_err(|_| ContinuationError::Corrupt("encode".into()))?,
+            )
+            .map_err(|_| ContinuationError::Corrupt("decode".into()))?,
+        );
         self.push("claim");
         Ok(claimed)
     }
     fn settle(
         &self,
-        _claimed: ClaimedContinuation,
-        _state: ContinuationState,
+        claimed: ClaimedContinuation,
+        state: ContinuationState,
     ) -> Result<(), ContinuationError> {
         self.push("settle");
+        if std::mem::take(&mut *self.fail_settle.lock().expect("settlement failure")) {
+            return Err(ContinuationError::Unavailable(
+                "scripted continuation settlement failure".into(),
+            ));
+        }
+        let id = claimed.id().to_owned();
+        let settled = claimed.settle(state)?;
+        self.records.lock().expect("records").insert(id, settled);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct CaptureStore {
+    entries: Mutex<BTreeMap<(String, String), Arc<GenerationPolicySnapshot>>>,
+    calls: Mutex<
+        Vec<(
+            GenerationPolicyCaptureStoreOperation,
+            String,
+            GenerationPolicyDigest,
+        )>,
+    >,
+    fail_store: Mutex<bool>,
+    trace: Trace,
+}
+
+impl CaptureStore {
+    fn with_trace(trace: Trace) -> Self {
+        Self {
+            trace,
+            ..Self::default()
+        }
+    }
+
+    fn key(id: &str, digest: &GenerationPolicyDigest) -> (String, String) {
+        (id.to_owned(), String::from(digest.clone()))
+    }
+
+    fn fail_next_store(&self) {
+        *self.fail_store.lock().expect("capture store failure") = true;
+    }
+
+    fn stored_snapshot(
+        &self,
+        id: &str,
+        digest: &GenerationPolicyDigest,
+    ) -> Option<Arc<GenerationPolicySnapshot>> {
+        self.entries
+            .lock()
+            .expect("capture entries")
+            .get(&Self::key(id, digest))
+            .cloned()
+    }
+
+    fn contains(&self, id: &str, digest: &GenerationPolicyDigest) -> bool {
+        self.entries
+            .lock()
+            .expect("capture entries")
+            .contains_key(&Self::key(id, digest))
+    }
+
+    fn evict(&self, id: &str, digest: &GenerationPolicyDigest) {
+        self.entries
+            .lock()
+            .expect("capture entries")
+            .remove(&Self::key(id, digest));
+    }
+
+    fn calls(
+        &self,
+    ) -> Vec<(
+        GenerationPolicyCaptureStoreOperation,
+        String,
+        GenerationPolicyDigest,
+    )> {
+        self.calls.lock().expect("capture calls").clone()
+    }
+
+    fn record_call(
+        &self,
+        operation: GenerationPolicyCaptureStoreOperation,
+        id: &str,
+        digest: GenerationPolicyDigest,
+    ) {
+        self.calls
+            .lock()
+            .expect("capture calls")
+            .push((operation, id.to_owned(), digest));
+    }
+
+    fn error(
+        operation: GenerationPolicyCaptureStoreOperation,
+        kind: GenerationPolicyCaptureStoreErrorKind,
+    ) -> GenerationPolicyCaptureStoreError {
+        GenerationPolicyCaptureStoreError::new(operation, kind)
+    }
+}
+
+impl GenerationPolicyCaptureStore for CaptureStore {
+    fn store(
+        &self,
+        id: &str,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<(), GenerationPolicyCaptureStoreError> {
+        let digest = snapshot.digest();
+        self.trace.push("store");
+        self.record_call(
+            GenerationPolicyCaptureStoreOperation::Store,
+            id,
+            digest.clone(),
+        );
+        if std::mem::take(&mut *self.fail_store.lock().expect("capture store failure")) {
+            return Err(Self::error(
+                GenerationPolicyCaptureStoreOperation::Store,
+                GenerationPolicyCaptureStoreErrorKind::Unavailable,
+            ));
+        }
+        self.entries
+            .lock()
+            .expect("capture entries")
+            .insert(Self::key(id, &digest), snapshot);
+        Ok(())
+    }
+
+    fn load(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<Arc<GenerationPolicySnapshot>, GenerationPolicyCaptureStoreError> {
+        self.trace.push("load");
+        self.record_call(
+            GenerationPolicyCaptureStoreOperation::Load,
+            id,
+            expected.clone(),
+        );
+        self.stored_snapshot(id, expected).ok_or_else(|| {
+            Self::error(
+                GenerationPolicyCaptureStoreOperation::Load,
+                GenerationPolicyCaptureStoreErrorKind::Missing,
+            )
+        })
+    }
+
+    fn delete(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<(), GenerationPolicyCaptureStoreError> {
+        self.trace.push("delete");
+        self.record_call(
+            GenerationPolicyCaptureStoreOperation::Delete,
+            id,
+            expected.clone(),
+        );
+        self.entries
+            .lock()
+            .expect("capture entries")
+            .remove(&Self::key(id, expected));
         Ok(())
     }
 }
@@ -463,6 +681,17 @@ impl ContinuationJournal for MultiJournal {
         }
         drop(records);
         self.push("record");
+        Ok(())
+    }
+
+    fn fail_pending(&self, id: &str) -> Result<(), ContinuationError> {
+        self.records
+            .lock()
+            .expect("multi journal records")
+            .get_mut(id)
+            .ok_or(ContinuationError::NotFound)?
+            .fail_pending()?;
+        self.push("fail_pending");
         Ok(())
     }
 
@@ -507,6 +736,14 @@ impl ContinuationJournal for MultiJournal {
                 return Err(error);
             }
         };
+        records.insert(
+            id.to_owned(),
+            serde_json::from_slice(
+                &serde_json::to_vec(claimed.record())
+                    .map_err(|_| ContinuationError::Corrupt("encode".into()))?,
+            )
+            .map_err(|_| ContinuationError::Corrupt("decode".into()))?,
+        );
         drop(records);
         self.push("claim");
         Ok(claimed)
@@ -514,9 +751,15 @@ impl ContinuationJournal for MultiJournal {
 
     fn settle(
         &self,
-        _claimed: ClaimedContinuation,
-        _state: ContinuationState,
+        claimed: ClaimedContinuation,
+        state: ContinuationState,
     ) -> Result<(), ContinuationError> {
+        let id = claimed.id().to_owned();
+        let settled = claimed.settle(state)?;
+        self.records
+            .lock()
+            .expect("multi journal records")
+            .insert(id, settled);
         self.push("settle");
         Ok(())
     }
@@ -636,14 +879,16 @@ struct ScriptedDuplex {
     output: Vec<u8>,
     reader_waker: Option<std::task::Waker>,
     complete: bool,
+    delivery: DeliveryCertainty,
 }
 impl ScriptedDuplex {
-    fn new(complete: bool) -> Self {
+    fn new(complete: bool, delivery: DeliveryCertainty) -> Self {
         Self {
             input: VecDeque::new(),
             output: Vec::new(),
             reader_waker: None,
             complete,
+            delivery,
         }
     }
 
@@ -750,29 +995,39 @@ impl AsyncWrite for ScriptedDuplex {
 }
 impl DuplexSession for ScriptedDuplex {
     fn delivery(&self) -> DeliveryCertainty {
-        DeliveryCertainty::DefinitelyUnsent
+        self.delivery
     }
     fn settle(self: Box<Self>) -> BoxFuture<'static, ego_core::permit::DuplexSettlement> {
+        let delivery = self.delivery;
         Box::pin(std::future::ready(ego_core::permit::DuplexSettlement::new(
             DuplexEnd::Exited { code: 0 },
             CleanupCertainty::Complete,
-            DeliveryCertainty::DefinitelyUnsent,
+            delivery,
             Ok(ToolResult::builtin("settled")),
         )))
     }
     fn interrupt(self: Box<Self>) -> BoxFuture<'static, ego_core::permit::DuplexSettlement> {
+        let delivery = self.delivery;
         Box::pin(std::future::ready(ego_core::permit::DuplexSettlement::new(
             DuplexEnd::Interrupted,
             CleanupCertainty::Complete,
-            DeliveryCertainty::DefinitelyUnsent,
+            delivery,
             Ok(ToolResult::builtin("interrupted")),
         )))
     }
 }
+
+#[derive(Clone, Copy)]
+enum ScriptedTerminal {
+    Complete,
+    TransportFailure(DeliveryCertainty),
+}
+
 #[derive(Clone)]
 struct ScriptedSpawner {
     calls: Arc<AtomicUsize>,
     input_required_rounds: usize,
+    terminal: ScriptedTerminal,
 }
 impl ScriptedSpawner {
     fn new() -> Self {
@@ -782,6 +1037,14 @@ impl ScriptedSpawner {
         Self {
             calls: Arc::new(AtomicUsize::new(0)),
             input_required_rounds,
+            terminal: ScriptedTerminal::Complete,
+        }
+    }
+    fn with_resume_transport_failure(delivery: DeliveryCertainty) -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            input_required_rounds: 1,
+            terminal: ScriptedTerminal::TransportFailure(delivery),
         }
     }
     fn calls(&self) -> usize {
@@ -790,10 +1053,31 @@ impl ScriptedSpawner {
 }
 impl DuplexSpawner for ScriptedSpawner {
     fn spawn(&self, _spec: SpawnSpec) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
-        let complete = self.calls.fetch_add(1, Ordering::SeqCst) >= self.input_required_rounds;
-        Box::pin(std::future::ready(Ok(
-            Box::new(ScriptedDuplex::new(complete)) as DuplexHandle,
-        )))
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let outcome = if call < self.input_required_rounds {
+            Ok(Box::new(ScriptedDuplex::new(
+                false,
+                DeliveryCertainty::DefinitelySent,
+            )) as DuplexHandle)
+        } else {
+            match self.terminal {
+                ScriptedTerminal::Complete => Ok(Box::new(ScriptedDuplex::new(
+                    true,
+                    DeliveryCertainty::DefinitelySent,
+                )) as DuplexHandle),
+                ScriptedTerminal::TransportFailure(DeliveryCertainty::DefinitelyUnsent) => {
+                    Err(TransportError::definitely_unsent(
+                        TransportFailure::Exchange("scripted resumed effect failure".into()),
+                    ))
+                }
+                ScriptedTerminal::TransportFailure(
+                    DeliveryCertainty::DefinitelySent | DeliveryCertainty::PossiblySent,
+                ) => Err(TransportError::possibly_sent(TransportFailure::Exchange(
+                    "scripted resumed effect failure".into(),
+                ))),
+            }
+        };
+        Box::pin(std::future::ready(outcome))
     }
 }
 
@@ -897,12 +1181,65 @@ fn ports(spawner: Arc<ScriptedSpawner>) -> ToolEffectPorts<'static> {
         spawner,
     )
 }
+
+async fn attempt_initial_record(
+    journal: Arc<Journal>,
+    policy_captures: Arc<CaptureStore>,
+    resolver: Arc<ExactCaptureResolver>,
+    mode: HookMode,
+    trace: Trace,
+) -> (
+    Result<ForeignInputRequired, McpError>,
+    std::sync::Weak<GenerationPolicySnapshot>,
+    GenerationPolicyDigest,
+) {
+    let owner =
+        context_free_owner_with_store(journal, Arc::clone(&policy_captures), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool) = captured_lookup(factory);
+    resolver.insert(capture.clone());
+    let call = prepare_lookup(&tool);
+    let envelope = call.mcp_envelope().expect("MCP envelope").clone();
+    let auth = authorized(call);
+    let (sealer, floor) = prepared_resume();
+    let resume = sealer.prepare(&auth, floor).expect("resume");
+    let snapshot = GenerationPolicyCapture::new(
+        CanonPath::new("/transaction-policy"),
+        Mode::Auto,
+        Ruleset::default(),
+        None,
+    )
+    .expect("generation policy capture")
+    .snapshot();
+    let digest = snapshot.digest();
+    let weak = Arc::downgrade(&snapshot);
+    let guarded = guarded_resume_with_session_context(
+        resume,
+        hooks_with_mode(mode, trace),
+        &capture,
+        Arc::clone(&snapshot),
+    );
+    drop(snapshot);
+    let result = owner
+        .record_input_required(envelope, mapped_input(), guarded)
+        .await;
+    (result, weak, digest)
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn real_operation_records_before_elicitation_and_returns_foreign_id() {
     let trace = Trace::default();
     let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
     let resolver = Arc::new(ExactCaptureResolver::default());
-    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let owner = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        resolver.clone(),
+    );
     let factory = Arc::new(
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
@@ -914,11 +1251,21 @@ async fn real_operation_records_before_elicitation_and_returns_foreign_id() {
     let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
-    let (call, guarded) = guarded_with_session_context(
+    let policy_snapshot = GenerationPolicyCapture::new(
+        CanonPath::new("/recorded-policy"),
+        Mode::Auto,
+        Ruleset::default(),
+        None,
+    )
+    .expect("generation policy capture")
+    .snapshot();
+    let policy_digest = policy_snapshot.digest();
+    let (call, guarded) = guarded_with_session_context_and_policy_snapshot(
         auth,
         resume,
         hooks_with_mode(HookMode::Continue, trace.clone()),
         &capture,
+        Arc::clone(&policy_snapshot),
         spawner.clone(),
     );
     let outcome = tool.execute(call, &guarded).await.expect("outcome");
@@ -926,17 +1273,277 @@ async fn real_operation_records_before_elicitation_and_returns_foreign_id() {
         panic!("expected input-required")
     };
     assert_eq!(foreign.continuation_id(), journal.id());
+    let stored = policy_captures
+        .stored_snapshot(foreign.continuation_id(), &policy_digest)
+        .expect("generation policy stored before question exposure");
+    assert!(Arc::ptr_eq(&stored, &policy_snapshot));
+    assert_eq!(stored.digest(), journal.recorded_policy_digest());
     assert_eq!(journal.events(), vec!["record"]);
-    assert_eq!(trace.events(), vec!["record", "Elicitation"]);
+    assert_eq!(trace.events(), vec!["store", "record", "Elicitation"]);
+    assert_eq!(
+        policy_captures.calls(),
+        vec![(
+            GenerationPolicyCaptureStoreOperation::Store,
+            foreign.continuation_id().to_owned(),
+            policy_digest,
+        )]
+    );
     assert_eq!(spawner.calls(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_digest_mismatch_is_refused_before_acceptance_or_effects() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        resolver.clone(),
+    );
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool) = captured_lookup(factory);
+    resolver.insert(capture.clone());
+    let auth = authorized(prepare_lookup(&tool));
+    let (sealer, floor) = prepared_resume();
+    let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::new());
+    let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
+    let policy_snapshot = GenerationPolicyCapture::new(
+        CanonPath::new("/pinned-policy"),
+        Mode::Default,
+        Ruleset::default(),
+        None,
+    )
+    .expect("generation policy capture")
+    .snapshot();
+    let policy_digest = policy_snapshot.digest();
+    let policy_weak = Arc::downgrade(&policy_snapshot);
+    let (call, guarded) = guarded_with_session_context_and_policy_snapshot(
+        auth,
+        resume,
+        runtime.clone(),
+        &capture,
+        Arc::clone(&policy_snapshot),
+        spawner.clone(),
+    );
+    let ToolExecution::InputRequired(required) =
+        tool.execute(call, &guarded).await.expect("required")
+    else {
+        panic!("expected input-required");
+    };
+    let id = required.continuation_id().to_owned();
+    let different_digest = GenerationPolicyCapture::new(
+        CanonPath::new("/different-policy"),
+        Mode::Auto,
+        Ruleset::default(),
+        None,
+    )
+    .expect("different generation policy capture")
+    .snapshot()
+    .digest();
+    assert_ne!(different_digest, policy_digest);
+    journal.replace_policy_digest(&id, &different_digest);
+    drop(policy_snapshot);
+    drop(guarded);
+
+    let causality = settled_continuation_causality(&runtime, &required, r#"{"choice":"yes"}"#);
+    let result = owner
+        .accept_answer(
+            &id,
+            br#"{"choice":"yes"}"#,
+            runtime,
+            causality,
+            floor,
+            ports(spawner.clone()),
+        )
+        .await;
+
+    let Err(error) = result else {
+        panic!("a record whose digest differs from its pinned snapshot must be refused");
+    };
+    assert_eq!(error.failure(), McpFailure::Authority);
+    assert_eq!(error.delivery(), None);
+    assert_eq!(journal.state_for(&id), Some(ContinuationState::Pending));
+    assert_eq!(journal.events(), vec!["record"]);
+    assert_eq!(trace.events(), vec!["store", "record", "Elicitation"]);
+    assert_eq!(spawner.calls(), 1, "the resumed effect must not run");
+    assert!(policy_captures.contains(&id, &policy_digest));
+    assert_eq!(policy_weak.strong_count(), 2);
+    assert_eq!(policy_captures.calls().len(), 1, "delete must not run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn capture_store_failure_precedes_record_elicitation_and_question_exposure() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    policy_captures.fail_next_store();
+    let (result, policy_weak, _digest) = attempt_initial_record(
+        Arc::clone(&journal),
+        Arc::clone(&policy_captures),
+        Arc::new(ExactCaptureResolver::default()),
+        HookMode::Continue,
+        trace.clone(),
+    )
+    .await;
+
+    let Err(error) = result else {
+        panic!("capture-store failure must not expose a foreign question");
+    };
+    assert_eq!(error.failure(), McpFailure::Authority);
+    assert_eq!(error.delivery(), None);
+    assert!(journal.events().is_empty());
+    assert_eq!(journal.state(), None);
+    assert_eq!(trace.events(), vec!["store"]);
+    assert_eq!(policy_captures.calls().len(), 1);
+    assert_eq!(
+        policy_captures.calls()[0].0,
+        GenerationPolicyCaptureStoreOperation::Store
+    );
+    assert!(
+        policy_weak.upgrade().is_none(),
+        "a failed store must release the local policy pin"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn journal_record_failure_retains_orphan_capture_but_releases_local_pin() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    journal.fail_next_record();
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let (result, policy_weak, digest) = attempt_initial_record(
+        Arc::clone(&journal),
+        Arc::clone(&policy_captures),
+        Arc::new(ExactCaptureResolver::default()),
+        HookMode::Continue,
+        trace.clone(),
+    )
+    .await;
+
+    let Err(error) = result else {
+        panic!("journal failure must not expose a foreign question");
+    };
+    assert_eq!(error.failure(), McpFailure::Authority);
+    assert_eq!(error.delivery(), None);
+    assert!(
+        error
+            .to_string()
+            .contains("scripted continuation record failure")
+    );
+    assert_eq!(journal.state(), None);
+    assert_eq!(trace.events(), vec!["store", "record"]);
+    let calls = policy_captures.calls();
+    let [(GenerationPolicyCaptureStoreOperation::Store, id, stored_digest)] = calls.as_slice()
+    else {
+        panic!("only the policy store may run before journal failure");
+    };
+    assert_eq!(stored_digest, &digest);
+    assert!(policy_captures.contains(id, &digest));
+    policy_captures.evict(id, &digest);
+    assert!(
+        policy_weak.upgrade().is_none(),
+        "after orphan eviction no in-memory pin may survive journal failure"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn elicitation_failure_terminalizes_pending_before_releasing_and_deleting_capture() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let (result, policy_weak, digest) = attempt_initial_record(
+        Arc::clone(&journal),
+        Arc::clone(&policy_captures),
+        Arc::new(ExactCaptureResolver::default()),
+        HookMode::BlockElicitation,
+        trace.clone(),
+    )
+    .await;
+
+    let Err(error) = result else {
+        panic!("blocked Elicitation must not expose a foreign question");
+    };
+    assert_eq!(error.failure(), McpFailure::Authority);
+    assert_eq!(error.delivery(), None);
+    assert!(error.to_string().contains("Elicitation hook blocked"));
+    assert_eq!(journal.state(), Some(ContinuationState::Failed));
+    assert_eq!(journal.events(), vec!["record", "fail_pending"]);
+    assert_eq!(
+        trace.events(),
+        vec!["store", "record", "Elicitation", "fail_pending", "delete"]
+    );
+    let id = journal.id();
+    assert!(!policy_captures.contains(&id, &digest));
+    assert_eq!(
+        policy_captures.calls(),
+        vec![
+            (
+                GenerationPolicyCaptureStoreOperation::Store,
+                id.clone(),
+                digest.clone(),
+            ),
+            (GenerationPolicyCaptureStoreOperation::Delete, id, digest,),
+        ]
+    );
+    assert!(
+        policy_weak.upgrade().is_none(),
+        "durable failure cleanup must release both policy authorities"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_pending_terminalization_retains_pin_and_capture_without_delete() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    journal.fail_next_pending_failure();
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let (result, policy_weak, digest) = attempt_initial_record(
+        Arc::clone(&journal),
+        Arc::clone(&policy_captures),
+        Arc::new(ExactCaptureResolver::default()),
+        HookMode::BlockElicitation,
+        trace.clone(),
+    )
+    .await;
+
+    let Err(error) = result else {
+        panic!("failed rollback must not expose a foreign question");
+    };
+    assert_eq!(error.failure(), McpFailure::Authority);
+    assert_eq!(error.delivery(), None);
+    assert_eq!(journal.state(), Some(ContinuationState::Pending));
+    assert_eq!(journal.events(), vec!["record", "fail_pending"]);
+    assert_eq!(
+        trace.events(),
+        vec!["store", "record", "Elicitation", "fail_pending"]
+    );
+    let id = journal.id();
+    assert!(policy_captures.contains(&id, &digest));
+    assert_eq!(
+        policy_weak.strong_count(),
+        2,
+        "the store and in-memory pin must both retain the exact snapshot"
+    );
+    assert_eq!(policy_captures.calls().len(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn accepted_answer_validates_hooks_claims_and_retries_once() {
     let trace = Trace::default();
     let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
     let resolver = Arc::new(ExactCaptureResolver::default());
-    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let owner = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        resolver.clone(),
+    );
     let factory = Arc::new(
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
@@ -949,14 +1556,32 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
     let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
-    let (call, guarded) =
-        guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
+    let policy_snapshot = GenerationPolicyCapture::new(
+        CanonPath::new("/completed-policy"),
+        Mode::Default,
+        Ruleset::default(),
+        None,
+    )
+    .expect("generation policy capture")
+    .snapshot();
+    let policy_digest = policy_snapshot.digest();
+    let policy_weak = Arc::downgrade(&policy_snapshot);
+    let (call, guarded) = guarded_with_session_context_and_policy_snapshot(
+        auth,
+        resume,
+        runtime.clone(),
+        &capture,
+        Arc::clone(&policy_snapshot),
+        spawner.clone(),
+    );
     let ToolExecution::InputRequired(foreign) =
         tool.execute(call, &guarded).await.expect("required")
     else {
         panic!("expected required")
     };
     let id = foreign.continuation_id().to_owned();
+    drop(policy_snapshot);
+    drop(guarded);
     let causality = settled_continuation_causality(&runtime, &foreign, r#"{"choice":"yes"}"#);
     let retried = owner
         .accept_answer(
@@ -977,24 +1602,353 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
     assert_eq!(
         trace.events(),
         vec![
+            "store",
             "record",
             "Elicitation",
             "accepted_answer",
             "ElicitationResult",
             "claim",
-            "settle"
+            "settle",
+            "delete"
         ]
     );
     assert_eq!(spawner.calls(), 2);
-    assert_eq!(journal.state(), None);
+    assert_eq!(journal.state(), Some(ContinuationState::Completed));
+    assert!(!policy_captures.contains(&id, &policy_digest));
+    assert_eq!(
+        policy_captures.calls(),
+        vec![
+            (
+                GenerationPolicyCaptureStoreOperation::Store,
+                id.clone(),
+                policy_digest.clone(),
+            ),
+            (
+                GenerationPolicyCaptureStoreOperation::Delete,
+                id,
+                policy_digest,
+            ),
+        ]
+    );
+    assert!(
+        policy_weak.upgrade().is_none(),
+        "completed settlement must precede release of both policy authorities"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completed_effect_settlement_failure_retains_both_authorities_and_delivery() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    journal.fail_next_settlement();
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        resolver.clone(),
+    );
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool) = captured_lookup(factory);
+    resolver.insert(capture.clone());
+    let auth = authorized(prepare_lookup(&tool));
+    let (sealer, floor) = prepared_resume();
+    let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::new());
+    let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
+    let policy_snapshot = GenerationPolicyCapture::new(
+        CanonPath::new("/failed-settlement-policy"),
+        Mode::Default,
+        Ruleset::default(),
+        None,
+    )
+    .expect("generation policy capture")
+    .snapshot();
+    let digest = policy_snapshot.digest();
+    let weak = Arc::downgrade(&policy_snapshot);
+    let (call, guarded) = guarded_with_session_context_and_policy_snapshot(
+        auth,
+        resume,
+        runtime.clone(),
+        &capture,
+        Arc::clone(&policy_snapshot),
+        spawner.clone(),
+    );
+    let ToolExecution::InputRequired(required) =
+        tool.execute(call, &guarded).await.expect("required")
+    else {
+        panic!("expected input-required");
+    };
+    let id = required.continuation_id().to_owned();
+    drop(policy_snapshot);
+    drop(guarded);
+    let causality = settled_continuation_causality(&runtime, &required, r#"{"choice":"yes"}"#);
+    let result = owner
+        .accept_answer(
+            &id,
+            br#"{"choice":"yes"}"#,
+            runtime,
+            causality,
+            floor,
+            ports(spawner),
+        )
+        .await;
+
+    let Err(error) = result else {
+        panic!("failed durable settlement must take precedence over completion");
+    };
+    assert_eq!(error.failure(), McpFailure::Authority);
+    assert_eq!(error.delivery(), Some(DeliveryCertainty::DefinitelySent));
+    assert_eq!(journal.state_for(&id), Some(ContinuationState::Claimed));
+    assert_eq!(
+        trace.events(),
+        vec![
+            "store",
+            "record",
+            "Elicitation",
+            "accepted_answer",
+            "ElicitationResult",
+            "claim",
+            "settle",
+        ]
+    );
+    assert!(policy_captures.contains(&id, &digest));
+    assert_eq!(weak.strong_count(), 2);
+    assert_eq!(policy_captures.calls().len(), 1, "delete must not run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn effect_failure_settlement_failure_retains_both_authorities_and_delivery() {
+    let cases = [
+        ("definitely unsent", DeliveryCertainty::DefinitelyUnsent),
+        ("possibly sent", DeliveryCertainty::PossiblySent),
+    ];
+
+    for (label, expected_delivery) in cases {
+        let trace = Trace::default();
+        let journal = Arc::new(Journal::with_trace(trace.clone()));
+        journal.fail_next_settlement();
+        let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+        let resolver = Arc::new(ExactCaptureResolver::default());
+        let owner = context_free_owner_with_store(
+            journal.clone(),
+            Arc::clone(&policy_captures),
+            resolver.clone(),
+        );
+        let factory = Arc::new(
+            McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+                .expect("factory"),
+        );
+        let (capture, tool) = captured_lookup(factory);
+        resolver.insert(capture.clone());
+        let auth = authorized(prepare_lookup(&tool));
+        let (sealer, floor) = prepared_resume();
+        let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
+        let spawner = Arc::new(ScriptedSpawner::with_resume_transport_failure(
+            expected_delivery,
+        ));
+        let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
+        let policy_snapshot = GenerationPolicyCapture::new(
+            CanonPath::new(format!("/effect-settlement-failure-{label}")),
+            Mode::Default,
+            Ruleset::default(),
+            None,
+        )
+        .expect("generation policy capture")
+        .snapshot();
+        let digest = policy_snapshot.digest();
+        let weak = Arc::downgrade(&policy_snapshot);
+        let (call, guarded) = guarded_with_session_context_and_policy_snapshot(
+            auth,
+            resume,
+            runtime.clone(),
+            &capture,
+            Arc::clone(&policy_snapshot),
+            Arc::clone(&spawner),
+        );
+        let ToolExecution::InputRequired(required) =
+            tool.execute(call, &guarded).await.expect("required")
+        else {
+            panic!("expected input-required for {label}");
+        };
+        let id = required.continuation_id().to_owned();
+        drop(policy_snapshot);
+        drop(guarded);
+        let causality = settled_continuation_causality(&runtime, &required, r#"{"choice":"yes"}"#);
+        let result = owner
+            .accept_answer(
+                &id,
+                br#"{"choice":"yes"}"#,
+                runtime,
+                causality,
+                floor,
+                ports(Arc::clone(&spawner)),
+            )
+            .await;
+
+        let Err(error) = result else {
+            panic!("{label} settlement failure must take precedence");
+        };
+        assert_eq!(error.failure(), McpFailure::Authority, "{label}");
+        assert_eq!(error.delivery(), Some(expected_delivery), "{label}");
+        assert_eq!(
+            error.to_string(),
+            "MCP continuation terminal state could not be durably recorded",
+            "{label}"
+        );
+        assert_eq!(
+            journal.state_for(&id),
+            Some(ContinuationState::Claimed),
+            "{label}"
+        );
+        assert_eq!(
+            trace.events(),
+            vec![
+                "store",
+                "record",
+                "Elicitation",
+                "accepted_answer",
+                "ElicitationResult",
+                "claim",
+                "settle",
+            ],
+            "{label}"
+        );
+        assert_eq!(spawner.calls(), 2, "{label}");
+        assert!(policy_captures.contains(&id, &digest), "{label}");
+        assert_eq!(weak.strong_count(), 2, "{label}");
+        assert_eq!(
+            policy_captures.calls().len(),
+            1,
+            "{label}: delete must not run"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn effect_failure_delivery_selects_durable_terminal_state_before_cleanup() {
+    let cases = [
+        (
+            "definitely unsent",
+            Arc::new(ScriptedSpawner::with_resume_transport_failure(
+                DeliveryCertainty::DefinitelyUnsent,
+            )),
+            ContinuationState::Failed,
+            DeliveryCertainty::DefinitelyUnsent,
+        ),
+        (
+            "possibly sent",
+            Arc::new(ScriptedSpawner::with_resume_transport_failure(
+                DeliveryCertainty::PossiblySent,
+            )),
+            ContinuationState::Uncertain,
+            DeliveryCertainty::PossiblySent,
+        ),
+    ];
+
+    for (label, spawner, expected_state, expected_delivery) in cases {
+        let trace = Trace::default();
+        let journal = Arc::new(Journal::with_trace(trace.clone()));
+        let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+        let resolver = Arc::new(ExactCaptureResolver::default());
+        let owner = context_free_owner_with_store(
+            journal.clone(),
+            Arc::clone(&policy_captures),
+            resolver.clone(),
+        );
+        let factory = Arc::new(
+            McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+                .expect("factory"),
+        );
+        let (capture, tool) = captured_lookup(factory);
+        resolver.insert(capture.clone());
+        let auth = authorized(prepare_lookup(&tool));
+        let (sealer, floor) = prepared_resume();
+        let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
+        let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
+        let policy_snapshot = GenerationPolicyCapture::new(
+            CanonPath::new(format!("/effect-failure-{label}")),
+            Mode::Default,
+            Ruleset::default(),
+            None,
+        )
+        .expect("generation policy capture")
+        .snapshot();
+        let digest = policy_snapshot.digest();
+        let weak = Arc::downgrade(&policy_snapshot);
+        let (call, guarded) = guarded_with_session_context_and_policy_snapshot(
+            auth,
+            resume,
+            runtime.clone(),
+            &capture,
+            Arc::clone(&policy_snapshot),
+            Arc::clone(&spawner),
+        );
+        let ToolExecution::InputRequired(required) =
+            tool.execute(call, &guarded).await.expect("required")
+        else {
+            panic!("expected input-required for {label}");
+        };
+        let id = required.continuation_id().to_owned();
+        drop(policy_snapshot);
+        drop(guarded);
+        let causality = settled_continuation_causality(&runtime, &required, r#"{"choice":"yes"}"#);
+        let result = owner
+            .accept_answer(
+                &id,
+                br#"{"choice":"yes"}"#,
+                runtime,
+                causality,
+                floor,
+                ports(spawner),
+            )
+            .await;
+
+        let Err(error) = result else {
+            panic!("{label} must remain an effect failure");
+        };
+        assert_eq!(error.failure(), McpFailure::Transport, "{label}");
+        assert_eq!(error.delivery(), Some(expected_delivery), "{label}");
+        assert!(
+            error
+                .to_string()
+                .contains("scripted resumed effect failure"),
+            "{label} must preserve the original effect diagnostic"
+        );
+        assert_eq!(journal.state_for(&id), Some(expected_state), "{label}");
+        assert_eq!(
+            trace.events(),
+            vec![
+                "store",
+                "record",
+                "Elicitation",
+                "accepted_answer",
+                "ElicitationResult",
+                "claim",
+                "settle",
+                "delete",
+            ],
+            "{label}"
+        );
+        assert!(!policy_captures.contains(&id, &digest), "{label}");
+        assert!(weak.upgrade().is_none(), "{label}");
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_successor_rounds() {
     let trace = Trace::default();
     let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
     let resolver = Arc::new(ExactCaptureResolver::default());
-    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let owner = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        resolver.clone(),
+    );
     let factory = Arc::new(
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
@@ -1060,7 +2014,34 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
         panic!("the first adapter resume must expose the persisted successor");
     };
     assert_ne!(successor.continuation_id(), initial_id);
+    let successor_id = successor.continuation_id().to_owned();
     assert_eq!(journal.state(), Some(ContinuationState::Pending));
+    assert_eq!(
+        journal.state_for(&initial_id),
+        Some(ContinuationState::Completed)
+    );
+    assert!(!policy_captures.contains(&initial_id, &policy_digest));
+    assert!(policy_captures.contains(&successor_id, &policy_digest));
+    assert_eq!(
+        policy_captures.calls(),
+        vec![
+            (
+                GenerationPolicyCaptureStoreOperation::Store,
+                initial_id.clone(),
+                policy_digest.clone(),
+            ),
+            (
+                GenerationPolicyCaptureStoreOperation::Store,
+                successor_id.clone(),
+                policy_digest.clone(),
+            ),
+            (
+                GenerationPolicyCaptureStoreOperation::Delete,
+                initial_id.clone(),
+                policy_digest.clone(),
+            ),
+        ]
+    );
     let retained_by_successor = policy_snapshot_weak
         .upgrade()
         .expect("the successor continuation must retain the original policy snapshot");
@@ -1081,12 +2062,13 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
         panic!("the successor adapter resume must complete");
     };
     assert_eq!(result.model_text(), "retry-complete");
+    assert!(!policy_captures.contains(&successor_id, &policy_digest));
     assert!(
         policy_snapshot_weak.upgrade().is_none(),
         "terminal completion must release the generation policy snapshot pin"
     );
     assert_eq!(spawner.calls(), 3);
-    assert_eq!(journal.state(), None);
+    assert_eq!(journal.state(), Some(ContinuationState::Completed));
     assert_eq!(
         journal.events(),
         vec![
@@ -1103,18 +2085,47 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
     assert_eq!(
         trace.events(),
         vec![
+            "store",
             "record",
             "Elicitation",
             "accepted_answer",
             "ElicitationResult",
             "claim",
+            "store",
             "record",
             "Elicitation",
             "settle",
+            "delete",
             "accepted_answer",
             "ElicitationResult",
             "claim",
-            "settle"
+            "settle",
+            "delete"
+        ]
+    );
+    assert_eq!(
+        policy_captures.calls(),
+        vec![
+            (
+                GenerationPolicyCaptureStoreOperation::Store,
+                initial_id.clone(),
+                policy_digest.clone(),
+            ),
+            (
+                GenerationPolicyCaptureStoreOperation::Store,
+                successor_id.clone(),
+                policy_digest.clone(),
+            ),
+            (
+                GenerationPolicyCaptureStoreOperation::Delete,
+                initial_id,
+                policy_digest.clone(),
+            ),
+            (
+                GenerationPolicyCaptureStoreOperation::Delete,
+                successor_id,
+                policy_digest,
+            ),
         ]
     );
 }
@@ -1182,8 +2193,13 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
     for mode in [HookMode::BlockResult, HookMode::UncertainResult] {
         let trace = Trace::default();
         let journal = Arc::new(Journal::with_trace(trace.clone()));
+        let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
         let resolver = Arc::new(ExactCaptureResolver::default());
-        let owner = context_free_owner(journal.clone(), resolver.clone());
+        let owner = context_free_owner_with_store(
+            journal.clone(),
+            Arc::clone(&policy_captures),
+            resolver.clone(),
+        );
         let factory = Arc::new(
             McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
                 .expect("factory"),
@@ -1196,13 +2212,32 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
         let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
         let spawner = Arc::new(ScriptedSpawner::new());
         let runtime = hooks_with_mode(mode, trace.clone());
-        let (call, guarded) =
-            guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
+        let policy_snapshot = GenerationPolicyCapture::new(
+            CanonPath::new("/pre-claim-policy"),
+            Mode::Default,
+            Ruleset::default(),
+            None,
+        )
+        .expect("generation policy capture")
+        .snapshot();
+        let digest = policy_snapshot.digest();
+        let weak = Arc::downgrade(&policy_snapshot);
+        let (call, guarded) = guarded_with_session_context_and_policy_snapshot(
+            auth,
+            resume,
+            runtime.clone(),
+            &capture,
+            Arc::clone(&policy_snapshot),
+            spawner.clone(),
+        );
         let ToolExecution::InputRequired(foreign) =
             tool.execute(call, &guarded).await.expect("required")
         else {
             panic!("expected required")
         };
+        let id = foreign.continuation_id().to_owned();
+        drop(policy_snapshot);
+        drop(guarded);
         let causality = settled_continuation_causality(&runtime, &foreign, r#"{"choice":"yes"}"#);
         assert!(
             owner
@@ -1220,9 +2255,13 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
         assert_eq!(journal.state(), Some(ContinuationState::Accepted));
         assert!(!journal.events().contains(&"claim"));
         assert_eq!(spawner.calls(), 1);
+        assert!(policy_captures.contains(&id, &digest));
+        assert_eq!(weak.strong_count(), 2);
+        assert_eq!(policy_captures.calls().len(), 1, "delete must not run");
         assert_eq!(
             journal.trace.events(),
             vec![
+                "store",
                 "record",
                 "Elicitation",
                 "accepted_answer",
@@ -1433,8 +2472,17 @@ fn context_free_owner(
     journal: Arc<dyn ContinuationJournal>,
     resolver: Arc<ExactCaptureResolver>,
 ) -> Arc<McpContinuationOwner> {
+    context_free_owner_with_store(journal, Arc::new(CaptureStore::default()), resolver)
+}
+
+fn context_free_owner_with_store(
+    journal: Arc<dyn ContinuationJournal>,
+    policy_captures: Arc<CaptureStore>,
+    resolver: Arc<ExactCaptureResolver>,
+) -> Arc<McpContinuationOwner> {
     Arc::new(McpContinuationOwner::new(
         journal,
+        policy_captures,
         resolver,
         Arc::new(FixedResumeKey),
         Arc::new(FixedClock),
@@ -1474,6 +2522,23 @@ fn guarded_with_session_context_and_policy_snapshot(
     policy_snapshot: Arc<GenerationPolicySnapshot>,
     spawner: Arc<ScriptedSpawner>,
 ) -> (PreparedCall, GuardedEffects<'static>) {
+    let context = resume_context(runtime, capture, policy_snapshot);
+    ToolEffectPorts::new(
+        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
+        Box::leak(Box::new(NoProcess)),
+        Box::leak(Box::new(EmptyEvidence)),
+        Arc::new(OfflineResolver),
+        Arc::new(OfflineOneHop),
+        spawner,
+    )
+    .bind_mcp_resume(authorized, resume, Some(context))
+}
+
+fn resume_context(
+    runtime: SessionHookRuntime<'static>,
+    capture: &McpRegistryCapture,
+    policy_snapshot: Arc<GenerationPolicySnapshot>,
+) -> McpResumeContext<'static> {
     let causality = runtime
         .hook_state()
         .inspect(|state| {
@@ -1498,15 +2563,19 @@ fn guarded_with_session_context_and_policy_snapshot(
         actual.encode_confidential().expose_secret_bytes(),
         policy_snapshot.encode_confidential().expose_secret_bytes()
     );
-    ToolEffectPorts::new(
-        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
-        Box::leak(Box::new(NoProcess)),
-        Box::leak(Box::new(EmptyEvidence)),
-        Arc::new(OfflineResolver),
-        Arc::new(OfflineOneHop),
-        spawner,
+    context
+}
+
+fn guarded_resume_with_session_context(
+    resume: ego_core::suspension::PreparedResume,
+    runtime: SessionHookRuntime<'static>,
+    capture: &McpRegistryCapture,
+    policy_snapshot: Arc<GenerationPolicySnapshot>,
+) -> GuardedMcpResume<'static> {
+    GuardedMcpResume::new(
+        resume,
+        Some(resume_context(runtime, capture, policy_snapshot)),
     )
-    .bind_mcp_resume(authorized, resume, Some(context))
 }
 
 fn guarded_without_session_context(
@@ -1753,8 +2822,13 @@ async fn answer_resume_resolves_recorded_capture_and_adapter_never_uses_loop_cap
 async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continuation() {
     let trace = Trace::default();
     let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
     let resolver = Arc::new(ExactCaptureResolver::default());
-    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let owner = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        resolver.clone(),
+    );
     let factory = Arc::new(
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
@@ -1767,14 +2841,32 @@ async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continu
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
     let runtime = hooks_with_mode(HookMode::BlockResult, trace.clone());
-    let (call, guarded) =
-        guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
+    let policy_snapshot = GenerationPolicyCapture::new(
+        CanonPath::new("/blocked-result-policy"),
+        Mode::Default,
+        Ruleset::default(),
+        None,
+    )
+    .expect("generation policy capture")
+    .snapshot();
+    let digest = policy_snapshot.digest();
+    let weak = Arc::downgrade(&policy_snapshot);
+    let (call, guarded) = guarded_with_session_context_and_policy_snapshot(
+        auth,
+        resume,
+        runtime.clone(),
+        &capture,
+        Arc::clone(&policy_snapshot),
+        spawner.clone(),
+    );
     let ToolExecution::InputRequired(required) =
         tool.execute(call, &guarded).await.expect("required")
     else {
         panic!("expected required");
     };
+    let id = required.continuation_id().to_owned();
     drop(guarded);
+    drop(policy_snapshot);
     drop(capture);
     assert!(resolver.remove(&stable).is_some());
 
@@ -1795,6 +2887,7 @@ async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continu
     assert_eq!(
         trace.events(),
         vec![
+            "store",
             "record",
             "Elicitation",
             "accepted_answer",
@@ -1804,6 +2897,9 @@ async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continu
     // The owner-held exact capture is still usable after the external map and
     // the operation's temporary capture handle have been released.
     assert_eq!(journal.recorded_capture(), stable);
+    assert!(policy_captures.contains(&id, &digest));
+    assert_eq!(weak.strong_count(), 2);
+    assert_eq!(policy_captures.calls().len(), 1, "delete must not run");
 }
 
 #[tokio::test(flavor = "current_thread")]

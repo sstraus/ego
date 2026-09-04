@@ -28,7 +28,7 @@ use ego_mcp::{
     RegistryScope, RegistryTrigger,
 };
 use ego_tools::clock::SystemClock;
-use ego_tools::credentials::OsResumeKey;
+use ego_tools::credentials::{OsGenerationPolicyCaptureStore, OsResumeKey};
 use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
 use ego_tools::mcp_continuation::JsonlContinuationJournal;
 use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
@@ -181,6 +181,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                 McpRegistryRuntime::new(
                     registry_journal,
                     continuation_journal,
+                    Arc::new(OsGenerationPolicyCaptureStore::default()),
                     http_management,
                     stdio_management,
                     Arc::new(OsResumeKey::open(storage.path())),

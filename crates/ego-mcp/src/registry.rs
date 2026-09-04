@@ -19,8 +19,9 @@ use ego_core::suspension::{
     ResumeFloor, ResumeKeySource,
 };
 use ego_core::turn::{
-    AdmittedToolSource, CapturedToolCatalogue, McpRegistryEvent, McpRegistryJournal,
-    McpRegistryJournalError, RegisteredTool, ToolCatalogueError, ToolEffectPorts,
+    AdmittedToolSource, CapturedToolCatalogue, GenerationPolicyCaptureStore, McpRegistryEvent,
+    McpRegistryJournal, McpRegistryJournalError, RegisteredTool, ToolCatalogueError,
+    ToolEffectPorts,
 };
 use rmcp::model::{Prompt, Resource};
 use sha2::{Digest, Sha256};
@@ -1434,6 +1435,7 @@ impl McpRegistryRuntime {
     pub fn new(
         registry_journal: Arc<dyn McpRegistryJournal>,
         continuation_journal: Arc<dyn ContinuationJournal>,
+        policy_captures: Arc<dyn GenerationPolicyCaptureStore>,
         http_management: Arc<dyn McpHttpEffects>,
         stdio_management: Arc<dyn McpDuplexEffectsFactory>,
         keys: Arc<dyn ResumeKeySource>,
@@ -1453,6 +1455,7 @@ impl McpRegistryRuntime {
         });
         let continuations = Arc::new(McpContinuationOwner::new(
             continuation_journal,
+            policy_captures,
             resolver,
             keys,
             clock,

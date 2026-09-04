@@ -26,7 +26,9 @@ use ego_core::suspension::{
     GuardedMcpResume, McpResumeContext, OpenedContinuation, PreparedResume, ResumeFloor,
     ResumeKeySource,
 };
-use ego_core::turn::{GenerationPolicySnapshot, ToolEffectPorts};
+use ego_core::turn::{
+    GenerationPolicyCaptureStore, GenerationPolicyDigest, GenerationPolicySnapshot, ToolEffectPorts,
+};
 use futures::future;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResult, ContentBlock, GetPromptRequestParams,
@@ -110,6 +112,7 @@ pub trait McpCaptureResolver: Send + Sync {
 /// The sole owner of durable MCP input-required and accepted-answer rounds.
 pub struct McpContinuationOwner {
     journal: Arc<dyn ContinuationJournal>,
+    policy_captures: Arc<dyn GenerationPolicyCaptureStore>,
     captures: Arc<dyn McpCaptureResolver>,
     keys: Arc<dyn ResumeKeySource>,
     clock: Arc<dyn Clock>,
@@ -125,12 +128,14 @@ struct PinnedContinuation {
 impl McpContinuationOwner {
     pub fn new(
         journal: Arc<dyn ContinuationJournal>,
+        policy_captures: Arc<dyn GenerationPolicyCaptureStore>,
         captures: Arc<dyn McpCaptureResolver>,
         keys: Arc<dyn ResumeKeySource>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             journal,
+            policy_captures,
             captures,
             keys,
             clock,
@@ -153,13 +158,14 @@ impl McpContinuationOwner {
             ));
         }
         let policy_snapshot = context.policy_snapshot();
+        let policy_digest = policy_snapshot.digest();
         let schema = serde_json::to_vec(required.schema())
             .map_err(|_| continuation(ContinuationError::InvalidRecord))?;
         let id = continuation_id(&envelope, &required, &schema);
         let record = resume
             .into_record(
                 id.clone(),
-                policy_snapshot.digest(),
+                policy_digest.clone(),
                 required.request_state().to_vec(),
                 required.correlation_key(),
                 schema,
@@ -186,20 +192,35 @@ impl McpContinuationOwner {
                 "MCP capture resolver returned the wrong identity",
             ));
         }
-        self.insert_pin(id.clone(), capture, policy_snapshot)?;
+        self.insert_pin(id.clone(), capture, Arc::clone(&policy_snapshot))?;
+        if let Err(error) = self
+            .policy_captures
+            .store(&id, Arc::clone(&policy_snapshot))
+        {
+            let _ = self.remove_pin(&id);
+            return Err(authority(error.diagnostic()));
+        }
         if let Err(error) = self.journal.record(record) {
-            self.remove_pin(&id)?;
+            let _ = self.remove_pin(&id);
             return Err(continuation(error));
         }
-        Self::dispatch(
+        if let Err(primary) = Self::dispatch(
             &context.runtime(),
             context.causality().clone(),
             HookLifecycle::Elicitation,
             &id,
         )
-        .await?;
-        ForeignInputRequired::new(id, required.question_request().clone())
-            .map_err(|_| continuation(ContinuationError::InvalidId))
+        .await
+        {
+            return Err(self.terminalize_pending_failure(&id, &policy_digest, primary));
+        }
+        ForeignInputRequired::new(id.clone(), required.question_request().clone()).map_err(|_| {
+            self.terminalize_pending_failure(
+                &id,
+                &policy_digest,
+                continuation(ContinuationError::InvalidId),
+            )
+        })
     }
 
     pub async fn accept_answer<'session, 'turn>(
@@ -213,20 +234,18 @@ impl McpContinuationOwner {
     ) -> Result<ToolExecution, McpError> {
         let pending = self.journal.load(id).map_err(continuation)?;
         validate_recorded_answer(&pending, raw_answer)?;
+        let policy_digest = pending.generation_policy_digest().clone();
         let pinned = self.capture_for(id, pending.capture())?;
+        if pinned.policy_snapshot.digest() != policy_digest {
+            return Err(authority(
+                "MCP continuation generation policy does not match its durable record",
+            ));
+        }
         let capture = &pinned.capture;
         let now = self.clock.now();
-        if let Err(error) = self.journal.accept_answer(id, raw_answer, now) {
-            if error.is_expired()
-                || matches!(
-                    error,
-                    ContinuationError::DuplicateAnswer | ContinuationError::InvalidTransition
-                )
-            {
-                self.remove_pin(id)?;
-            }
-            return Err(continuation(error));
-        }
+        self.journal
+            .accept_answer(id, raw_answer, now)
+            .map_err(continuation)?;
         let accepted = self
             .journal
             .load(id)
@@ -238,17 +257,9 @@ impl McpContinuationOwner {
             accepted.fingerprints(),
             accepted.original_parameters(),
         )?;
-        let opened =
-            match accepted.open(call, &current_fingerprints, &floor, now, self.keys.as_ref()) {
-                Ok(opened) => opened,
-                Err(error) => {
-                    if error.is_expired() {
-                        self.remove_pin(id)?;
-                    }
-                    return Err(continuation(error));
-                }
-            };
-        let expires_at = opened.expires_at();
+        let opened = accepted
+            .open(call, &current_fingerprints, &floor, now, self.keys.as_ref())
+            .map_err(continuation)?;
         let admission = McpResumeAdmission::validate(opened)?;
         Self::dispatch(
             &runtime,
@@ -259,35 +270,12 @@ impl McpContinuationOwner {
         .await?;
         let original_causality = original_tool_causality(&runtime, &causality)?;
         let claim_time = self.clock.now();
-        let (authorized, successor) = match admission.into_retry_authorized_with_successor(
+        let (authorized, successor) = admission.into_retry_authorized_with_successor(
             floor,
             claim_time,
             self.keys.as_ref(),
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                if matches!(error.failure(), McpFailure::Authority)
-                    && self.clock.now() >= expires_at
-                {
-                    self.remove_pin(id)?;
-                }
-                return Err(error);
-            }
-        };
-        let claimed = match self.journal.claim(id, claim_time) {
-            Ok(claimed) => claimed,
-            Err(error) => {
-                if error.is_expired()
-                    || matches!(
-                        error,
-                        ContinuationError::DuplicateClaim | ContinuationError::InvalidTransition
-                    )
-                {
-                    self.remove_pin(id)?;
-                }
-                return Err(continuation(error));
-            }
-        };
+        )?;
+        let claimed = self.journal.claim(id, claim_time).map_err(continuation)?;
         let successor_context = McpResumeContext::new(
             runtime,
             capture.clone(),
@@ -299,37 +287,49 @@ impl McpContinuationOwner {
         let generation: Arc<str> = Arc::from(capture.generation());
         match factory.execute(server, call, &guarded, generation).await {
             Ok(execution) => {
-                let settlement = self
-                    .journal
+                self.journal
                     .settle(claimed, ContinuationState::Completed)
-                    .map_err(continuation);
-                self.remove_pin(id)?;
-                settlement?;
+                    .map_err(|_| settlement_failure(DeliveryCertainty::DefinitelySent))?;
+                self.cleanup_terminal(id, &policy_digest);
                 Ok(execution)
             }
             Err(error) => {
+                let message = error.to_string();
                 let delivery = error.delivery().unwrap_or(DeliveryCertainty::PossiblySent);
                 let state = if delivery == DeliveryCertainty::DefinitelyUnsent {
                     ContinuationState::Failed
                 } else {
                     ContinuationState::Uncertain
                 };
-                let settlement = self.journal.settle(claimed, state).map_err(|settlement| {
-                    McpError::with_delivery(
-                        McpFailure::Transport,
-                        format!("continued MCP settlement failed: {settlement}"),
-                        delivery,
-                    )
-                });
-                self.remove_pin(id)?;
-                settlement?;
+                self.journal
+                    .settle(claimed, state)
+                    .map_err(|_| settlement_failure(delivery))?;
+                self.cleanup_terminal(id, &policy_digest);
                 Err(McpError::with_delivery(
                     McpFailure::Transport,
-                    error.to_string(),
+                    message,
                     delivery,
                 ))
             }
         }
+    }
+
+    fn terminalize_pending_failure(
+        &self,
+        id: &str,
+        digest: &GenerationPolicyDigest,
+        primary: McpError,
+    ) -> McpError {
+        if self.journal.fail_pending(id).is_err() {
+            return authority("MCP continuation pending failure could not be durably recorded");
+        }
+        self.cleanup_terminal(id, digest);
+        primary
+    }
+
+    fn cleanup_terminal(&self, id: &str, digest: &GenerationPolicyDigest) {
+        let _ = self.remove_pin(id);
+        let _ = self.policy_captures.delete(id, digest);
     }
 
     fn insert_pin(
@@ -1853,6 +1853,14 @@ fn mcp_execution_error(error: McpError) -> ToolError {
 
 fn continuation(error: ContinuationError) -> McpError {
     McpError::new(McpFailure::Authority, error.to_string())
+}
+
+fn settlement_failure(delivery: DeliveryCertainty) -> McpError {
+    McpError::with_delivery(
+        McpFailure::Authority,
+        "MCP continuation terminal state could not be durably recorded",
+        delivery,
+    )
 }
 
 fn hook_failure(message: impl Into<String>) -> McpError {

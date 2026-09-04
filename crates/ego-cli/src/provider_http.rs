@@ -17,7 +17,7 @@ use ego_mcp::{
     McpHttpEffects, McpRegistryController, McpRegistryRuntime,
 };
 use ego_tools::clock::SystemClock;
-use ego_tools::credentials::OsResumeKey;
+use ego_tools::credentials::{OsGenerationPolicyCaptureStore, OsResumeKey};
 use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts};
 use ego_tools::http::SystemResolver;
 use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
@@ -177,6 +177,7 @@ impl McpProcessScope {
             McpRegistryRuntime::new(
                 journal,
                 continuation_journal,
+                Arc::new(OsGenerationPolicyCaptureStore::default()),
                 http,
                 stdio,
                 Arc::new(OsResumeKey::open(&root)),
