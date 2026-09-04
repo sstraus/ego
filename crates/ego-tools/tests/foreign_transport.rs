@@ -1722,6 +1722,13 @@ fn absolute_hop_timeout_covers_phased_exchange() {
     let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
         let request = read_request(&mut stream);
+        if !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return CapturedConnection {
+                peer,
+                request,
+                request_count: 1,
+            };
+        }
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabc")
             .expect("first response phase");
