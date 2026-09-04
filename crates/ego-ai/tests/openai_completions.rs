@@ -282,7 +282,7 @@ fn reasoning_state_is_refused_rather_than_dropped() {
 #[test]
 fn the_request_declares_what_it_sends_and_what_it_expects_back() {
     let base = Url::parse("https://api.openai.com/v1/").expect("a URL");
-    let headers = vec![("authorization".to_string(), "Bearer sk-test".to_string())];
+    let headers = vec![HttpHeader::new("authorization", b"Bearer sk-test".to_vec()).unwrap()];
     let target = RequestTarget::new(&base, &headers);
     let req = build_request(&target, &golden_request()).expect("this request is expressible");
 
@@ -294,8 +294,8 @@ fn the_request_declares_what_it_sends_and_what_it_expects_back() {
     let header = |name: &str| {
         req.headers
             .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.as_str())
+            .find(|header| header.name() == name)
+            .and_then(|header| std::str::from_utf8(header.value()).ok())
     };
     assert_eq!(header("content-type"), Some("application/json"));
     assert_eq!(

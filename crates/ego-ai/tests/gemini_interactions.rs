@@ -427,7 +427,7 @@ fn the_request_is_stateless_and_states_it_rather_than_relying_on_a_default() {
 fn the_stream_is_asked_for_in_the_query_as_well_as_in_the_body() {
     let base = Url::parse("https://generativelanguage.googleapis.com/v1beta/")
         .expect("a base this test controls");
-    let headers = vec![("x-goog-api-key".to_string(), "k".to_string())];
+    let headers = vec![HttpHeader::new("x-goog-api-key", b"k".to_vec()).unwrap()];
     let target = RequestTarget::new(&base, &headers);
     let built = build_request(&target, &wide_request()).expect("this request is expressible");
 
@@ -436,7 +436,7 @@ fn the_stream_is_asked_for_in_the_query_as_well_as_in_the_body() {
         "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse",
         "?alt=sse is how this API frames a stream as SSE"
     );
-    let names: Vec<&str> = built.headers.iter().map(|(n, _)| n.as_str()).collect();
+    let names: Vec<&str> = built.headers.iter().map(|header| header.name()).collect();
     assert!(names.contains(&"x-goog-api-key"), "{names:?}");
     assert!(names.contains(&"content-type"), "{names:?}");
 }

@@ -8,6 +8,7 @@ use ego_ai::wire::openai_codex_responses::OpenAiCodexResponses;
 use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::{RequestTarget, WireFormat};
 use ego_core::generator::types::{GenRequest, ThinkingLevel};
+use ego_core::permit::HttpHeader;
 use serde_json::{Value, json};
 
 mod support;
@@ -38,7 +39,7 @@ fn body_for(
     wire: &dyn WireFormat,
     request: &GenRequest,
 ) -> Result<Value, String> {
-    let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
+    let headers = vec![HttpHeader::new("authorization", b"Bearer test".to_vec()).unwrap()];
     let target = RequestTarget::new(row.base(), &headers);
     let built = wire
         .build_request(&target, request)

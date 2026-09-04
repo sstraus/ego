@@ -592,7 +592,7 @@ fn a_system_turn_that_is_not_text_is_refused() {
 #[test]
 fn every_request_carries_the_version_this_mapping_was_written_against() {
     let base = Url::parse("https://api.anthropic.com/v1/").expect("a valid base");
-    let headers = vec![("x-api-key".to_string(), "sk-test".to_string())];
+    let headers = vec![HttpHeader::new("x-api-key", b"sk-test".to_vec()).unwrap()];
     let target = RequestTarget::new(&base, &headers);
     let req = build_request(&target, &wide_request()).expect("this request is expressible");
 
@@ -600,8 +600,8 @@ fn every_request_carries_the_version_this_mapping_was_written_against() {
     let header = |name: &str| {
         req.headers
             .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.as_str())
+            .find(|header| header.name() == name)
+            .and_then(|header| std::str::from_utf8(header.value()).ok())
     };
     assert_eq!(header(VERSION_HEADER), Some(VERSION));
     assert_eq!(header("content-type"), Some("application/json"));

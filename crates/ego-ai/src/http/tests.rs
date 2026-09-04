@@ -133,7 +133,7 @@ fn provider_request(url: &str) -> crate::http::HttpRequest {
     crate::http::HttpRequest {
         url: Url::parse(url).expect("URL"),
         method: Method::Post,
-        headers: vec![("x-test".to_owned(), "raw".to_owned())],
+        headers: vec![HttpHeader::new("x-test", b"raw".to_vec()).expect("header")],
         body: Some(b"prompt".to_vec()),
     }
 }

@@ -11,6 +11,7 @@ use ego_core::generator::types::{
     ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel, ToolDescriptor,
 };
+use ego_core::permit::HttpHeader;
 use futures::StreamExt;
 use url::Url;
 
@@ -54,7 +55,7 @@ fn the_path_is_codex_responses_not_chat_completions() {
 #[test]
 fn build_request_joins_the_codex_path_and_sets_the_wire_beta() {
     let base = Url::parse("https://chatgpt.com/backend-api/").unwrap();
-    let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
+    let headers = vec![HttpHeader::new("authorization", b"Bearer test".to_vec()).unwrap()];
     let target = RequestTarget::new(&base, &headers);
     let request = OpenAiCodexResponses
         .build_request(&target, &request())
@@ -65,13 +66,10 @@ fn build_request_joins_the_codex_path_and_sets_the_wire_beta() {
         request.url
     );
     assert!(!request.url.as_str().contains("chat/completions"));
-    assert!(
-        request
-            .headers
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("openai-beta")
-                && value == "responses=experimental")
-    );
+    assert!(request.headers.iter().any(|header| {
+        header.name().eq_ignore_ascii_case("openai-beta")
+            && header.value() == b"responses=experimental"
+    }));
 }
 
 #[tokio::test]

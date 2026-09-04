@@ -47,7 +47,6 @@ use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::ProviderCost;
 use ego_ai::wire::{RequestRefused, RequestTarget, WireFormat};
 use ego_core::budget::{BudgetGate, PricingQuote, SharedBudgetGate};
-use ego_core::config::{Mode, Ruleset};
 use ego_core::cost::{Amount, CumulativeCost, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{DomainEvent, ExitReason};
 use ego_core::event::id::SessionId;
@@ -67,9 +66,7 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{ErrorKind, GenRequest, StopReason, ThinkingLevel};
 use ego_core::permit::fake::FakeFs;
-use ego_core::permit::{
-    CanonPath, PolicyEngine, ProcessError, ProcessExecutor, SpawnSpec, Tool, ToolResult,
-};
+use ego_core::permit::{CanonPath, ProcessError, ProcessExecutor, SpawnSpec, Tool, ToolResult};
 use ego_core::permit::{HttpHeader, OneHopResponse, TransportError, TransportFailure};
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::NullSink;
@@ -82,6 +79,7 @@ use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, St
 use ego_core::turn::{
     CancelToken, GenerationRuntime, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
 };
+use ego_core::turn::{GenerationPolicyCapture, GenerationPolicySnapshot, GenerationPolicySource};
 use futures::StreamExt;
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
@@ -337,6 +335,35 @@ impl HttpCall for StubCall {
 
 // --- the harness ---
 
+struct FixedPolicySource;
+
+impl GenerationPolicySource for FixedPolicySource {
+    fn current(&self) -> Result<Arc<ego_core::permit::PolicyEngine>, String> {
+        Ok(Arc::new(ego_core::permit::PolicyEngine::new(
+            CanonPath::new("/ws"),
+            ego_core::config::Mode::Default,
+            ego_core::config::Ruleset::default(),
+        )))
+    }
+
+    fn capture(&self) -> Result<GenerationPolicyCapture, String> {
+        GenerationPolicyCapture::new(
+            CanonPath::new("/ws"),
+            ego_core::config::Mode::Default,
+            ego_core::config::Ruleset::default(),
+            None,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn restore(
+        &self,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<GenerationPolicyCapture, String> {
+        GenerationPolicyCapture::restore(snapshot, None).map_err(|error| error.to_string())
+    }
+}
+
 /// One whole turn against `row`, over a transport replaying `transcript`.
 ///
 /// Everything a `TurnLoop` borrows is built here and dropped here, which is
@@ -371,7 +398,6 @@ async fn one_turn(
     ));
     let store = MemStore::default();
     let clock = FixedClock;
-    let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
     let fs = FakeFs::default();
     let process = NoProcess;
     let evidence = NoEvidence;
@@ -401,6 +427,7 @@ async fn one_turn(
                     rates: resolved.rates.clone(),
                 },
             }),
+            policy_source: Arc::new(FixedPolicySource),
             gate,
             config: TurnConfig {
                 system: None,
@@ -411,7 +438,6 @@ async fn one_turn(
         },
         Tools::new(
             &registry,
-            &policy,
             ToolEffectPorts::new(
                 &fs,
                 &process,
