@@ -23,17 +23,17 @@
 //!
 //! # What the goldens are, and what they are worth
 //!
-//! Hand-assembled from `docs/14-six-wire-protocols.md` §3.1-§3.8, which reads
-//! Google's documentation and the request types in the **released** v2.19.0 of
-//! `googleapis/python-genai` — `[D]+[S]`, never `[R]`. No `GEMINI_API_KEY`
+//! Hand-assembled from Google's stable v1 Interactions reference, audited by
+//! exact Terra on 2026-09-04 — `[D]`, never `[R]`. No entitled Gemini key
 //! exists in this repository, so nothing here has been observed against a live
-//! server. §3.7's curl is what would upgrade it.
+//! server. The ignored opt-in smoke is what would upgrade it.
 //!
 //! Fields this mapping ignores are present in the transcripts on purpose
 //! (`service_tier`, `object`, `created`, `input_tokens_by_modality`,
 //! `interaction.status_update`, `step_usage`), so that ignoring them is tested
 //! rather than assumed.
 
+use base64::Engine as _;
 use ego_ai::http::HttpResponse;
 use ego_ai::wire::RequestTarget;
 use ego_ai::wire::gemini_interactions::{
@@ -41,8 +41,8 @@ use ego_ai::wire::gemini_interactions::{
 };
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
-    ThinkingLevel, ToolDescriptor,
+    ContentBlock, Conversation, ErrorKind, GenRequest, Image, ImageMediaType, Message,
+    ReasoningState, Role, StopReason, ThinkingLevel, ToolDescriptor,
 };
 use ego_core::permit::HttpHeader;
 use ego_core::state::Usage;
@@ -50,6 +50,8 @@ use url::Url;
 
 const TEXT_TRANSCRIPT: &str = include_str!("goldens/profile/gemini/stream/text.sse");
 const TOOL_TRANSCRIPT: &str = include_str!("goldens/profile/gemini/stream/tool_calls.sse");
+const IMAGE_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 fn conversation(messages: Vec<Message>) -> Conversation {
     Conversation::new(messages).expect("the test histories here are valid")
@@ -158,6 +160,39 @@ fn a_prior_answer_replays_as_a_model_output_step() {
     );
 }
 
+/// Stable Interactions accepts inline image content as base64 plus its MIME
+/// type. The image stays in its exact position among the user's content.
+#[test]
+fn an_image_is_inline_base64_content_with_its_mime_type() {
+    let image = Image::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(IMAGE_PNG)
+            .expect("the fixture is base64"),
+        ImageMediaType::Png,
+    )
+    .expect("the fixture is a valid PNG");
+    let req = GenRequest {
+        messages: conversation(vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "before".to_string(),
+                },
+                ContentBlock::Image { image },
+                ContentBlock::Text {
+                    text: "after".to_string(),
+                },
+            ],
+        }]),
+        ..wide_request()
+    };
+
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("goldens/profile/gemini/request/image.json"))
+            .expect("the image request fixture is JSON");
+    assert_eq!(body_of(&req), expected);
+}
+
 /// A tool call replays with its arguments as an **object**, and its result as
 /// a `function_result` step carrying the flag that says it failed.
 ///
@@ -245,6 +280,41 @@ fn tool_arguments_that_are_not_json_are_refused() {
     );
 }
 
+/// Valid JSON is still not sufficient: function arguments are an object on
+/// this contract, so a scalar is rejected before request construction ends.
+#[test]
+fn tool_arguments_that_are_not_an_object_are_refused() {
+    let req = GenRequest {
+        messages: conversation(vec![
+            Message::text(Role::User, "read it"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    call_id: "un6k8t18".to_string(),
+                    name: "read_file".to_string(),
+                    args: r#"["a.txt"]"#.to_string(),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    call_id: "un6k8t18".to_string(),
+                    output: "contents".to_string(),
+                    is_error: false,
+                }],
+            },
+        ]),
+        ..wide_request()
+    };
+
+    assert_eq!(
+        request_body(&req).expect_err("a JSON array is not an arguments object"),
+        Inexpressible::ArgumentsNotObject {
+            call_id: "un6k8t18".to_string()
+        }
+    );
+}
+
 /// Reasoning state replays as a `thought` step, byte for byte.
 ///
 /// Google's wording is as hard as Anthropic's: "You **MUST** always resend all
@@ -301,6 +371,33 @@ fn reasoning_state_from_another_dialect_is_refused() {
         Inexpressible::ReasoningStateFromAnotherDialect {
             dialect: "anthropic-messages".to_string()
         }
+    );
+}
+
+/// Provider-private state is opaque but still has to be a complete JSON step;
+/// malformed bytes are refused before a transport can observe the request.
+#[test]
+fn malformed_reasoning_state_is_refused_before_network_effects() {
+    let req = GenRequest {
+        messages: conversation(vec![
+            Message::text(Role::User, "think"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Reasoning {
+                    state: ReasoningState {
+                        dialect: DIALECT.to_string(),
+                        blob: "not a JSON step".to_string(),
+                    },
+                }],
+            },
+            Message::text(Role::User, "again"),
+        ]),
+        ..wide_request()
+    };
+
+    assert_eq!(
+        request_body(&req).expect_err("malformed private state cannot go on the wire"),
+        Inexpressible::ReasoningStateNotJson
     );
 }
 
@@ -422,10 +519,11 @@ fn the_request_is_stateless_and_states_it_rather_than_relying_on_a_default() {
     assert_eq!(body["model"], serde_json::json!("gemini-3.7-flash"));
 }
 
-/// The URL asks for SSE framing, and the row's credential header survives.
+/// Stable Interactions asks for SSE in the body and `Accept` header. It has no
+/// beta path and no query-based compatibility spelling.
 #[test]
-fn the_stream_is_asked_for_in_the_query_as_well_as_in_the_body() {
-    let base = Url::parse("https://generativelanguage.googleapis.com/v1beta/")
+fn the_stable_target_and_sse_negotiation_have_no_beta_or_query_fallback() {
+    let base = Url::parse("https://generativelanguage.googleapis.com/v1/")
         .expect("a base this test controls");
     let headers = vec![HttpHeader::new("x-goog-api-key", b"k".to_vec()).unwrap()];
     let target = RequestTarget::new(&base, &headers);
@@ -433,12 +531,23 @@ fn the_stream_is_asked_for_in_the_query_as_well_as_in_the_body() {
 
     assert_eq!(
         built.url.as_str(),
-        "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse",
-        "?alt=sse is how this API frames a stream as SSE"
+        "https://generativelanguage.googleapis.com/v1/interactions"
+    );
+    assert!(
+        built.url.query().is_none(),
+        "no query belongs on {}",
+        built.url
     );
     let names: Vec<&str> = built.headers.iter().map(|header| header.name()).collect();
     assert!(names.contains(&"x-goog-api-key"), "{names:?}");
     assert!(names.contains(&"content-type"), "{names:?}");
+    let accept = built
+        .headers
+        .iter()
+        .find(|header| header.name() == "accept")
+        .expect("streaming requests carry Accept");
+    assert_eq!(accept.value(), b"text/event-stream");
+    assert_eq!(body_of(&wide_request())["stream"], serde_json::json!(true));
 }
 
 // --- the stream ---
@@ -676,8 +785,8 @@ fn an_error_event_ends_the_generation_with_what_the_provider_said() {
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
 }
 
-/// There is no `[DONE]` sentinel and no finish reason, so a stream that simply
-/// stops was cut — and that is an error, not a short answer.
+/// `[DONE]` is only a framing sentinel. Without `interaction.completed`, a
+/// stream that simply stops was cut and is not a short answer.
 #[test]
 fn a_stream_that_ends_before_the_interaction_completes_is_an_error() {
     let cut = TEXT_TRANSCRIPT

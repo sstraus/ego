@@ -384,7 +384,7 @@ pub const KIMI_CODING_BASE: &str = "https://api.kimi.com/coding/v1/";
 pub const MINIMAX_OAUTH_BASE: &str = "https://api.minimax.io/anthropic/v1/";
 pub const NOUS_BASE: &str = "https://inference-api.nousresearch.com/v1/";
 /// The base Google serves the Gemini developer API under.
-pub const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/";
+pub const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1/";
 /// The environment variable Gemini's credential is read from.
 pub const GEMINI_KEY_VAR: &str = "GEMINI_API_KEY";
 
@@ -792,8 +792,8 @@ impl ProviderRow {
                 header: "x-goog-api-key".to_string(),
                 var: GEMINI_KEY_VAR.to_string(),
             },
-            // "No monetary figure, ever" — `docs/14` §3.3, confirmed against a
-            // recorded fixture. `None` is that assertion, not an omission.
+            // The stable v1 contract states usage dimensions and no monetary
+            // figure. `None` is that schema-derived assertion, not an omission.
             cost: None,
         }
     }

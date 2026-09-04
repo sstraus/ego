@@ -246,8 +246,8 @@ pub const ANTHROPIC: Profile = Profile {
 /// Two mappings could be a special case; three is a seam. This one shares no
 /// request field with either of the others — a conversation is a list of
 /// *steps* with no role on them, the terminal signal is an interaction
-/// `status` rather than any finish reason, and the stream is asked for in the
-/// query string.
+/// `status` rather than any finish reason, and streaming is requested through
+/// the body and `Accept` header.
 ///
 /// It is also the only row that cannot offer every level ego names:
 /// `thinking_level` has no `off`, so `ThinkingLevel::Off` is refused at the
@@ -260,7 +260,7 @@ pub const GEMINI: Profile = Profile {
     row: ProviderRow::gemini_default,
     wire: &GeminiInteractions,
     provenance: Provenance::VendorSchemaDerived,
-    source: "the Gemini Interactions API streaming specification",
+    source: "the stable Gemini v1 Interactions API specification (read 2026-09-04)",
     subscription: false,
     error_message_at: NESTED,
 };

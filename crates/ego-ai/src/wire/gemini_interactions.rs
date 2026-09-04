@@ -43,6 +43,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     ContentBlock, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason, ThinkingLevel,
@@ -80,13 +81,10 @@ impl WireFormat for GeminiInteractions {
     }
 }
 
-/// The path a provider row appends to its base URL to reach this format.
-///
-/// The query is part of the path because it is part of the *framing*:
-/// `?alt=sse` is how this API is asked for an event stream, exactly as
-/// `accept: text/event-stream` is on the others, and both are facts about what
-/// is wanted back rather than about who is serving it.
-pub const PATH: &str = "interactions?alt=sse";
+/// The stable Interactions path a provider row appends to its v1 base URL.
+/// Streaming is negotiated by the body's `stream: true` and the shared
+/// `Accept: text/event-stream` header, never by a query compatibility shape.
+pub const PATH: &str = "interactions";
 
 /// Which dialect this mapping's [`ReasoningState`] blobs are written in.
 pub const DIALECT: &str = "gemini-interactions";
@@ -108,10 +106,10 @@ pub enum Inexpressible {
     /// Tool arguments that are not JSON. This API wants an object, and a
     /// string that only looks like one cannot become it.
     ArgumentsNotJson { call_id: String },
+    /// Valid JSON that is not the object this API requires for arguments.
+    ArgumentsNotObject { call_id: String },
     /// A system turn carrying something that is not text.
     SystemTurnIsTextOnly,
-    /// This compiled candidate has no selectable model-capability authority.
-    ImageInputUnproved,
 }
 
 impl std::fmt::Display for Inexpressible {
@@ -139,14 +137,15 @@ impl std::fmt::Display for Inexpressible {
                 "the arguments of call {call_id} are not JSON: this API takes an \
                  object where chat-completions takes a string"
             ),
+            Inexpressible::ArgumentsNotObject { call_id } => write!(
+                f,
+                "the arguments of call {call_id} are JSON but not an object, and \
+                 the Interactions API accepts only an object in that field"
+            ),
             Inexpressible::SystemTurnIsTextOnly => write!(
                 f,
                 "a system turn carried something other than text, and \
                  system_instruction is a plain string on this API"
-            ),
-            Inexpressible::ImageInputUnproved => write!(
-                f,
-                "image input is not admitted for the unselectable Gemini Interactions candidate"
             ),
         }
     }
@@ -195,7 +194,7 @@ enum Step<'a> {
     Turn {
         #[serde(rename = "type")]
         kind: &'static str,
-        content: Vec<TextContent<'a>>,
+        content: Vec<WireContent<'a>>,
     },
     Call {
         #[serde(rename = "type")]
@@ -223,8 +222,26 @@ struct TextContent<'a> {
     text: &'a str,
 }
 
+/// One item inside a user or model turn. Images are owned strings because
+/// base64 is a wire encoding, not part of the provider-neutral image value.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireContent<'a> {
+    Text(TextContent<'a>),
+    Image {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        data: String,
+        mime_type: &'static str,
+    },
+}
+
 fn text_content(text: &str) -> TextContent<'_> {
     TextContent { kind: "text", text }
+}
+
+fn turn_text(text: &str) -> WireContent<'_> {
+    WireContent::Text(text_content(text))
 }
 
 /// The spelling this API gives a level, or a refusal naming the four it has.
@@ -273,12 +290,16 @@ fn project<'a>(messages: &'a [Message]) -> Result<(Option<String>, Vec<Step<'a>>
             Role::Assistant => "model_output",
             _ => "user_input",
         };
-        let mut pending: Vec<TextContent<'_>> = Vec::new();
+        let mut pending: Vec<WireContent<'_>> = Vec::new();
 
         for block in &message.content {
             match block {
-                ContentBlock::Text { text } => pending.push(text_content(text)),
-                ContentBlock::Image { .. } => return Err(Inexpressible::ImageInputUnproved),
+                ContentBlock::Text { text } => pending.push(turn_text(text)),
+                ContentBlock::Image { image } => pending.push(WireContent::Image {
+                    kind: "image",
+                    data: base64::engine::general_purpose::STANDARD.encode(image.bytes()),
+                    mime_type: image.media_type().mime(),
+                }),
                 ContentBlock::Reasoning { state } => {
                     flush(turn, &mut pending, &mut steps);
                     if state.dialect != DIALECT {
@@ -297,15 +318,21 @@ fn project<'a>(messages: &'a [Message]) -> Result<(Option<String>, Vec<Step<'a>>
                     args,
                 } => {
                     flush(turn, &mut pending, &mut steps);
+                    let arguments = serde_json::from_str::<&RawValue>(args).map_err(|_| {
+                        Inexpressible::ArgumentsNotJson {
+                            call_id: call_id.clone(),
+                        }
+                    })?;
+                    if !arguments.get().trim_start().starts_with('{') {
+                        return Err(Inexpressible::ArgumentsNotObject {
+                            call_id: call_id.clone(),
+                        });
+                    }
                     steps.push(Step::Call {
                         kind: "function_call",
                         id: call_id,
                         name,
-                        arguments: serde_json::from_str::<&RawValue>(args).map_err(|_| {
-                            Inexpressible::ArgumentsNotJson {
-                                call_id: call_id.clone(),
-                            }
-                        })?,
+                        arguments,
                     });
                 }
                 ContentBlock::ToolResult {
@@ -338,7 +365,7 @@ fn project<'a>(messages: &'a [Message]) -> Result<(Option<String>, Vec<Step<'a>>
 ///
 /// A free function and not a closure: it borrows the same lifetime the steps
 /// carry, and a closure capturing `turn` cannot name that lifetime.
-fn flush<'a>(kind: &'static str, pending: &mut Vec<TextContent<'a>>, steps: &mut Vec<Step<'a>>) {
+fn flush<'a>(kind: &'static str, pending: &mut Vec<WireContent<'a>>, steps: &mut Vec<Step<'a>>) {
     if !pending.is_empty() {
         steps.push(Step::Turn {
             kind,
@@ -675,8 +702,8 @@ impl StreamDecoder {
                 });
                 out.push(AiEvent::Stop(StopReason::Error));
             }
-            // There is no `[DONE]` sentinel and no finish reason on this wire,
-            // so a stream that simply stopped was cut.
+            // `[DONE]` is only a framing sentinel. Without the preceding
+            // interaction status, a stream that simply stopped was cut.
             None => {
                 let message = match &transport {
                     Some(error) => error.to_string(),

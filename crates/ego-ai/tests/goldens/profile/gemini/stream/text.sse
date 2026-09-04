@@ -1,4 +1,4 @@
-: schema-derived from the Gemini Interactions API types in google-genai v2.19.0
+: schema-derived from the stable Gemini v1 Interactions reference, read 2026-09-04
 event: interaction.created
 data: {"interaction":{"id":"v1_9c2f","model":"gemini-3.7-flash","status":"in_progress","object":"interaction"},"event_type":"interaction.created"}
 
@@ -32,3 +32,4 @@ data: {"index":1,"usage":{"total_tokens":1495,"total_input_tokens":1000,"total_c
 event: interaction.completed
 data: {"interaction":{"id":"v1_9c2f","status":"completed","usage":{"total_tokens":1495,"total_input_tokens":1000,"input_tokens_by_modality":[{"modality":"text","tokens":1000}],"total_cached_tokens":400,"total_output_tokens":250,"total_thought_tokens":245,"total_tool_use_tokens":0},"created":"2026-08-22T10:11:12Z","updated":"2026-08-22T10:11:14Z","service_tier":"standard","object":"interaction","model":"gemini-3.7-flash"},"event_type":"interaction.completed"}
 
+data: [DONE]

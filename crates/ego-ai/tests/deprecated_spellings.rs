@@ -51,7 +51,7 @@
 //! an inert field. `docs/15-provider-contract-audit.md` §3 is where that
 //! argument lives in full.
 
-use ego_ai::provider::XAI_BASE;
+use ego_ai::provider::{GEMINI_BASE, XAI_BASE};
 use ego_ai::wire::{
     RequestTarget, WireFormat, anthropic_messages, gemini_interactions,
     github_copilot_completions::GithubCopilotCompletions, kimi_anthropic, kimi_openai,
@@ -178,6 +178,24 @@ const RETIRED: &[Retired] = &[
         why: "xAI Responses takes `input`; `messages` is the deprecated Chat Completions conversation field",
     },
 ];
+
+/// The retired Gemini transport spelling is outside the JSON body, so the
+/// recursive body walk cannot see it. Pin both independently owned halves:
+/// the row owns the API version and the mapping owns the relative path.
+#[test]
+fn gemini_has_no_beta_or_query_stream_compatibility_target() {
+    assert_eq!(GEMINI_BASE, "https://generativelanguage.googleapis.com/v1/");
+    assert_eq!(gemini_interactions::PATH, "interactions");
+    let target = format!("{GEMINI_BASE}{}", gemini_interactions::PATH);
+    assert!(
+        !target.contains("v1beta"),
+        "retired API version in {target}"
+    );
+    assert!(
+        !target.contains("alt=sse"),
+        "retired stream query in {target}"
+    );
+}
 
 fn conversation(messages: Vec<Message>) -> Conversation {
     Conversation::new(messages).expect("the histories here are valid")

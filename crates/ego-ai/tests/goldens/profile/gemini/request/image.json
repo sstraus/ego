@@ -1,0 +1,47 @@
+{
+  "generation_config": {
+    "max_output_tokens": 4096,
+    "thinking_level": "high"
+  },
+  "input": [
+    {
+      "type": "user_input",
+      "content": [
+        {
+          "type": "text",
+          "text": "before"
+        },
+        {
+          "type": "image",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+          "mime_type": "image/png"
+        },
+        {
+          "type": "text",
+          "text": "after"
+        }
+      ]
+    }
+  ],
+  "model": "gemini-3.7-flash",
+  "store": false,
+  "stream": true,
+  "tools": [
+    {
+      "type": "function",
+      "name": "read_file",
+      "description": "Read a file from the workspace.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    }
+  ]
+}

@@ -25,5 +25,5 @@
     "x-goog-api-key"
   ],
   "method": "Post",
-  "url": "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse"
+  "url": "https://generativelanguage.googleapis.com/v1/interactions"
 }

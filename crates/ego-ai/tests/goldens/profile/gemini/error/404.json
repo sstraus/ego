@@ -1,1 +1,1 @@
-{"error":{"message":"models/gemini-9.9-ultra is not found for API version v1beta, or is not supported for interactions.","code":"not_found"}}
+{"error":{"message":"models/gemini-9.9-ultra is not found for API version v1, or is not supported for interactions.","code":"not_found"}}
