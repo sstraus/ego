@@ -735,6 +735,14 @@ impl ContinuationRecord {
         Ok(())
     }
 
+    pub fn fail_pending(&mut self) -> Result<(), ContinuationError> {
+        if self.state != ContinuationState::Pending || self.accepted_answer.is_some() {
+            return Err(ContinuationError::InvalidTransition);
+        }
+        self.state = ContinuationState::Failed;
+        Ok(())
+    }
+
     pub fn claim(mut self, now: Timestamp) -> Result<ClaimedContinuation, ContinuationError> {
         if now >= self.expires_at {
             return Err(ContinuationError::Expired);
@@ -996,6 +1004,7 @@ impl From<&ContinuationRecord> for ContinuationRecordEvent {
 /// Persistence boundary for durable, atomic continuation transitions.
 pub trait ContinuationJournal: Send + Sync {
     fn record(&self, record: ContinuationRecord) -> Result<(), ContinuationError>;
+    fn fail_pending(&self, id: &str) -> Result<(), ContinuationError>;
     fn accept_answer(
         &self,
         id: &str,

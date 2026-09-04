@@ -214,6 +214,14 @@ impl ContinuationJournal for JsonlContinuationJournal {
         })
     }
 
+    fn fail_pending(&self, id: &str) -> Result<(), ContinuationError> {
+        self.with_lock(|| {
+            let mut record = self.get_locked(id)?;
+            record.fail_pending()?;
+            self.append_locked(&record)
+        })
+    }
+
     fn accept_answer(
         &self,
         id: &str,

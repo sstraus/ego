@@ -191,6 +191,61 @@ fn accepted_answer_is_durable_before_atomic_single_use_claim() {
 }
 
 #[test]
+fn pending_failure_is_durable_after_reopen_and_not_acceptable() {
+    let root = tempfile::tempdir().expect("directory");
+    let journal = JsonlContinuationJournal::open(root.path()).expect("journal");
+    let authorized = authorized();
+    let record = record(
+        &authorized,
+        Arc::from(b"deterministic-key-0123456789abcdef".as_slice()),
+        now(),
+        300_000,
+    );
+    let id = record.id().to_owned();
+    ContinuationJournal::record(&journal, record).expect("pending record");
+    ContinuationJournal::fail_pending(&journal, &id).expect("durable pending failure");
+
+    let reopened = JsonlContinuationJournal::open(root.path()).expect("reopen");
+    assert_eq!(
+        ContinuationJournal::load(&reopened, &id)
+            .expect("failed record")
+            .state(),
+        ContinuationState::Failed
+    );
+    assert!(
+        ContinuationJournal::accept_answer(
+            &reopened,
+            &id,
+            br#"{"inputResponses":[{"answer":"yes"}]}"#,
+            now(),
+        )
+        .is_err(),
+        "a durably failed continuation cannot accept an answer"
+    );
+    assert!(
+        reopened.claim(&id).is_err(),
+        "a durably failed continuation cannot be claimed"
+    );
+
+    let committed = persisted_wires(root.path());
+    assert_eq!(committed.len(), 2);
+    assert_eq!(
+        committed
+            .iter()
+            .map(|snapshot| snapshot["record"]["state"].as_str())
+            .collect::<Vec<_>>(),
+        vec![Some("pending"), Some("failed")]
+    );
+    for snapshot in committed {
+        assert_eq!(snapshot["version"], json!(2));
+        assert_eq!(
+            snapshot["record"]["generation_policy_digest"],
+            json!(GENERATION_POLICY_DIGEST)
+        );
+    }
+}
+
+#[test]
 fn stable_capture_identity_survives_reopen_and_resume_validation() {
     let root = tempfile::tempdir().expect("directory");
     let key = FakeResumeKey {
