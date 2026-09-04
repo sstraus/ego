@@ -23,6 +23,7 @@ use super::actions::{
     SharedActionSink, SkillSurfaceAction,
 };
 use super::keys::{Intercept, intercept};
+use super::policy_controls::{ModalInput, PolicyControlController};
 use super::selector::{Selector, SelectorKey, SelectorKind, SelectorOption, SelectorValue};
 use super::status::{
     GitFacts, GitFactsSource, SeatFacts, SelectionFacts, StatusLine, StatusSegmentName,
@@ -74,6 +75,9 @@ struct Actions {
 
 #[derive(Debug, Clone, Copy)]
 enum SurfaceActionEffect {
+    Mode,
+    Plan,
+    Yolo,
     Compact,
     Fork,
     Sessions,
@@ -104,6 +108,9 @@ struct SurfaceActionSink {
 impl ActionSink for SurfaceActionSink {
     fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
         let effect = match action.id {
+            ActionId::Mode => SurfaceActionEffect::Mode,
+            ActionId::Plan => SurfaceActionEffect::Plan,
+            ActionId::Yolo => SurfaceActionEffect::Yolo,
             ActionId::Compact => SurfaceActionEffect::Compact,
             ActionId::Fork => SurfaceActionEffect::Fork,
             ActionId::Sessions => SurfaceActionEffect::Sessions,
@@ -769,6 +776,9 @@ impl Seat {
             pending: Arc::clone(&surface_effect),
         }));
         for action in [
+            ActionId::Mode,
+            ActionId::Plan,
+            ActionId::Yolo,
             ActionId::Compact,
             ActionId::Fork,
             ActionId::Sessions,
@@ -825,6 +835,42 @@ impl Seat {
         if let SeatKind::Live(live) = &self.kind {
             repaint_status(&live.status);
         }
+    }
+
+    /// Enable the three mode controls after their application owner exists.
+    pub(crate) fn enable_policy_controls(&self) {
+        for action in [ActionId::Mode, ActionId::Plan, ActionId::Yolo] {
+            self.registry
+                .set_availability(action, Availability::Enabled);
+        }
+        if let SeatKind::Live(live) = &self.kind {
+            repaint_status(&live.status);
+        }
+    }
+
+    /// Replace only the active generation mode used by the next status rebuild.
+    pub(crate) fn set_status_mode(&self, mode: Mode) {
+        let SeatKind::Live(live) = &self.kind else {
+            return;
+        };
+        if let Some(base) = live
+            .status
+            .lock()
+            .expect("surface status lock")
+            .status_base
+            .as_mut()
+        {
+            base.mode = mode;
+        }
+    }
+
+    /// Publish one local controller outcome without creating a prompt.
+    pub(crate) fn set_notice(&self, notice: String) {
+        let SeatKind::Live(live) = &self.kind else {
+            return;
+        };
+        live.status.lock().expect("surface status lock").notice = Some(notice);
+        repaint_status(&live.status);
     }
 
     /// Activate native status after session, selection and config are known.
@@ -1573,6 +1619,20 @@ fn apply_surface_effect(
     busy: bool,
 ) -> Option<Line> {
     match effect {
+        SurfaceActionEffect::Mode => {
+            return choose_policy_mode(editor, phase, status, busy);
+        }
+        SurfaceActionEffect::Plan => {
+            let mut controller = PolicyControlController::new();
+            return controller
+                .select_mode(Mode::Plan)
+                .map(|request| Line::HostCommand(HostCommand::Policy(request)));
+        }
+        SurfaceActionEffect::Yolo => {
+            let mut controller = PolicyControlController::new();
+            controller.begin_yolo();
+            return confirm_yolo(editor, phase, status, busy, &mut controller);
+        }
         SurfaceActionEffect::Compact => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Compact)));
         }
@@ -1770,6 +1830,163 @@ fn apply_surface_effect(
     }
     repaint_status(status);
     None
+}
+
+enum PolicyModeChoice {
+    Selected(Mode),
+    Cancelled,
+    Propagate(Line),
+}
+
+fn choose_policy_mode(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    busy: bool,
+) -> Option<Line> {
+    let mut controller = PolicyControlController::new();
+    let modes = controller.mode_options();
+    let request = QuestionRequest::new(
+        "Choose execution mode",
+        QuestionMode::Single,
+        modes
+            .iter()
+            .map(|mode| QuestionOption::new(mode.as_str(), format!("{mode:?}")))
+            .collect(),
+        false,
+    );
+    let selector = Arc::new(Mutex::new(Selector::with_options(
+        SelectorKind::Single,
+        request
+            .options
+            .iter()
+            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone())),
+    )));
+    let saved = enter_modal(editor, phase, status);
+    status
+        .lock()
+        .expect("surface status lock")
+        .question_selector = Some(Arc::clone(&selector));
+    repaint_status(status);
+
+    let choice = loop {
+        let prompt = Question::new(
+            question_selector_prompt(&request, &selector),
+            Arc::clone(status),
+        );
+        match answer(false, editor.read_line(&prompt)) {
+            Line::HostCommand(HostCommand::QuestionSelector(command)) => {
+                let Some(key) = question_selector_key(&command) else {
+                    break PolicyModeChoice::Cancelled;
+                };
+                let mut selector = selector.lock().expect("policy mode selector lock");
+                selector.key(key);
+                if key == SelectorKey::Escape {
+                    break PolicyModeChoice::Cancelled;
+                }
+                if key != SelectorKey::Enter {
+                    drop(selector);
+                    repaint_status(status);
+                    continue;
+                }
+                let Some(SelectorValue::Single(id)) = selector.result() else {
+                    continue;
+                };
+                let Some(mode) = modes
+                    .iter()
+                    .copied()
+                    .find(|mode| mode.as_str() == id.as_str())
+                else {
+                    break PolicyModeChoice::Cancelled;
+                };
+                break PolicyModeChoice::Selected(mode);
+            }
+            Line::ExternalBreak(buffer) => {
+                break PolicyModeChoice::Propagate(Line::ExternalBreak(buffer));
+            }
+            Line::Submitted(_)
+            | Line::Blank
+            | Line::Interrupted
+            | Line::Ended
+            | Line::Refused(_)
+            | Line::HostCommand(_) => break PolicyModeChoice::Cancelled,
+        }
+    };
+    status
+        .lock()
+        .expect("surface status lock")
+        .question_selector = None;
+    leave_modal(
+        editor,
+        phase,
+        status,
+        saved,
+        if busy {
+            EditPhase::Busy
+        } else {
+            EditPhase::Idle
+        },
+    );
+
+    match choice {
+        PolicyModeChoice::Selected(mode) => match controller.select_mode(mode) {
+            Some(request) => Some(Line::HostCommand(HostCommand::Policy(request))),
+            None => confirm_yolo(editor, phase, status, busy, &mut controller),
+        },
+        PolicyModeChoice::Cancelled => None,
+        PolicyModeChoice::Propagate(line) => Some(line),
+    }
+}
+
+fn confirm_yolo(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    busy: bool,
+    controller: &mut PolicyControlController,
+) -> Option<Line> {
+    let saved = enter_modal(editor, phase, status);
+    let prompt = Question::new(
+        "Type yolo to confirm relaxed execution policy: ".to_owned(),
+        Arc::clone(status),
+    );
+    let outcome = match answer(false, editor.read_line(&prompt)) {
+        Line::Submitted(value) => controller.confirm_yolo(ModalInput::Text(value)),
+        Line::Interrupted | Line::HostCommand(HostCommand::Interrupt) => {
+            controller.confirm_yolo(ModalInput::CtrlC)
+        }
+        Line::Ended => controller.confirm_yolo(ModalInput::Eof),
+        Line::ExternalBreak(buffer) => {
+            let _ = controller.confirm_yolo(ModalInput::Cancel);
+            leave_modal(
+                editor,
+                phase,
+                status,
+                saved,
+                if busy {
+                    EditPhase::Busy
+                } else {
+                    EditPhase::Idle
+                },
+            );
+            return Some(Line::ExternalBreak(buffer));
+        }
+        Line::Blank | Line::Refused(_) | Line::HostCommand(_) => {
+            controller.confirm_yolo(ModalInput::Cancel)
+        }
+    };
+    leave_modal(
+        editor,
+        phase,
+        status,
+        saved,
+        if busy {
+            EditPhase::Busy
+        } else {
+            EditPhase::Idle
+        },
+    );
+    outcome.map(|request| Line::HostCommand(HostCommand::Policy(request)))
 }
 
 enum Confirmation {
@@ -2923,6 +3140,7 @@ fn question_selector_command(command: &str) -> ReedlineEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repl::policy_controls::PolicyControlRequest;
 
     #[test]
     fn trust_accepts_only_an_explicit_yes_or_no() {
@@ -3003,6 +3221,116 @@ mod tests {
 
         assert_eq!(seat.read(), Line::Submitted("initial".to_string()));
         assert_eq!(phase.get(), EditPhase::Busy);
+    }
+
+    #[test]
+    fn enabling_policy_controls_marks_only_mode_plan_and_yolo_enabled() {
+        let (seat, _) = Seat::new(CancelToken::new()).expect("test seat");
+        let registry = seat.action_registry();
+        for action in [ActionId::Mode, ActionId::Plan, ActionId::Yolo] {
+            assert!(matches!(
+                registry.availability(action),
+                Availability::Disabled { .. }
+            ));
+        }
+        assert!(matches!(
+            registry.availability(ActionId::Permissions),
+            Availability::Disabled { .. }
+        ));
+
+        seat.enable_policy_controls();
+        for action in [ActionId::Mode, ActionId::Plan, ActionId::Yolo] {
+            assert_eq!(registry.availability(action), Availability::Enabled);
+        }
+        assert!(matches!(
+            registry.availability(ActionId::Permissions),
+            Availability::Disabled { .. }
+        ));
+        seat.join();
+    }
+
+    #[test]
+    fn enter_and_leave_modal_restore_composer_cursor_origin_and_phase() {
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[
+            EditCommand::InsertString("draft text".to_owned()),
+            EditCommand::MoveToPosition {
+                position: 5,
+                select: false,
+            },
+        ]);
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            origin: InputOrigin::BracketedPaste,
+            ..SurfaceStatus::default()
+        }));
+        let saved = enter_modal(&mut editor, &phase, &status);
+        assert_eq!(phase.get(), EditPhase::Modal);
+        assert_eq!(editor.current_buffer_contents(), "");
+        leave_modal(&mut editor, &phase, &status, saved, EditPhase::Busy);
+        assert_eq!(editor.current_buffer_contents(), "draft text");
+        assert_eq!(editor.current_insertion_point(), 5);
+        assert_eq!(status.lock().unwrap().origin, InputOrigin::BracketedPaste);
+        assert_eq!(phase.get(), EditPhase::Busy);
+    }
+
+    #[test]
+    fn surface_action_sink_routes_only_mode_plan_and_yolo_controls() {
+        let pending = Arc::new(Mutex::new(None));
+        let mut sink = SurfaceActionSink {
+            pending: Arc::clone(&pending),
+        };
+        for (action, effect) in [
+            (ActionId::Mode, SurfaceActionEffect::Mode),
+            (ActionId::Plan, SurfaceActionEffect::Plan),
+            (ActionId::Yolo, SurfaceActionEffect::Yolo),
+        ] {
+            assert_eq!(
+                sink.invoke(LocalAction {
+                    id: action,
+                    busy: false
+                }),
+                LocalActionOutcome::Completed
+            );
+            let observed = pending.lock().unwrap();
+            assert_eq!(
+                observed.as_ref().map(std::mem::discriminant),
+                Some(std::mem::discriminant(&effect))
+            );
+            drop(observed);
+            pending.lock().unwrap().take();
+        }
+        assert!(matches!(
+            sink.invoke(LocalAction {
+                id: ActionId::Permissions,
+                busy: false,
+            }),
+            LocalActionOutcome::Refused { .. }
+        ));
+        assert!(pending.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn plan_surface_effect_emits_typed_policy_command_without_prompt() {
+        let mut editor = Reedline::create();
+        let phase = SurfacePhase::new(EditPhase::Idle);
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        let line = apply_surface_effect(
+            &mut editor,
+            &phase,
+            &status,
+            SurfaceActionEffect::Plan,
+            false,
+        )
+        .expect("plan action emits a host command");
+        assert_eq!(
+            line,
+            Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(
+                Mode::Plan
+            )))
+        );
+        assert_eq!(editor.current_buffer_contents(), "");
+        assert_eq!(phase.get(), EditPhase::Idle);
     }
 
     #[test]

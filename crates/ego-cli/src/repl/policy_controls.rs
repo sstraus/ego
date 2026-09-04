@@ -156,6 +156,11 @@ impl GenerationPolicySelection {
         Ok(state.active.clone())
     }
 
+    pub(crate) fn next_snapshot(&self) -> Result<GenerationPolicySnapshot, PolicyControlError> {
+        let state = self.read()?;
+        Ok(state.staged.as_ref().unwrap_or(&state.active).clone())
+    }
+
     fn stage(
         &self,
         mode: Mode,

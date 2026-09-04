@@ -19,6 +19,7 @@ pub use seat::{
 
 use actions::{ActionId, SkillSurfaceAction};
 use ego_core::skill::AdmittedSkillOperation;
+use policy_controls::PolicyControlRequest;
 
 use reedline::Signal;
 
@@ -50,6 +51,7 @@ pub(super) const INTERRUPT_COMMAND: &str = "ego:interrupt";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCommand {
     Action(ActionId),
+    Policy(PolicyControlRequest),
     Skill(AdmittedSkillOperation),
     Skills(SkillSurfaceAction),
     Hooks,
@@ -159,6 +161,8 @@ fn answer(asked_for_image: bool, signal: std::io::Result<Signal>) -> Line {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repl::policy_controls::{PolicyControlController, PolicyControlRequest};
+    use ego_core::config::Mode;
     use ego_core::event::skill::{
         SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillSourceAuthority,
         SkillSourceLocation,
@@ -171,6 +175,20 @@ mod tests {
         let line = Line::of(Signal::Success(pasted.to_string()));
 
         assert_eq!(line, Line::Submitted(pasted.to_string()));
+    }
+
+    #[test]
+    fn policy_controls_cross_the_host_boundary_as_one_typed_command() {
+        let mut controller = PolicyControlController::new();
+        let request = controller
+            .select_mode(Mode::Plan)
+            .expect("plan emits a typed policy request");
+        assert_eq!(
+            Line::HostCommand(HostCommand::Policy(request.clone())),
+            Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(
+                Mode::Plan
+            )))
+        );
     }
 
     /// The refusal is a factual claim about this build, so it names the thing

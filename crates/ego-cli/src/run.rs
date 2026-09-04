@@ -22,10 +22,12 @@ use ego_core::compact::{
     CompactionTransitionError, CompactionTransitionRequest, CompactionTransitionService,
     PreparedCompaction,
 };
+use ego_core::config::rule_management::RuleManagement;
 use ego_core::config::{
-    ConfigLayer, Effective, Limits, McpServerConfig, Mode, ModelRef, Posture, Ruleset, Selection,
-    Sourced, SystemPrompt, Trust, UserConfigError, UserConfigMutation, UserConfigPublication,
-    UserConfigStore, resolve_selected, system_prompt,
+    ConfigLayer, Effective, Limits, McpServerConfig, Mode, ModelRef, PermCfg, Posture,
+    RuleMutation, RuleSnapshot, Ruleset, Selection, Source, Sourced, SystemPrompt, Trust,
+    UserConfigError, UserConfigMutation, UserConfigPublication, UserConfigStore, UserConfigTarget,
+    resolve_selected, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
@@ -119,7 +121,11 @@ use crate::output::{
 use crate::provider_http::{ProviderHttpAdapter, run_effect_ports};
 use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
 use crate::render::osc::{Osc, Progress, State};
-use crate::repl::policy_controls::{CliGenerationPolicySource, GenerationPolicySelection};
+use crate::repl::policy_controls::{
+    CliGenerationPolicySource, FrozenPolicyResolver, FrozenRuleResolution,
+    GenerationPolicySelection, GenerationPolicySnapshot, PolicyApplicationOwner,
+    PolicyControlError, PolicyControlOutcome, PolicyControlRequest, PreflightPort,
+};
 use crate::session::{self, ActiveSession, Opened};
 use crate::{attachment, config, hooks, model, prompt, repl, schema};
 
@@ -1155,6 +1161,122 @@ struct Settings {
     effective: Effective,
 }
 
+/// Re-resolves rule transactions against the exact config authority captured at startup.
+pub(crate) struct FrozenRuleResolver {
+    layers: Vec<Sourced<ConfigLayer>>,
+    trust: Trust,
+    selected_profile: Option<(String, Source)>,
+    selection: GenerationPolicySelection,
+}
+
+impl FrozenRuleResolver {
+    pub(crate) fn new(
+        layers: Vec<Sourced<ConfigLayer>>,
+        trust: Trust,
+        selected_profile: Option<(String, Source)>,
+        selection: GenerationPolicySelection,
+    ) -> Self {
+        Self {
+            layers,
+            trust,
+            selected_profile,
+            selection,
+        }
+    }
+
+    fn resolve_rules(&self, snapshot: &RuleSnapshot) -> Result<Ruleset, PolicyControlError> {
+        if snapshot.target != UserConfigTarget::Base
+            || (!snapshot.permissions_present
+                && (!snapshot.allow.is_empty() || !snapshot.deny.is_empty()))
+        {
+            return Err(PolicyControlError::Resolution {
+                diagnostic: "a frozen policy resolution requires a valid base rule snapshot".into(),
+            });
+        }
+
+        let mut layers = self.layers.clone();
+        if let Some(user) = layers.iter_mut().find(|layer| layer.source == Source::User) {
+            let captured_judge = user
+                .value
+                .permissions
+                .as_ref()
+                .and_then(|permissions| permissions.judge.clone());
+            user.value.permissions = (snapshot.permissions_present || captured_judge.is_some())
+                .then(|| PermCfg {
+                    judge: captured_judge,
+                    allow: snapshot.allow.clone(),
+                    deny: snapshot.deny.clone(),
+                });
+        } else if snapshot.permissions_present {
+            layers.push(Sourced {
+                source: Source::User,
+                value: ConfigLayer {
+                    permissions: Some(PermCfg {
+                        judge: None,
+                        allow: snapshot.allow.clone(),
+                        deny: snapshot.deny.clone(),
+                    }),
+                    ..ConfigLayer::default()
+                },
+            });
+        }
+
+        resolve_selected(
+            &layers,
+            self.trust,
+            self.selected_profile
+                .as_ref()
+                .map(|(name, source)| (name.as_str(), *source)),
+        )
+        .map(|effective| effective.permissions)
+        .map_err(|error| PolicyControlError::Resolution {
+            diagnostic: error.to_string(),
+        })
+    }
+}
+
+impl FrozenPolicyResolver for FrozenRuleResolver {
+    fn resolve_rule_transaction(
+        &self,
+        before: &RuleSnapshot,
+        after: &RuleSnapshot,
+        affected: &[RuleMutation],
+    ) -> Result<FrozenRuleResolution, PolicyControlError> {
+        if before.target != UserConfigTarget::Base
+            || after.target != UserConfigTarget::Base
+            || before.target != after.target
+        {
+            return Err(PolicyControlError::Resolution {
+                diagnostic: "a frozen policy resolution requires one base rule transaction".into(),
+            });
+        }
+
+        let before_rules = self.resolve_rules(before)?;
+        let after_rules = self.resolve_rules(after)?;
+        let stored_changed = before != after;
+        let comparisons = affected
+            .iter()
+            .map(|mutation| {
+                RuleManagement::compare_resolved(
+                    &before_rules,
+                    &after_rules,
+                    stored_changed,
+                    &mutation.rule,
+                    mutation.effect,
+                )
+            })
+            .collect();
+        let mode = self.selection.next_snapshot()?.mode;
+        Ok(FrozenRuleResolution {
+            next: GenerationPolicySnapshot {
+                mode,
+                ruleset: after_rules,
+            },
+            comparisons,
+        })
+    }
+}
+
 /// Validated direct-host facts that exist only for the explicit CI posture.
 struct CiInvocation {
     session_root: PathBuf,
@@ -1606,25 +1728,23 @@ fn validate_judge_request(
     capabilities: &ModelCapabilities,
     request: &GenRequest,
     ensure_expressible: impl FnOnce(&GenRequest) -> Result<(), RequestExpressibilityError>,
-) -> Result<(), RunTermination> {
+) -> Result<(), String> {
     let gaps = capabilities.request_gaps(request);
     if !gaps.is_empty() {
-        return Err(RunTermination::UsageError {
-            message: format!(
-                "judge model `{}` is incompatible with the fixed judge request: {}",
-                identity.0.as_str(),
-                gaps.iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-        });
+        return Err(format!(
+            "judge model `{}` is incompatible with the fixed judge request: {}",
+            identity.0.as_str(),
+            gaps.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
     }
-    ensure_expressible(request).map_err(|error| RunTermination::UsageError {
-        message: format!(
+    ensure_expressible(request).map_err(|error| {
+        format!(
             "judge model `{}` cannot encode the fixed judge request: {error}",
             identity.0.as_str()
-        ),
+        )
     })
 }
 
@@ -1643,37 +1763,78 @@ fn preflight_judge(
     validate_judge_request(&judge.identity, &judge.capabilities, &request, |request| {
         judge.generator.ensure_expressible(request)
     })
+    .map_err(|message| RunTermination::UsageError { message })
 }
 
-/// Refuse only judge request-shape failures already determined by supplied
-/// configuration. Dynamic model facts defer to the post-admission preflight.
-fn preflight_supplied_judge(
-    effective: &Effective,
-    confinement: &RunConfinement,
-) -> Result<(), RunTermination> {
-    if effective.mode.unwrap_or(Mode::Default) != Mode::Auto {
-        return Ok(());
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CapturedAutoPreflight {
+    MissingJudge,
+    DeferredDynamic,
+    Valid,
+    Refused { diagnostic: String },
+}
+
+struct CliAutoPreflight {
+    state: CapturedAutoPreflight,
+}
+
+impl CliAutoPreflight {
+    fn new(state: CapturedAutoPreflight) -> Self {
+        Self { state }
     }
-    let identity = effective
-        .judge
-        .as_ref()
-        .ok_or_else(|| RunTermination::UsageError {
-            message: "`auto` mode requires `[permissions] judge = \"provider/model\"`".to_owned(),
-        })?;
-    let Some(profile) = model::supplied_request_profile(identity).map_err(generation_refusal)?
-    else {
-        return Ok(());
-    };
-    let request = fixed_judge_request(
-        identity,
-        profile.request_model(),
-        profile.output_ceiling(),
-        confinement,
-        ExecCaps::empty(),
-    );
-    validate_judge_request(identity, profile.capabilities(), &request, |request| {
-        profile.ensure_expressible(request)
-    })
+
+    /// Capture only supplied request-shape facts. Dynamic facts defer to generation preflight.
+    fn capture(effective: &Effective, confinement: &RunConfinement) -> Self {
+        let Some(identity) = effective.judge.as_ref() else {
+            return Self::new(CapturedAutoPreflight::MissingJudge);
+        };
+        let profile = match model::supplied_request_profile(identity) {
+            Ok(Some(profile)) => profile,
+            Ok(None) => return Self::new(CapturedAutoPreflight::DeferredDynamic),
+            Err(error) => {
+                return Self::new(CapturedAutoPreflight::Refused {
+                    diagnostic: error.message,
+                });
+            }
+        };
+        let request = fixed_judge_request(
+            identity,
+            profile.request_model(),
+            profile.output_ceiling(),
+            confinement,
+            ExecCaps::empty(),
+        );
+        let state =
+            match validate_judge_request(identity, profile.capabilities(), &request, |request| {
+                profile.ensure_expressible(request)
+            }) {
+                Ok(()) => CapturedAutoPreflight::Valid,
+                Err(diagnostic) => CapturedAutoPreflight::Refused { diagnostic },
+            };
+        Self::new(state)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        match &self.state {
+            CapturedAutoPreflight::MissingJudge => {
+                Err("`auto` mode requires `[permissions] judge = \"provider/model\"`".to_owned())
+            }
+            CapturedAutoPreflight::Refused { diagnostic } => Err(diagnostic.clone()),
+            CapturedAutoPreflight::DeferredDynamic | CapturedAutoPreflight::Valid => Ok(()),
+        }
+    }
+
+    fn validate_startup(&self) -> Result<(), RunTermination> {
+        self.validate()
+            .map_err(|message| RunTermination::UsageError { message })
+    }
+}
+
+impl PreflightPort for CliAutoPreflight {
+    fn validate_auto(&self) -> Result<(), PolicyControlError> {
+        self.validate()
+            .map_err(|diagnostic| PolicyControlError::JudgeUnavailable { diagnostic })
+    }
 }
 
 fn generation_refusal(error: GenerationModelError) -> RunTermination {
@@ -4119,16 +4280,20 @@ async fn execute<S: EventSink>(
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
-    let (settings, ci, refresh, ready) = match preflight {
+    let (settings, ci, refresh, ready, auto_preflight) = match preflight {
         Some(ExecutionPreflight {
             settings,
             ci,
             refresh,
             ready,
-        }) => (settings, ci, refresh, ready),
+        }) => (settings, ci, refresh, ready, None),
         None => {
             let settings = settings(&args, |root| run_trust(&args, &driver, root), diagnostics)
                 .map_err(usage)?;
+            let auto_preflight = Arc::new(CliAutoPreflight::capture(
+                &settings.effective,
+                &settings.confinement,
+            ));
             let ci = ci_invocation(&args, &settings, &driver).map_err(usage)?;
             if ci.is_some() {
                 return Err(RunTermination::Failed {
@@ -4146,8 +4311,10 @@ async fn execute<S: EventSink>(
             .map_err(|error| RunTermination::Failed {
                 message: error.to_string(),
             })?;
-            preflight_supplied_judge(&settings.effective, &settings.confinement)?;
-            (settings, ci, refresh, None)
+            if settings.effective.mode.unwrap_or(Mode::Default) == Mode::Auto {
+                auto_preflight.validate_startup()?;
+            }
+            (settings, ci, refresh, None, Some(auto_preflight))
         }
     };
     if let Some(ci) = &ci {
@@ -4454,6 +4621,37 @@ async fn execute<S: EventSink>(
             }
         }
     };
+
+    let policy_application = match (
+        status.as_ref().filter(|status| status.human),
+        auto_preflight.as_ref(),
+        skill_profile_layers.as_ref(),
+    ) {
+        (Some(status), Some(preflight), Some(layers)) => {
+            status.model_config_store.as_ref().map(|store| {
+                let preflight = Arc::clone(preflight) as Arc<dyn PreflightPort>;
+                let resolver = Arc::new(FrozenRuleResolver::new(
+                    layers.clone(),
+                    skill_trust,
+                    effective
+                        .active_profile
+                        .as_ref()
+                        .map(|profile| (profile.name.clone(), profile.selected_by)),
+                    policy_selection.clone(),
+                ));
+                Arc::new(PolicyApplicationOwner::new(
+                    policy_selection.clone(),
+                    Arc::clone(store),
+                    preflight,
+                    resolver,
+                ))
+            })
+        }
+        _ => None,
+    };
+    if let (Some(status), Some(_)) = (status.as_ref(), policy_application.as_ref()) {
+        status.seat.enable_policy_controls();
+    }
 
     let opening = opened.state();
     let mut active =
@@ -5229,6 +5427,43 @@ async fn execute<S: EventSink>(
                                         }
                                         continue;
                                     }
+                                    repl::Line::HostCommand(repl::HostCommand::Policy(request)) => {
+                                        let requested_mode = match &request {
+                                            PolicyControlRequest::SetMode(mode) => Some(*mode),
+                                            PolicyControlRequest::Rule(_)
+                                            | PolicyControlRequest::Permission(_) => None,
+                                        };
+                                        let notice = match policy_application.as_ref() {
+                                            Some(owner) => match owner.apply(request) {
+                                                Ok(PolicyControlOutcome::Mode { staging }) => {
+                                                    let mode = requested_mode.expect(
+                                                        "a mode outcome follows a mode request",
+                                                    );
+                                                    if staging.changed {
+                                                        format!(
+                                                            "mode `{mode}` staged for the next generation"
+                                                        )
+                                                    } else {
+                                                        format!("mode `{mode}` is already selected")
+                                                    }
+                                                }
+                                                Ok(_) => "policy control applied".to_owned(),
+                                                Err(error) => {
+                                                    format!("policy control failed: {error}")
+                                                }
+                                            },
+                                            None => "interactive policy controls are unavailable"
+                                                .to_owned(),
+                                        };
+                                        if let Some(status) = status.as_ref()
+                                            && status.human
+                                        {
+                                            status.seat.set_notice(notice);
+                                        } else {
+                                            diagnostics.note(&notice);
+                                        }
+                                        continue;
+                                    }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Sessions,
                                     )) => {
@@ -5830,6 +6065,12 @@ async fn execute<S: EventSink>(
                             if let Some(status) = status.as_ref()
                                 && status.human
                             {
+                                match policy_selection.snapshot() {
+                                    Ok(policy) => status.seat.set_status_mode(policy.mode),
+                                    Err(error) => diagnostics.note(&format!(
+                                        "the active policy mode could not be refreshed: {error}"
+                                    )),
+                                }
                                 match selection.snapshot() {
                         Ok(selected) => status.seat.refresh_status(&state, selected),
                         Err(error) => diagnostics.note(&format!(
@@ -8040,6 +8281,124 @@ mod tests {
                 assert_eq!(answer, QuestionAnswer::single("yes"));
             }
             ResumePlan::Model { .. } => panic!("foreign answer was misclassified as model"),
+        }
+    }
+
+    #[test]
+    fn frozen_rule_resolver_reuses_startup_layers_and_replaces_only_base_user_permissions() {
+        let system = ConfigLayer::parse(
+            ego_core::config::Source::System,
+            "[permissions]\nallow = [\"write(src/**)\"]\ndeny = [\"read(src/**)\"]\n",
+        )
+        .expect("system layer");
+        let user = ConfigLayer::parse(
+            ego_core::config::Source::User,
+            "[permissions]\nallow = [\"read(src/**)\"]\njudge = \"ollama/judge\"\n[profile.ci]\nmodel = \"ollama/ci\"\n",
+        )
+        .expect("user layer");
+        let project = ConfigLayer::parse(
+            ego_core::config::Source::Project,
+            "[permissions]\nallow = [\"read(src/private/**)\"]\n",
+        )
+        .expect("project layer");
+        let selection = GenerationPolicySelection::new(Mode::Plan, Ruleset::default());
+        let resolver = FrozenRuleResolver::new(
+            vec![system, user, project],
+            Trust::Trusted,
+            Some(("ci".to_owned(), ego_core::config::Source::Flags)),
+            selection,
+        );
+        let before = ego_core::config::RuleSnapshot {
+            target: ego_core::config::UserConfigTarget::Base,
+            permissions_present: true,
+            allow: vec![ego_core::permit::rule::Rule::load("read(src/**)").unwrap()],
+            deny: Vec::new(),
+        };
+        let after = ego_core::config::RuleSnapshot {
+            target: ego_core::config::UserConfigTarget::Base,
+            permissions_present: true,
+            allow: vec![ego_core::permit::rule::Rule::load("read(src/private/**)").unwrap()],
+            deny: Vec::new(),
+        };
+        let result = resolver
+            .resolve_rule_transaction(
+                &before,
+                &after,
+                &[ego_core::config::RuleMutation {
+                    effect: ego_core::config::ManagedRuleEffect::Allow,
+                    rule: ego_core::permit::rule::Rule::load("read(src/private/**)").unwrap(),
+                }],
+            )
+            .expect("frozen resolution");
+        assert_eq!(result.next.mode, Mode::Plan);
+        assert_eq!(result.next.ruleset.allow.len(), 1);
+        assert_eq!(
+            result.next.ruleset.allow[0].rule(),
+            &ego_core::permit::rule::Rule::load("read(src/private/**)").unwrap()
+        );
+        assert_eq!(
+            result.next.ruleset.allow[0].origins(),
+            ego_core::config::OriginSet::just(ego_core::config::Source::Project)
+        );
+        assert_eq!(result.next.ruleset.deny.len(), 1);
+        assert_eq!(
+            result.next.ruleset.deny[0].rule(),
+            &ego_core::permit::rule::Rule::load("read(src/**)").unwrap()
+        );
+        assert_eq!(
+            result.next.ruleset.deny[0].origins(),
+            ego_core::config::OriginSet::just(ego_core::config::Source::System)
+        );
+
+        let unchanged = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+        let unknown_profile = FrozenRuleResolver::new(
+            vec![
+                ConfigLayer::parse(
+                    ego_core::config::Source::User,
+                    "[profile.ci]\nmodel = \"ollama/ci\"\n",
+                )
+                .expect("profile fixture"),
+            ],
+            Trust::Trusted,
+            Some(("missing".to_owned(), ego_core::config::Source::Flags)),
+            unchanged.clone(),
+        );
+        let error = unknown_profile
+            .resolve_rule_transaction(&before, &after, &[])
+            .expect_err("unknown selected profile must fail closed");
+        assert!(matches!(
+            error,
+            crate::repl::policy_controls::PolicyControlError::Resolution { .. }
+        ));
+        assert_eq!(unchanged.snapshot().unwrap().mode, Mode::Default);
+        assert!(unchanged.staged_snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn captured_auto_preflight_has_closed_repeatable_outcomes_without_new_io() {
+        let cases = [
+            (CapturedAutoPreflight::MissingJudge, false),
+            (CapturedAutoPreflight::DeferredDynamic, true),
+            (CapturedAutoPreflight::Valid, true),
+            (
+                CapturedAutoPreflight::Refused {
+                    diagnostic: "captured judge cannot encode request".to_owned(),
+                },
+                false,
+            ),
+        ];
+        for (state, accepted) in cases {
+            let preflight = CliAutoPreflight::new(state);
+            let first = preflight.validate_auto();
+            let second = preflight.validate_auto();
+            assert_eq!(first, second);
+            assert_eq!(first.is_ok(), accepted);
+            if !accepted {
+                assert!(matches!(
+                    first,
+                    Err(crate::repl::policy_controls::PolicyControlError::JudgeUnavailable { .. })
+                ));
+            }
         }
     }
 }

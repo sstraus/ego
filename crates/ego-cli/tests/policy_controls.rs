@@ -174,6 +174,14 @@ impl PreflightPort for RefusingJudge {
     }
 }
 
+struct AllowingJudge;
+
+impl PreflightPort for AllowingJudge {
+    fn validate_auto(&self) -> Result<(), PolicyControlError> {
+        Ok(())
+    }
+}
+
 type RuleResolutionCalls = Vec<(RuleSnapshot, RuleSnapshot, Vec<RuleMutation>)>;
 
 #[derive(Clone)]
@@ -284,6 +292,68 @@ fn owner_auto_uses_injected_preflight_and_failure_preserves_selection() {
     assert_eq!(selection.snapshot().unwrap(), before);
     assert!(resolver.calls.lock().unwrap().is_empty());
     assert!(store.mutations().is_empty());
+}
+
+#[test]
+fn staged_modes_survive_a_rule_transaction_until_the_next_capture() {
+    for mode in [Mode::Plan, Mode::Edits, Mode::Yolo] {
+        let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+        let store = Arc::new(RecordingStore::published(
+            UserConfigPublication::PublishedDurably,
+        ));
+        let resolver = Arc::new(RecordingResolver {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            next: ego_cli::repl::policy_controls::GenerationPolicySnapshot {
+                mode,
+                ruleset: Ruleset::default(),
+            },
+        });
+        let application = owner(selection.clone(), store, resolver);
+        application
+            .apply(PolicyControlRequest::SetMode(mode))
+            .unwrap();
+        application
+            .apply(PolicyControlRequest::Rule(RuleMutation {
+                effect: ego_core::config::ManagedRuleEffect::Allow,
+                rule: rule("read(src/**)"),
+            }))
+            .unwrap();
+        assert_eq!(selection.snapshot().unwrap().mode, Mode::Default);
+        assert_eq!(selection.staged_snapshot().unwrap().unwrap().mode, mode);
+    }
+}
+
+#[test]
+fn owner_valid_auto_preflight_stages_without_changing_active_mode() {
+    let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+    let store = Arc::new(RecordingStore::published(
+        UserConfigPublication::NotPublished,
+    ));
+    let resolver = Arc::new(RecordingResolver {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        next: ego_cli::repl::policy_controls::GenerationPolicySnapshot {
+            mode: Mode::Auto,
+            ruleset: Ruleset::default(),
+        },
+    });
+    let application = PolicyApplicationOwner::new(
+        selection.clone(),
+        store.clone(),
+        Arc::new(AllowingJudge),
+        resolver.clone(),
+    );
+    assert!(
+        application
+            .apply(PolicyControlRequest::SetMode(Mode::Auto))
+            .is_ok()
+    );
+    assert_eq!(selection.snapshot().unwrap().mode, Mode::Default);
+    assert_eq!(
+        selection.staged_snapshot().unwrap().unwrap().mode,
+        Mode::Auto
+    );
+    assert!(store.mutations().is_empty());
+    assert!(resolver.calls.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -624,6 +694,46 @@ fn rule_mutations_revoke_and_remember_use_atomic_receipts_and_frozen_resolution(
     );
     assert!(malformed_resolver.calls.lock().unwrap().is_empty());
     assert!(malformed_selection.staged_snapshot().unwrap().is_none());
+
+    let profile_before = RuleSnapshot {
+        target: UserConfigTarget::Profile("ci".parse().unwrap()),
+        permissions_present: true,
+        allow: vec![],
+        deny: vec![],
+    };
+    let profile_store = Arc::new(RecordingStore::transaction(
+        UserConfigPublication::PublishedDurably,
+        profile_before.clone(),
+        RuleSnapshot {
+            target: UserConfigTarget::Profile("ci".parse().unwrap()),
+            permissions_present: true,
+            allow: vec![rule("read(src/**)")],
+            deny: vec![],
+        },
+    ));
+    let profile_resolver = Arc::new(RecordingResolver {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        next: ego_cli::repl::policy_controls::GenerationPolicySnapshot {
+            mode: Mode::Edits,
+            ruleset: Ruleset::default(),
+        },
+    });
+    let profile_selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+    let profile_owner = owner(
+        profile_selection.clone(),
+        profile_store,
+        profile_resolver.clone(),
+    );
+    let profile_result = profile_owner.apply(PolicyControlRequest::Rule(RuleMutation {
+        effect: ego_core::config::ManagedRuleEffect::Allow,
+        rule: rule("read(src/**)"),
+    }));
+    assert!(matches!(
+        profile_result,
+        Err(PolicyControlError::PublicationContract { .. })
+    ));
+    assert!(profile_resolver.calls.lock().unwrap().is_empty());
+    assert!(profile_selection.staged_snapshot().unwrap().is_none());
 }
 
 #[test]

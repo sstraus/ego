@@ -121,6 +121,67 @@ fn compare_reports_one_authority_for_shadowed_and_overlapping_mutations() {
 }
 
 #[test]
+fn compare_resolved_rulesets_preserves_storage_and_effective_authority_separately() {
+    let system = system_rules(&["write(src/**)"], &["read(src/**)"]);
+    let before = RuleManagement::effective(
+        &system,
+        &user_snapshot(&["read(src/**)"], &["read(src/**)"]),
+    );
+    let after = RuleManagement::effective(
+        &system,
+        &user_snapshot(&["read(src/private/**)"], &["read(src/**)"]),
+    );
+
+    let shadowed = RuleManagement::compare_resolved(
+        &before,
+        &before,
+        true,
+        &rule("read(src/**)"),
+        ManagedRuleEffect::Allow,
+    );
+    assert!(shadowed.stored_changed);
+    assert!(!shadowed.effective_changed);
+    assert_eq!(shadowed.authorities.len(), 1);
+    assert_eq!(shadowed.authorities[0].from, Source::System);
+    assert_eq!(shadowed.authorities[0].id, rule("read(src/**)").id());
+    assert_eq!(
+        shadowed.authorities[0].also,
+        OriginSet::from(vec![Source::User])
+    );
+
+    let unchanged_storage = RuleManagement::compare_resolved(
+        &before,
+        &after,
+        false,
+        &rule("read(src/private/**)"),
+        ManagedRuleEffect::Allow,
+    );
+    assert!(!unchanged_storage.stored_changed);
+    assert!(unchanged_storage.effective_changed);
+
+    let changed = RuleManagement::compare_resolved(
+        &before,
+        &after,
+        true,
+        &rule("read(src/private/**)"),
+        ManagedRuleEffect::Allow,
+    );
+    assert!(changed.stored_changed);
+    assert!(changed.effective_changed);
+    assert!(changed.authorities.is_empty());
+
+    let rows = RuleManagement::rows(&after);
+    let deny = rows
+        .iter()
+        .find(|row| row.effect == ManagedRuleEffect::Deny)
+        .expect("system deny remains in the resolved ruleset");
+    assert_eq!(deny.id, rule("read(src/**)").id());
+    assert_eq!(deny.effect, ManagedRuleEffect::Deny);
+    assert_eq!(deny.from, Source::System);
+    assert_eq!(deny.also, OriginSet::from(vec![Source::User]));
+}
+
+#[test]
 fn explain_denied_call_stops_at_first_deny_and_reports_only_that_authority() {
     let rules = system_rules(&["read(src/**)"], &["read(private/**)"]);
     let call = PreparedCall::new(

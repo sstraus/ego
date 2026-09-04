@@ -160,19 +160,23 @@ impl RuleManagement {
         before: &RuleSnapshot,
         after: &RuleSnapshot,
         rule: &Rule,
-        _effect: ManagedRuleEffect,
+        effect: ManagedRuleEffect,
     ) -> RuleMutationComparison {
         let stored_changed = before != after;
-        if !stored_changed {
-            return RuleMutationComparison {
-                stored_changed: false,
-                effective_changed: false,
-                authorities: Vec::new(),
-            };
-        }
+        let before = Self::effective(system, before);
+        let after = Self::effective(system, after);
+        Self::compare_resolved(&before, &after, stored_changed, rule, effect)
+    }
 
-        let before_binding = binding(system, before, rule);
-        let after_binding = binding(system, after, rule);
+    pub fn compare_resolved(
+        before: &Ruleset,
+        after: &Ruleset,
+        stored_changed: bool,
+        rule: &Rule,
+        _effect: ManagedRuleEffect,
+    ) -> RuleMutationComparison {
+        let before_binding = binding(before, rule);
+        let after_binding = binding(after, rule);
         let effective_changed =
             binding_identity(before_binding.as_ref()) != binding_identity(after_binding.as_ref());
         let authorities = if effective_changed {
@@ -380,8 +384,8 @@ fn effective_row(entry: &SourcedRule, effect: ManagedRuleEffect) -> EffectiveRul
     }
 }
 
-fn binding(system: &Ruleset, snapshot: &RuleSnapshot, rule: &Rule) -> Option<EffectiveRule> {
-    RuleManagement::effective_rows(system, snapshot)
+fn binding(rules: &Ruleset, rule: &Rule) -> Option<EffectiveRule> {
+    RuleManagement::rows(rules)
         .into_iter()
         .find(|row| row.rule == *rule)
 }
