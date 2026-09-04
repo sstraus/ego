@@ -26,7 +26,7 @@ use ego_core::suspension::{
     GuardedMcpResume, McpResumeContext, OpenedContinuation, PreparedResume, ResumeFloor,
     ResumeKeySource,
 };
-use ego_core::turn::ToolEffectPorts;
+use ego_core::turn::{GenerationPolicySnapshot, ToolEffectPorts};
 use futures::future;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResult, ContentBlock, GetPromptRequestParams,
@@ -113,7 +113,13 @@ pub struct McpContinuationOwner {
     captures: Arc<dyn McpCaptureResolver>,
     keys: Arc<dyn ResumeKeySource>,
     clock: Arc<dyn Clock>,
-    pinned: Mutex<BTreeMap<String, McpRegistryCapture>>,
+    pinned: Mutex<BTreeMap<String, PinnedContinuation>>,
+}
+
+#[derive(Clone)]
+struct PinnedContinuation {
+    capture: McpRegistryCapture,
+    policy_snapshot: Arc<GenerationPolicySnapshot>,
 }
 
 impl McpContinuationOwner {
@@ -178,7 +184,7 @@ impl McpContinuationOwner {
                 "MCP capture resolver returned the wrong identity",
             ));
         }
-        self.insert_pin(id.clone(), capture)?;
+        self.insert_pin(id.clone(), capture, context.policy_snapshot())?;
         if let Err(error) = self.journal.record(record) {
             self.remove_pin(&id)?;
             return Err(continuation(error));
@@ -205,7 +211,8 @@ impl McpContinuationOwner {
     ) -> Result<ToolExecution, McpError> {
         let pending = self.journal.load(id).map_err(continuation)?;
         validate_recorded_answer(&pending, raw_answer)?;
-        let capture = self.capture_for(id, pending.capture())?;
+        let pinned = self.capture_for(id, pending.capture())?;
+        let capture = &pinned.capture;
         let now = self.clock.now();
         if let Err(error) = self.journal.accept_answer(id, raw_answer, now) {
             if error.is_expired()
@@ -279,7 +286,12 @@ impl McpContinuationOwner {
                 return Err(continuation(error));
             }
         };
-        let successor_context = McpResumeContext::new(runtime, capture.clone(), original_causality);
+        let successor_context = McpResumeContext::new(
+            runtime,
+            capture.clone(),
+            original_causality,
+            Arc::clone(&pinned.policy_snapshot),
+        );
         let (call, guarded) =
             effects.bind_mcp_resume(authorized, successor, Some(successor_context));
         let generation: Arc<str> = Arc::from(capture.generation());
@@ -318,7 +330,12 @@ impl McpContinuationOwner {
         }
     }
 
-    fn insert_pin(&self, id: String, capture: McpRegistryCapture) -> Result<(), McpError> {
+    fn insert_pin(
+        &self,
+        id: String,
+        capture: McpRegistryCapture,
+        policy_snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<(), McpError> {
         let mut pinned = self
             .pinned
             .lock()
@@ -326,7 +343,13 @@ impl McpContinuationOwner {
         if pinned.contains_key(&id) {
             return Err(authority("MCP continuation capture is already pinned"));
         }
-        pinned.insert(id, capture);
+        pinned.insert(
+            id,
+            PinnedContinuation {
+                capture,
+                policy_snapshot,
+            },
+        );
         Ok(())
     }
 
@@ -342,32 +365,20 @@ impl McpContinuationOwner {
         &self,
         id: &str,
         stable_fingerprint: &str,
-    ) -> Result<McpRegistryCapture, McpError> {
-        if let Some(capture) = self
+    ) -> Result<PinnedContinuation, McpError> {
+        let pinned = self
             .pinned
             .lock()
             .map_err(|_| authority("MCP continuation capture lock is unavailable"))?
             .get(id)
             .cloned()
-        {
-            if capture.stable_fingerprint() != stable_fingerprint {
-                return Err(authority(
-                    "pinned MCP capture does not match the continuation",
-                ));
-            }
-            return Ok(capture);
-        }
-        let capture = self
-            .captures
-            .resolve_capture(stable_fingerprint)
-            .map_err(|error| authority(error.to_string()))?;
-        if capture.stable_fingerprint() != stable_fingerprint {
+            .ok_or_else(|| authority("MCP continuation generation policy is unavailable"))?;
+        if pinned.capture.stable_fingerprint() != stable_fingerprint {
             return Err(authority(
-                "MCP capture resolver returned the wrong identity",
+                "pinned MCP capture does not match the continuation",
             ));
         }
-        self.insert_pin(id.to_owned(), capture.clone())?;
-        Ok(capture)
+        Ok(pinned)
     }
 
     async fn dispatch(

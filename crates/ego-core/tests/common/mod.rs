@@ -19,7 +19,7 @@ use futures::future::BoxFuture;
 
 use ego_core::config::{Mode, Ruleset};
 use ego_core::permit::{CanonPath, PolicyEngine};
-use ego_core::turn::GenerationPolicySource;
+use ego_core::turn::{GenerationPolicyCapture, GenerationPolicySnapshot, GenerationPolicySource};
 
 struct FixedPolicySource {
     root: CanonPath,
@@ -29,15 +29,23 @@ struct FixedPolicySource {
 
 impl GenerationPolicySource for FixedPolicySource {
     fn current(&self) -> Result<Arc<PolicyEngine>, String> {
-        self.capture()
-    }
-
-    fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
         Ok(Arc::new(PolicyEngine::new(
             self.root.clone(),
             self.mode,
             self.rules.clone(),
         )))
+    }
+
+    fn capture(&self) -> Result<GenerationPolicyCapture, String> {
+        GenerationPolicyCapture::new(self.root.clone(), self.mode, self.rules.clone(), None)
+            .map_err(|error| error.to_string())
+    }
+
+    fn restore(
+        &self,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<GenerationPolicyCapture, String> {
+        GenerationPolicyCapture::restore(snapshot, None).map_err(|error| error.to_string())
     }
 }
 

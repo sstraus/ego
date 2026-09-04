@@ -497,7 +497,11 @@ pub struct Session<'a> {
 /// Supplies active pre-generation authority and one immutable generation capture.
 pub trait GenerationPolicySource: Send + Sync {
     fn current(&self) -> Result<Arc<PolicyEngine>, String>;
-    fn capture(&self) -> Result<Arc<PolicyEngine>, String>;
+    fn capture(&self) -> Result<GenerationPolicyCapture, String>;
+    fn restore(
+        &self,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<GenerationPolicyCapture, String>;
 }
 
 /// The run-owned inputs needed at every fresh generation boundary.
@@ -2327,7 +2331,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 return Ok(DriveOutcome::Ended(ExitReason::Budget, None));
             }
 
-            let (policy, generation, terminal, reason, pending, error_kind) =
+            let (capture, generation, terminal, reason, pending, error_kind) =
                 match self.generate(turn).await? {
                     Generated::Ended(reason) => return Ok(DriveOutcome::Ended(reason, None)),
                     Generated::Cancelled { cause, pending } => {
@@ -2335,14 +2339,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
                     }
                     Generated::Stopped {
-                        policy,
+                        capture,
                         generation,
                         terminal,
                         reason,
                         pending,
                         error_kind,
-                    } => (policy, generation, terminal, reason, pending, error_kind),
+                    } => (capture, generation, terminal, reason, pending, error_kind),
                 };
+            let policy = capture.policy();
+            let policy_snapshot = capture.snapshot();
 
             // A generation that says it stopped for tools and then names none
             // has nothing to answer. Generating again on that evidence loops
@@ -2459,7 +2465,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 // configured on purpose. `DeniedBy` is what carries that
                 // difference past the prose and into §4.1's object.
                 let denial = match self
-                    .run_tool(policy.as_ref(), turn, &mut pending[index])
+                    .run_tool(policy.as_ref(), &policy_snapshot, turn, &mut pending[index])
                     .await?
                 {
                     ToolOutcome::Answered { ok, result } => {
@@ -2726,13 +2732,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
         let source = Arc::clone(&self.source);
         let model_request = self.main_model_request();
-        let policy = match self.policy_source.capture() {
-            Ok(policy) => policy,
+        let capture = match self.policy_source.capture() {
+            Ok(capture) => capture,
             Err(error) => {
                 tracing::warn!(%error, "the generation policy could not be captured");
                 return self.refuse(turn, error, ExitReason::Internal);
             }
         };
+        let policy = capture.policy();
         if let Err(error) = self.bind_hook_policy(Arc::clone(&policy)) {
             tracing::warn!(%error, "the generation hook policy could not be bound");
             return self.refuse(turn, error, ExitReason::Internal);
@@ -2967,7 +2974,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             return Ok(Generated::Ended(ExitReason::Provider));
         }
         Ok(Generated::Stopped {
-            policy,
+            capture,
             generation: reference.generation(),
             terminal,
             reason: settlement.outcome.stop(),
@@ -3719,6 +3726,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     async fn run_tool(
         &mut self,
         policy: &PolicyEngine,
+        policy_snapshot: &Arc<GenerationPolicySnapshot>,
         turn: TurnId,
         call: &mut PendingCall,
     ) -> Result<ToolOutcome, StoreError> {
@@ -4216,6 +4224,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let resume_context = call.capture_authority.resume_context(
             self.hook_runtime.as_ref(),
             HookCausality::item(call.item, turn, call.started),
+            policy_snapshot,
         );
         let execution = await_controlled(
             &self.journal,
@@ -4736,7 +4745,7 @@ enum Generated {
     /// The generation finished. `pending` is what it asked to call.
     Stopped {
         /// The exact immutable authority captured before this generation.
-        policy: Arc<PolicyEngine>,
+        capture: GenerationPolicyCapture,
         generation: GenerationId,
         terminal: EventId,
         reason: StopReason,

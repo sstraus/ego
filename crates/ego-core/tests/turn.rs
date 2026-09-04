@@ -71,9 +71,9 @@ use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, St
 use ego_core::subagent::{ChildWait, ChildWaitResult};
 use ego_core::suspension::ResumeFloor;
 use ego_core::turn::{
-    CancelToken, ControlError, GenerationPolicySource, GenerationRuntime, Journal, JudgeContext,
-    RegisteredTool, Session, SharedJournal, ToolEffectPorts, Tools, TurnConfig,
-    TurnLoop as CoreTurnLoop,
+    CancelToken, ControlError, GenerationPolicyCapture, GenerationPolicySnapshot,
+    GenerationPolicySource, GenerationRuntime, Journal, JudgeContext, RegisteredTool, Session,
+    SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop as CoreTurnLoop,
 };
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -1136,10 +1136,6 @@ mod turn {
 
     impl GenerationPolicySource for FixedPolicySource {
         fn current(&self) -> Result<Arc<PolicyEngine>, String> {
-            self.capture()
-        }
-
-        fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
             Ok(Arc::new(match &self.human {
                 Some(human) => PolicyEngine::with_human(
                     CanonPath::new("/ws"),
@@ -1151,6 +1147,24 @@ mod turn {
                     PolicyEngine::new(CanonPath::new("/ws"), self.mode, self.permissions.clone())
                 }
             }))
+        }
+
+        fn capture(&self) -> Result<GenerationPolicyCapture, String> {
+            GenerationPolicyCapture::new(
+                CanonPath::new("/ws"),
+                self.mode,
+                self.permissions.clone(),
+                self.human.clone(),
+            )
+            .map_err(|error| error.to_string())
+        }
+
+        fn restore(
+            &self,
+            snapshot: Arc<GenerationPolicySnapshot>,
+        ) -> Result<GenerationPolicyCapture, String> {
+            GenerationPolicyCapture::restore(snapshot, self.human.clone())
+                .map_err(|error| error.to_string())
         }
     }
 
@@ -7435,7 +7449,7 @@ mod turn {
     }
 
     struct ScriptedPolicySource {
-        captures: Mutex<VecDeque<Result<Arc<PolicyEngine>, String>>>,
+        captures: Mutex<VecDeque<Result<GenerationPolicyCapture, String>>>,
         timeline: Arc<Mutex<Vec<String>>>,
         active: Arc<PolicyEngine>,
     }
@@ -7446,7 +7460,7 @@ mod turn {
             Ok(Arc::clone(&self.active))
         }
 
-        fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
+        fn capture(&self) -> Result<GenerationPolicyCapture, String> {
             let next = self
                 .captures
                 .lock()
@@ -7456,6 +7470,18 @@ mod turn {
             self.timeline.lock().unwrap().push("capture".into());
             next
         }
+
+        fn restore(
+            &self,
+            snapshot: Arc<GenerationPolicySnapshot>,
+        ) -> Result<GenerationPolicyCapture, String> {
+            GenerationPolicyCapture::restore(snapshot, None).map_err(|error| error.to_string())
+        }
+    }
+
+    fn captured_policy(mode: Mode, rules: Ruleset) -> GenerationPolicyCapture {
+        GenerationPolicyCapture::new(CanonPath::new("/ws"), mode, rules, None)
+            .expect("valid generation policy capture")
     }
 
     struct RecordingHookBinding {
@@ -7564,8 +7590,7 @@ mod turn {
         let timeline = Arc::clone(&trace.timeline);
         let policy_source = Arc::new(ScriptedPolicySource {
             captures: Mutex::new(VecDeque::from([
-                Ok(Arc::new(PolicyEngine::new(
-                    CanonPath::new("/ws"),
+                Ok(captured_policy(
                     Mode::Default,
                     Ruleset::from_layer(
                         PermCfg {
@@ -7575,17 +7600,9 @@ mod turn {
                         },
                         Source::Project,
                     ),
-                ))),
-                Ok(Arc::new(PolicyEngine::new(
-                    CanonPath::new("/ws"),
-                    Mode::Default,
-                    Ruleset::default(),
-                ))),
-                Ok(Arc::new(PolicyEngine::new(
-                    CanonPath::new("/ws"),
-                    Mode::Default,
-                    Ruleset::default(),
-                ))),
+                )),
+                Ok(captured_policy(Mode::Default, Ruleset::default())),
+                Ok(captured_policy(Mode::Default, Ruleset::default())),
             ])),
             timeline: Arc::clone(&timeline),
             active: Arc::new(PolicyEngine::new(
@@ -7772,13 +7789,10 @@ mod turn {
             Mode::Auto,
             Ruleset::default(),
         ));
-        let captured = Arc::new(PolicyEngine::new(
-            CanonPath::new("/ws"),
-            Mode::Default,
-            Ruleset::default(),
-        ));
+        let captured = captured_policy(Mode::Default, Ruleset::default());
+        let captured_policy = captured.policy();
         let policy_source = Arc::new(ScriptedPolicySource {
-            captures: Mutex::new(VecDeque::from([Ok(Arc::clone(&captured))])),
+            captures: Mutex::new(VecDeque::from([Ok(captured)])),
             timeline: Arc::clone(&trace.timeline),
             active: Arc::clone(&active),
         });
@@ -7855,11 +7869,11 @@ mod turn {
         let policies = binding.policies.lock().unwrap();
         assert_eq!(policies.len(), 2);
         assert!(Arc::ptr_eq(&policies[0], &active));
-        assert!(Arc::ptr_eq(&policies[1], &captured));
+        assert!(Arc::ptr_eq(&policies[1], &captured_policy));
         assert_eq!(*binding.mcp_bindings.lock().unwrap(), 2);
         assert_eq!(
             mcp.floors.lock().unwrap().as_slice(),
-            [active.resume_floor(), captured.resume_floor()]
+            [active.resume_floor(), captured_policy.resume_floor()]
         );
         assert_eq!(invoker.lifecycles(), vec![HookLifecycle::UserPromptSubmit]);
         assert_eq!(
@@ -7974,11 +7988,7 @@ mod turn {
             Mode::Auto,
             Ruleset::default(),
         ));
-        let captured = Arc::new(PolicyEngine::new(
-            CanonPath::new("/ws"),
-            Mode::Default,
-            Ruleset::default(),
-        ));
+        let captured = captured_policy(Mode::Default, Ruleset::default());
         let policy_source = Arc::new(ScriptedPolicySource {
             captures: Mutex::new(VecDeque::from([Ok(captured)])),
             timeline: Arc::clone(&trace.timeline),

@@ -57,8 +57,8 @@ use ego_core::store::evidence::{
 mod common;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
-    CancelToken, GenerationRuntime, RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig,
-    TurnLoop,
+    CancelToken, GenerationPolicyCapture, GenerationPolicySnapshot, GenerationRuntime,
+    RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
 };
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -476,7 +476,25 @@ struct QuestionMcpRuntime {
 
 struct TracingPolicySource {
     policy: Arc<PolicyEngine>,
+    snapshot: Arc<GenerationPolicySnapshot>,
     trace: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl TracingPolicySource {
+    fn new(trace: Arc<Mutex<Vec<&'static str>>>) -> Self {
+        let capture = GenerationPolicyCapture::new(
+            CanonPath::new("/ws"),
+            Mode::Default,
+            Ruleset::default(),
+            None,
+        )
+        .expect("valid generation policy capture");
+        Self {
+            policy: capture.policy(),
+            snapshot: capture.snapshot(),
+            trace,
+        }
+    }
 }
 
 impl ego_core::turn::GenerationPolicySource for TracingPolicySource {
@@ -485,9 +503,17 @@ impl ego_core::turn::GenerationPolicySource for TracingPolicySource {
         Ok(Arc::clone(&self.policy))
     }
 
-    fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
+    fn capture(&self) -> Result<GenerationPolicyCapture, String> {
         self.trace.lock().expect("question trace").push("capture");
-        Ok(Arc::clone(&self.policy))
+        GenerationPolicyCapture::restore(Arc::clone(&self.snapshot), None)
+            .map_err(|error| error.to_string())
+    }
+
+    fn restore(
+        &self,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<GenerationPolicyCapture, String> {
+        GenerationPolicyCapture::restore(snapshot, None).map_err(|error| error.to_string())
     }
 }
 
@@ -601,13 +627,8 @@ fn with_foreign_turn<R>(
         CanonPath::new("/ws"),
     );
     let source = Arc::new(FixedSource { generator });
-    let policy = Arc::new(PolicyEngine::new(
-        CanonPath::new("/ws"),
-        Mode::Default,
-        Ruleset::default(),
-    ));
     let policy_source: Arc<dyn ego_core::turn::GenerationPolicySource> = match trace.clone() {
-        Some(trace) => Arc::new(TracingPolicySource { policy, trace }),
+        Some(trace) => Arc::new(TracingPolicySource::new(trace)),
         None => common::default_policy_source(),
     };
     let mut turn = TurnLoop::new(
@@ -1025,16 +1046,8 @@ fn reconstructed_resume_without_captured_policy_fails_closed_before_settlement()
                 ToolEffectPorts::new(&fs, &process, evidence, resolver, one_hop, duplex),
                 CanonPath::new("/ws"),
             );
-            let policy = Arc::new(PolicyEngine::new(
-                CanonPath::new("/ws"),
-                Mode::Default,
-                Ruleset::default(),
-            ));
             let policy_source: Arc<dyn ego_core::turn::GenerationPolicySource> =
-                Arc::new(TracingPolicySource {
-                    policy,
-                    trace: restart_trace.clone(),
-                });
+                Arc::new(TracingPolicySource::new(restart_trace.clone()));
             let runtime = GenerationRuntime {
                 policy_source,
                 source: Arc::new(FixedSource {

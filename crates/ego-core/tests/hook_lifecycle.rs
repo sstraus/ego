@@ -59,8 +59,8 @@ use ego_core::store::evidence::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
-    CancelToken, GenerationPolicySource, GenerationRuntime, Session, SharedJournal,
-    ToolEffectPorts, Tools, TurnConfig, TurnLoop,
+    CancelToken, GenerationPolicyCapture, GenerationPolicySnapshot, GenerationPolicySource,
+    GenerationRuntime, Session, SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
 };
 use futures::channel::oneshot;
 use futures::executor::block_on;
@@ -594,15 +594,28 @@ fn run_turn<P: HookInvocationPort + Clone + 'static>(
 
 struct TestHookBinding<P>(P);
 
-struct FixedPolicySource(Arc<PolicyEngine>);
+struct FixedPolicySource {
+    policy: Arc<PolicyEngine>,
+    snapshot: Arc<GenerationPolicySnapshot>,
+    human: Option<Arc<dyn HumanApprover>>,
+}
 
 impl GenerationPolicySource for FixedPolicySource {
     fn current(&self) -> Result<Arc<PolicyEngine>, String> {
-        Ok(Arc::clone(&self.0))
+        Ok(Arc::clone(&self.policy))
     }
 
-    fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
-        Ok(Arc::clone(&self.0))
+    fn capture(&self) -> Result<GenerationPolicyCapture, String> {
+        GenerationPolicyCapture::restore(Arc::clone(&self.snapshot), self.human.clone())
+            .map_err(|error| error.to_string())
+    }
+
+    fn restore(
+        &self,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<GenerationPolicyCapture, String> {
+        GenerationPolicyCapture::restore(snapshot, self.human.clone())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -651,16 +664,18 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
         },
         Source::Project,
     );
-    let policy = if deny_exec {
-        PolicyEngine::with_human(
-            CanonPath::new("/ws"),
-            Mode::Default,
-            permissions,
-            Arc::new(DenyApprover),
-        )
+    let human: Option<Arc<dyn HumanApprover>> = if deny_exec {
+        Some(Arc::new(DenyApprover))
     } else {
-        PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, permissions)
+        None
     };
+    let policy = GenerationPolicyCapture::new(
+        CanonPath::new("/ws"),
+        Mode::Default,
+        permissions,
+        human.clone(),
+    )
+    .expect("valid generation policy capture");
     let process = NoProcess::default();
     let evidence = NoEvidence;
     let fs = ego_core::permit::fake::FakeFs::default();
@@ -690,7 +705,11 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
             cancel: cancel.clone(),
         },
         GenerationRuntime {
-            policy_source: Arc::new(FixedPolicySource(Arc::new(policy))),
+            policy_source: Arc::new(FixedPolicySource {
+                policy: policy.policy(),
+                snapshot: policy.snapshot(),
+                human,
+            }),
             source: Arc::new(GeneratorSource { generator }),
             gate,
             config: TurnConfig {

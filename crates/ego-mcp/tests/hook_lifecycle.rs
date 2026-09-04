@@ -47,8 +47,8 @@ use ego_core::suspension::{
     ContinuationState, McpResumeContext, ResumeKeySource, ResumeSealer,
 };
 use ego_core::turn::{
-    CancelToken, Journal as SessionJournal, McpRegistryEvent, McpRegistryJournal,
-    McpRegistryJournalError, SharedJournal, ToolEffectPorts,
+    CancelToken, GenerationPolicyCapture, GenerationPolicySnapshot, Journal as SessionJournal,
+    McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, SharedJournal, ToolEffectPorts,
 };
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
@@ -997,13 +997,36 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::with_input_required_rounds(2));
     let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
-    let (call, guarded) =
-        guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
+    let policy_snapshot = GenerationPolicyCapture::new(
+        CanonPath::new("/pinned-generation"),
+        Mode::Auto,
+        Ruleset::default(),
+        None,
+    )
+    .expect("valid generation policy capture")
+    .snapshot();
+    let policy_digest = policy_snapshot.digest();
+    let policy_snapshot_weak = Arc::downgrade(&policy_snapshot);
+    let (call, guarded) = guarded_with_session_context_and_policy_snapshot(
+        auth,
+        resume,
+        runtime.clone(),
+        &capture,
+        Arc::clone(&policy_snapshot),
+        spawner.clone(),
+    );
+    drop(policy_snapshot);
     let ToolExecution::InputRequired(initial) =
         tool.execute(call, &guarded).await.expect("required")
     else {
         panic!("expected required");
     };
+    drop(guarded);
+    let retained_by_initial = policy_snapshot_weak
+        .upgrade()
+        .expect("the initial continuation owner must retain the exact policy snapshot");
+    assert_eq!(retained_by_initial.digest(), policy_digest);
+    drop(retained_by_initial);
     let initial_id = initial.continuation_id().to_owned();
     let runtime_for_events = runtime.clone();
     let initial_causality =
@@ -1027,6 +1050,11 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
     };
     assert_ne!(successor.continuation_id(), initial_id);
     assert_eq!(journal.state(), Some(ContinuationState::Pending));
+    let retained_by_successor = policy_snapshot_weak
+        .upgrade()
+        .expect("the successor continuation must retain the original policy snapshot");
+    assert_eq!(retained_by_successor.digest(), policy_digest);
+    drop(retained_by_successor);
 
     let successor_causality =
         settled_continuation_causality(&runtime_for_events, &successor, r#"{"choice":"yes"}"#);
@@ -1042,6 +1070,10 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
         panic!("the successor adapter resume must complete");
     };
     assert_eq!(result.model_text(), "retry-complete");
+    assert!(
+        policy_snapshot_weak.upgrade().is_none(),
+        "terminal completion must release the generation policy snapshot pin"
+    );
     assert_eq!(spawner.calls(), 3);
     assert_eq!(journal.state(), None);
     assert_eq!(
@@ -1395,6 +1427,32 @@ fn guarded_with_session_context(
     capture: &McpRegistryCapture,
     spawner: Arc<ScriptedSpawner>,
 ) -> (PreparedCall, GuardedEffects<'static>) {
+    let policy_snapshot = GenerationPolicyCapture::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        Ruleset::default(),
+        None,
+    )
+    .expect("valid generation policy capture")
+    .snapshot();
+    guarded_with_session_context_and_policy_snapshot(
+        authorized,
+        resume,
+        runtime,
+        capture,
+        policy_snapshot,
+        spawner,
+    )
+}
+
+fn guarded_with_session_context_and_policy_snapshot(
+    authorized: Authorized,
+    resume: ego_core::suspension::PreparedResume,
+    runtime: SessionHookRuntime<'static>,
+    capture: &McpRegistryCapture,
+    policy_snapshot: Arc<GenerationPolicySnapshot>,
+    spawner: Arc<ScriptedSpawner>,
+) -> (PreparedCall, GuardedEffects<'static>) {
     let causality = runtime
         .hook_state()
         .inspect(|state| {
@@ -1406,7 +1464,19 @@ fn guarded_with_session_context(
         })
         .expect("session state inspection")
         .expect("tool causality");
-    let context = McpResumeContext::new(runtime, capture.clone(), causality);
+    let context = McpResumeContext::new(
+        runtime,
+        capture.clone(),
+        causality,
+        Arc::clone(&policy_snapshot),
+    );
+    let actual: Arc<GenerationPolicySnapshot> = context.policy_snapshot();
+    assert!(Arc::ptr_eq(&actual, &policy_snapshot));
+    assert_eq!(actual.digest(), policy_snapshot.digest());
+    assert_eq!(
+        actual.encode_confidential().expose_secret_bytes(),
+        policy_snapshot.encode_confidential().expose_secret_bytes()
+    );
     ToolEffectPorts::new(
         Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
         Box::leak(Box::new(NoProcess)),

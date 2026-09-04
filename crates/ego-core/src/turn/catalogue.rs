@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::hook::{HookCausality, SessionHookRuntime};
 use crate::suspension::{McpCaptureAuthority, McpCapturePin, McpResumeContext};
 
-use super::RegisteredTool;
+use super::{GenerationPolicySnapshot, RegisteredTool};
 
 /// Authority retained with the exact catalogue selected for one generation.
 #[derive(Clone)]
@@ -21,10 +21,16 @@ impl ToolCaptureAuthority {
         &self,
         runtime: Option<&SessionHookRuntime<'s>>,
         causality: HookCausality,
+        policy_snapshot: &Arc<GenerationPolicySnapshot>,
     ) -> Option<McpResumeContext<'s>> {
         match self {
             Self::Mcp(capture) => runtime.map(|runtime| {
-                McpResumeContext::from_authority(runtime.clone(), capture.clone(), causality)
+                McpResumeContext::from_authority(
+                    runtime.clone(),
+                    capture.clone(),
+                    causality,
+                    Arc::clone(policy_snapshot),
+                )
             }),
             Self::Static => None,
         }

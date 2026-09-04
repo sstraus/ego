@@ -57,8 +57,8 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::turn::{
-    CancelToken, GenerationPolicySource, GenerationRuntime, Session, ToolEffectPorts, Tools,
-    TurnConfig, TurnLoop,
+    CancelToken, GenerationPolicyCapture, GenerationPolicySnapshot, GenerationPolicySource,
+    GenerationRuntime, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::fs::OsFs;
@@ -1696,6 +1696,18 @@ mod end_to_end {
 
     struct FixedPolicySource {
         policy: Arc<PolicyEngine>,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    }
+
+    impl FixedPolicySource {
+        fn new(workspace: CanonPath, mode: Mode, rules: Ruleset) -> Self {
+            let capture = GenerationPolicyCapture::new(workspace, mode, rules, None)
+                .expect("valid generation policy capture");
+            Self {
+                policy: capture.policy(),
+                snapshot: capture.snapshot(),
+            }
+        }
     }
 
     impl GenerationPolicySource for FixedPolicySource {
@@ -1703,8 +1715,16 @@ mod end_to_end {
             Ok(Arc::clone(&self.policy))
         }
 
-        fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
-            Ok(Arc::clone(&self.policy))
+        fn capture(&self) -> Result<GenerationPolicyCapture, String> {
+            GenerationPolicyCapture::restore(Arc::clone(&self.snapshot), None)
+                .map_err(|error| error.to_string())
+        }
+
+        fn restore(
+            &self,
+            snapshot: Arc<GenerationPolicySnapshot>,
+        ) -> Result<GenerationPolicyCapture, String> {
+            GenerationPolicyCapture::restore(snapshot, None).map_err(|error| error.to_string())
         }
     }
 
@@ -1772,13 +1792,11 @@ mod end_to_end {
                     cancel: CancelToken::new(),
                 },
                 GenerationRuntime {
-                    policy_source: Arc::new(FixedPolicySource {
-                        policy: Arc::new(PolicyEngine::new(
-                            ws.cwd(),
-                            Mode::Default,
-                            Ruleset::default(),
-                        )),
-                    }),
+                    policy_source: Arc::new(FixedPolicySource::new(
+                        ws.cwd(),
+                        Mode::Default,
+                        Ruleset::default(),
+                    )),
                     source: Arc::new(FixedSource {
                         generator: Arc::clone(&generator),
                     }),
@@ -1878,13 +1896,11 @@ mod end_to_end {
                     cancel: CancelToken::new(),
                 },
                 GenerationRuntime {
-                    policy_source: Arc::new(FixedPolicySource {
-                        policy: Arc::new(PolicyEngine::new(
-                            ws.cwd(),
-                            Mode::Default,
-                            Ruleset::default(),
-                        )),
-                    }),
+                    policy_source: Arc::new(FixedPolicySource::new(
+                        ws.cwd(),
+                        Mode::Default,
+                        Ruleset::default(),
+                    )),
                     source: Arc::new(FixedSource {
                         generator: Arc::clone(&generator),
                     }),

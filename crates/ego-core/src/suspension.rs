@@ -13,6 +13,7 @@ use crate::config::Mode;
 use crate::event::time::{Clock, Timestamp};
 use crate::hook::{HookCausality, SessionHookRuntime};
 use crate::permit::{Authority, Authorized, PreparedCall};
+use crate::turn::GenerationPolicySnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -117,10 +118,16 @@ pub struct McpResumeContext<'s> {
     runtime: SessionHookRuntime<'s>,
     capture: McpCaptureAuthority,
     causality: HookCausality,
+    policy_snapshot: Arc<GenerationPolicySnapshot>,
 }
 
 impl<'s> McpResumeContext<'s> {
-    pub fn new<P>(runtime: SessionHookRuntime<'s>, capture: P, causality: HookCausality) -> Self
+    pub fn new<P>(
+        runtime: SessionHookRuntime<'s>,
+        capture: P,
+        causality: HookCausality,
+        policy_snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Self
     where
         P: McpCapturePin + 'static,
     {
@@ -128,6 +135,7 @@ impl<'s> McpResumeContext<'s> {
             runtime,
             capture: McpCaptureAuthority::new(capture),
             causality,
+            policy_snapshot,
         }
     }
 
@@ -135,11 +143,13 @@ impl<'s> McpResumeContext<'s> {
         runtime: SessionHookRuntime<'s>,
         capture: McpCaptureAuthority,
         causality: HookCausality,
+        policy_snapshot: Arc<GenerationPolicySnapshot>,
     ) -> Self {
         Self {
             runtime,
             capture,
             causality,
+            policy_snapshot,
         }
     }
 
@@ -153,6 +163,10 @@ impl<'s> McpResumeContext<'s> {
 
     pub fn causality(&self) -> &HookCausality {
         &self.causality
+    }
+
+    pub fn policy_snapshot(&self) -> Arc<GenerationPolicySnapshot> {
+        Arc::clone(&self.policy_snapshot)
     }
 }
 

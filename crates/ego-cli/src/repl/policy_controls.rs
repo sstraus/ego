@@ -11,7 +11,10 @@ use ego_core::config::{
     UserConfigPublication, UserConfigStore, UserConfigTarget,
 };
 use ego_core::permit::{CanonPath, HumanApprover, PolicyEngine, PreparedCall};
-use ego_core::turn::GenerationPolicySource;
+use ego_core::turn::{
+    GenerationPolicyCapture, GenerationPolicySnapshot as CapturedGenerationPolicySnapshot,
+    GenerationPolicySource,
+};
 
 const MODE_OPTIONS: [Mode; 5] = [
     Mode::Plan,
@@ -236,10 +239,25 @@ impl GenerationPolicySource for CliGenerationPolicySource {
             .map_err(|error| error.to_string())
     }
 
-    fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
-        self.selection
+    fn capture(&self) -> Result<GenerationPolicyCapture, String> {
+        let snapshot = self
+            .selection
             .capture()
-            .map(|snapshot| self.engine(snapshot))
+            .map_err(|error| error.to_string())?;
+        GenerationPolicyCapture::new(
+            self.workspace.clone(),
+            snapshot.mode,
+            snapshot.ruleset,
+            self.human.clone(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn restore(
+        &self,
+        snapshot: Arc<CapturedGenerationPolicySnapshot>,
+    ) -> Result<GenerationPolicyCapture, String> {
+        GenerationPolicyCapture::restore(snapshot, self.human.clone())
             .map_err(|error| error.to_string())
     }
 }
@@ -420,6 +438,33 @@ impl PolicyApplicationOwner {
 mod tests {
     use super::*;
 
+    use ego_core::permit::{
+        Change, Classification, Op, PermissionDecision, PermissionRequest, Resolution,
+    };
+    use futures::future::BoxFuture;
+
+    #[derive(Debug)]
+    struct AllowingHumanApprover;
+
+    impl HumanApprover for AllowingHumanApprover {
+        fn decide<'a>(
+            &'a self,
+            _request: &'a PermissionRequest,
+        ) -> BoxFuture<'a, PermissionDecision> {
+            Box::pin(std::future::ready(PermissionDecision::Allow))
+        }
+    }
+
+    fn uncovered_write(workspace: &str) -> PreparedCall {
+        PreparedCall::new(
+            "edit",
+            Op::Write {
+                path: CanonPath::new(format!("{workspace}/uncovered.txt")),
+                change: Change::Whole(Vec::new()),
+            },
+        )
+    }
+
     #[test]
     fn poisoned_selection_reads_return_synchronization_errors() {
         let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
@@ -465,5 +510,89 @@ mod tests {
         let captured = selection.capture().unwrap();
         assert_eq!(captured.mode, Mode::Plan);
         assert_eq!(selection.snapshot().unwrap(), captured);
+    }
+
+    #[test]
+    fn cli_policy_source_restores_exact_snapshot_semantics_with_only_its_live_human() {
+        let snapshot_human = Arc::new(AllowingHumanApprover);
+        let original = ego_core::turn::GenerationPolicyCapture::new(
+            CanonPath::new("/captured-workspace"),
+            Mode::Default,
+            Ruleset::default(),
+            Some(snapshot_human.clone()),
+        )
+        .expect("valid original capture");
+        let snapshot = original.snapshot();
+        let digest = snapshot.digest();
+        drop(original);
+
+        let configured_human = Arc::new(AllowingHumanApprover);
+        let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+        let source = CliGenerationPolicySource::new(
+            selection.clone(),
+            CanonPath::new("/live-workspace"),
+            Some(configured_human.clone()),
+        );
+        assert!(selection.stage_mode(Mode::Yolo).unwrap().changed);
+
+        let current: Arc<PolicyEngine> =
+            GenerationPolicySource::current(&source).expect("active policy");
+        let Classification::Ask(pending) = current.classify(uncovered_write("/live-workspace"))
+        else {
+            panic!("current must read the uncommitted default policy");
+        };
+        assert!(matches!(
+            futures::executor::block_on(current.settle(pending)),
+            Resolution::Ask(_)
+        ));
+        assert_eq!(
+            selection.staged_snapshot().unwrap().unwrap().mode,
+            Mode::Yolo,
+            "current must not commit the staged policy"
+        );
+        drop(current);
+
+        let captured: ego_core::turn::GenerationPolicyCapture =
+            GenerationPolicySource::capture(&source).expect("boundary capture");
+        let Classification::Ask(pending) = captured
+            .policy()
+            .classify(uncovered_write("/live-workspace"))
+        else {
+            panic!("yolo reaches mode settlement for the uncovered write");
+        };
+        assert!(matches!(
+            futures::executor::block_on(captured.policy().settle(pending)),
+            Resolution::Settled(Ok(_))
+        ));
+        drop(captured);
+
+        let restored: ego_core::turn::GenerationPolicyCapture =
+            GenerationPolicySource::restore(&source, Arc::clone(&snapshot))
+                .expect("captured semantics restore");
+        assert!(Arc::ptr_eq(&restored.snapshot(), &snapshot));
+        assert_eq!(restored.snapshot().digest(), digest);
+        assert_eq!(
+            restored
+                .snapshot()
+                .encode_confidential()
+                .expose_secret_bytes(),
+            snapshot.encode_confidential().expose_secret_bytes()
+        );
+        let restored_policy = restored.policy();
+        let Classification::Ask(pending) =
+            restored_policy.classify(uncovered_write("/captured-workspace"))
+        else {
+            panic!("restore must ignore the now-active yolo selection");
+        };
+        let Resolution::Ask(_pending) =
+            futures::executor::block_on(restored_policy.settle(pending))
+        else {
+            panic!("the restored default mode must reach the human party");
+        };
+        assert_eq!(Arc::strong_count(&configured_human), 3);
+        assert_eq!(Arc::strong_count(&snapshot_human), 1);
+        drop(restored_policy);
+        drop(restored);
+        assert_eq!(Arc::strong_count(&configured_human), 2);
     }
 }
