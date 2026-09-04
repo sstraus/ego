@@ -18,6 +18,7 @@ use super::skill::{
 use super::time::Timestamp;
 use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
+use crate::generator::capabilities::CapabilityGap;
 use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
 use crate::goal::{GoalOwner, GoalTransition};
 use crate::permit::{Authority, Escalation, ExecObservation, ToolResult, ToolResultProvenance};
@@ -59,6 +60,23 @@ pub enum GenerationRole {
     Compaction,
     Subagent,
     Hook,
+}
+
+/// Why one ordered fallback candidate was changed or skipped before admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum FallbackDecision {
+    /// Opaque provider reasoning was the only incompatibility and was removed.
+    ReasoningDropped {
+        dropped_blocks: usize,
+        dialects: Vec<String>,
+    },
+    /// Capability facts prove that the candidate cannot accept the request.
+    Skipped { gaps: Vec<CapabilityGap> },
+    /// The adapter cannot encode the otherwise-capable request.
+    ExpressibilitySkipped { message: String },
+    /// Current model authority could not be resolved for this candidate.
+    ResolutionSkipped { message: String },
 }
 
 /// Closed refusal evidence for a child that never reached admission.
@@ -194,7 +212,7 @@ pub enum OccupancyProvenance {
 /// ReasoningDelta | ReasoningState | ToolCallStarted |
 /// ToolCallDelta | ToolCallCompleted | PermissionRequested |
 /// PermissionAmended | PermissionDecided | GenerationStarted |
-/// ExecutionObserved | AttemptSettled | UsageUpdated | UsageCorrected |
+/// ExecutionObserved | FallbackDecision | AttemptSettled | UsageUpdated | UsageCorrected |
 /// ContextWindowUpdated | TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled |
@@ -363,6 +381,11 @@ pub enum EventKind {
         #[serde(default)]
         role: GenerationRole,
     },
+    /// A fallback was sanitized or rejected before any reservation was minted.
+    FallbackDecision {
+        candidate: crate::config::ModelRef,
+        decision: FallbackDecision,
+    },
     /// The process backend evidence captured before any turn action.
     ExecutionObserved { observation: ExecObservation },
     /// One attempt reached a terminal state.
@@ -377,7 +400,7 @@ pub enum EventKind {
         attempt: AttemptRef,
         outcome: Outcome,
     },
-    /// One generation's usage was reported (added to the running totals),
+    /// One attempt's usage was reported (added to the running totals),
     /// together with what it cost.
     ///
     /// Token counts and cost travel together because they are the same
@@ -614,6 +637,7 @@ impl EventKind {
             EventKind::PermissionAmended { .. } => "permission_amended",
             EventKind::PermissionDecided { .. } => "permission_decided",
             EventKind::GenerationStarted { .. } => "generation_started",
+            EventKind::FallbackDecision { .. } => "fallback_decision",
             EventKind::ExecutionObserved { .. } => "execution_observed",
             EventKind::AttemptSettled { .. } => "attempt_settled",
             EventKind::UsageUpdated { .. } => "usage_updated",

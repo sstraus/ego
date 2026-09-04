@@ -3141,6 +3141,8 @@ pub struct CliPrepared {
     run_id: RunId,
     session_id: SessionId,
     schema_retries: u32,
+    retry: u32,
+    fallbacks: Vec<ModelRef>,
     max_turns: Option<u32>,
     run_deadline: Option<std::time::Instant>,
     root: PathBuf,
@@ -3226,6 +3228,8 @@ impl CliPrepared {
             ..
         } = settings;
         let schema_retries = args.schema_retries;
+        let retry = args.retry;
+        let fallbacks = args.fallbacks.clone();
         let max_turns = args.max_turns;
         let instructions = system
             .as_ref()
@@ -3251,6 +3255,8 @@ impl CliPrepared {
                 run_id: request.run_id,
                 session_id: request.run_id.session_id(),
                 schema_retries,
+                retry,
+                fallbacks,
                 max_turns,
                 run_deadline,
                 root,
@@ -3352,6 +3358,8 @@ impl CliPrepared {
         let config = TurnConfig {
             system: self.system,
             token_ceiling: self.effective.ceilings.tokens,
+            retry: self.retry,
+            fallbacks: self.fallbacks,
         };
         let turns = Turns {
             schema: self.compiled.as_ref(),
@@ -3667,6 +3675,8 @@ fn protocol_args(session_dir: Option<PathBuf>) -> Args {
         output: Output::Json,
         schema: None,
         schema_retries: 0,
+        retry: 0,
+        fallbacks: Vec::new(),
         budget: None,
         max_turns: None,
         timeout: None,
@@ -3894,6 +3904,8 @@ impl CliCompactionCommand {
         let config = TurnConfig {
             system: system.clone(),
             token_ceiling: effective.ceilings.tokens,
+            retry: 0,
+            fallbacks: Vec::new(),
         };
         let (ports, observation) =
             effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
@@ -4839,6 +4851,8 @@ async fn execute<S: EventSink>(
     let mut config = TurnConfig {
         system,
         token_ceiling: effective.ceilings.tokens,
+        retry: args.retry,
+        fallbacks: args.fallbacks.clone(),
     };
 
     let turns = Turns {

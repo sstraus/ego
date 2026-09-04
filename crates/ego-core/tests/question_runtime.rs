@@ -666,6 +666,8 @@ fn with_foreign_turn<R>(
             config: TurnConfig {
                 system: None,
                 token_ceiling: None,
+                retry: 0,
+                fallbacks: Vec::new(),
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
@@ -789,6 +791,8 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
             config: TurnConfig {
                 system: None,
                 token_ceiling: None,
+                retry: 0,
+                fallbacks: Vec::new(),
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
@@ -1075,6 +1079,8 @@ fn reconstructed_resume_without_captured_policy_fails_closed_before_settlement()
                 config: TurnConfig {
                     system: None,
                     token_ceiling: None,
+                    retry: 0,
+                    fallbacks: Vec::new(),
                 },
                 admission: Arc::new(EvidenceAdmissionService::new()),
                 invocation: RunInvocationId::new(),

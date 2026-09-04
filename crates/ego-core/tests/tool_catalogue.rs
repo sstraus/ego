@@ -357,6 +357,8 @@ fn loop_with_policy(
         config: TurnConfig {
             system: None::<SystemPrompt>,
             token_ceiling: None,
+            retry: 0,
+            fallbacks: Vec::new(),
         },
         admission: Arc::new(EvidenceAdmissionService::new()),
         invocation: RunInvocationId::new(),

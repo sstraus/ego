@@ -27,7 +27,8 @@ use clap::error::ErrorKind;
 use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand};
 use ego_core::config::{
     ManagedConfigKey, ManagedConfigValue, ManagedRuleEffect, McpEnvironmentName, McpHttpAuth,
-    McpHttpConfig, McpHttpUrl, McpServerConfig, McpServerName, Mode, ProfileName, UserConfigTarget,
+    McpHttpConfig, McpHttpUrl, McpServerConfig, McpServerName, Mode, ModelRef, ProfileName,
+    UserConfigTarget,
 };
 use ego_core::event::id::{ItemId, SessionId};
 use ego_core::generator::types::ThinkingLevel;
@@ -139,12 +140,6 @@ const UNAVAILABLE: &[Unavailable] = &[
                      build installs no subscriber, and adding one puts a \
                      second writer on the stream the marks and the \
                      notification already own",
-    },
-    Unavailable {
-        flags: &["--retry", "--fallback"],
-        waiting_on: "a retry seam. A generation owns a reservation for its \
-                     whole life, so re-issuing one is a change to the attempt \
-                     contract rather than a loop that runs twice",
     },
 ];
 
@@ -586,6 +581,10 @@ pub struct Args {
     pub output: Output,
     pub schema: Option<String>,
     pub schema_retries: u32,
+    /// Additional delivery-safe attempts allowed for each model candidate.
+    pub retry: u32,
+    /// Ordered model candidates used after a safely-unsent failure or refusal.
+    pub fallbacks: Vec<ModelRef>,
     pub budget: Option<String>,
     pub max_turns: Option<u32>,
     pub timeout: Option<String>,
@@ -1183,6 +1182,19 @@ struct Flags {
     #[arg(long, default_value_t = 2)]
     schema_retries: u32,
 
+    /// Additional delivery-safe attempts for each candidate.
+    #[arg(long, default_value_t = 0)]
+    retry: u32,
+
+    /// Ordered provider/model candidate used after a delivery-safe failure.
+    #[arg(
+        long = "fallback",
+        value_name = "P/M",
+        action = ArgAction::Append,
+        value_parser = parse_model_ref
+    )]
+    fallbacks: Vec<ModelRef>,
+
     /// Hard cap: '2.5$' or '400k' tokens.
     #[arg(long)]
     budget: Option<String>,
@@ -1279,6 +1291,12 @@ fn parse_thinking(value: &str) -> Result<ThinkingLevel, String> {
             "`{other}` is not a thinking level: off|minimal|low|medium|high|xhigh|max"
         )),
     }
+}
+
+fn parse_model_ref(value: &str) -> Result<ModelRef, String> {
+    ego_ai::catalogue::ModelSlug::parse(value)
+        .map(|slug| ModelRef(slug.to_string()))
+        .map_err(|error| error.to_string())
 }
 
 fn parse_mcp_selector(value: &str) -> Result<McpSelector, String> {
@@ -2152,6 +2170,8 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         output: flags.common.output,
         schema: flags.schema,
         schema_retries: flags.schema_retries,
+        retry: flags.retry,
+        fallbacks: flags.fallbacks,
         budget: flags.budget,
         max_turns: flags.max_turns,
         timeout: flags.timeout,

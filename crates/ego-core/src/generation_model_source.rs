@@ -43,6 +43,12 @@ impl GenerationModelRequest {
         self
     }
 
+    /// Select one explicit model for this resolution without changing its role.
+    pub fn with_model(mut self, model: ModelRef) -> Self {
+        self.model = Some(model);
+        self
+    }
+
     pub fn role(&self) -> GenerationRole {
         self.role
     }

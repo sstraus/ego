@@ -650,6 +650,8 @@ mod turn_execution_observation {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),

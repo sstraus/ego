@@ -489,6 +489,7 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
         PublicEvent::SessionStarted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
+        | PublicEvent::FallbackDecision { .. }
         | PublicEvent::TurnCompleted { .. }
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
@@ -596,6 +597,7 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         PublicEvent::SessionStarted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
+        | PublicEvent::FallbackDecision { .. }
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
         | PublicEvent::Error { .. } => None,

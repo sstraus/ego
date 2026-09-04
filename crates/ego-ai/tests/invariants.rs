@@ -432,6 +432,8 @@ async fn one_turn(
             config: TurnConfig {
                 system: None,
                 token_ceiling: None,
+                retry: 0,
+                fallbacks: Vec::new(),
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),

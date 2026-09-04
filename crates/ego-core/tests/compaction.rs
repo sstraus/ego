@@ -311,7 +311,7 @@ fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
 
 #[test]
 fn public_projection_distinguishes_checkpoint_from_human_prompt_and_keeps_authority_low() {
-    assert_eq!(PUBLIC_EVENT_VERSION, 9);
+    assert_eq!(PUBLIC_EVENT_VERSION, 10);
     let source: SessionId =
         serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
     let seeded = seeded_event(EventKind::CompactionSeeded {
@@ -805,6 +805,8 @@ fn compaction_turn_with_state(
             config: TurnConfig {
                 system: None,
                 token_ceiling: None,
+                retry: 0,
+                fallbacks: Vec::new(),
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),

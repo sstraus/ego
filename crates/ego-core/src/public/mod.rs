@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::budget::{Ledger, Metering};
 use crate::cost::{CostDelta, Money, RateSource};
-use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
+use crate::event::domain::{
+    DomainEvent, EventKind, ExitReason, FallbackDecision, OccupancyProvenance,
+};
 use crate::event::id::{ItemId, SessionId, TurnId};
 use crate::generator::types::ErrorKind;
 use crate::question::{QuestionMode, QuestionOption, QuestionRequest, QuestionTarget};
@@ -30,7 +32,8 @@ use crate::state::Usage;
 ///
 /// Version 7 adds the public question item and its structured report. The
 /// durable codec stays at 7 because new event variants are additive.
-/// Version 9 adds the closed question target to the public report.
+/// Version 9 adds the closed question target to the public report. Version 10
+/// adds the sanitized fallback decision event.
 ///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
@@ -38,7 +41,7 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 9;
+pub const PUBLIC_EVENT_VERSION: u32 = 10;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
@@ -230,8 +233,8 @@ pub enum PublicEvent {
     TurnStarted { turn: TurnId },
     /// How the generation about to run is metered.
     ///
-    /// Emitted **per generation**, not once per session, because a fallback
-    /// chain can switch rows mid-turn — the same argument
+    /// Emitted **per wire attempt**, not once per session, because a retry
+    /// resolves its row afresh and a fallback can switch rows mid-turn — the same argument
     /// [`TurnCompleted`](Self::TurnCompleted)'s doc already makes for keeping
     /// usage off a turn-level event.
     ///
@@ -257,6 +260,12 @@ pub enum PublicEvent {
         ceiling: CeilingEffect,
         /// What the ceiling rests on, when it rests on anything.
         rates: RateSource,
+    },
+    /// A fallback was sanitized or skipped before any network effect.
+    FallbackDecision {
+        turn: TurnId,
+        candidate: crate::config::ModelRef,
+        decision: FallbackDecision,
     },
     /// An item (message, reasoning block, tool call, permission request or
     /// subagent invocation) began.
@@ -598,6 +607,14 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             item,
             usage_delta: *usage,
             cost_delta: cost_delta.clone(),
+        }),
+        EventKind::FallbackDecision {
+            candidate,
+            decision,
+        } => Some(PublicEvent::FallbackDecision {
+            turn,
+            candidate: candidate.clone(),
+            decision: decision.clone(),
         }),
         EventKind::ContextWindowUpdated {
             used_tokens,

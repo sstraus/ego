@@ -37,7 +37,7 @@ use crate::compact::{
 use crate::config::{Mode, ModelRef, SystemPrompt};
 use crate::cost::{Money, RateSource};
 use crate::event::domain::{
-    CancelCause, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+    CancelCause, EventKind, ExitReason, FallbackDecision, GenerationRole, OccupancyProvenance,
 };
 use crate::event::hook::{HookLifecycle, HookOccurrenceKey, HookSubject};
 use crate::event::id::{
@@ -52,11 +52,15 @@ use crate::generation_model_source::{
     GenerationModelErrorClass, GenerationModelRequest, GenerationModelSource, GenerationProfile,
 };
 use crate::generator::attempt::DeliveryCertainty;
-use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
+use crate::generator::attempt::{
+    AttemptRef, AttemptStream, GenerationAttempt, UsageReport, settled_cost,
+    settled_cost_for_delivery,
+};
+use crate::generator::capabilities::CapabilityGap;
 use crate::generator::history::conversation_from_with_blobs;
 use crate::generator::port::AiEvent;
 use crate::generator::types::{
-    Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ToolDescriptor,
+    ContentBlock, Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ToolDescriptor,
 };
 use crate::hook::{
     HookCausality, HookEvent, HookInvocationBinding, HookOccurrence, HookRunError,
@@ -277,6 +281,10 @@ pub struct TurnConfig {
     pub system: Option<SystemPrompt>,
     /// A ceiling on this session's cumulative billed tokens.
     pub token_ceiling: Option<u64>,
+    /// Additional delivery-safe attempts allowed for each model candidate.
+    pub retry: u32,
+    /// Ordered candidates considered after a safely-unsent failure or refusal.
+    pub fallbacks: Vec<ModelRef>,
 }
 
 /// What ended a turn.
@@ -757,7 +765,7 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
         })?;
         let delivery = settlement.outcome.delivery();
         let observed = usage.unwrap_or(Usage::IDENTITY);
-        let cost_delta = settled_cost(
+        let cost_delta = settled_cost_for_delivery(
             &profile.metering,
             quote,
             usage.map_or(UsageReport::Missing, UsageReport::Reported),
@@ -766,6 +774,7 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                 .snapshot()
                 .map_err(|error| ToollessGenerationFailure::new(error.to_string(), delivery))?
                 .currency(),
+            delivery,
         );
         self.journal
             .append(
@@ -1799,6 +1808,36 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         reason = "TurnAbandoned carries the exact durable session state by contract"
     )]
     pub async fn resume_turn(&mut self, turn: TurnId) -> Result<TurnOutcome, TurnAbandoned> {
+        let live = self
+            .state()
+            .live_attempts
+            .keys()
+            .map(|attempt| format!("{attempt:?}"))
+            .collect::<Vec<_>>();
+        if !live.is_empty() {
+            let message = format!(
+                "refusing continuation because attempt(s) {} have no durable settlement and may have been sent; start a new session to recover",
+                live.join(", ")
+            );
+            if let Err(cause) = self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::Error {
+                    message,
+                    kind: ErrorKind::Unclassified,
+                },
+            ) {
+                return Err(self.abandon(turn, cause));
+            }
+            return match self
+                .finish_turn(turn, DriveOutcome::Ended(ExitReason::Provider, None))
+                .await
+            {
+                Ok(outcome) => Ok(outcome),
+                Err(cause) => Err(self.abandon(turn, cause)),
+            };
+        }
         if let Err(cause) = self.admit_skill_catalogue(turn) {
             return Err(self.abandon(turn, cause));
         }
@@ -2156,6 +2195,39 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         )>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
         let turn = TurnId::new();
+        let live = self
+            .state()
+            .live_attempts
+            .keys()
+            .map(|attempt| format!("{attempt:?}"))
+            .collect::<Vec<_>>();
+        if !live.is_empty() {
+            if let Err(cause) = self.begin_turn(turn) {
+                return Err(self.abandon(turn, cause));
+            }
+            let message = format!(
+                "refusing a new turn because attempt(s) {} have no durable settlement and may have been sent; start a new session to recover",
+                live.join(", ")
+            );
+            if let Err(cause) = self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::Error {
+                    message,
+                    kind: ErrorKind::Unclassified,
+                },
+            ) {
+                return Err(self.abandon(turn, cause));
+            }
+            return match self
+                .finish_turn(turn, DriveOutcome::Ended(ExitReason::Provider, None))
+                .await
+            {
+                Ok(outcome) => Ok(outcome),
+                Err(cause) => Err(self.abandon(turn, cause)),
+            };
+        }
         if let Err(cause) = self.begin_turn(turn) {
             return Err(self.abandon(turn, cause));
         }
@@ -2741,8 +2813,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             );
         }
 
-        let source = Arc::clone(&self.source);
-        let model_request = self.main_model_request();
         let capture = match self.policy_source.capture() {
             Ok(capture) => capture,
             Err(error) => {
@@ -2755,34 +2825,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             tracing::warn!(%error, "the generation hook policy could not be bound");
             return self.refuse(turn, error, ExitReason::Internal);
         }
-        let profile = match await_controlled(
-            &self.journal,
-            &self.cancel,
-            &mut self.control,
-            turn,
-            source.resolve(model_request),
-            InterruptDisposition::Return,
-        )
-        .await
-        {
-            Controlled::Completed(Ok(profile)) => profile,
-            Controlled::Completed(Err(error)) => {
-                let exit = match error.class {
-                    GenerationModelErrorClass::Usage => ExitReason::Usage,
-                    GenerationModelErrorClass::Provider => ExitReason::Provider,
-                    GenerationModelErrorClass::Internal => ExitReason::Internal,
-                };
-                return self.refuse(turn, error.message, exit);
-            }
-            Controlled::Interrupted => {
-                return Ok(Generated::Cancelled {
-                    cause: self.cancel.cause().unwrap_or(CancelCause::User),
-                    pending: Vec::new(),
-                });
-            }
-            Controlled::Failed(cause) => return Err(cause),
-        };
-
         let ceiling = self
             .active_skill_scope
             .as_ref()
@@ -2800,198 +2842,377 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
         };
 
-        let request = GenRequest {
-            model: profile.request_model.clone(),
-            messages: conversation,
-            tools: catalogue.descriptors(),
-            thinking: profile.thinking,
-            max_output_tokens: profile.output_ceiling(),
-            parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
-        };
+        let source = Arc::clone(&self.source);
+        let first = AttemptRef::first(GenerationId::new());
+        let generation_id = first.generation();
+        let mut next_attempt = first;
+        let mut candidates = Vec::with_capacity(1 + self.config.fallbacks.len());
+        candidates.push(None);
+        candidates.extend(self.config.fallbacks.iter().cloned().map(Some));
+        let mut last_failure = None;
+        let mut last_preflight_exit = ExitReason::Usage;
+        let mut primary_model: Option<ModelRef> = None;
+        let mut primary_capabilities = None;
 
-        // Before the gate, deliberately: a reservation taken for a request
-        // the model will reject has authorised spending on something that was
-        // never going to be sent
-        // (`docs/decisions/2026-08-21-a-request-the-model-will-not-take.md`).
-        let gaps = profile.capabilities.request_gaps(&request);
-        if !gaps.is_empty() {
-            tracing::warn!(
-                ?gaps,
-                "the model does not accept the request this run asks for"
-            );
-            return self.refuse(
-                turn,
-                gaps.iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; "),
-                ExitReason::Usage,
-            );
-        }
-        if let Err(refused) = profile.generator.ensure_expressible(&request) {
-            tracing::warn!(%refused, "the selected generator cannot encode this request");
-            return self.refuse(turn, refused.to_string(), ExitReason::Usage);
-        }
+        for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+            if let Some(cause) = self.cancel.cause() {
+                return Ok(Generated::Cancelled {
+                    cause,
+                    pending: Vec::new(),
+                });
+            }
+            let mut candidate_conversation = conversation.clone();
+            let mut additional_attempts = 0;
 
-        // Per generation, and before the gate: a fallback chain can switch
-        // rows mid-turn, and on a row that is not metered in currency the
-        // gate is about to mint a zero reservation — which means a monetary
-        // `--budget` admits everything. The operator is told that here rather
-        // than discovering it from a limit that never fired.
-        let budget = self
-            .gate
-            .snapshot()
-            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
-        self.journal.publish(&PublicEvent::metering_selected(
-            turn,
-            &profile.metering,
-            budget.ledger(),
-            profile
-                .rates
-                .as_ref()
-                .map_or(&RateSource::None, |rates| &rates.source),
-        ))?;
-
-        let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
-        let reservation = match self.gate.reserve(
-            &profile.metering,
-            quote.as_ref(),
-            &request,
-            &profile.capabilities,
-        ) {
-            Ok(reservation) => reservation,
-            Err(denied) => {
-                tracing::warn!(%denied, "the budget gate refused a generation");
-                let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
-                    ExitReason::Budget
-                } else {
-                    ExitReason::Internal
+            loop {
+                let model_request = match candidate.as_ref() {
+                    Some(model) => self.main_model_request().with_model(model.clone()),
+                    None => primary_model.as_ref().map_or_else(
+                        || self.main_model_request(),
+                        |model| self.main_model_request().with_model(model.clone()),
+                    ),
                 };
-                return self.refuse(turn, denied.to_string(), reason);
-            }
-        };
+                let profile = match await_controlled(
+                    &self.journal,
+                    &self.cancel,
+                    &mut self.control,
+                    turn,
+                    source.resolve(model_request),
+                    InterruptDisposition::Return,
+                )
+                .await
+                {
+                    Controlled::Completed(Ok(profile)) => {
+                        if candidate_index == 0 && primary_model.is_none() {
+                            primary_model = Some(profile.identity.clone());
+                            primary_capabilities = Some(profile.capabilities.clone());
+                        }
+                        profile
+                    }
+                    Controlled::Completed(Err(error)) => {
+                        let exit = match error.class {
+                            GenerationModelErrorClass::Usage => ExitReason::Usage,
+                            GenerationModelErrorClass::Provider => ExitReason::Provider,
+                            GenerationModelErrorClass::Internal => ExitReason::Internal,
+                        };
+                        last_preflight_exit = exit;
+                        match candidate.as_ref() {
+                            Some(candidate) => {
+                                self.journal.append(
+                                    turn,
+                                    None,
+                                    None,
+                                    EventKind::FallbackDecision {
+                                        candidate: candidate.clone(),
+                                        decision: FallbackDecision::ResolutionSkipped {
+                                            message: error.message,
+                                        },
+                                    },
+                                )?;
+                            }
+                            None => {
+                                self.journal.append(
+                                    turn,
+                                    None,
+                                    None,
+                                    EventKind::Error {
+                                        message: error.message,
+                                        kind: ErrorKind::Unclassified,
+                                    },
+                                )?;
+                            }
+                        }
+                        break;
+                    }
+                    Controlled::Interrupted => {
+                        return Ok(Generated::Cancelled {
+                            cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                            pending: Vec::new(),
+                        });
+                    }
+                    Controlled::Failed(cause) => return Err(cause),
+                };
 
-        let attempt = match GenerationAttempt::new(
-            GenerationId::new(),
-            reservation,
-            &profile.metering,
-            quote.as_ref(),
-            &request,
-            &profile.capabilities,
-        ) {
-            Ok(attempt) => attempt,
-            Err(denied) => {
-                // The reservation went into the error and is not released.
-                // Loud, and the turn stops: an authorisation that does not
-                // authorise its own request is a defect in this loop, not a
-                // condition to work around.
-                tracing::error!(%denied, "a reservation did not authorise the request it was minted for");
-                return self.refuse(turn, denied.to_string(), ExitReason::Internal);
-            }
-        };
+                let mut request = GenRequest {
+                    model: profile.request_model.clone(),
+                    messages: candidate_conversation.clone(),
+                    tools: catalogue.descriptors(),
+                    thinking: profile.thinking,
+                    max_output_tokens: profile.output_ceiling(),
+                    parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
+                };
+                let mut gaps = if candidate_index == 0 {
+                    profile.capabilities.request_gaps(&request)
+                } else {
+                    primary_capabilities
+                        .as_ref()
+                        .unwrap_or(&profile.capabilities)
+                        .fallback_gaps(&profile.capabilities, &request)
+                };
 
-        let reference = attempt.attempt();
-        self.admit_generation(&profile, reference, GenerationRole::Main)?;
-        // Kept, not discarded: this is the id every item from this generation
-        // names as its causal parent, and it is the only record of which
-        // generation produced which call. Without it a rebuilt history cannot
-        // tell two calls issued at once from two issued in turn.
-        let generation = self.journal.append(
-            turn,
-            None,
-            None,
-            EventKind::GenerationStarted {
-                attempt: reference,
-                role: GenerationRole::Main,
-            },
-        )?;
+                if let Some(candidate) = candidate.as_ref()
+                    && !gaps.is_empty()
+                    && gaps.iter().all(reasoning_carryover_gap)
+                {
+                    let (sanitized, dropped_blocks, dialects) =
+                        drop_reasoning(candidate_conversation);
+                    candidate_conversation = sanitized;
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::FallbackDecision {
+                            candidate: candidate.clone(),
+                            decision: FallbackDecision::ReasoningDropped {
+                                dropped_blocks,
+                                dialects,
+                            },
+                        },
+                    )?;
+                    request.messages = candidate_conversation.clone();
+                    gaps = primary_capabilities
+                        .as_ref()
+                        .unwrap_or(&profile.capabilities)
+                        .fallback_gaps(&profile.capabilities, &request);
+                }
 
-        let stream = profile.generator.generate(request, attempt);
-        let drained = self
-            .drain(
-                turn,
-                stream,
-                DrainGeneration {
-                    event: generation,
-                    metering: &profile.metering,
-                    quote: quote.as_ref(),
-                    visibility: GenerationVisibility::Conversation,
-                    catalogue: Some(&catalogue),
-                },
-            )
-            .await;
+                if !gaps.is_empty() {
+                    tracing::warn!(?gaps, "the candidate does not accept this request");
+                    match candidate.as_ref() {
+                        Some(candidate) => {
+                            self.journal.append(
+                                turn,
+                                None,
+                                None,
+                                EventKind::FallbackDecision {
+                                    candidate: candidate.clone(),
+                                    decision: FallbackDecision::Skipped { gaps },
+                                },
+                            )?;
+                        }
+                        None => {
+                            self.journal.append(
+                                turn,
+                                None,
+                                None,
+                                EventKind::Error {
+                                    message: gaps
+                                        .iter()
+                                        .map(ToString::to_string)
+                                        .collect::<Vec<_>>()
+                                        .join("; "),
+                                    kind: ErrorKind::Unclassified,
+                                },
+                            )?;
+                        }
+                    }
+                    last_preflight_exit = ExitReason::Usage;
+                    break;
+                }
+                if let Err(refused) = profile.generator.ensure_expressible(&request) {
+                    tracing::warn!(%refused, "the candidate generator cannot encode this request");
+                    match candidate.as_ref() {
+                        Some(candidate) => {
+                            self.journal.append(
+                                turn,
+                                None,
+                                None,
+                                EventKind::FallbackDecision {
+                                    candidate: candidate.clone(),
+                                    decision: FallbackDecision::ExpressibilitySkipped {
+                                        message: refused.to_string(),
+                                    },
+                                },
+                            )?;
+                        }
+                        None => {
+                            self.journal.append(
+                                turn,
+                                None,
+                                None,
+                                EventKind::Error {
+                                    message: refused.to_string(),
+                                    kind: ErrorKind::Unclassified,
+                                },
+                            )?;
+                        }
+                    }
+                    last_preflight_exit = ExitReason::Usage;
+                    break;
+                }
 
-        // Settle before reporting anything, including a store failure: the
-        // stream owns the reservation, and returning early would drop it.
-        let settlement = match self.gate.settle(drained.stream) {
-            Ok(settlement) => settlement,
-            Err(denied) => {
-                tracing::error!(%denied, "the gate refused to settle an attempt it minted");
-                // Before the refusal is written: a store that has already
-                // failed cannot record why the gate refused, and the store
-                // failure is the one that has to reach the caller.
+                let budget = self
+                    .gate
+                    .snapshot()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                self.journal.publish(&PublicEvent::metering_selected(
+                    turn,
+                    &profile.metering,
+                    budget.ledger(),
+                    profile
+                        .rates
+                        .as_ref()
+                        .map_or(&RateSource::None, |rates| &rates.source),
+                ))?;
+
+                let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
+                let reservation = match self.gate.reserve(
+                    &profile.metering,
+                    quote.as_ref(),
+                    &request,
+                    &profile.capabilities,
+                ) {
+                    Ok(reservation) => reservation,
+                    Err(denied) => {
+                        tracing::warn!(%denied, "the budget gate refused a generation attempt");
+                        let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
+                            ExitReason::Budget
+                        } else {
+                            ExitReason::Internal
+                        };
+                        return self.refuse(turn, denied.to_string(), reason);
+                    }
+                };
+                let attempt = match GenerationAttempt::from_attempt(
+                    next_attempt,
+                    reservation,
+                    &profile.metering,
+                    quote.as_ref(),
+                    &request,
+                    &profile.capabilities,
+                ) {
+                    Ok(attempt) => attempt,
+                    Err(denied) => {
+                        tracing::error!(%denied, "a reservation did not authorise its attempt");
+                        return self.refuse(turn, denied.to_string(), ExitReason::Internal);
+                    }
+                };
+                let reference = attempt.attempt();
+                next_attempt = reference.retry();
+                self.admit_generation(&profile, reference, GenerationRole::Main)?;
+                let generation = self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::GenerationStarted {
+                        attempt: reference,
+                        role: GenerationRole::Main,
+                    },
+                )?;
+                let stream = profile.generator.generate(request, attempt);
+                let drained = self
+                    .drain(
+                        turn,
+                        stream,
+                        DrainGeneration {
+                            event: generation,
+                            metering: &profile.metering,
+                            quote: quote.as_ref(),
+                            visibility: GenerationVisibility::Conversation,
+                            catalogue: Some(&catalogue),
+                        },
+                    )
+                    .await;
+                let settlement = match self.gate.settle(drained.stream) {
+                    Ok(settlement) => settlement,
+                    Err(denied) => {
+                        tracing::error!(%denied, "the gate refused to settle an attempt it minted");
+                        drained.failure.map_or(Ok(()), Err)?;
+                        return self.refuse(turn, denied.to_string(), ExitReason::Internal);
+                    }
+                };
                 drained.failure.map_or(Ok(()), Err)?;
-                return self.refuse(turn, denied.to_string(), ExitReason::Internal);
+
+                if !drained.accounting_booked {
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::UsageUpdated {
+                            usage: Usage::IDENTITY,
+                            cost_delta: settled_cost_for_delivery(
+                                &profile.metering,
+                                quote.as_ref(),
+                                UsageReport::Missing,
+                                None,
+                                self.settlement_currency,
+                                settlement.outcome.delivery(),
+                            ),
+                            attempt: Some(reference),
+                        },
+                    )?;
+                }
+                let terminal = self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::AttemptSettled {
+                        attempt: settlement.attempt,
+                        outcome: settlement.outcome,
+                    },
+                )?;
+                if let UsageReport::Reported(usage) = settlement.outcome.usage() {
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::ContextWindowUpdated {
+                            used_tokens: usage.total_tokens(),
+                            provenance: OccupancyProvenance::GenerationBoundary,
+                        },
+                    )?;
+                }
+                if drained.cancelled || self.cancel.is_cancelled() {
+                    return Ok(Generated::Cancelled {
+                        cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                        pending: drained.pending,
+                    });
+                }
+                if drained.corrupt.is_some() {
+                    return Ok(Generated::Ended(ExitReason::Provider));
+                }
+
+                let stopped = (
+                    terminal,
+                    settlement.outcome.stop(),
+                    drained.pending,
+                    drained.error_kind,
+                );
+                let safely_unsent_error = settlement.outcome.stop() == StopReason::Error
+                    && settlement.outcome.delivery() == DeliveryCertainty::DefinitelyUnsent;
+                if safely_unsent_error {
+                    let retry_same = stopped.3 == Some(ErrorKind::Transient)
+                        && additional_attempts < self.config.retry;
+                    if retry_same {
+                        additional_attempts += 1;
+                        continue;
+                    }
+                    last_failure = Some(stopped);
+                    break;
+                }
+
+                return Ok(Generated::Stopped {
+                    capture,
+                    generation: generation_id,
+                    terminal: stopped.0,
+                    reason: stopped.1,
+                    pending: stopped.2,
+                    error_kind: stopped.3,
+                });
             }
-        };
-        drained.failure.map_or(Ok(()), Err)?;
-
-        let terminal = self.journal.append(
-            turn,
-            None,
-            None,
-            EventKind::AttemptSettled {
-                attempt: settlement.attempt,
-                outcome: settlement.outcome,
-            },
-        )?;
-
-        // `CLI.md` §4.1's `context`, and the only place it can come from: a
-        // generation boundary is where occupancy is observable, and the loop
-        // is the only thing that sees one. The figure is the provider's own
-        // report for the generation that just finished — the prompt it
-        // counted plus what it produced — which is what
-        // `OccupancyProvenance::GenerationBoundary` names, proxy and all.
-        //
-        // An attempt that reported nothing appends nothing. `ContextWindow`
-        // holds an `Option` precisely so that "nobody has told us" is not
-        // spelled `0`, and a fabricated zero would be indistinguishable from
-        // an empty context.
-        if let UsageReport::Reported(usage) = settlement.outcome.usage() {
-            self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::ContextWindowUpdated {
-                    used_tokens: usage.total_tokens(),
-                    provenance: OccupancyProvenance::GenerationBoundary,
-                },
-            )?;
         }
 
-        if drained.cancelled {
-            return Ok(Generated::Cancelled {
-                cause: self.cancel.cause().unwrap_or(CancelCause::User),
-                pending: drained.pending,
-            });
+        match last_failure {
+            Some((terminal, reason, pending, error_kind)) => Ok(Generated::Stopped {
+                capture,
+                generation: generation_id,
+                terminal,
+                reason,
+                pending,
+                error_kind,
+            }),
+            None => Ok(Generated::Ended(last_preflight_exit)),
         }
-        // After the settlement and after cancellation: the attempt is paid for
-        // either way, and someone who asked to stop gets that answer rather
-        // than the provider's. The error is already in the log; this is only
-        // the exit. `Provider` and not `Internal` — `CLI.md` §4.3 makes them
-        // different codes, and a script that retries 4 is right to: the next
-        // response may well be well-formed.
-        if drained.corrupt.is_some() {
-            return Ok(Generated::Ended(ExitReason::Provider));
-        }
-        Ok(Generated::Stopped {
-            capture,
-            generation: reference.generation(),
-            terminal,
-            reason: settlement.outcome.stop(),
-            pending: drained.pending,
-            error_kind: drained.error_kind,
-        })
     }
 
     /// Write down why this loop stopped a generation, and end the turn on it.
@@ -4727,6 +4948,40 @@ fn hook_store_error(error: crate::hook::HookRunError) -> StoreError {
         std::io::ErrorKind::InvalidData,
         error.to_string(),
     ))
+}
+
+fn reasoning_carryover_gap(gap: &CapabilityGap) -> bool {
+    matches!(
+        gap,
+        CapabilityGap::ReasoningStateCarryoverUnsupported
+            | CapabilityGap::ReasoningStateDialectMismatch { .. }
+            | CapabilityGap::ReasoningStateDialectUnstated { .. }
+    )
+}
+
+fn drop_reasoning(conversation: Conversation) -> (Conversation, usize, Vec<String>) {
+    let mut dropped_blocks = 0;
+    let mut dialects = BTreeSet::new();
+    let messages = Vec::<Message>::from(conversation)
+        .into_iter()
+        .map(|mut message| {
+            message.content.retain(|block| match block {
+                ContentBlock::Reasoning { state } => {
+                    dropped_blocks += 1;
+                    dialects.insert(state.dialect.clone());
+                    false
+                }
+                _ => true,
+            });
+            message
+        })
+        .collect();
+    (
+        Conversation::new(messages)
+            .expect("removing reasoning changes no conversation call/result invariant"),
+        dropped_blocks,
+        dialects.into_iter().collect(),
+    )
 }
 
 enum DriveOutcome {

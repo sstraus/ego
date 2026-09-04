@@ -2,12 +2,11 @@
 //!
 //! See `docs/decisions/2026-08-20-generation-attempt-contract.md`.
 //!
-//! A *generation* is one intent — this prompt, this model, this quote — and
-//! the budget settles once for it. An *attempt* is one journey to the wire.
-//! They are separate identities because a retry is the same generation
-//! reaching the provider a second time, while the provider's usage figures
-//! are reported per attempt: summing two attempts of one generation would
-//! bill the caller twice for work they asked for once.
+//! A *generation* is one logical request plan. An *attempt* is one journey to
+//! the wire, with its own reservation and settlement.
+//! They are separate identities because a retry is the same logical plan
+//! reaching the provider again, while usage, cost, evidence and settlement
+//! remain attributable to each distinct wire journey.
 //!
 //! `DeliveryCertainty` lives here rather than in `ego-ai`, even though
 //! `ego-ai` is what observes it (`ARCHITECTURE.md` §3.1). It has to: it is
@@ -94,7 +93,7 @@ impl AttemptRef {
         }
     }
 
-    /// The generation this attempt belongs to. The budget settles on this.
+    /// The generation plan this attempt belongs to.
     pub fn generation(&self) -> GenerationId {
         self.generation
     }
@@ -258,9 +257,28 @@ impl GenerationAttempt {
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Self, BudgetDenied> {
+        Self::from_attempt(
+            AttemptRef::first(generation),
+            reservation,
+            metering,
+            rates,
+            req,
+            caps,
+        )
+    }
+
+    /// Take ownership of a reservation for an already-minted attempt identity.
+    pub fn from_attempt(
+        attempt: AttemptRef,
+        reservation: Reservation,
+        metering: &Metering,
+        rates: Option<&PricingQuote>,
+        req: &GenRequest,
+        caps: &ModelCapabilities,
+    ) -> Result<Self, BudgetDenied> {
         reservation.authorises(metering, rates, req, caps)?;
         Ok(Self {
-            attempt: AttemptRef::first(generation),
+            attempt,
             metering: metering.clone(),
             rates: rates.cloned(),
             reservation: Some(reservation),
@@ -323,7 +341,7 @@ impl Drop for GenerationAttempt {
     }
 }
 
-/// What one generation cost, from what the stream observed and how the row
+/// What one wire attempt cost, from what the stream observed and how the row
 /// is metered.
 ///
 /// One function rather than one rule in [`AttemptStream::settle`] and another
@@ -385,6 +403,30 @@ pub fn settled_cost(
             },
         ),
     }
+}
+
+/// Settle missing accounting using the delivery evidence for this attempt.
+pub fn settled_cost_for_delivery(
+    metering: &Metering,
+    rates: Option<&PricingQuote>,
+    usage: UsageReport,
+    provider_cost: Option<Money>,
+    settlement: CurrencyCode,
+    delivery: DeliveryCertainty,
+) -> CostDelta {
+    if matches!(usage, UsageReport::Missing) {
+        return if delivery == DeliveryCertainty::DefinitelyUnsent {
+            CostDelta::free(settlement, CostAttribution::DefinitelyUnsent)
+        } else {
+            CostDelta::Unknown(match metering {
+                Metering::Currency {
+                    settlement: SettlementSource::ProviderReported { .. },
+                } => UnknownCost::ProviderReportedCostMissing,
+                _ => UnknownCost::ProviderReportedNoUsage,
+            })
+        };
+    }
+    settled_cost(metering, rates, usage, provider_cost, settlement)
 }
 
 /// An attempt settled against its gate.
@@ -548,12 +590,13 @@ impl AttemptStream {
     /// the error, not because it was dropped on the floor.
     pub fn settle(mut self, gate: &mut BudgetGate) -> Result<Settlement, Box<ReconcileDenied>> {
         let outcome = self.outcome();
-        let actual = settled_cost(
+        let actual = settled_cost_for_delivery(
             &self.attempt.metering,
             self.attempt.rates.as_ref(),
             self.usage,
             self.provider_cost,
             gate.currency(),
+            outcome.delivery(),
         );
         let reservation = self
             .attempt

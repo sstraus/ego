@@ -46,7 +46,7 @@ use crate::store::blob::BlobRef;
 /// standard context-occupancy proxy impossible to compute. See the mdkb
 /// decision `ego-acp-usage-verdict`.
 ///
-/// Used both as one generation's increment (`AiEvent::Usage`,
+/// Used both as one attempt's increment (`AiEvent::Usage`,
 /// `EventKind::UsageUpdated`) and as the session's running totals
 /// (`SessionState::usage`): the same shape, folded by `add`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,7 +183,7 @@ impl Usage {
             .saturating_add(self.output_tokens)
     }
 
-    /// Add one generation's usage to the running totals.
+    /// Add one attempt's usage to the running totals.
     ///
     /// Saturates rather than panicking or wrapping: `apply` must be total,
     /// and this totals field is later read by budget gates, so a silent
@@ -976,7 +976,7 @@ pub struct SessionState {
     /// state knows, and saying otherwise would attribute items to a record
     /// that was declined.
     ///
-    /// Grows by one entry per generation and is not pruned, for the same
+    /// Grows by one entry per admitted attempt and is not pruned, for the same
     /// reason [`Self::settled_attempts`] is not: a parent may be named long
     /// after the generation that wrote it settled.
     #[serde(default)]
@@ -1777,6 +1777,7 @@ impl SessionState {
                 }
             }
             EventKind::GenerationStarted { attempt, role } => self.start(ev, attempt, *role),
+            EventKind::FallbackDecision { .. } => {}
             EventKind::ExecutionObserved { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
@@ -2336,6 +2337,10 @@ impl SessionState {
         let booked = self.booked_usage(id);
         let reported = match outcome.usage() {
             UsageReport::Reported(usage) => Some(usage),
+            // A missing provider report is represented by one zero-token
+            // bookkeeping entry. The cost retains whether that absence was a
+            // definitely-unsent zero or an unknown possibly-sent charge.
+            UsageReport::Missing if booked == Some(Usage::IDENTITY) => booked,
             UsageReport::Missing => None,
         };
         if booked != reported {

@@ -9,7 +9,9 @@ use crate::budget::MeteringIdentity;
 use crate::ceiling::Ceilings;
 use crate::config::ModelRef;
 use crate::cost::{CostDelta, PricingRevision};
-use crate::event::domain::{EventKind, ExitReason, GenerationRole, OccupancyProvenance};
+use crate::event::domain::{
+    EventKind, ExitReason, FallbackDecision, GenerationRole, OccupancyProvenance,
+};
 use crate::event::hook::{
     HookActivation, HookContentDigest, HookDecision, HookFailureKind, HookId, HookInvocationId,
     HookLifecycle, HookOccurrenceKey, HookPlanEntry, HookResult, HookSourceAuthority, HookSubject,
@@ -218,6 +220,10 @@ pub enum ExportEvent {
         attempt: AttemptRef,
         role: GenerationRole,
     },
+    FallbackDecision {
+        candidate: ModelRef,
+        decision: ExportFallbackDecision,
+    },
     ExecutionObserved {
         observation: ExecObservation,
     },
@@ -293,6 +299,20 @@ pub enum ExportQuestionOutcome {
     Declined,
     Cancelled,
     Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ExportFallbackDecision {
+    ReasoningDropped {
+        dropped_blocks: usize,
+        dialects: Vec<String>,
+    },
+    Skipped {
+        gaps: Vec<crate::generator::capabilities::CapabilityGap>,
+    },
+    ExpressibilitySkipped,
+    ResolutionSkipped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -765,6 +785,35 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             attempt: *attempt,
             role: *role,
         },
+        EventKind::FallbackDecision {
+            candidate,
+            decision,
+        } => {
+            let decision = match decision {
+                FallbackDecision::ReasoningDropped {
+                    dropped_blocks,
+                    dialects,
+                } => ExportFallbackDecision::ReasoningDropped {
+                    dropped_blocks: *dropped_blocks,
+                    dialects: dialects.clone(),
+                },
+                FallbackDecision::Skipped { gaps } => ExportFallbackDecision::Skipped {
+                    gaps: gaps.clone(),
+                },
+                FallbackDecision::ExpressibilitySkipped { .. } => {
+                    redactions.opaque_prose += 1;
+                    ExportFallbackDecision::ExpressibilitySkipped
+                }
+                FallbackDecision::ResolutionSkipped { .. } => {
+                    redactions.opaque_prose += 1;
+                    ExportFallbackDecision::ResolutionSkipped
+                }
+            };
+            ExportEvent::FallbackDecision {
+                candidate: candidate.clone(),
+                decision,
+            }
+        }
         EventKind::ExecutionObserved { observation } => ExportEvent::ExecutionObserved {
             observation: observation.clone(),
         },

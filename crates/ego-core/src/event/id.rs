@@ -239,8 +239,8 @@ impl Default for EventId {
 
 /// One logical generation, stable across every retry of it (UUIDv7).
 ///
-/// The budget settles once per `GenerationId`: a retry is the same intent
-/// reaching the wire again, not a second thing to pay for.
+/// Each attempt settles independently: the ID groups one ordered retry and
+/// fallback plan without collapsing distinct provider work or charges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct GenerationId(Uuid);
 

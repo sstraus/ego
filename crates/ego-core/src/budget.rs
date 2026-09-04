@@ -597,8 +597,9 @@ impl BudgetBinding {
     ///
     /// A **policy** figure must name the policy that was authorised, for the
     /// same reason as a table.
-    fn settles(&self, attribution: &CostAttribution) -> bool {
+    fn settles(&self, attribution: &CostAttribution, amount: &Money) -> bool {
         match (&self.metering, attribution) {
+            (_, CostAttribution::DefinitelyUnsent) => amount.amount.is_zero(),
             (_, CostAttribution::ProviderReported(_)) => true,
             (MeteringIdentity::Currency { .. }, CostAttribution::Table { revision: settled }) => {
                 self.rates.as_ref() == Some(settled)
@@ -1388,8 +1389,10 @@ impl BudgetGate {
         // and poisoning a run's total that has a perfectly good answer.
         let settles = |attribution: &CostAttribution, amount: &Money| {
             amount.currency == self.currency
+                && (!matches!(attribution, CostAttribution::DefinitelyUnsent)
+                    || amount.amount.is_zero())
                 && match reservation.binding() {
-                    Some(binding) => binding.settles(attribution),
+                    Some(binding) => binding.settles(attribution, amount),
                     None => true,
                 }
         };

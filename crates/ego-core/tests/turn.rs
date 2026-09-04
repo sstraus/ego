@@ -1698,6 +1698,8 @@ mod turn {
             config: TurnConfig {
                 system,
                 token_ceiling,
+                retry: 0,
+                fallbacks: Vec::new(),
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
@@ -5911,7 +5913,7 @@ mod turn {
             source: Arc<ScriptedGenerationSource>,
             config: TurnConfig,
         ) -> (ExitReason, bool, SessionState) {
-            let mut gate = fx.gate.borrow_mut();
+            let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
                 ToolEffectPorts::new(
@@ -6032,6 +6034,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -6176,6 +6180,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -6300,6 +6306,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -6359,6 +6367,8 @@ mod turn {
                         config: TurnConfig {
                             system: None,
                             token_ceiling: None,
+                            retry: 0,
+                            fallbacks: Vec::new(),
                         },
                         admission: Arc::new(EvidenceAdmissionService::new()),
                         invocation: RunInvocationId::new(),
@@ -6422,6 +6432,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -6509,6 +6521,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -6604,6 +6618,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -6678,6 +6694,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -6745,6 +6763,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -6823,6 +6843,8 @@ mod turn {
                         config: TurnConfig {
                             system: None,
                             token_ceiling: None,
+                            retry: 0,
+                            fallbacks: Vec::new(),
                         },
                         admission: Arc::new(EvidenceAdmissionService::new()),
                         invocation: RunInvocationId::new(),
@@ -6924,6 +6946,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -7035,6 +7059,8 @@ mod turn {
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
@@ -7582,7 +7608,7 @@ mod turn {
             };
 
             let (_, usage) = run_case(DeliveryCertainty::DefinitelyUnsent);
-            assert_eq!(usage.0, tokens(0, 0, 0, 0));
+            assert_eq!(usage.0, Usage::IDENTITY);
             assert!(matches!(
                 usage.1,
                 CostDelta::Known {
@@ -7593,14 +7619,15 @@ mod turn {
             ));
 
             let (_, usage) = run_case(DeliveryCertainty::PossiblySent);
-            assert_eq!(usage.0, tokens(0, 0, 0, 0));
+            assert_eq!(usage.0, Usage::IDENTITY);
             assert!(matches!(usage.1, CostDelta::Unknown(_)));
 
             let attempt = AttemptRef::first(ego_core::event::id::GenerationId::new());
             let turn_id = TurnId::new();
+            let mut seq = Seq::ZERO;
             let seeded = DomainEvent {
                 env: Envelope {
-                    seq: Seq::ZERO.next(),
+                    seq: seq.next(),
                     id: EventId::new(),
                     turn: turn_id,
                     item: None,

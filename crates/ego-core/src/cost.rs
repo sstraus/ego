@@ -547,12 +547,10 @@ pub struct ProviderCostRevision {
 /// Where a settled figure came from, recorded on every [`CostDelta::Known`]
 /// so a past cost stays attributable.
 ///
-/// Three arms because there are three answers to "who produced this number",
-/// and they are checkable in three different ways. A table revision points at
-/// an artefact; a provider statement points at a field in a response body; a
-/// metering policy points at neither, because a row with no per-token price
-/// has no figure to check — the policy *is* the whole source, and saying so
-/// is more honest than dressing it as a price list.
+/// Each arm is a distinct answer to "who produced this number". A table
+/// revision points at an artefact; a provider statement points at a response
+/// field; a metering policy names the arrangement; definitely-unsent names
+/// transport evidence and is valid only for zero.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum CostAttribution {
@@ -566,6 +564,8 @@ pub enum CostAttribution {
     /// Neither: the row is not metered in currency, and this policy is what
     /// established that.
     MeteringPolicy { revision: MeteringRevision },
+    /// The transport proved that no request bytes left this process.
+    DefinitelyUnsent,
 }
 
 /// Why a generation's cost is not known.
@@ -669,7 +669,7 @@ pub enum TokenCategory {
     Output,
 }
 
-/// The cost of one generation.
+/// The cost of one wire attempt.
 ///
 /// `CostDelta`, never `cost`: `ARCHITECTURE.md` §3.1 produces a
 /// per-generation figure while ACP wants a cumulative session total, and a
