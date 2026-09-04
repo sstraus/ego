@@ -782,12 +782,14 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
         .find(|item| item.call_id.as_deref() == Some("sibling-call"))
         .expect("the unstarted sibling remains represented");
     assert_eq!(sibling.ok, Some(false));
-    assert!(sibling
-        .tool_result
-        .as_ref()
-        .expect("sibling closure result")
-        .model_text()
-        .contains("interrupted: not run"));
+    assert!(
+        sibling
+            .tool_result
+            .as_ref()
+            .expect("sibling closure result")
+            .model_text()
+            .contains("interrupted: not run")
+    );
 
     let events = store.events();
     let question = events
@@ -1086,11 +1088,13 @@ fn reconstructed_resume_without_captured_policy_fails_closed_before_settlement()
             assert_eq!(resumed.exit_reason, ExitReason::Internal);
             assert!(!resumed.ok);
             drop(restarted);
-            assert!(restart_trace
-                .lock()
-                .expect("restart trace")
-                .iter()
-                .all(|label| *label != "question-settled"));
+            assert!(
+                restart_trace
+                    .lock()
+                    .expect("restart trace")
+                    .iter()
+                    .all(|label| *label != "question-settled")
+            );
             assert!(restart_foreign.calls().is_empty());
             assert!(
                 turn.state().pending_question().is_some(),

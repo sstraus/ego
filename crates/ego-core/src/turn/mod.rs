@@ -14,6 +14,7 @@ mod catalogue;
 mod control;
 mod journal;
 mod mcp_registry;
+mod policy;
 mod tools;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -84,6 +85,10 @@ pub use journal::{Journal, SharedJournal, SharedJournalError};
 pub use mcp_registry::{
     McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, McpRegistryJournalErrorKind,
     McpRegistryJournalOperation,
+};
+pub use policy::{
+    GenerationPolicyCapture, GenerationPolicyCaptureError, GenerationPolicyDigest,
+    GenerationPolicySnapshot,
 };
 use tools::{GenerationToolCatalogue, PreparedToolCall};
 pub use tools::{ToolBatchError, ToolEffectPorts, Tools};
@@ -1625,11 +1630,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 let reason =
                     "the captured policy binding for this foreign continuation is unavailable";
                 tracing::warn!("foreign question resume has no captured policy binding");
-                let driven = match self.refuse_drive(
-                    turn,
-                    reason.to_owned(),
-                    ExitReason::Internal,
-                ) {
+                let driven = match self.refuse_drive(turn, reason.to_owned(), ExitReason::Internal)
+                {
                     Ok(driven) => driven,
                     Err(cause) => return Err(self.abandon(turn, cause)),
                 };

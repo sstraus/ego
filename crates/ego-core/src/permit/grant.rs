@@ -1213,7 +1213,6 @@ pub enum Resolution {
 /// There is deliberately no `widen` method, here or anywhere: a call that
 /// needs a broader grant is a new decision, made by minting a new `Permit`,
 /// not by mutating an old one.
-#[derive(Debug)]
 pub struct PolicyEngine {
     /// The boundary ego draws for itself. Not a rule: nobody wrote it, and no
     /// rule lifts it.
@@ -1232,6 +1231,17 @@ pub struct PolicyEngine {
     /// The final party, absent in headless runs. It is separate from
     /// `approver` so no caller can replace the mode derived from config.
     human: Option<Arc<dyn HumanApprover>>,
+}
+
+impl fmt::Debug for PolicyEngine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PolicyEngine")
+            .field("mode", &self.mode)
+            .field("human_present", &self.human.is_some())
+            .field("policy", &"<redacted>")
+            .finish()
+    }
 }
 
 impl PolicyEngine {
