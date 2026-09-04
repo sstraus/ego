@@ -128,6 +128,11 @@ impl RuleManagement {
 
     pub fn effective_rows(system: &Ruleset, user: &RuleSnapshot) -> Vec<EffectiveRule> {
         let rules = effective_rules(system, user);
+        Self::rows(&rules)
+    }
+
+    /// Project one already-admitted ruleset without reading another authority.
+    pub fn rows(rules: &Ruleset) -> Vec<EffectiveRule> {
         let mut rows = Vec::with_capacity(rules.deny.len() + rules.allow.len());
         rows.extend(
             rules

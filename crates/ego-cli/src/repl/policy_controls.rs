@@ -5,16 +5,19 @@
 
 use std::sync::{Arc, RwLock};
 
-use ego_core::config::rule_management::{EffectiveRule, RuleExplanation, RuleManagement};
+use ego_core::config::rule_management::{EffectiveRule, RuleExplanation, RuleMutationComparison};
 use ego_core::config::{
-    Mode, RuleMutation, RuleSnapshot, Ruleset, UserConfigMutation, UserConfigMutationResult,
-    UserConfigPublication, UserConfigStore, UserConfigTarget,
+    Mode, RuleMutation, RuleSnapshot, Ruleset, UserConfigStore, UserConfigTarget,
 };
+use ego_core::permit::rule::RuleId;
 use ego_core::permit::{CanonPath, HumanApprover, PolicyEngine, PreparedCall};
 use ego_core::turn::{
     GenerationPolicyCapture, GenerationPolicySnapshot as CapturedGenerationPolicySnapshot,
     GenerationPolicySource,
 };
+
+pub use crate::rules::{RememberPreview, RememberRequest, RuleMutationReceipt};
+use crate::rules::{RuleApplication, RuleApplicationError, RuleChange, RuleReadAuthority};
 
 const MODE_OPTIONS: [Mode; 5] = [
     Mode::Plan,
@@ -37,6 +40,8 @@ pub enum ModalInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionInput {
     List,
+    Revoke(RuleId),
+    Remember(RememberRequest),
     Explain {
         call: PreparedCall,
         workspace: CanonPath,
@@ -283,7 +288,19 @@ pub trait PreflightPort: Send + Sync {
 
 /// Re-resolve policy from the frozen source set admitted for this session.
 pub trait FrozenPolicyResolver: Send + Sync {
-    fn resolve(&self) -> Result<(Mode, Ruleset), PolicyControlError>;
+    fn resolve_rule_transaction(
+        &self,
+        before: &RuleSnapshot,
+        after: &RuleSnapshot,
+        affected: &[RuleMutation],
+    ) -> Result<FrozenRuleResolution, PolicyControlError>;
+}
+
+/// Frozen policy facts resolved after one published rule transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenRuleResolution {
+    pub next: GenerationPolicySnapshot,
+    pub comparisons: Vec<RuleMutationComparison>,
 }
 
 /// Result of a read-only permission-control request.
@@ -300,9 +317,10 @@ pub enum PolicyControlOutcome {
         staging: PolicyStageOutcome,
     },
     Rule {
-        mutation: UserConfigMutationResult,
+        receipt: RuleMutationReceipt,
         staging: PolicyStageOutcome,
     },
+    RememberPreview(RememberPreview),
     Permission(PermissionOutcome),
 }
 
@@ -314,6 +332,7 @@ pub enum PolicyControlError {
     Resolution { diagnostic: String },
     Synchronization { diagnostic: String },
     PublicationContract { diagnostic: String },
+    RuleManagement { diagnostic: String },
 }
 
 impl std::fmt::Display for PolicyControlError {
@@ -328,6 +347,7 @@ impl std::fmt::Display for PolicyControlError {
             Self::PublicationContract { diagnostic } => {
                 ("user configuration publication contract failed", diagnostic)
             }
+            Self::RuleManagement { diagnostic } => ("rule management failed", diagnostic),
         };
         write!(formatter, "{context}: {diagnostic}")
     }
@@ -338,7 +358,7 @@ impl std::error::Error for PolicyControlError {}
 /// Application owner for policy preflight, persistence, resolution, and staging.
 pub struct PolicyApplicationOwner {
     selection: GenerationPolicySelection,
-    store: Arc<dyn UserConfigStore>,
+    rules: RuleApplication,
     preflight: Arc<dyn PreflightPort>,
     resolver: Arc<dyn FrozenPolicyResolver>,
 }
@@ -352,7 +372,7 @@ impl PolicyApplicationOwner {
     ) -> Self {
         Self {
             selection,
-            store,
+            rules: RuleApplication::new(store, UserConfigTarget::Base),
             preflight,
             resolver,
         }
@@ -365,29 +385,48 @@ impl PolicyApplicationOwner {
         match request {
             PolicyControlRequest::SetMode(mode) => self.apply_mode(mode),
             PolicyControlRequest::Rule(mutation) => self.apply_rule(mutation),
-            PolicyControlRequest::Permission(input) => {
-                self.explain(input).map(PolicyControlOutcome::Permission)
-            }
+            PolicyControlRequest::Permission(input) => self.apply_permission(input),
         }
     }
 
     /// Inspect admitted rules without reading mutable config a second time.
     pub fn explain(&self, input: PermissionInput) -> Result<PermissionOutcome, PolicyControlError> {
         let ruleset = self.selection.snapshot()?.ruleset;
-        Ok(match input {
-            PermissionInput::List => PermissionOutcome::List(RuleManagement::effective_rows(
-                &ruleset,
-                &RuleSnapshot {
-                    target: UserConfigTarget::Base,
-                    permissions_present: false,
-                    allow: Vec::new(),
-                    deny: Vec::new(),
-                },
-            )),
-            PermissionInput::Explain { call, workspace } => PermissionOutcome::Explain(
-                RuleManagement::explain(&call, &ruleset, workspace.as_path()),
-            ),
-        })
+        match input {
+            PermissionInput::List => self
+                .rules
+                .list(RuleReadAuthority::Admitted(&ruleset))
+                .map(PermissionOutcome::List)
+                .map_err(map_rule_error),
+            PermissionInput::Explain { call, workspace } => self
+                .rules
+                .explain(&call, &workspace, RuleReadAuthority::Admitted(&ruleset))
+                .map(PermissionOutcome::Explain)
+                .map_err(map_rule_error),
+            PermissionInput::Revoke(_) | PermissionInput::Remember(_) => {
+                Err(PolicyControlError::RuleManagement {
+                    diagnostic: "a permission mutation must be applied, not inspected".into(),
+                })
+            }
+        }
+    }
+
+    pub fn preview_remember(
+        &self,
+        request: RememberRequest,
+    ) -> Result<RememberPreview, PolicyControlError> {
+        self.rules.preview_remember(request).map_err(map_rule_error)
+    }
+
+    pub fn confirm_remember(
+        &self,
+        preview: RememberPreview,
+    ) -> Result<RuleMutationReceipt, PolicyControlError> {
+        let change = self
+            .rules
+            .confirm_remember(preview)
+            .map_err(map_rule_error)?;
+        self.finish_rule_change(change).map(|(receipt, _)| receipt)
     }
 
     fn apply_mode(&self, mode: Mode) -> Result<PolicyControlOutcome, PolicyControlError> {
@@ -403,34 +442,69 @@ impl PolicyApplicationOwner {
         &self,
         mutation: RuleMutation,
     ) -> Result<PolicyControlOutcome, PolicyControlError> {
-        let result = self
-            .store
-            .mutate(UserConfigMutation::Rules {
-                target: UserConfigTarget::Base,
-                changes: vec![mutation],
-            })
-            .map_err(|error| PolicyControlError::Store {
-                diagnostic: error.to_string(),
-            })?;
-
-        if !result.changed {
-            return Ok(PolicyControlOutcome::Rule {
-                mutation: result,
-                staging: PolicyStageOutcome { changed: false },
-            });
+        let change = match mutation.effect {
+            ego_core::config::ManagedRuleEffect::Allow => self.rules.allow(mutation.rule),
+            ego_core::config::ManagedRuleEffect::Deny => self.rules.deny(mutation.rule),
         }
-        if result.publication == UserConfigPublication::NotPublished {
-            return Err(PolicyControlError::PublicationContract {
-                diagnostic: "a changed mutation was reported as not published".into(),
-            });
+        .map_err(map_rule_error)?;
+        let (receipt, staging) = self.finish_rule_change(change)?;
+        Ok(PolicyControlOutcome::Rule { receipt, staging })
+    }
+
+    fn apply_permission(
+        &self,
+        input: PermissionInput,
+    ) -> Result<PolicyControlOutcome, PolicyControlError> {
+        match input {
+            read @ (PermissionInput::List | PermissionInput::Explain { .. }) => {
+                self.explain(read).map(PolicyControlOutcome::Permission)
+            }
+            PermissionInput::Revoke(id) => {
+                let change = self.rules.revoke(id).map_err(map_rule_error)?;
+                let (receipt, staging) = self.finish_rule_change(change)?;
+                Ok(PolicyControlOutcome::Rule { receipt, staging })
+            }
+            PermissionInput::Remember(request) => self
+                .preview_remember(request)
+                .map(PolicyControlOutcome::RememberPreview),
+        }
+    }
+
+    fn finish_rule_change(
+        &self,
+        change: RuleChange,
+    ) -> Result<(RuleMutationReceipt, PolicyStageOutcome), PolicyControlError> {
+        if !change.changed() {
+            return change
+                .into_unchanged_receipt()
+                .map(|receipt| (receipt, PolicyStageOutcome { changed: false }))
+                .map_err(map_rule_error);
         }
 
-        let (mode, ruleset) = self.resolver.resolve()?;
-        let staging = self.selection.stage(mode, ruleset)?;
-        Ok(PolicyControlOutcome::Rule {
-            mutation: result,
-            staging,
-        })
+        let resolution = {
+            let (before, after) = change.transaction();
+            self.resolver
+                .resolve_rule_transaction(before, after, change.affected())?
+        };
+        let receipt = change
+            .into_receipt(resolution.comparisons)
+            .map_err(map_rule_error)?;
+        let staging = self
+            .selection
+            .stage(resolution.next.mode, resolution.next.ruleset)?;
+        Ok((receipt, staging))
+    }
+}
+
+fn map_rule_error(error: RuleApplicationError) -> PolicyControlError {
+    match error {
+        RuleApplicationError::Store(diagnostic) => PolicyControlError::Store { diagnostic },
+        RuleApplicationError::Management(error) => PolicyControlError::RuleManagement {
+            diagnostic: error.to_string(),
+        },
+        RuleApplicationError::Contract(diagnostic) => PolicyControlError::PublicationContract {
+            diagnostic: diagnostic.into(),
+        },
     }
 }
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ego_core::config::rule_management::{
     EffectiveRule, OmittedDimension, RememberPlan, RuleExplanation, RuleManagement,
-    RuleMutationComparison, RuleOutcome,
+    RuleManagementError, RuleMutationComparison, RuleOutcome,
 };
 use ego_core::config::{
     ManagedRuleEffect, OriginSet, RuleMutation, RuleSnapshot, Ruleset, Source, UserConfigMutation,
@@ -23,6 +23,439 @@ use crate::cli::{RulesAction, RulesArgs};
 use crate::config::{escape_field, rule_management, user_target};
 use crate::output::{self, Stdout};
 
+/// One prepared call whose representable permission rules may be remembered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RememberRequest {
+    call: PreparedCall,
+    effect: ManagedRuleEffect,
+    workspace: CanonPath,
+}
+
+impl RememberRequest {
+    pub fn new(call: PreparedCall, effect: ManagedRuleEffect, workspace: CanonPath) -> Self {
+        Self {
+            call,
+            effect,
+            workspace,
+        }
+    }
+}
+
+/// The complete, side-effect-free preview of a remember operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RememberPreview {
+    effect: ManagedRuleEffect,
+    plan: RememberPlan,
+}
+
+impl RememberPreview {
+    pub(crate) fn effect(&self) -> ManagedRuleEffect {
+        self.effect
+    }
+
+    pub(crate) fn plan(&self) -> &RememberPlan {
+        &self.plan
+    }
+}
+
+/// One verified atomic rule mutation and its effective-policy comparisons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleMutationReceipt {
+    mutation: UserConfigMutationResult,
+    affected: Vec<RuleMutation>,
+    comparisons: Vec<RuleMutationComparison>,
+}
+
+impl RuleMutationReceipt {
+    /// Construct a receipt only when all facts describe the same transaction.
+    pub fn from_atomic_facts(
+        mutation: UserConfigMutationResult,
+        affected: Vec<RuleMutation>,
+        comparisons: Vec<RuleMutationComparison>,
+    ) -> Result<Self, &'static str> {
+        let expected_affected = validate_atomic_rule_result(&mutation, None)?;
+        if affected != expected_affected {
+            return Err("rule mutation receipt disagrees with its atomic request facts");
+        }
+        if comparisons.len() != affected.len()
+            || comparisons
+                .iter()
+                .any(|comparison| comparison.stored_changed != mutation.changed)
+        {
+            return Err("rule mutation comparisons disagree with its atomic facts");
+        }
+        Ok(Self {
+            mutation,
+            affected,
+            comparisons,
+        })
+    }
+
+    pub fn publication(&self) -> UserConfigPublication {
+        self.mutation.publication.clone()
+    }
+
+    pub(crate) fn mutation(&self) -> &UserConfigMutationResult {
+        &self.mutation
+    }
+
+    pub(crate) fn affected(&self) -> &[RuleMutation] {
+        &self.affected
+    }
+
+    pub(crate) fn comparisons(&self) -> &[RuleMutationComparison] {
+        &self.comparisons
+    }
+
+    pub(crate) fn effective_changed(&self) -> bool {
+        self.comparisons
+            .iter()
+            .any(|comparison| comparison.effective_changed)
+    }
+}
+
+fn validate_atomic_rule_result(
+    result: &UserConfigMutationResult,
+    expected_request: Option<&UserConfigMutationFacts>,
+) -> Result<Vec<RuleMutation>, &'static str> {
+    let (request, before, after) = result
+        .rule_transaction()
+        .ok_or("rule mutation returned no atomic before/after facts")?;
+    if before.target != result.target || after.target != result.target {
+        return Err("rule mutation returned facts for a different target");
+    }
+    validate_rule_snapshot(before)?;
+    validate_rule_snapshot(after)?;
+    if expected_request.is_some_and(|expected| request != expected) {
+        return Err("rule mutation returned different request facts");
+    }
+
+    let affected = match request {
+        UserConfigMutationFacts::Batch { changes } => {
+            let expected = expected_batch_after(before, changes)?;
+            if &expected != after {
+                return Err("rule mutation after facts do not apply its batch request");
+            }
+            changes.clone()
+        }
+        UserConfigMutationFacts::Revoke { id } => {
+            validate_revoke_after(before, after, id)?;
+            removed_rule_mutations(before, after, id)?
+        }
+        _ => return Err("rule mutation returned non-rule request facts"),
+    };
+
+    if result.changed != (before != after) {
+        return Err("rule mutation changed flag disagrees with its atomic facts");
+    }
+    if result.changed && result.publication == UserConfigPublication::NotPublished {
+        return Err("a changed mutation was reported as not published");
+    }
+    if !result.changed && result.publication != UserConfigPublication::NotPublished {
+        return Err("an unchanged mutation was reported as published");
+    }
+    Ok(affected)
+}
+
+fn validate_rule_snapshot(snapshot: &RuleSnapshot) -> Result<(), &'static str> {
+    if !snapshot.permissions_present && (!snapshot.allow.is_empty() || !snapshot.deny.is_empty()) {
+        return Err("rule mutation returned rules outside a permission authority");
+    }
+    Ok(())
+}
+
+fn expected_batch_after(
+    before: &RuleSnapshot,
+    changes: &[RuleMutation],
+) -> Result<RuleSnapshot, &'static str> {
+    let mut expected = before.clone();
+    let mut added = false;
+    for change in changes {
+        match change.effect {
+            ManagedRuleEffect::Allow => {
+                if expected.deny.contains(&change.rule) {
+                    return Err("rule mutation batch contains an opposite-effect conflict");
+                }
+                if !expected.allow.contains(&change.rule) {
+                    expected.allow.push(change.rule.clone());
+                    added = true;
+                }
+            }
+            ManagedRuleEffect::Deny => {
+                if expected.allow.contains(&change.rule) {
+                    return Err("rule mutation batch contains an opposite-effect conflict");
+                }
+                if !expected.deny.contains(&change.rule) {
+                    expected.deny.push(change.rule.clone());
+                    added = true;
+                }
+            }
+        }
+    }
+    if added {
+        expected.permissions_present = true;
+    }
+    Ok(expected)
+}
+
+fn removed_rule_mutations(
+    before: &RuleSnapshot,
+    after: &RuleSnapshot,
+    id: &RuleId,
+) -> Result<Vec<RuleMutation>, &'static str> {
+    let affected = before
+        .allow
+        .iter()
+        .filter(|rule| rule.id() == *id && !after.allow.contains(rule))
+        .cloned()
+        .map(|rule| RuleMutation {
+            effect: ManagedRuleEffect::Allow,
+            rule,
+        })
+        .chain(
+            before
+                .deny
+                .iter()
+                .filter(|rule| rule.id() == *id && !after.deny.contains(rule))
+                .cloned()
+                .map(|rule| RuleMutation {
+                    effect: ManagedRuleEffect::Deny,
+                    rule,
+                }),
+        )
+        .collect::<Vec<_>>();
+    if let Some(first) = affected.first()
+        && affected
+            .iter()
+            .any(|candidate| candidate.rule != first.rule)
+    {
+        return Err("rule mutation revoke facts contain an ambiguous rule ID");
+    }
+    Ok(affected)
+}
+
+fn validate_revoke_after(
+    before: &RuleSnapshot,
+    after: &RuleSnapshot,
+    id: &RuleId,
+) -> Result<(), &'static str> {
+    let expected_allow = before
+        .allow
+        .iter()
+        .filter(|rule| rule.id() != *id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let expected_deny = before
+        .deny
+        .iter()
+        .filter(|rule| rule.id() != *id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if after.allow != expected_allow || after.deny != expected_deny {
+        return Err("rule mutation after facts do not apply its revoke request");
+    }
+    let removed =
+        expected_allow.len() != before.allow.len() || expected_deny.len() != before.deny.len();
+    if !removed && after.permissions_present != before.permissions_present {
+        return Err("an unchanged revoke altered the permission authority");
+    }
+    Ok(())
+}
+
+pub(crate) enum RuleReadAuthority<'a> {
+    Stored { system: &'a Ruleset },
+    Admitted(&'a Ruleset),
+}
+
+#[derive(Debug)]
+pub(crate) enum RuleApplicationError {
+    Store(String),
+    Management(RuleManagementError),
+    Contract(&'static str),
+}
+
+pub(crate) struct RuleChange {
+    mutation: UserConfigMutationResult,
+    affected: Vec<RuleMutation>,
+}
+
+impl RuleChange {
+    pub(crate) fn transaction(&self) -> (&RuleSnapshot, &RuleSnapshot) {
+        let (_, before, after) = self
+            .mutation
+            .rule_transaction()
+            .expect("RuleApplication admits only atomic rule facts");
+        (before, after)
+    }
+
+    pub(crate) fn affected(&self) -> &[RuleMutation] {
+        &self.affected
+    }
+
+    pub(crate) fn changed(&self) -> bool {
+        self.mutation.changed
+    }
+
+    pub(crate) fn comparisons(&self, system: &Ruleset) -> Vec<RuleMutationComparison> {
+        let (before, after) = self.transaction();
+        self.affected
+            .iter()
+            .map(|mutation| {
+                RuleManagement::compare(system, before, after, &mutation.rule, mutation.effect)
+            })
+            .collect()
+    }
+
+    pub(crate) fn into_receipt(
+        self,
+        comparisons: Vec<RuleMutationComparison>,
+    ) -> Result<RuleMutationReceipt, RuleApplicationError> {
+        RuleMutationReceipt::from_atomic_facts(self.mutation, self.affected, comparisons)
+            .map_err(RuleApplicationError::Contract)
+    }
+
+    pub(crate) fn into_unchanged_receipt(
+        self,
+    ) -> Result<RuleMutationReceipt, RuleApplicationError> {
+        let comparisons = self
+            .affected
+            .iter()
+            .map(|_| RuleMutationComparison {
+                stored_changed: false,
+                effective_changed: false,
+                authorities: Vec::new(),
+            })
+            .collect();
+        self.into_receipt(comparisons)
+    }
+}
+
+/// Shared application service for the six rule-management operations.
+pub(crate) struct RuleApplication {
+    store: Arc<dyn UserConfigStore>,
+    target: UserConfigTarget,
+}
+
+impl RuleApplication {
+    pub(crate) fn new(store: Arc<dyn UserConfigStore>, target: UserConfigTarget) -> Self {
+        Self { store, target }
+    }
+
+    pub(crate) fn list(
+        &self,
+        authority: RuleReadAuthority<'_>,
+    ) -> Result<Vec<EffectiveRule>, RuleApplicationError> {
+        match authority {
+            RuleReadAuthority::Stored { system } => {
+                let user = self
+                    .store
+                    .rule_snapshot(self.target.clone())
+                    .map_err(|error| RuleApplicationError::Store(error.to_string()))?;
+                Ok(RuleManagement::effective_rows(system, &user))
+            }
+            RuleReadAuthority::Admitted(ruleset) => Ok(RuleManagement::rows(ruleset)),
+        }
+    }
+
+    pub(crate) fn explain(
+        &self,
+        call: &PreparedCall,
+        workspace: &CanonPath,
+        authority: RuleReadAuthority<'_>,
+    ) -> Result<RuleExplanation, RuleApplicationError> {
+        let rules = match authority {
+            RuleReadAuthority::Stored { system } => {
+                let user = self
+                    .store
+                    .rule_snapshot(self.target.clone())
+                    .map_err(|error| RuleApplicationError::Store(error.to_string()))?;
+                RuleManagement::effective(system, &user)
+            }
+            RuleReadAuthority::Admitted(ruleset) => ruleset.clone(),
+        };
+        Ok(RuleManagement::explain(call, &rules, workspace.as_path()))
+    }
+
+    pub(crate) fn allow(&self, rule: Rule) -> Result<RuleChange, RuleApplicationError> {
+        self.add(ManagedRuleEffect::Allow, rule)
+    }
+
+    pub(crate) fn deny(&self, rule: Rule) -> Result<RuleChange, RuleApplicationError> {
+        self.add(ManagedRuleEffect::Deny, rule)
+    }
+
+    pub(crate) fn revoke(&self, id: RuleId) -> Result<RuleChange, RuleApplicationError> {
+        self.mutate(UserConfigMutation::RevokeRule {
+            target: self.target.clone(),
+            id,
+        })
+    }
+
+    pub(crate) fn preview_remember(
+        &self,
+        request: RememberRequest,
+    ) -> Result<RememberPreview, RuleApplicationError> {
+        let plan =
+            RuleManagement::remember(&request.call, request.effect, request.workspace.as_path())
+                .map_err(RuleApplicationError::Management)?;
+        Ok(RememberPreview {
+            effect: request.effect,
+            plan,
+        })
+    }
+
+    pub(crate) fn confirm_remember(
+        &self,
+        preview: RememberPreview,
+    ) -> Result<RuleChange, RuleApplicationError> {
+        let changes = preview
+            .plan
+            .candidates
+            .iter()
+            .cloned()
+            .map(|rule| RuleMutation {
+                effect: preview.effect,
+                rule,
+            })
+            .collect::<Vec<_>>();
+        self.mutate(UserConfigMutation::Rules {
+            target: self.target.clone(),
+            changes,
+        })
+    }
+
+    fn add(
+        &self,
+        effect: ManagedRuleEffect,
+        rule: Rule,
+    ) -> Result<RuleChange, RuleApplicationError> {
+        let affected = vec![RuleMutation { effect, rule }];
+        self.mutate(UserConfigMutation::Rules {
+            target: self.target.clone(),
+            changes: affected,
+        })
+    }
+
+    fn mutate(&self, request: UserConfigMutation) -> Result<RuleChange, RuleApplicationError> {
+        let expected_facts = request.facts();
+        let result = self
+            .store
+            .mutate(request)
+            .map_err(|error| RuleApplicationError::Store(error.to_string()))?;
+        if result.target != self.target {
+            return Err(RuleApplicationError::Contract(
+                "rule mutation returned facts for a different target",
+            ));
+        }
+        let affected = validate_atomic_rule_result(&result, Some(&expected_facts))
+            .map_err(RuleApplicationError::Contract)?;
+        Ok(RuleChange {
+            mutation: result,
+            affected,
+        })
+    }
+}
+
 pub fn execute(args: &RulesArgs, out: &Stdout) -> RunTermination {
     match execute_inner(args, out) {
         Ok(()) => RunTermination::Done,
@@ -35,69 +468,44 @@ fn execute_inner(args: &RulesArgs, out: &Stdout) -> Result<(), RunTermination> {
     let management = rule_management(target).map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?;
-    let store = OsUserConfigStore::new(Arc::new(OsIo), management.user_path);
+    let store: Arc<dyn UserConfigStore> =
+        Arc::new(OsUserConfigStore::new(Arc::new(OsIo), management.user_path));
+    let application = RuleApplication::new(store, target.clone());
 
     match &args.action {
         RulesAction::List { target, json } => {
-            let user = store.rule_snapshot(target.clone()).map_err(store_failure)?;
-            let rows = RuleManagement::effective_rows(&management.system, &user);
+            let rows = application
+                .list(RuleReadAuthority::Stored {
+                    system: &management.system,
+                })
+                .map_err(application_failure)?;
             if *json {
                 render_list_json(target, &rows, out);
             } else {
                 render_list_text(&rows, out);
             }
         }
-        RulesAction::Add {
-            target,
-            effect,
-            rule,
-        } => {
-            let result = store
-                .mutate(UserConfigMutation::Rules {
-                    target: target.clone(),
-                    changes: vec![RuleMutation {
-                        effect: *effect,
-                        rule: rule.clone(),
-                    }],
-                })
-                .map_err(store_failure)?;
-            let comparison = comparison(&management.system, &result, rule, *effect)?;
-            render_mutation_receipt(
-                &result,
-                comparison,
-                effect_name(*effect),
-                Some(rule.id()),
-                Some(rule),
-                out,
-            );
+        RulesAction::Add { effect, rule, .. } => {
+            let change = match effect {
+                ManagedRuleEffect::Allow => application.allow(rule.clone()),
+                ManagedRuleEffect::Deny => application.deny(rule.clone()),
+            }
+            .map_err(application_failure)?;
+            let comparisons = change.comparisons(&management.system);
+            let receipt = change
+                .into_receipt(comparisons)
+                .map_err(application_failure)?;
+            render_mutation_receipt(&receipt, effect_name(*effect), out);
         }
-        RulesAction::Revoke { target, id } => {
-            let result = store
-                .mutate(UserConfigMutation::RevokeRule {
-                    target: target.clone(),
-                    id: id.clone(),
-                })
-                .map_err(store_failure)?;
-            let (_, before, after) = transaction(&result)?;
-            let removed = rule_by_id(before, id);
-            let comparison = match removed {
-                Some((effect, rule)) => {
-                    RuleManagement::compare(&management.system, before, after, rule, effect)
-                }
-                None => RuleMutationComparison {
-                    stored_changed: false,
-                    effective_changed: false,
-                    authorities: Vec::new(),
-                },
-            };
-            render_mutation_receipt(
-                &result,
-                comparison,
-                "both",
-                removed.map(|(_, rule)| rule.id()),
-                removed.map(|(_, rule)| rule),
-                out,
-            );
+        RulesAction::Revoke { id, .. } => {
+            let change = application
+                .revoke(id.clone())
+                .map_err(application_failure)?;
+            let comparisons = change.comparisons(&management.system);
+            let receipt = change
+                .into_receipt(comparisons)
+                .map_err(application_failure)?;
+            render_mutation_receipt(&receipt, "both", out);
         }
         RulesAction::Remember {
             target,
@@ -109,14 +517,11 @@ fn execute_inner(args: &RulesArgs, out: &Stdout) -> Result<(), RunTermination> {
         } => {
             let workspace = workspace(directory.as_deref())?;
             let call = prepare_call(tool, arguments, &workspace)?;
-            let plan =
-                RuleManagement::remember(&call, *effect, workspace.as_path()).map_err(|error| {
-                    RunTermination::UsageError {
-                        message: error.to_string(),
-                    }
-                })?;
+            let preview = application
+                .preview_remember(RememberRequest::new(call, *effect, workspace))
+                .map_err(application_failure)?;
             if !yes {
-                render_remember_plan(&plan, *effect, out);
+                render_remember_plan(preview.plan(), preview.effect(), out);
                 out.line(&format!(
                     "RESULT\tstored_unchanged\teffective_unchanged\t{}\tnot_published",
                     escape_field(&user_target(target))
@@ -124,35 +529,24 @@ fn execute_inner(args: &RulesArgs, out: &Stdout) -> Result<(), RunTermination> {
                 return Ok(());
             }
 
-            let result = store
-                .mutate(UserConfigMutation::Rules {
-                    target: target.clone(),
-                    changes: plan
-                        .candidates
-                        .iter()
-                        .cloned()
-                        .map(|rule| RuleMutation {
-                            effect: *effect,
-                            rule,
-                        })
-                        .collect(),
-                })
-                .map_err(store_failure)?;
-            let (_, before, after) = transaction(&result)?;
-            let effective_changed = plan.candidates.iter().any(|rule| {
-                RuleManagement::compare(&management.system, before, after, rule, *effect)
-                    .effective_changed
-            });
-            render_remember_plan(&plan, *effect, out);
-            let publication = publication(&result.publication);
+            let rendered_preview = preview.clone();
+            let change = application
+                .confirm_remember(preview)
+                .map_err(application_failure)?;
+            let comparisons = change.comparisons(&management.system);
+            let receipt = change
+                .into_receipt(comparisons)
+                .map_err(application_failure)?;
+            render_remember_plan(rendered_preview.plan(), rendered_preview.effect(), out);
+            let publication = publication(&receipt.mutation().publication);
             out.line(&format!(
                 "RESULT\t{}\t{}\t{}\t{}",
-                stored_state(result.changed),
-                effective_state(effective_changed),
+                stored_state(receipt.mutation().changed),
+                effective_state(receipt.effective_changed()),
                 escape_field(&user_target(target)),
                 publication
             ));
-            publication_warning(&result.publication);
+            publication_warning(&receipt.mutation().publication);
         }
         RulesAction::Explain {
             target,
@@ -163,9 +557,15 @@ fn execute_inner(args: &RulesArgs, out: &Stdout) -> Result<(), RunTermination> {
         } => {
             let workspace = workspace(directory.as_deref())?;
             let call = prepare_call(tool, arguments, &workspace)?;
-            let user = store.rule_snapshot(target.clone()).map_err(store_failure)?;
-            let rules = RuleManagement::effective(&management.system, &user);
-            let explanation = RuleManagement::explain(&call, &rules, workspace.as_path());
+            let explanation = application
+                .explain(
+                    &call,
+                    &workspace,
+                    RuleReadAuthority::Stored {
+                        system: &management.system,
+                    },
+                )
+                .map_err(application_failure)?;
             if *json {
                 render_explanation_json(target, &call, &explanation, out);
             } else {
@@ -244,44 +644,6 @@ fn prepare_call(
         })
 }
 
-fn comparison(
-    system: &Ruleset,
-    result: &UserConfigMutationResult,
-    rule: &Rule,
-    effect: ManagedRuleEffect,
-) -> Result<RuleMutationComparison, RunTermination> {
-    let (_, before, after) = transaction(result)?;
-    Ok(RuleManagement::compare(system, before, after, rule, effect))
-}
-
-fn transaction(
-    result: &UserConfigMutationResult,
-) -> Result<(&UserConfigMutationFacts, &RuleSnapshot, &RuleSnapshot), RunTermination> {
-    result
-        .rule_transaction()
-        .ok_or_else(|| RunTermination::Failed {
-            message: "rule mutation returned no atomic before/after facts".to_owned(),
-        })
-}
-
-fn rule_by_id<'a>(
-    snapshot: &'a RuleSnapshot,
-    id: &RuleId,
-) -> Option<(ManagedRuleEffect, &'a Rule)> {
-    snapshot
-        .allow
-        .iter()
-        .find(|rule| rule.id() == *id)
-        .map(|rule| (ManagedRuleEffect::Allow, rule))
-        .or_else(|| {
-            snapshot
-                .deny
-                .iter()
-                .find(|rule| rule.id() == *id)
-                .map(|rule| (ManagedRuleEffect::Deny, rule))
-        })
-}
-
 fn render_list_text(rows: &[EffectiveRule], out: &Stdout) {
     for row in rows {
         out.line(&format!(
@@ -317,28 +679,24 @@ fn render_list_json(target: &UserConfigTarget, rows: &[EffectiveRule], out: &Std
     ));
 }
 
-fn render_mutation_receipt(
-    result: &UserConfigMutationResult,
-    comparison: RuleMutationComparison,
-    effect: &str,
-    id: Option<RuleId>,
-    rule: Option<&Rule>,
-    out: &Stdout,
-) {
+fn render_mutation_receipt(receipt: &RuleMutationReceipt, effect: &str, out: &Stdout) {
+    let affected = receipt.affected().first();
     out.line(&format!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        stored_state(comparison.stored_changed),
-        effective_state(comparison.effective_changed),
+        stored_state(receipt.mutation().changed),
+        effective_state(receipt.effective_changed()),
         effect,
-        id.map(|id| id.to_string())
+        affected
+            .map(|mutation| mutation.rule.id().to_string())
             .unwrap_or_else(|| "-".to_owned()),
-        rule.map(|rule| escape_field(&rule.to_string()))
+        affected
+            .map(|mutation| escape_field(&mutation.rule.to_string()))
             .unwrap_or_else(|| "-".to_owned()),
-        escape_field(&user_target(&result.target)),
-        render_authorities(&comparison),
-        publication(&result.publication)
+        escape_field(&user_target(&receipt.mutation().target)),
+        render_authorities(receipt.comparisons()),
+        publication(&receipt.mutation().publication)
     ));
-    publication_warning(&result.publication);
+    publication_warning(&receipt.mutation().publication);
 }
 
 fn render_remember_plan(plan: &RememberPlan, effect: ManagedRuleEffect, out: &Stdout) {
@@ -449,12 +807,12 @@ fn render_explanation_json(
     ));
 }
 
-fn render_authorities(comparison: &RuleMutationComparison) -> String {
+fn render_authorities(comparisons: &[RuleMutationComparison]) -> String {
     let mut sources = Vec::new();
     for source in Source::ALL {
-        if comparison
-            .authorities
+        if comparisons
             .iter()
+            .flat_map(|comparison| &comparison.authorities)
             .any(|authority| authority.from == source || authority.also.contains(source))
         {
             sources.push(source.to_string());
@@ -567,5 +925,17 @@ fn omitted_name(dimension: OmittedDimension) -> &'static str {
 fn store_failure(error: impl std::fmt::Display) -> RunTermination {
     RunTermination::Failed {
         message: format!("user config rule operation failed before publication: {error}"),
+    }
+}
+
+fn application_failure(error: RuleApplicationError) -> RunTermination {
+    match error {
+        RuleApplicationError::Management(error) => RunTermination::UsageError {
+            message: error.to_string(),
+        },
+        RuleApplicationError::Store(diagnostic) => store_failure(diagnostic),
+        RuleApplicationError::Contract(message) => RunTermination::Failed {
+            message: message.to_owned(),
+        },
     }
 }

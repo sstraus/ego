@@ -43,6 +43,21 @@ fn system_rules(allow: &[&str], deny: &[&str]) -> Ruleset {
 }
 
 #[test]
+fn rows_projects_the_admitted_rules_without_a_synthetic_user_snapshot() {
+    let rules = system_rules(&["write(src/**)"], &["read(src/**)"]);
+    let rows = RuleManagement::rows(&rules);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].effect, ManagedRuleEffect::Deny);
+    assert_eq!(rows[0].rule, rule("read(src/**)"));
+    assert_eq!(rows[0].from, Source::System);
+    assert!(rows[0].also.is_empty());
+    assert_eq!(rows[1].effect, ManagedRuleEffect::Allow);
+    assert_eq!(rows[1].rule, rule("write(src/**)"));
+    assert_eq!(rows[1].from, Source::System);
+    assert!(rows[1].also.is_empty());
+}
+
+#[test]
 fn effective_rows_fold_same_effect_copies_but_keep_opposite_effects_separate() {
     let system = system_rules(&["write(src/**)"], &["read(src/**)"]);
     let user = user_snapshot(&["read(src/**)", "write(src/**)"], &["read(src/**)"]);
