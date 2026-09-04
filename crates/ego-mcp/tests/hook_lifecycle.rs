@@ -393,6 +393,23 @@ impl Journal {
             serde_json::from_value(wire).expect("continuation with replacement policy digest"),
         );
     }
+    fn replace_capture_identity(&self, id: &str, capture: &str) {
+        let mut records = self.records.lock().expect("records");
+        let mut wire = serde_json::to_value(records.get(id).expect("recorded continuation"))
+            .expect("continuation wire");
+        wire.get_mut("subject")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("continuation subject")
+            .insert("capture".to_owned(), json!(capture));
+        wire.get_mut("fingerprints")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("continuation fingerprints")
+            .insert("capture".to_owned(), json!(capture));
+        records.insert(
+            id.to_owned(),
+            serde_json::from_value(wire).expect("continuation with replacement capture identity"),
+        );
+    }
     fn fail_next_record(&self) {
         *self.fail_record.lock().expect("record failure") = true;
     }
@@ -451,12 +468,12 @@ impl ContinuationJournal for Journal {
         Ok(())
     }
     fn load(&self, id: &str) -> Result<ContinuationRecord, ContinuationError> {
-        let records = self.records.lock().expect("records");
-        let record = records.get(id).ok_or(ContinuationError::NotFound)?;
-        serde_json::from_slice(
-            &serde_json::to_vec(record).map_err(|_| ContinuationError::Corrupt("encode".into()))?,
-        )
-        .map_err(|_| ContinuationError::Corrupt("decode".into()))
+        let bytes = {
+            let records = self.records.lock().expect("records");
+            let record = records.get(id).ok_or(ContinuationError::NotFound)?;
+            serde_json::to_vec(record).map_err(|_| ContinuationError::Corrupt("encode".into()))?
+        };
+        serde_json::from_slice(&bytes).map_err(|_| ContinuationError::Corrupt("decode".into()))
     }
     fn claim(&self, id: &str, now: Timestamp) -> Result<ClaimedContinuation, ContinuationError> {
         let mut records = self.records.lock().expect("records");
@@ -514,6 +531,8 @@ struct CaptureStore {
         )>,
     >,
     fail_store: Mutex<bool>,
+    fail_load: Mutex<Option<GenerationPolicyCaptureStoreErrorKind>>,
+    after_load: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     trace: Trace,
 }
 
@@ -531,6 +550,14 @@ impl CaptureStore {
 
     fn fail_next_store(&self) {
         *self.fail_store.lock().expect("capture store failure") = true;
+    }
+
+    fn fail_next_load(&self, kind: GenerationPolicyCaptureStoreErrorKind) {
+        *self.fail_load.lock().expect("capture load failure") = Some(kind);
+    }
+
+    fn after_next_load(&self, callback: impl FnOnce() + Send + 'static) {
+        *self.after_load.lock().expect("capture load callback") = Some(Box::new(callback));
     }
 
     fn stored_snapshot(
@@ -626,12 +653,27 @@ impl GenerationPolicyCaptureStore for CaptureStore {
             id,
             expected.clone(),
         );
-        self.stored_snapshot(id, expected).ok_or_else(|| {
+        if let Some(kind) = self.fail_load.lock().expect("capture load failure").take() {
+            return Err(Self::error(
+                GenerationPolicyCaptureStoreOperation::Load,
+                kind,
+            ));
+        }
+        let snapshot = self.stored_snapshot(id, expected).ok_or_else(|| {
             Self::error(
                 GenerationPolicyCaptureStoreOperation::Load,
                 GenerationPolicyCaptureStoreErrorKind::Missing,
             )
-        })
+        })?;
+        let callback = self
+            .after_load
+            .lock()
+            .expect("capture load callback")
+            .take();
+        if let Some(callback) = callback {
+            callback();
+        }
+        Ok(snapshot)
     }
 
     fn delete(
@@ -1289,6 +1331,548 @@ async fn real_operation_records_before_elicitation_and_returns_foreign_id() {
         )]
     );
     assert_eq!(spawner.calls(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn restarted_owner_loads_policy_before_binding_exact_capture_and_accepting() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let (recorded, _policy_weak, digest) = attempt_initial_record(
+        Arc::clone(&journal),
+        Arc::clone(&policy_captures),
+        Arc::clone(&resolver),
+        HookMode::Continue,
+        trace.clone(),
+    )
+    .await;
+    let required = recorded.expect("initial input-required");
+    let id = required.continuation_id().to_owned();
+    let stable_capture = journal.recorded_capture();
+    drop(
+        resolver
+            .remove(&stable_capture)
+            .expect("remove the prior process capture"),
+    );
+
+    let restarted = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        Arc::clone(&resolver),
+    );
+    let resolve_calls_before_load = resolver.calls();
+    let stored = policy_captures
+        .stored_snapshot(&id, &digest)
+        .expect("stored generation policy");
+    let loaded = restarted
+        .load_pending_foreign_policy(&id)
+        .expect("load pending generation policy before reconciliation");
+    assert!(Arc::ptr_eq(&loaded, &stored));
+    assert_eq!(loaded.digest(), digest);
+    assert_eq!(
+        resolver.calls(),
+        resolve_calls_before_load,
+        "phase one must not consult the registry capture resolver"
+    );
+    assert_eq!(
+        policy_captures.calls(),
+        vec![
+            (
+                GenerationPolicyCaptureStoreOperation::Store,
+                id.clone(),
+                digest.clone(),
+            ),
+            (
+                GenerationPolicyCaptureStoreOperation::Load,
+                id.clone(),
+                digest.clone(),
+            ),
+        ]
+    );
+    assert_eq!(
+        trace.events(),
+        vec!["store", "record", "Elicitation", "load"]
+    );
+
+    let restarted_factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&restarted), 64 * 1024, Duration::from_secs(30))
+            .expect("restarted factory"),
+    );
+    let (reconciled_capture, _tool) = captured_lookup(restarted_factory);
+    assert_eq!(reconciled_capture.stable_fingerprint(), stable_capture);
+    resolver.insert(reconciled_capture);
+    restarted
+        .bind_pending_foreign_continuation(&id, Arc::clone(&loaded))
+        .expect("bind the reconciled exact capture");
+
+    let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
+    let causality = settled_continuation_causality(&runtime, &required, r#"{"choice":"yes"}"#);
+    let spawner = Arc::new(ScriptedSpawner::with_input_required_rounds(0));
+    let execution = restarted
+        .accept_answer(
+            &id,
+            br#"{"choice":"yes"}"#,
+            runtime,
+            causality,
+            prepared_resume().1,
+            ports(spawner.clone()),
+        )
+        .await
+        .expect("accept with the recovered authorities");
+    assert!(matches!(execution, ToolExecution::Complete(_)));
+    assert_eq!(spawner.calls(), 1);
+    assert_eq!(journal.state_for(&id), Some(ContinuationState::Completed));
+    assert_eq!(
+        trace.events(),
+        vec![
+            "store",
+            "record",
+            "Elicitation",
+            "load",
+            "accepted_answer",
+            "ElicitationResult",
+            "claim",
+            "settle",
+            "delete",
+        ]
+    );
+    assert_eq!(
+        policy_captures.calls(),
+        vec![
+            (
+                GenerationPolicyCaptureStoreOperation::Store,
+                id.clone(),
+                digest.clone(),
+            ),
+            (
+                GenerationPolicyCaptureStoreOperation::Load,
+                id.clone(),
+                digest.clone(),
+            ),
+            (GenerationPolicyCaptureStoreOperation::Delete, id, digest,),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_policy_load_failures_are_closed_and_do_not_advance_authority() {
+    for kind in [
+        GenerationPolicyCaptureStoreErrorKind::Missing,
+        GenerationPolicyCaptureStoreErrorKind::Corrupt,
+        GenerationPolicyCaptureStoreErrorKind::DigestMismatch,
+        GenerationPolicyCaptureStoreErrorKind::CapacityExceeded,
+        GenerationPolicyCaptureStoreErrorKind::Unavailable,
+    ] {
+        let trace = Trace::default();
+        let journal = Arc::new(Journal::with_trace(trace.clone()));
+        let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+        let resolver = Arc::new(ExactCaptureResolver::default());
+        let (recorded, _policy_weak, digest) = attempt_initial_record(
+            Arc::clone(&journal),
+            Arc::clone(&policy_captures),
+            Arc::clone(&resolver),
+            HookMode::Continue,
+            trace.clone(),
+        )
+        .await;
+        let id = recorded
+            .expect("initial input-required")
+            .continuation_id()
+            .to_owned();
+        policy_captures.fail_next_load(kind);
+        let restarted =
+            context_free_owner_with_store(journal.clone(), Arc::clone(&policy_captures), resolver);
+
+        let Err(error) = restarted.load_pending_foreign_policy(&id) else {
+            panic!("{kind:?} must fail closed");
+        };
+        assert_eq!(error.failure(), McpFailure::Authority, "{kind:?}");
+        assert_eq!(error.delivery(), None, "{kind:?}");
+        let diagnostic = error.to_string();
+        let digest_text = String::from(digest.clone());
+        assert!(!diagnostic.contains(&id), "{kind:?}");
+        assert!(!diagnostic.contains(&digest_text), "{kind:?}");
+        assert_eq!(journal.state_for(&id), Some(ContinuationState::Pending));
+        assert_eq!(journal.events(), vec!["record"]);
+        assert_eq!(
+            trace.events(),
+            vec!["store", "record", "Elicitation", "load"]
+        );
+        assert_eq!(
+            policy_captures
+                .calls()
+                .into_iter()
+                .map(|(operation, _, _)| operation)
+                .collect::<Vec<_>>(),
+            vec![
+                GenerationPolicyCaptureStoreOperation::Store,
+                GenerationPolicyCaptureStoreOperation::Load,
+            ],
+            "{kind:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_policy_load_rejects_unknown_and_non_pending_records_before_store_access() {
+    let empty_journal = Arc::new(Journal::default());
+    let empty_store = Arc::new(CaptureStore::default());
+    let empty_owner = context_free_owner_with_store(
+        empty_journal.clone(),
+        Arc::clone(&empty_store),
+        Arc::new(ExactCaptureResolver::default()),
+    );
+    let Err(unknown) = empty_owner.load_pending_foreign_policy("unknown-continuation") else {
+        panic!("an unknown continuation must fail closed");
+    };
+    assert_eq!(unknown.failure(), McpFailure::Authority);
+    assert_eq!(unknown.delivery(), None);
+    assert!(empty_journal.events().is_empty());
+    assert!(empty_store.calls().is_empty());
+
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let (recorded, _policy_weak, _digest) = attempt_initial_record(
+        Arc::clone(&journal),
+        Arc::clone(&policy_captures),
+        Arc::clone(&resolver),
+        HookMode::Continue,
+        trace.clone(),
+    )
+    .await;
+    let id = recorded
+        .expect("initial input-required")
+        .continuation_id()
+        .to_owned();
+    journal
+        .fail_pending(&id)
+        .expect("make the continuation non-pending");
+    let restarted =
+        context_free_owner_with_store(journal.clone(), policy_captures.clone(), resolver);
+
+    let Err(non_pending) = restarted.load_pending_foreign_policy(&id) else {
+        panic!("a non-pending continuation must fail closed");
+    };
+    assert_eq!(non_pending.failure(), McpFailure::Authority);
+    assert_eq!(non_pending.delivery(), None);
+    assert_eq!(journal.state_for(&id), Some(ContinuationState::Failed));
+    assert_eq!(journal.events(), vec!["record", "fail_pending"]);
+    assert_eq!(
+        policy_captures
+            .calls()
+            .into_iter()
+            .map(|(operation, _, _)| operation)
+            .collect::<Vec<_>>(),
+        vec![GenerationPolicyCaptureStoreOperation::Store]
+    );
+    assert_eq!(
+        trace.events(),
+        vec!["store", "record", "Elicitation", "fail_pending"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_policy_load_revalidates_durable_authority_after_store_read() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let (recorded, _policy_weak, digest) = attempt_initial_record(
+        Arc::clone(&journal),
+        Arc::clone(&policy_captures),
+        Arc::clone(&resolver),
+        HookMode::Continue,
+        trace.clone(),
+    )
+    .await;
+    let id = recorded
+        .expect("initial input-required")
+        .continuation_id()
+        .to_owned();
+    let changed_digest = GenerationPolicyCapture::new(
+        CanonPath::new("/changed-during-policy-load"),
+        Mode::Default,
+        Ruleset::default(),
+        None,
+    )
+    .expect("changed generation policy")
+    .snapshot()
+    .digest();
+    assert_ne!(changed_digest, digest);
+    let callback_journal = Arc::clone(&journal);
+    let callback_id = id.clone();
+    let callback_digest = changed_digest.clone();
+    policy_captures.after_next_load(move || {
+        callback_journal.replace_policy_digest(&callback_id, &callback_digest);
+    });
+    let restarted = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        Arc::clone(&resolver),
+    );
+    let resolve_calls_before_load = resolver.calls();
+
+    let Err(error) = restarted.load_pending_foreign_policy(&id) else {
+        panic!("a durable authority change during policy load must fail closed");
+    };
+    assert_eq!(error.failure(), McpFailure::Authority);
+    assert_eq!(error.delivery(), None);
+    assert_eq!(resolver.calls(), resolve_calls_before_load);
+    assert_eq!(journal.recorded_policy_digest(), changed_digest);
+    assert_eq!(journal.state_for(&id), Some(ContinuationState::Pending));
+    assert_eq!(journal.events(), vec!["record"]);
+    assert_eq!(
+        trace.events(),
+        vec!["store", "record", "Elicitation", "load"]
+    );
+    assert_eq!(
+        policy_captures
+            .calls()
+            .into_iter()
+            .map(|(operation, _, _)| operation)
+            .collect::<Vec<_>>(),
+        vec![
+            GenerationPolicyCaptureStoreOperation::Store,
+            GenerationPolicyCaptureStoreOperation::Load,
+        ]
+    );
+
+    journal.replace_policy_digest(&id, &digest);
+    let stored = policy_captures
+        .stored_snapshot(&id, &digest)
+        .expect("stored generation policy");
+    restarted
+        .bind_pending_foreign_continuation(&id, stored)
+        .expect("failed phase one must not leave a hidden pin");
+    assert_eq!(resolver.calls(), resolve_calls_before_load + 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_bind_rejects_changed_or_unavailable_authority_and_never_replaces_a_pin() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let (recorded, _policy_weak, digest) = attempt_initial_record(
+        Arc::clone(&journal),
+        Arc::clone(&policy_captures),
+        Arc::clone(&resolver),
+        HookMode::Continue,
+        trace.clone(),
+    )
+    .await;
+    let id = recorded
+        .expect("initial input-required")
+        .continuation_id()
+        .to_owned();
+    let stable_capture = journal.recorded_capture();
+    let restarted = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        Arc::clone(&resolver),
+    );
+    let loaded = restarted
+        .load_pending_foreign_policy(&id)
+        .expect("load pending generation policy");
+
+    let different_snapshot = GenerationPolicyCapture::new(
+        CanonPath::new("/wrong-recovered-policy"),
+        Mode::Auto,
+        Ruleset::default(),
+        None,
+    )
+    .expect("different generation policy")
+    .snapshot();
+    let Err(mismatched_snapshot) =
+        restarted.bind_pending_foreign_continuation(&id, different_snapshot)
+    else {
+        panic!("a supplied snapshot with another digest must be refused");
+    };
+    assert_eq!(mismatched_snapshot.failure(), McpFailure::Authority);
+    assert_eq!(mismatched_snapshot.delivery(), None);
+
+    drop(
+        resolver
+            .remove(&stable_capture)
+            .expect("remove the recorded registry capture"),
+    );
+    let Err(unavailable_capture) =
+        restarted.bind_pending_foreign_continuation(&id, Arc::clone(&loaded))
+    else {
+        panic!("an unavailable recorded registry capture must be refused");
+    };
+    assert_eq!(unavailable_capture.failure(), McpFailure::Authority);
+    assert_eq!(unavailable_capture.delivery(), None);
+
+    let restarted_factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&restarted), 64 * 1024, Duration::from_secs(30))
+            .expect("restarted factory"),
+    );
+    let wrong_capture = registry_capture_with_schema(
+        Arc::clone(&restarted_factory),
+        json!({
+            "type":"object",
+            "properties":{"wrong":{"type":"string"}},
+            "required":["wrong"],
+            "additionalProperties":false
+        }),
+    );
+    assert_ne!(wrong_capture.stable_fingerprint(), stable_capture);
+    resolver.insert_for(&stable_capture, wrong_capture);
+    let Err(wrong_capture) = restarted.bind_pending_foreign_continuation(&id, Arc::clone(&loaded))
+    else {
+        panic!("a resolver result with another capture identity must be refused");
+    };
+    assert_eq!(wrong_capture.failure(), McpFailure::Authority);
+    assert_eq!(wrong_capture.delivery(), None);
+    drop(
+        resolver
+            .remove(&stable_capture)
+            .expect("remove the wrong registry capture"),
+    );
+
+    let (exact_capture, _tool) = captured_lookup(restarted_factory);
+    assert_eq!(exact_capture.stable_fingerprint(), stable_capture);
+    resolver.insert(exact_capture);
+    let changed_digest = GenerationPolicyCapture::new(
+        CanonPath::new("/changed-before-bind"),
+        Mode::Default,
+        Ruleset::default(),
+        None,
+    )
+    .expect("changed generation policy")
+    .snapshot()
+    .digest();
+    assert_ne!(changed_digest, digest);
+    journal.replace_policy_digest(&id, &changed_digest);
+    let Err(changed_record) = restarted.bind_pending_foreign_continuation(&id, Arc::clone(&loaded))
+    else {
+        panic!("a changed durable digest must be refused");
+    };
+    assert_eq!(changed_record.failure(), McpFailure::Authority);
+    assert_eq!(changed_record.delivery(), None);
+    journal.replace_policy_digest(&id, &digest);
+
+    let first_bytes = loaded.encode_confidential();
+    let first = Arc::new(
+        GenerationPolicySnapshot::decode_confidential(&first_bytes)
+            .expect("first equivalent snapshot"),
+    );
+    let first_weak = Arc::downgrade(&first);
+    restarted
+        .bind_pending_foreign_continuation(&id, Arc::clone(&first))
+        .expect("first exact bind");
+    drop(first);
+    let replacement_bytes = loaded.encode_confidential();
+    let replacement = Arc::new(
+        GenerationPolicySnapshot::decode_confidential(&replacement_bytes)
+            .expect("replacement equivalent snapshot"),
+    );
+    let replacement_weak = Arc::downgrade(&replacement);
+    let Err(duplicate) = restarted.bind_pending_foreign_continuation(&id, Arc::clone(&replacement))
+    else {
+        panic!("an existing pin must never be replaced");
+    };
+    assert_eq!(duplicate.failure(), McpFailure::Authority);
+    assert_eq!(duplicate.delivery(), None);
+    drop(replacement);
+    assert!(
+        first_weak.upgrade().is_some(),
+        "the original exact pin must remain retained"
+    );
+    assert!(
+        replacement_weak.upgrade().is_none(),
+        "a duplicate supplied snapshot must not replace the pin"
+    );
+    assert_eq!(journal.state_for(&id), Some(ContinuationState::Pending));
+    assert_eq!(journal.events(), vec!["record"]);
+    assert_eq!(
+        trace.events(),
+        vec!["store", "record", "Elicitation", "load"]
+    );
+    assert_eq!(
+        policy_captures
+            .calls()
+            .into_iter()
+            .map(|(operation, _, _)| operation)
+            .collect::<Vec<_>>(),
+        vec![
+            GenerationPolicyCaptureStoreOperation::Store,
+            GenerationPolicyCaptureStoreOperation::Load,
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_bind_revalidates_durable_authority_after_capture_read() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let policy_captures = Arc::new(CaptureStore::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let (recorded, _policy_weak, digest) = attempt_initial_record(
+        Arc::clone(&journal),
+        Arc::clone(&policy_captures),
+        Arc::clone(&resolver),
+        HookMode::Continue,
+        trace.clone(),
+    )
+    .await;
+    let id = recorded
+        .expect("initial input-required")
+        .continuation_id()
+        .to_owned();
+    let restarted = context_free_owner_with_store(
+        journal.clone(),
+        Arc::clone(&policy_captures),
+        Arc::clone(&resolver),
+    );
+    let loaded = restarted
+        .load_pending_foreign_policy(&id)
+        .expect("load pending generation policy");
+    let capture_identity = journal.recorded_capture();
+    let changed_capture = "changed-during-capture-resolution";
+    assert_ne!(changed_capture, capture_identity);
+    let callback_journal = Arc::clone(&journal);
+    let callback_id = id.clone();
+    resolver.after_next_resolve(move || {
+        callback_journal.replace_capture_identity(&callback_id, changed_capture);
+    });
+    let resolve_calls_before_bind = resolver.calls();
+
+    let Err(error) = restarted.bind_pending_foreign_continuation(&id, Arc::clone(&loaded)) else {
+        panic!("a durable authority change during capture resolution must fail closed");
+    };
+    assert_eq!(error.failure(), McpFailure::Authority);
+    assert_eq!(error.delivery(), None);
+    assert_eq!(resolver.calls(), resolve_calls_before_bind + 1);
+    assert_eq!(journal.recorded_policy_digest(), digest);
+    assert_eq!(journal.recorded_capture(), changed_capture);
+    assert_eq!(journal.state_for(&id), Some(ContinuationState::Pending));
+    assert_eq!(journal.events(), vec!["record"]);
+    assert_eq!(
+        trace.events(),
+        vec!["store", "record", "Elicitation", "load"]
+    );
+    assert_eq!(
+        policy_captures
+            .calls()
+            .into_iter()
+            .map(|(operation, _, _)| operation)
+            .collect::<Vec<_>>(),
+        vec![
+            GenerationPolicyCaptureStoreOperation::Store,
+            GenerationPolicyCaptureStoreOperation::Load,
+        ]
+    );
+
+    journal.replace_capture_identity(&id, &capture_identity);
+    restarted
+        .bind_pending_foreign_continuation(&id, loaded)
+        .expect("failed phase two must not leave a hidden pin");
+    assert_eq!(resolver.calls(), resolve_calls_before_bind + 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2128,6 +2712,13 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
             ),
         ]
     );
+    assert!(
+        policy_captures
+            .calls()
+            .iter()
+            .all(|(operation, _, _)| { *operation != GenerationPolicyCaptureStoreOperation::Load }),
+        "same-process successor rounds must never load the durable policy capture"
+    );
 }
 
 #[test]
@@ -2432,21 +3023,40 @@ fn registry_reload() -> McpRegistryRefresh {
 // capture identity belong to the one-shot guarded resume context instead of
 // being ambient state on the owner.
 #[derive(Default)]
-struct ExactCaptureResolver(Mutex<BTreeMap<String, McpRegistryCapture>>);
+struct ExactCaptureResolver {
+    captures: Mutex<BTreeMap<String, McpRegistryCapture>>,
+    calls: AtomicUsize,
+    after_resolve: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
 
 impl ExactCaptureResolver {
     fn insert(&self, capture: McpRegistryCapture) {
-        self.0
+        self.captures
             .lock()
             .expect("capture resolver")
             .insert(capture.stable_fingerprint().to_owned(), capture);
     }
 
+    fn insert_for(&self, stable_fingerprint: &str, capture: McpRegistryCapture) {
+        self.captures
+            .lock()
+            .expect("capture resolver")
+            .insert(stable_fingerprint.to_owned(), capture);
+    }
+
     fn remove(&self, stable_fingerprint: &str) -> Option<McpRegistryCapture> {
-        self.0
+        self.captures
             .lock()
             .expect("capture resolver")
             .remove(stable_fingerprint)
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn after_next_resolve(&self, callback: impl FnOnce() + Send + 'static) {
+        *self.after_resolve.lock().expect("capture resolve callback") = Some(Box::new(callback));
     }
 }
 
@@ -2455,7 +3065,9 @@ impl McpCaptureResolver for ExactCaptureResolver {
         &self,
         stable_fingerprint: &str,
     ) -> Result<McpRegistryCapture, ego_mcp::McpRegistryError> {
-        self.0
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let capture = self
+            .captures
             .lock()
             .expect("capture resolver")
             .get(stable_fingerprint)
@@ -2464,7 +3076,16 @@ impl McpCaptureResolver for ExactCaptureResolver {
                 ego_mcp::McpRegistryError::InvalidCandidate(
                     "capture identity is unavailable".into(),
                 )
-            })
+            })?;
+        let callback = self
+            .after_resolve
+            .lock()
+            .expect("capture resolve callback")
+            .take();
+        if let Some(callback) = callback {
+            callback();
+        }
+        Ok(capture)
     }
 }
 

@@ -143,6 +143,52 @@ impl McpContinuationOwner {
         }
     }
 
+    pub fn load_pending_foreign_policy(
+        &self,
+        id: &str,
+    ) -> Result<Arc<GenerationPolicySnapshot>, McpError> {
+        let pending = self.load_pending_record(id)?;
+        let digest = pending.generation_policy_digest().clone();
+        let capture = pending.capture().to_owned();
+        let snapshot = self
+            .policy_captures
+            .load(id, &digest)
+            .map_err(|error| authority(error.diagnostic()))?;
+        if snapshot.digest() != digest {
+            return Err(authority(
+                "MCP generation policy capture does not match its durable record",
+            ));
+        }
+        self.revalidate_pending_authority(id, &digest, &capture)?;
+        Ok(snapshot)
+    }
+
+    pub fn bind_pending_foreign_continuation(
+        &self,
+        id: &str,
+        policy_snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<(), McpError> {
+        let pending = self.load_pending_record(id)?;
+        let digest = pending.generation_policy_digest().clone();
+        let capture_identity = pending.capture().to_owned();
+        if policy_snapshot.digest() != digest {
+            return Err(authority(
+                "MCP generation policy capture does not match its durable record",
+            ));
+        }
+        let capture = self
+            .captures
+            .resolve_capture(&capture_identity)
+            .map_err(|_| authority("MCP registry capture is unavailable"))?;
+        if capture.stable_fingerprint() != capture_identity {
+            return Err(authority(
+                "MCP capture resolver returned the wrong identity",
+            ));
+        }
+        self.revalidate_pending_authority(id, &digest, &capture_identity)?;
+        self.insert_pin(id.to_owned(), capture, policy_snapshot)
+    }
+
     pub async fn record_input_required(
         &self,
         envelope: ego_core::permit::McpPreparedEnvelope,
@@ -330,6 +376,32 @@ impl McpContinuationOwner {
     fn cleanup_terminal(&self, id: &str, digest: &GenerationPolicyDigest) {
         let _ = self.remove_pin(id);
         let _ = self.policy_captures.delete(id, digest);
+    }
+
+    fn load_pending_record(&self, id: &str) -> Result<ContinuationRecord, McpError> {
+        let record = self
+            .journal
+            .load(id)
+            .map_err(|_| authority("MCP pending continuation record is unavailable"))?;
+        if record.state() != ContinuationState::Pending {
+            return Err(authority("MCP continuation is not pending"));
+        }
+        Ok(record)
+    }
+
+    fn revalidate_pending_authority(
+        &self,
+        id: &str,
+        digest: &GenerationPolicyDigest,
+        capture: &str,
+    ) -> Result<(), McpError> {
+        let current = self.load_pending_record(id)?;
+        if current.generation_policy_digest() != digest || current.capture() != capture {
+            return Err(authority(
+                "MCP pending continuation authority changed during recovery",
+            ));
+        }
+        Ok(())
     }
 
     fn insert_pin(
