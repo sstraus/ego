@@ -9,9 +9,11 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ceiling::Ceilings;
 use crate::event::domain::{DomainEvent, Envelope, EventKind};
 use crate::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use crate::event::time::{Clock, Timestamp};
+use crate::goal::{GoalOwner, GoalRecord, GoalRefusal, GoalState, GoalTransition};
 use crate::public::{PublicEvent, project_public};
 use crate::session::{
     ForkError, PreparedFork, ReplayContext, ReplayError, ReplaySource, ReplaySourceError,
@@ -247,6 +249,8 @@ pub enum LifecycleError {
     LeaseHeld,
     EffectUncertain,
     Conflict,
+    Goal(GoalRefusal),
+    InvalidText,
     Fork(ForkError),
     Ancestry(ReplayError),
     Replay(ReplaySourceError),
@@ -272,6 +276,8 @@ impl fmt::Display for LifecycleError {
             Self::LeaseHeld => formatter.write_str("session has a live lease"),
             Self::EffectUncertain => formatter.write_str("session has an uncertain effect"),
             Self::Conflict => formatter.write_str("session changed concurrently"),
+            Self::Goal(error) => error.fmt(formatter),
+            Self::InvalidText => formatter.write_str("invalid operator text"),
             Self::Fork(error) => error.fmt(formatter),
             Self::Ancestry(error) => error.fmt(formatter),
             Self::Replay(error) => error.fmt(formatter),
@@ -310,6 +316,12 @@ impl From<LifecycleAppendError> for LifecycleError {
             LifecycleAppendError::LeaseHeld => Self::LeaseHeld,
             LifecycleAppendError::Store(error) => Self::Store(error),
         }
+    }
+}
+
+impl From<GoalRefusal> for LifecycleError {
+    fn from(value: GoalRefusal) -> Self {
+        Self::Goal(value)
     }
 }
 
@@ -482,6 +494,7 @@ where
         id: SessionId,
         title: Option<String>,
     ) -> Result<SessionMeta, LifecycleError> {
+        let title = title.map(validate_operator_text).transpose()?;
         let current = self.meta(id)?;
         if current.title == title {
             return Ok(current);
@@ -497,6 +510,80 @@ where
                 .compare_and_append_lifecycle(id, state.last_seq, event)?,
         )?;
         self.meta(id)
+    }
+
+    pub fn goal(&self, id: SessionId) -> Result<Option<GoalRecord>, LifecycleError> {
+        self.meta(id)?;
+        Ok(self.state(id)?.goal)
+    }
+
+    pub fn set_goal(
+        &self,
+        session: SessionId,
+        objective: String,
+        owner: GoalOwner,
+        ceilings: Ceilings,
+    ) -> Result<GoalRecord, LifecycleError> {
+        let objective = validate_operator_text(objective)?;
+        self.meta(session)?;
+        let state = self.state(session)?;
+        if state
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.state == GoalState::Active)
+        {
+            return Err(GoalRefusal::ActiveGoalExists.into());
+        }
+        let event = lifecycle_event(
+            state.last_seq,
+            self.clock.now(),
+            EventKind::GoalSet {
+                id: crate::event::id::GoalId::new(),
+                objective,
+                owner,
+                ceilings,
+                derived_from: None,
+            },
+        );
+        require_publication(self.store.compare_and_append_lifecycle(
+            session,
+            state.last_seq,
+            event,
+        )?)?;
+        self.goal(session)?
+            .ok_or_else(|| GoalRefusal::NoActiveGoal.into())
+    }
+
+    pub fn transition_goal(
+        &self,
+        session: SessionId,
+        transition: GoalTransition,
+    ) -> Result<GoalRecord, LifecycleError> {
+        let transition = match transition {
+            GoalTransition::BlockerObserved { reason } => GoalTransition::BlockerObserved {
+                reason: validate_operator_text(reason)?,
+            },
+            achieved @ GoalTransition::Achieved { .. } => achieved,
+        };
+        self.meta(session)?;
+        let state = self.state(session)?;
+        let goal = state.goal.as_ref().ok_or(GoalRefusal::NoActiveGoal)?;
+        goal.admits(&transition)?;
+        let event = lifecycle_event(
+            state.last_seq,
+            self.clock.now(),
+            EventKind::GoalTransitioned {
+                id: goal.id,
+                transition,
+            },
+        );
+        require_publication(self.store.compare_and_append_lifecycle(
+            session,
+            state.last_seq,
+            event,
+        )?)?;
+        self.goal(session)?
+            .ok_or_else(|| GoalRefusal::NoActiveGoal.into())
     }
 
     pub async fn delete(&self, id: SessionId) -> Result<LifecyclePublication, LifecycleError> {
@@ -596,6 +683,17 @@ fn lifecycle_event(previous: Seq, at: Timestamp, kind: EventKind) -> DomainEvent
         },
         kind,
     }
+}
+
+const OPERATOR_TEXT_MAX_BYTES: usize = 1024;
+
+fn validate_operator_text(text: String) -> Result<String, LifecycleError> {
+    let text = text.trim().to_owned();
+    if text.is_empty() || text.len() > OPERATOR_TEXT_MAX_BYTES || text.chars().any(char::is_control)
+    {
+        return Err(LifecycleError::InvalidText);
+    }
+    Ok(text)
 }
 
 fn require_publication(publication: LifecyclePublication) -> Result<(), LifecycleError> {

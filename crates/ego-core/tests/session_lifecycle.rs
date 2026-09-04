@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::goal::{GoalOwner, GoalRefusal, GoalState, GoalTransition};
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::session::{
     ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
@@ -38,6 +39,16 @@ struct FakeStore(Arc<Mutex<DurableState>>);
 struct FakeStoreControl(FakeStore);
 
 impl FakeStoreControl {
+    fn event_count(&self, session: SessionId) -> usize {
+        self.0
+            .0
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|(id, _)| *id == session)
+            .count()
+    }
     fn append_event(&self, session: SessionId, event: DomainEvent) {
         self.0
             .0
@@ -514,4 +525,159 @@ fn list_fails_closed_when_a_catalogued_session_has_corrupt_replay() {
         service.list(None, 1, Some(&root)),
         Err(LifecycleError::Replay(_))
     ));
+}
+
+#[test]
+fn lifecycle_goal_operations_replay_and_refuse_invalid_transitions_without_append() {
+    let (service, control, _runs) = service();
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    assert_eq!(service.goal(id).unwrap(), None);
+    let ceilings = ego_core::ceiling::Ceilings::default();
+    service
+        .set_goal(
+            id,
+            "  Ship  the   product  ".into(),
+            GoalOwner::Operator,
+            ceilings.clone(),
+        )
+        .unwrap();
+    let goal = service.goal(id).unwrap().unwrap();
+    assert_eq!(goal.objective, "Ship  the   product");
+    assert_eq!(goal.state, GoalState::Active);
+    let before = control.event_count(id);
+    assert!(matches!(
+        service.set_goal(id, "second".into(), GoalOwner::Operator, ceilings.clone()),
+        Err(LifecycleError::Goal(_))
+    ));
+    assert_eq!(control.event_count(id), before);
+    service
+        .transition_goal(
+            id,
+            GoalTransition::Achieved {
+                attested_by: GoalOwner::Operator,
+                evidence: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        service.goal(id).unwrap().unwrap().state,
+        GoalState::Achieved
+    );
+    let terminal = service.goal(id).unwrap().unwrap().id;
+    let before = control.event_count(id);
+    assert!(matches!(
+        service.transition_goal(
+            id,
+            GoalTransition::BlockerObserved {
+                reason: "late".into()
+            }
+        ),
+        Err(LifecycleError::Goal(GoalRefusal::AlreadyTerminal(
+            GoalState::Achieved
+        )))
+    ));
+    assert_eq!(control.event_count(id), before);
+    let replacement = service
+        .set_goal(id, "new objective".into(), GoalOwner::Operator, ceilings)
+        .unwrap();
+    assert_ne!(replacement.id, terminal);
+    assert_eq!(replacement.derived_from, None);
+    let achieved = service
+        .transition_goal(
+            id,
+            GoalTransition::Achieved {
+                attested_by: GoalOwner::Operator,
+                evidence: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(achieved.state, GoalState::Achieved);
+}
+
+#[test]
+fn lifecycle_goal_requires_active_goal_for_transition() {
+    let (service, control, _runs) = service();
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let before = control.event_count(id);
+    assert!(matches!(
+        service.transition_goal(
+            id,
+            GoalTransition::BlockerObserved {
+                reason: "blocked".into()
+            }
+        ),
+        Err(LifecycleError::Goal(_))
+    ));
+    assert_eq!(control.event_count(id), before);
+}
+
+#[test]
+fn operator_text_is_trimmed_bounded_and_shared_by_title_goal_and_blocker() {
+    let (lifecycle, control, _runs) = service();
+    let id = lifecycle.create(PathBuf::from("/workspace")).unwrap().id;
+    let accepted = "\u{2003}Release  Candidate\u{2003}";
+    lifecycle.set_title(id, Some(accepted.into())).unwrap();
+    assert_eq!(
+        lifecycle.meta(id).unwrap().title.as_deref(),
+        Some("Release  Candidate")
+    );
+    let goal = lifecycle
+        .set_goal(
+            id,
+            format!("\u{2003}{}\u{2003}", "x".repeat(1024)),
+            GoalOwner::Operator,
+            ego_core::ceiling::Ceilings::default(),
+        )
+        .unwrap();
+    assert_eq!(goal.objective.len(), 1024);
+    for invalid in ["", " \u{2003} ", "bad\ntext", &"x".repeat(1025)] {
+        let (fresh, fresh_control, _runs) = service();
+        let fresh_id = fresh.create(PathBuf::from("/workspace")).unwrap().id;
+        let before = fresh_control.event_count(fresh_id);
+        assert!(matches!(
+            fresh.set_title(fresh_id, Some((*invalid).into())),
+            Err(LifecycleError::InvalidText)
+        ));
+        assert_eq!(fresh_control.event_count(fresh_id), before);
+        assert!(matches!(
+            fresh.set_goal(
+                fresh_id,
+                (*invalid).into(),
+                GoalOwner::Operator,
+                ego_core::ceiling::Ceilings::default()
+            ),
+            Err(LifecycleError::InvalidText)
+        ));
+        assert_eq!(fresh_control.event_count(fresh_id), before);
+    }
+    let before = control.event_count(id);
+    assert!(matches!(
+        lifecycle.transition_goal(
+            id,
+            GoalTransition::BlockerObserved {
+                reason: "bad\ntext".into()
+            }
+        ),
+        Err(LifecycleError::InvalidText)
+    ));
+    assert_eq!(control.event_count(id), before);
+    lifecycle
+        .transition_goal(
+            id,
+            GoalTransition::BlockerObserved {
+                reason: " API   unavailable ".into(),
+            },
+        )
+        .unwrap();
+    lifecycle
+        .transition_goal(
+            id,
+            GoalTransition::BlockerObserved {
+                reason: "api unavailable".into(),
+            },
+        )
+        .unwrap();
+    let goal = lifecycle.goal(id).unwrap().unwrap();
+    assert_eq!(goal.blocker_reason.as_deref(), Some("API   unavailable"));
+    assert_eq!(goal.blocker_observations, 2);
 }

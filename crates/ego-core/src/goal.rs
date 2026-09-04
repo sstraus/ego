@@ -46,6 +46,24 @@ pub enum GoalRefusal {
     AttestationWouldWiden,
 }
 
+impl std::fmt::Display for GoalRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoActiveGoal => formatter.write_str("session has no active goal"),
+            Self::AlreadyTerminal(state) => write!(formatter, "goal is already {state:?}"),
+            Self::ActiveGoalExists => formatter.write_str("session already has an active goal"),
+            Self::EvidenceRequired => {
+                formatter.write_str("automated goal achievement requires evidence")
+            }
+            Self::AttestationWouldWiden => {
+                formatter.write_str("goal achievement would widen automated authority")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GoalRefusal {}
+
 /// Immutable goal facts plus the current blocker audit projected by replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalRecord {
@@ -65,6 +83,7 @@ pub struct GoalRecord {
 }
 
 impl GoalRecord {
+    /// Check whether this record may accept a transition without widening its authority.
     pub fn admits(&self, transition: &GoalTransition) -> Result<(), GoalRefusal> {
         if self.state != GoalState::Active {
             return Err(GoalRefusal::AlreadyTerminal(self.state));
@@ -89,9 +108,13 @@ impl GoalRecord {
             return;
         }
 
-        let reason = normalize_reason(reason);
-        if self.blocker_reason.as_deref() != Some(reason.as_str()) {
-            self.blocker_reason = Some(reason);
+        let normalized = normalize_reason(reason);
+        let same_condition = self
+            .blocker_reason
+            .as_deref()
+            .is_some_and(|current| normalize_reason(current) == normalized);
+        if !same_condition {
+            self.blocker_reason = Some(reason.to_owned());
             self.blocker_turns.clear();
         }
         if self.blocker_turns.contains(&turn) {
