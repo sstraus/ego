@@ -149,6 +149,23 @@ impl Default for TurnId {
     }
 }
 
+/// Stable, sortable identity of one persistent session goal (UUIDv7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GoalId(Uuid);
+
+impl GoalId {
+    /// Generate a new identity from the current time.
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for GoalId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Stable, sortable item identity (UUIDv7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ItemId(Uuid);

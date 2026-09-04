@@ -27,6 +27,7 @@ use crate::event::skill::{
 use crate::event::time::Timestamp;
 use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use crate::generator::types::{ImageRef, ReasoningState};
+use crate::goal::{GoalRecord, GoalState, GoalTransition};
 use crate::permit::{ToolResult, ToolResultProvenance};
 use crate::question::{
     QuestionAnswer, QuestionError, QuestionOutcome, QuestionRequest, QuestionTarget,
@@ -953,6 +954,9 @@ pub struct SessionState {
     /// A soft-deleted session remains readable only for internal lineage replay.
     #[serde(default)]
     pub deleted: bool,
+    /// The session's current goal, if one has been set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalRecord>,
     /// Per-turn state, keyed by turn id.
     pub turns: HashMap<TurnId, TurnState>,
     /// Per-item state, keyed by item id.
@@ -1078,6 +1082,7 @@ impl Default for SessionState {
             lineage: None,
             title: None,
             deleted: false,
+            goal: None,
             turns: HashMap::default(),
             items: HashMap::default(),
             known_events: HashSet::default(),
@@ -1576,6 +1581,42 @@ impl SessionState {
         match &ev.kind {
             EventKind::SessionTitleChanged { title } => self.title = title.clone(),
             EventKind::SessionDeleted => self.deleted = true,
+            EventKind::GoalSet {
+                id,
+                objective,
+                owner,
+                ceilings,
+                derived_from,
+            } => {
+                let may_set = self
+                    .goal
+                    .as_ref()
+                    .is_none_or(|goal| goal.state != GoalState::Active && goal.id != *id);
+                if may_set {
+                    self.goal = Some(GoalRecord {
+                        id: *id,
+                        objective: objective.clone(),
+                        owner: *owner,
+                        ceilings: ceilings.clone(),
+                        derived_from: *derived_from,
+                        created_seq: ev.env.seq,
+                        state: GoalState::Active,
+                        blocker_reason: None,
+                        blocker_observations: 0,
+                        blocker_turns: Vec::new(),
+                    });
+                }
+            }
+            EventKind::GoalTransitioned { id, transition } => {
+                let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) else {
+                    return;
+                };
+                match transition {
+                    GoalTransition::BlockerObserved { reason } => {
+                        goal.observe_blocker(ev.env.turn, reason);
+                    }
+                }
+            }
             EventKind::PromptQueued { id, text, images } => {
                 self.accept_prompt(ev, *id, text, images)
             }
@@ -1747,6 +1788,9 @@ impl SessionState {
                 };
             }
             EventKind::TurnCompleted { ok, exit_reason } => {
+                if let Some(goal) = &mut self.goal {
+                    goal.clear_blocker_after_completed_turn(ev.env.turn);
+                }
                 let turn = self.turns.entry(ev.env.turn).or_default();
                 turn.completed = true;
                 turn.ok = *ok;

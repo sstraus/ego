@@ -178,6 +178,8 @@ pub enum ExportRunSettlement {
 pub enum ExportEvent {
     SessionTitleChanged,
     SessionDeleted,
+    GoalSet,
+    GoalTransitioned,
     PromptQueued {
         id: QueuedPromptId,
         images: Vec<ImageRef>,
@@ -646,6 +648,14 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::SessionTitleChanged
         }
         EventKind::SessionDeleted => ExportEvent::SessionDeleted,
+        EventKind::GoalSet { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::GoalSet
+        }
+        EventKind::GoalTransitioned { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::GoalTransitioned
+        }
         EventKind::PromptQueued {
             id,
             text: _,

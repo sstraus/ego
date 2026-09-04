@@ -9,7 +9,7 @@ use super::hook::{
     HookResult, HookSubject,
 };
 use super::id::{
-    EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId, TurnId,
+    EventId, GoalId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId, TurnId,
 };
 use super::skill::{
     SkillCatalogueEvidence, SkillCatalogueGeneration, SkillContentDigest, SkillId,
@@ -19,6 +19,7 @@ use super::time::Timestamp;
 use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
+use crate::goal::{GoalOwner, GoalTransition};
 use crate::permit::{Authority, Escalation, ExecObservation, ToolResult, ToolResultProvenance};
 use crate::question::{QuestionOutcome, QuestionRequest, QuestionTarget};
 use crate::run::{CancelReason, DeniedBy, RunId, RunSelections, RunSettlement};
@@ -188,8 +189,9 @@ pub enum OccupancyProvenance {
 /// The exhaustive set of internal reducer inputs, per ARCH §1:
 ///
 /// ```text
-/// SessionTitleChanged | SessionDeleted | PromptQueued | PromptDeliveryExpedited | UserPrompt | AssistantDelta |
-/// AssistantMessage | ReasoningDelta | ReasoningState | ToolCallStarted |
+/// SessionTitleChanged | SessionDeleted | GoalSet | GoalTransitioned | PromptQueued |
+/// PromptDeliveryExpedited | UserPrompt | AssistantDelta | AssistantMessage |
+/// ReasoningDelta | ReasoningState | ToolCallStarted |
 /// ToolCallDelta | ToolCallCompleted | PermissionRequested |
 /// PermissionAmended | PermissionDecided | GenerationStarted |
 /// ExecutionObserved | AttemptSettled | UsageUpdated | UsageCorrected |
@@ -223,6 +225,19 @@ pub enum EventKind {
     SessionTitleChanged { title: Option<String> },
     /// Durable soft deletion. Storage remains available to lineage replay.
     SessionDeleted,
+    /// A persistent goal became the session's current goal.
+    GoalSet {
+        id: GoalId,
+        objective: String,
+        owner: GoalOwner,
+        ceilings: crate::ceiling::Ceilings,
+        derived_from: Option<GoalId>,
+    },
+    /// One observation was made against the current goal.
+    GoalTransitioned {
+        id: GoalId,
+        transition: GoalTransition,
+    },
     /// Input accepted for later delivery. Its envelope turn determines on
     /// replay whether it was accepted as a busy-turn steer or at an ordinary
     /// queue boundary.
@@ -573,6 +588,8 @@ impl EventKind {
         match self {
             EventKind::SessionTitleChanged { .. } => "session_title_changed",
             EventKind::SessionDeleted => "session_deleted",
+            EventKind::GoalSet { .. } => "goal_set",
+            EventKind::GoalTransitioned { .. } => "goal_transitioned",
             EventKind::PromptQueued { .. } => "prompt_queued",
             EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",
             EventKind::UserPrompt { .. } => "user_prompt",

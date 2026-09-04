@@ -443,7 +443,10 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
     let item = ev.env.item;
 
     match &ev.kind {
-        EventKind::SessionTitleChanged { .. } | EventKind::SessionDeleted => None,
+        EventKind::SessionTitleChanged { .. }
+        | EventKind::SessionDeleted
+        | EventKind::GoalSet { .. }
+        | EventKind::GoalTransitioned { .. } => None,
         EventKind::CompactionSeeded { checkpoint, .. } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
