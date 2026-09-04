@@ -614,28 +614,47 @@ impl JsonlStore {
             }
             _ => false,
         };
+        let trailing = events.get(1..).unwrap_or_default();
+        let is_title = |event: &&DomainEvent| {
+            matches!(
+                &event.kind,
+                EventKind::SessionTitleChanged { title: Some(_) }
+            )
+        };
+        let is_goal = |event: &&DomainEvent| {
+            matches!(
+                &event.kind,
+                EventKind::GoalSet {
+                    derived_from: Some(_),
+                    ..
+                }
+            )
+        };
+        let valid_shape = match trailing {
+            [] => true,
+            [only] => is_title(only) || is_goal(only),
+            [title, goal] => is_title(title) && is_goal(goal),
+            _ => false,
+        };
+        let mut expected_seq = first;
+        let mut previous_id = event.env.id;
+        let valid_chain = trailing.iter().all(|trailing| {
+            expected_seq.next();
+            let valid = trailing.env.seq == expected_seq
+                && trailing.env.parent == Some(previous_id)
+                && trailing.env.turn == event.env.turn
+                && trailing.env.item.is_none()
+                && trailing.env.ts == event.env.ts
+                && trailing.env.producer == Producer::Main;
+            previous_id = trailing.env.id;
+            valid
+        });
         let valid_seed = event.env.seq == first
             && event.env.parent.is_none()
             && event.env.producer == Producer::Main
             && valid_kind
-            && events.get(1..).is_some_and(|trailing| match trailing {
-                [] => true,
-                [title] => {
-                    let mut second = first;
-                    second.next();
-                    title.env.seq == second
-                        && title.env.parent == Some(event.env.id)
-                        && title.env.turn == event.env.turn
-                        && title.env.item.is_none()
-                        && title.env.ts == event.env.ts
-                        && title.env.producer == Producer::Main
-                        && matches!(
-                            &title.kind,
-                            EventKind::SessionTitleChanged { title: Some(_) }
-                        )
-                }
-                _ => false,
-            });
+            && valid_shape
+            && valid_chain;
         if !valid_seed {
             return TargetPublication::NotPublished {
                 diagnostic: "a target requires one canonical typed sequence-1 seed event"
@@ -1896,7 +1915,10 @@ impl SessionLifecycleStore for JsonlStore {
                 && event.env.producer == Producer::Main
                 && matches!(
                     &event.kind,
-                    EventKind::SessionTitleChanged { .. } | EventKind::SessionDeleted
+                    EventKind::SessionTitleChanged { .. }
+                        | EventKind::SessionDeleted
+                        | EventKind::GoalSet { .. }
+                        | EventKind::GoalTransitioned { .. }
                 );
             if !valid_event {
                 return Err(invalid_log("invalid lifecycle event append"));

@@ -9,14 +9,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ego_core::ceiling::Ceilings;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Clock;
 use ego_core::event::time::Timestamp;
+use ego_core::goal::{GoalOwner, GoalTransition};
 use ego_core::session_lifecycle::{
     ActivityFuture, CloseFuture, ClosedSession, LifecycleAppendError, SessionActivity,
     SessionLifecycle, SessionLifecycleStore, SessionRunLifecycle,
 };
+use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionStore};
 use ego_tools::store::{AtomicReplacePublication, JsonlStore, LeaseInputs, OsIo, StoreIo};
 use futures::StreamExt;
@@ -315,6 +318,56 @@ fn compare_and_append_title_and_delete_are_typed_single_session_mutations() {
 }
 
 #[test]
+fn jsonl_lifecycle_allows_goal_events_and_replays_them_after_restart() {
+    let dir = tempdir().unwrap();
+    let jsonl = store(dir.path(), Arc::new(Mutex::new(Vec::new())));
+    let id = SessionId::new();
+    jsonl
+        .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
+        .unwrap();
+    let goal = ego_core::event::id::GoalId::new();
+    jsonl
+        .compare_and_append_lifecycle(
+            id,
+            Seq::ZERO,
+            lifecycle_event(
+                1,
+                EventKind::GoalSet {
+                    id: goal,
+                    objective: "ship".into(),
+                    owner: GoalOwner::Operator,
+                    ceilings: Ceilings::default(),
+                    derived_from: None,
+                },
+            ),
+        )
+        .unwrap();
+    jsonl
+        .compare_and_append_lifecycle(
+            id,
+            serde_json::from_value(serde_json::json!(1)).unwrap(),
+            lifecycle_event(
+                2,
+                EventKind::GoalTransitioned {
+                    id: goal,
+                    transition: GoalTransition::BlockerObserved {
+                        reason: "blocked".into(),
+                    },
+                },
+            ),
+        )
+        .unwrap();
+    let restarted = store(dir.path(), Arc::new(Mutex::new(Vec::new())));
+    let events = session_entries(&restarted, &id)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            SessionEntry::Event(event) => Some(event),
+            _ => None,
+        });
+    assert_eq!(SessionState::replay(events).goal.unwrap().id, goal);
+}
+
+#[test]
 fn stale_compare_and_append_is_a_conflict_without_a_second_lifecycle_event() {
     let dir = tempdir().unwrap();
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -592,4 +645,58 @@ fn reopened_lifecycle_preserves_title_lineage_and_keyset_catalogue_order() {
         next.items.iter().map(|meta| meta.id).collect::<Vec<_>>(),
         expected[2..]
     );
+}
+
+#[test]
+fn reopened_fork_seed_accepts_active_goal_with_and_without_title() {
+    let dir = tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let make_service = || {
+        SessionLifecycle::new(
+            Arc::new(JsonlStore::new(&sessions, &workspace, Box::new(OsIo))),
+            Arc::new(InactiveRuns),
+            Arc::new(FixedClock),
+        )
+    };
+
+    let service = make_service();
+    let titled = service.create(workspace.clone()).unwrap().id;
+    service.set_title(titled, Some("named".into())).unwrap();
+    let titled_goal = service
+        .set_goal(
+            titled,
+            "titled objective".into(),
+            GoalOwner::Operator,
+            Ceilings::default(),
+        )
+        .unwrap();
+    let titled_child = futures::executor::block_on(service.fork(titled))
+        .unwrap()
+        .id;
+
+    let untitled = service.create(workspace.clone()).unwrap().id;
+    let untitled_goal = service
+        .set_goal(
+            untitled,
+            "untitled objective".into(),
+            GoalOwner::Operator,
+            Ceilings::default(),
+        )
+        .unwrap();
+    let untitled_child = futures::executor::block_on(service.fork(untitled))
+        .unwrap()
+        .id;
+    drop(service);
+
+    let reopened = make_service();
+    for (child, source_goal) in [(titled_child, titled_goal), (untitled_child, untitled_goal)] {
+        let inherited = reopened.goal(child).unwrap().unwrap();
+        assert_ne!(inherited.id, source_goal.id);
+        assert_eq!(inherited.derived_from, Some(source_goal.id));
+        assert_eq!(inherited.objective, source_goal.objective);
+        assert_eq!(inherited.owner, source_goal.owner);
+        assert_eq!(inherited.ceilings, source_goal.ceilings);
+    }
 }
