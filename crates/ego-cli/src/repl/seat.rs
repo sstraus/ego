@@ -23,7 +23,9 @@ use super::actions::{
     SharedActionSink, SkillSurfaceAction,
 };
 use super::keys::{Intercept, intercept};
-use super::policy_controls::{ModalInput, PolicyControlController};
+use super::policy_controls::{
+    ModalInput, PermissionInput, PolicyControlController, PolicyControlRequest,
+};
 use super::selector::{Selector, SelectorKey, SelectorKind, SelectorOption, SelectorValue};
 use super::status::{
     GitFacts, GitFactsSource, SeatFacts, SelectionFacts, StatusLine, StatusSegmentName,
@@ -31,14 +33,19 @@ use super::status::{
 };
 use super::surface::InteractivePainter;
 use super::{BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, answer};
+use crate::cli::{managed_rule, managed_rule_effect, managed_rule_id, rule_arguments};
 use crate::model::{GenerationSelection, GenerationSelectionSnapshot};
 use crate::model_picker::{
     ModelPicker, ModelPickerView, PickerFocus, PickerInput, PickerInputOutcome, PickerOutcome,
 };
-use ego_core::config::{Mode, Trust, UserConfigMutation, UserConfigPublication, UserConfigStore};
+use crate::rules::{RememberRequest, prepare_from_catalogue};
+use ego_core::config::{
+    ManagedRuleEffect, Mode, RuleMutation, Trust, UserConfigMutation, UserConfigPublication,
+    UserConfigStore,
+};
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::{ItemId, SessionId};
-use ego_core::permit::{PermissionDecision, PermissionRequest};
+use ego_core::permit::{CanonPath, PathResolver, PermissionDecision, PermissionRequest, Tool};
 use ego_core::question::{
     Elicitor, ElicitorError, QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome,
     QuestionRequest,
@@ -49,6 +56,7 @@ use ego_core::turn::{
     interactive_control,
 };
 use ego_mcp::McpRegistryController;
+use ego_tools::fs::OsFs;
 
 const CHANNEL_CAPACITY: usize = 1;
 pub(super) const ACTION_COMMAND: &str = "ego:action:";
@@ -78,6 +86,7 @@ enum SurfaceActionEffect {
     Mode,
     Plan,
     Yolo,
+    Permissions,
     Compact,
     Fork,
     Sessions,
@@ -111,6 +120,7 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Mode => SurfaceActionEffect::Mode,
             ActionId::Plan => SurfaceActionEffect::Plan,
             ActionId::Yolo => SurfaceActionEffect::Yolo,
+            ActionId::Permissions => SurfaceActionEffect::Permissions,
             ActionId::Compact => SurfaceActionEffect::Compact,
             ActionId::Fork => SurfaceActionEffect::Fork,
             ActionId::Sessions => SurfaceActionEffect::Sessions,
@@ -476,6 +486,9 @@ enum Control {
         source: SessionId,
         reply: Sender<bool>,
     },
+    ConfirmRemember {
+        reply: Sender<Confirmation>,
+    },
     ActivateSession {
         target: SessionId,
         reply: Sender<bool>,
@@ -779,6 +792,7 @@ impl Seat {
             ActionId::Mode,
             ActionId::Plan,
             ActionId::Yolo,
+            ActionId::Permissions,
             ActionId::Compact,
             ActionId::Fork,
             ActionId::Sessions,
@@ -837,13 +851,23 @@ impl Seat {
         }
     }
 
-    /// Enable the three mode controls after their application owner exists.
+    /// Enable policy controls after their application owner and catalogue exist.
     pub(crate) fn enable_policy_controls(&self) {
         for action in [ActionId::Mode, ActionId::Plan, ActionId::Yolo] {
             self.registry
                 .set_availability(action, Availability::Enabled);
         }
         if let SeatKind::Live(live) = &self.kind {
+            if live
+                .status
+                .lock()
+                .expect("surface status lock")
+                .mcp_actions
+                .is_some()
+            {
+                self.registry
+                    .set_availability(ActionId::Permissions, Availability::Enabled);
+            }
             repaint_status(&live.status);
         }
     }
@@ -1000,6 +1024,13 @@ impl Seat {
     pub fn question(&self, id: ItemId, request: QuestionRequest) -> QuestionOutcome {
         futures::executor::block_on(self.elicit(id, request))
             .unwrap_or(QuestionOutcome::Unavailable)
+    }
+
+    pub(crate) fn confirm_remember(&self) -> Confirmation {
+        self.request(
+            |reply| Control::ConfirmRemember { reply },
+            Confirmation::Declined,
+        )
     }
 
     fn request<R>(&self, control: impl FnOnce(Sender<R>) -> Control, fallback: R) -> R {
@@ -1633,6 +1664,9 @@ fn apply_surface_effect(
             controller.begin_yolo();
             return confirm_yolo(editor, phase, status, busy, &mut controller);
         }
+        SurfaceActionEffect::Permissions => {
+            return choose_permission_action(editor, phase, status, busy);
+        }
         SurfaceActionEffect::Compact => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Compact)));
         }
@@ -1838,6 +1872,300 @@ enum PolicyModeChoice {
     Propagate(Line),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionMenuId {
+    List,
+    Allow,
+    Deny,
+    Revoke,
+    Remember,
+    Explain,
+}
+
+impl PermissionMenuId {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::Revoke => "revoke",
+            Self::Remember => "remember",
+            Self::Explain => "explain",
+        }
+    }
+}
+
+fn permission_menu() -> [PermissionMenuId; 6] {
+    [
+        PermissionMenuId::List,
+        PermissionMenuId::Allow,
+        PermissionMenuId::Deny,
+        PermissionMenuId::Revoke,
+        PermissionMenuId::Remember,
+        PermissionMenuId::Explain,
+    ]
+}
+
+enum PermissionMenuChoice {
+    Selected(PermissionMenuId),
+    Cancelled,
+    Propagate(Line),
+}
+
+enum PermissionField {
+    Value(String),
+    Cancelled,
+    Propagate(Line),
+}
+
+fn choose_permission_action(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    busy: bool,
+) -> Option<Line> {
+    let choices = permission_menu();
+    let request = QuestionRequest::new(
+        "Choose permission operation",
+        QuestionMode::Single,
+        choices
+            .iter()
+            .map(|choice| QuestionOption::new(choice.as_str(), choice.as_str()))
+            .collect(),
+        false,
+    );
+    let selector = Arc::new(Mutex::new(Selector::with_options(
+        SelectorKind::Single,
+        request
+            .options
+            .iter()
+            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone())),
+    )));
+    let saved = enter_modal(editor, phase, status);
+    status
+        .lock()
+        .expect("surface status lock")
+        .question_selector = Some(Arc::clone(&selector));
+    repaint_status(status);
+
+    let choice = loop {
+        let prompt = Question::new(
+            question_selector_prompt(&request, &selector),
+            Arc::clone(status),
+        );
+        match answer(false, editor.read_line(&prompt)) {
+            Line::HostCommand(HostCommand::QuestionSelector(command)) => {
+                let Some(key) = question_selector_key(&command) else {
+                    break PermissionMenuChoice::Cancelled;
+                };
+                let mut selector = selector.lock().expect("permission selector lock");
+                selector.key(key);
+                if key == SelectorKey::Escape {
+                    break PermissionMenuChoice::Cancelled;
+                }
+                if key != SelectorKey::Enter {
+                    drop(selector);
+                    repaint_status(status);
+                    continue;
+                }
+                let Some(SelectorValue::Single(id)) = selector.result() else {
+                    continue;
+                };
+                let Some(choice) = choices
+                    .iter()
+                    .copied()
+                    .find(|choice| choice.as_str() == id.as_str())
+                else {
+                    break PermissionMenuChoice::Cancelled;
+                };
+                break PermissionMenuChoice::Selected(choice);
+            }
+            line @ (Line::Ended | Line::ExternalBreak(_)) => {
+                break PermissionMenuChoice::Propagate(line);
+            }
+            Line::Submitted(_)
+            | Line::Blank
+            | Line::Interrupted
+            | Line::Refused(_)
+            | Line::HostCommand(_) => break PermissionMenuChoice::Cancelled,
+        }
+    };
+    status
+        .lock()
+        .expect("surface status lock")
+        .question_selector = None;
+    leave_modal(
+        editor,
+        phase,
+        status,
+        saved,
+        if busy {
+            EditPhase::Busy
+        } else {
+            EditPhase::Idle
+        },
+    );
+
+    let choice = match choice {
+        PermissionMenuChoice::Selected(choice) => choice,
+        PermissionMenuChoice::Cancelled => return None,
+        PermissionMenuChoice::Propagate(line) => return Some(line),
+    };
+    build_permission_request(editor, phase, status, busy, choice)
+}
+
+fn build_permission_request(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    busy: bool,
+    choice: PermissionMenuId,
+) -> Option<Line> {
+    macro_rules! field {
+        ($prompt:literal) => {
+            match read_permission_field(editor, phase, status, busy, $prompt) {
+                PermissionField::Value(value) => value,
+                PermissionField::Cancelled => return None,
+                PermissionField::Propagate(line) => return Some(line),
+            }
+        };
+    }
+    let request = match choice {
+        PermissionMenuId::List => PolicyControlRequest::Permission(PermissionInput::List),
+        PermissionMenuId::Allow | PermissionMenuId::Deny => {
+            let raw = field!("Canonical permission rule: ");
+            let rule = match managed_rule(&raw) {
+                Ok(rule) => rule,
+                Err(error) => return permission_failure(status, error),
+            };
+            PolicyControlRequest::Rule(RuleMutation {
+                effect: if choice == PermissionMenuId::Allow {
+                    ManagedRuleEffect::Allow
+                } else {
+                    ManagedRuleEffect::Deny
+                },
+                rule,
+            })
+        }
+        PermissionMenuId::Revoke => {
+            let raw = field!("Canonical permission rule ID: ");
+            let id = match managed_rule_id(raw) {
+                Ok(id) => id,
+                Err(error) => return permission_failure(status, error),
+            };
+            PolicyControlRequest::Permission(PermissionInput::Revoke(id))
+        }
+        PermissionMenuId::Remember => {
+            let raw_effect = field!("Rule effect (allow or deny): ");
+            let effect = match managed_rule_effect(&raw_effect) {
+                Ok(effect) => effect,
+                Err(error) => return permission_failure(status, error),
+            };
+            let name = field!("Tool name: ");
+            let raw_arguments = field!("Tool arguments (JSON object): ");
+            let arguments = match rule_arguments(&raw_arguments) {
+                Ok(arguments) => arguments,
+                Err(error) => return permission_failure(status, error),
+            };
+            let (call, workspace) = match prepare_permission_call(status, &name, &arguments) {
+                Ok(prepared) => prepared,
+                Err(error) => return permission_failure(status, error),
+            };
+            PolicyControlRequest::Permission(PermissionInput::Remember(RememberRequest::new(
+                call, effect, workspace,
+            )))
+        }
+        PermissionMenuId::Explain => {
+            let name = field!("Tool name: ");
+            let raw_arguments = field!("Tool arguments (JSON object): ");
+            let arguments = match rule_arguments(&raw_arguments) {
+                Ok(arguments) => arguments,
+                Err(error) => return permission_failure(status, error),
+            };
+            let (call, workspace) = match prepare_permission_call(status, &name, &arguments) {
+                Ok(prepared) => prepared,
+                Err(error) => return permission_failure(status, error),
+            };
+            PolicyControlRequest::Permission(PermissionInput::Explain { call, workspace })
+        }
+    };
+    Some(Line::HostCommand(HostCommand::Policy(request)))
+}
+
+fn read_permission_field(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    busy: bool,
+    text: &str,
+) -> PermissionField {
+    let saved = enter_modal(editor, phase, status);
+    let prompt = Question::new(text.to_owned(), Arc::clone(status));
+    let field = match answer(false, editor.read_line(&prompt)) {
+        Line::Submitted(value) => PermissionField::Value(value),
+        line @ (Line::Ended | Line::ExternalBreak(_)) => PermissionField::Propagate(line),
+        Line::Blank | Line::Interrupted | Line::Refused(_) | Line::HostCommand(_) => {
+            PermissionField::Cancelled
+        }
+    };
+    leave_modal(
+        editor,
+        phase,
+        status,
+        saved,
+        if busy {
+            EditPhase::Busy
+        } else {
+            EditPhase::Idle
+        },
+    );
+    field
+}
+
+fn prepare_permission_call(
+    status: &SharedStatus,
+    name: &str,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(ego_core::permit::PreparedCall, CanonPath), String> {
+    let (actions, cwd) = {
+        let current = status.lock().map_err(|_| "surface status is unavailable")?;
+        let actions = current
+            .mcp_actions
+            .clone()
+            .ok_or("the permission tool catalogue is unavailable")?;
+        let cwd = current
+            .status_base
+            .as_ref()
+            .map(|base| base.cwd.clone())
+            .ok_or("the permission workspace is unavailable")?;
+        (actions, cwd)
+    };
+    let workspace = OsFs
+        .canonicalize(&cwd)
+        .map_err(|error| format!("permission workspace could not be resolved: {error}"))?;
+    let capture = actions
+        .registry
+        .capture()
+        .map_err(|_| "the admitted permission tool catalogue is unavailable".to_owned())?;
+    let mut admitted = actions
+        .native_tools
+        .iter()
+        .filter_map(RegisteredTool::as_effect)
+        .cloned()
+        .collect::<Vec<Arc<dyn Tool>>>();
+    admitted.extend(capture.tools().iter().cloned());
+    prepare_from_catalogue(name, arguments, &workspace, &OsFs, &admitted)
+        .map(|call| (call, workspace))
+        .map_err(|error| error.to_string())
+}
+
+fn permission_failure(status: &SharedStatus, error: impl std::fmt::Display) -> Option<Line> {
+    status.lock().expect("surface status lock").notice =
+        Some(format!("permission control failed: {error}"));
+    repaint_status(status);
+    None
+}
+
 fn choose_policy_mode(
     editor: &mut Reedline,
     phase: &SurfacePhase,
@@ -1989,7 +2317,8 @@ fn confirm_yolo(
     outcome.map(|request| Line::HostCommand(HostCommand::Policy(request)))
 }
 
-enum Confirmation {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Confirmation {
     Confirmed,
     Declined,
     Propagate(Line),
@@ -2401,6 +2730,21 @@ fn answer_control(
         }
         control => control,
     };
+    let control = match control {
+        Control::ConfirmRemember { reply } => {
+            let busy = phase.get() == EditPhase::Busy;
+            let confirmation = confirm_surface_action(
+                editor,
+                phase,
+                surface.status,
+                "Apply these remembered permission rules? [y/N] ",
+                busy,
+            );
+            let _ = reply.send(confirmation);
+            return true;
+        }
+        control => control,
+    };
     if matches!(&control, Control::Activate { .. }) {
         return true;
     }
@@ -2508,6 +2852,9 @@ fn answer_control(
         Control::Shutdown => return false,
         Control::ActivateSession { .. } => unreachable!("activation is handled before modal entry"),
         Control::Activate { .. } => unreachable!("activation is handled before modal entry"),
+        Control::ConfirmRemember { .. } => {
+            unreachable!("remember confirmation is handled before modal entry")
+        }
     };
     match controls.try_recv() {
         Ok(Control::Shutdown) => keep_running = false,
@@ -3224,20 +3571,20 @@ mod tests {
     }
 
     #[test]
-    fn enabling_policy_controls_marks_only_mode_plan_and_yolo_enabled() {
+    fn enabling_policy_controls_without_catalogue_leaves_permissions_disabled() {
         let (seat, _) = Seat::new(CancelToken::new()).expect("test seat");
         let registry = seat.action_registry();
-        for action in [ActionId::Mode, ActionId::Plan, ActionId::Yolo] {
+        for action in [
+            ActionId::Mode,
+            ActionId::Plan,
+            ActionId::Yolo,
+            ActionId::Permissions,
+        ] {
             assert!(matches!(
                 registry.availability(action),
                 Availability::Disabled { .. }
             ));
         }
-        assert!(matches!(
-            registry.availability(ActionId::Permissions),
-            Availability::Disabled { .. }
-        ));
-
         seat.enable_policy_controls();
         for action in [ActionId::Mode, ActionId::Plan, ActionId::Yolo] {
             assert_eq!(registry.availability(action), Availability::Enabled);
@@ -3275,7 +3622,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_action_sink_routes_only_mode_plan_and_yolo_controls() {
+    fn surface_action_sink_routes_all_four_policy_controls() {
         let pending = Arc::new(Mutex::new(None));
         let mut sink = SurfaceActionSink {
             pending: Arc::clone(&pending),
@@ -3284,6 +3631,7 @@ mod tests {
             (ActionId::Mode, SurfaceActionEffect::Mode),
             (ActionId::Plan, SurfaceActionEffect::Plan),
             (ActionId::Yolo, SurfaceActionEffect::Yolo),
+            (ActionId::Permissions, SurfaceActionEffect::Permissions),
         ] {
             assert_eq!(
                 sink.invoke(LocalAction {
@@ -3300,14 +3648,28 @@ mod tests {
             drop(observed);
             pending.lock().unwrap().take();
         }
-        assert!(matches!(
-            sink.invoke(LocalAction {
-                id: ActionId::Permissions,
-                busy: false,
-            }),
-            LocalActionOutcome::Refused { .. }
-        ));
-        assert!(pending.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn permissions_menu_uses_six_private_ids_and_operator_spellings() {
+        assert_eq!(
+            permission_menu(),
+            [
+                PermissionMenuId::List,
+                PermissionMenuId::Allow,
+                PermissionMenuId::Deny,
+                PermissionMenuId::Revoke,
+                PermissionMenuId::Remember,
+                PermissionMenuId::Explain,
+            ]
+        );
+        assert_eq!(
+            permission_menu()
+                .iter()
+                .map(PermissionMenuId::as_str)
+                .collect::<Vec<_>>(),
+            ["list", "allow", "deny", "revoke", "remember", "explain"]
+        );
     }
 
     #[test]

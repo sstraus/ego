@@ -1795,13 +1795,7 @@ fn into_rules_args(command: RulesCommand) -> Result<RulesArgs, UsageError> {
             rule: managed_rule(&rule)?,
         },
         RulesSubcommand::Revoke { profile, id } => {
-            let id = RuleId::from_str(&id)
-                .map_err(|_| UsageError("invalid permission rule ID".to_owned()))?;
-            if !id.is_known() {
-                return Err(UsageError(
-                    "permission rule ID uses an unsupported grammar generation".to_owned(),
-                ));
-            }
+            let id = managed_rule_id(id)?;
             RulesAction::Revoke {
                 target: config_target(profile)?,
                 id,
@@ -1839,11 +1833,22 @@ fn into_rules_args(command: RulesCommand) -> Result<RulesArgs, UsageError> {
     Ok(RulesArgs { action })
 }
 
-fn managed_rule(raw: &str) -> Result<Rule, UsageError> {
+pub(crate) fn managed_rule(raw: &str) -> Result<Rule, UsageError> {
     Rule::load(raw).map_err(|_| UsageError("invalid or unenforceable permission rule".to_owned()))
 }
 
-fn managed_rule_effect(raw: &str) -> Result<ManagedRuleEffect, UsageError> {
+pub(crate) fn managed_rule_id(raw: impl AsRef<str>) -> Result<RuleId, UsageError> {
+    let id = RuleId::from_str(raw.as_ref())
+        .map_err(|_| UsageError("invalid permission rule ID".to_owned()))?;
+    if !id.is_known() {
+        return Err(UsageError(
+            "permission rule ID uses an unsupported grammar generation".to_owned(),
+        ));
+    }
+    Ok(id)
+}
+
+pub(crate) fn managed_rule_effect(raw: &str) -> Result<ManagedRuleEffect, UsageError> {
     match raw {
         "allow" => Ok(ManagedRuleEffect::Allow),
         "deny" => Ok(ManagedRuleEffect::Deny),
@@ -1853,7 +1858,9 @@ fn managed_rule_effect(raw: &str) -> Result<ManagedRuleEffect, UsageError> {
     }
 }
 
-fn rule_arguments(raw: &str) -> Result<serde_json::Map<String, serde_json::Value>, UsageError> {
+pub(crate) fn rule_arguments(
+    raw: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, UsageError> {
     match serde_json::from_str(raw) {
         Ok(serde_json::Value::Object(arguments)) => Ok(arguments),
         _ => Err(UsageError(
@@ -2100,4 +2107,25 @@ fn parse_usage_period(spec: &str) -> Result<UsagePeriod, String> {
     let seconds = NonZeroU64::new(seconds)
         .ok_or_else(|| format!("`{spec}` is not a usage period: the duration must be positive"))?;
     Ok(UsagePeriod::Last { seconds })
+}
+
+#[cfg(test)]
+mod permission_red {
+    use super::*;
+
+    #[test]
+    fn managed_inputs_are_canonical_and_strictly_object_shaped() {
+        let parsed = managed_rule("read(src/**)").expect("canonical rule");
+        assert_eq!(
+            parsed,
+            ego_core::permit::rule::Rule::load("read(src/**)").unwrap()
+        );
+        assert!(managed_rule("read(").is_err());
+        let id = managed_rule_id(parsed.id().to_string()).expect("known rule id");
+        assert_eq!(id, parsed.id());
+        assert!(managed_rule_id("r9:000000000000").is_err());
+        assert!(managed_rule_id("not-a-rule-id").is_err());
+        assert!(rule_arguments(r#"{"path":"src/main.rs"}"#).is_ok());
+        assert!(rule_arguments("[\"not\",\"an\",\"object\"]").is_err());
+    }
 }

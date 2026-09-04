@@ -162,7 +162,7 @@ fn allow_deny_are_idempotent_and_opposite_effect_is_a_conflict() {
     assert_eq!(duplicate_fields[1], "effective_unchanged");
     assert_eq!(duplicate_fields[2], "allow");
     assert_eq!(duplicate_fields[4], "read(src/**)");
-    assert_eq!(duplicate_fields[6], "-");
+    assert_eq!(duplicate_fields[6], "user");
     assert_eq!(duplicate_fields[7], "not_published");
     let conflict = fixture.run(&["rules", "deny", "read(src/**)"]);
     assert_eq!(conflict.status.code(), Some(1));

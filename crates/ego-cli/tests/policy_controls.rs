@@ -499,7 +499,15 @@ fn remember_preview_is_pure_and_confirmation_emits_one_base_mutation() {
     let preview: RememberPreview = owner.preview_remember(request.clone()).unwrap();
     assert!(store.mutations().is_empty());
     assert_eq!(preview, owner.preview_remember(request.clone()).unwrap());
-    let receipt: RuleMutationReceipt = owner.confirm_remember(preview).unwrap();
+    let receipt: RuleMutationReceipt = match owner
+        .apply(PolicyControlRequest::Permission(
+            PermissionInput::ConfirmRemember(preview),
+        ))
+        .unwrap()
+    {
+        ego_cli::repl::policy_controls::PolicyControlOutcome::Rule { receipt, .. } => receipt,
+        other => panic!("unexpected confirmed remember outcome: {other:?}"),
+    };
     assert!(matches!(
         &store.mutations()[..],
         [UserConfigMutation::Rules {
@@ -530,6 +538,55 @@ fn remember_preview_is_pure_and_confirmation_emits_one_base_mutation() {
         selection.staged_snapshot().unwrap().unwrap().mode,
         Mode::Edits
     );
+}
+
+#[test]
+fn remember_confirmation_is_a_typed_policy_request_and_not_a_second_write_path() {
+    let call = PreparedCall::new(
+        "read",
+        Op::Read {
+            path: CanonPath::new("/workspace/src/main.rs"),
+        },
+    );
+    let request = RememberRequest::new(
+        call,
+        ego_core::config::ManagedRuleEffect::Allow,
+        CanonPath::new("/workspace"),
+    );
+    let store = Arc::new(RecordingStore::published(
+        UserConfigPublication::PublishedDurably,
+    ));
+    let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+    let resolver = Arc::new(RecordingResolver {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        next: ego_cli::repl::policy_controls::GenerationPolicySnapshot {
+            mode: Mode::Plan,
+            ruleset: Ruleset::default(),
+        },
+    });
+    let owner = owner(selection.clone(), store.clone(), resolver.clone());
+    let preview = match owner
+        .apply(PolicyControlRequest::Permission(PermissionInput::Remember(
+            request,
+        )))
+        .unwrap()
+    {
+        ego_cli::repl::policy_controls::PolicyControlOutcome::RememberPreview(preview) => preview,
+        other => panic!("unexpected preview outcome: {other:?}"),
+    };
+    assert!(store.mutations().is_empty());
+    let result = owner
+        .apply(PolicyControlRequest::Permission(
+            PermissionInput::ConfirmRemember(preview),
+        ))
+        .unwrap();
+    assert!(matches!(
+        result,
+        ego_cli::repl::policy_controls::PolicyControlOutcome::Rule { .. }
+    ));
+    assert_eq!(store.mutations().len(), 1);
+    assert_eq!(resolver.calls.lock().unwrap().len(), 1);
+    assert_eq!(selection.snapshot().unwrap().mode, Mode::Default);
 }
 
 #[test]

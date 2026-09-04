@@ -13,6 +13,7 @@ pub mod selector;
 pub mod status;
 pub mod surface;
 
+pub(crate) use seat::Confirmation;
 pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };
@@ -331,6 +332,14 @@ mod live_surface_red {
             Line::of(Signal::ExternalBreak("draft".into())),
             Line::ExternalBreak(_)
         ));
+    }
+
+    #[test]
+    fn permissions_action_enters_the_local_surface_without_a_prompt() {
+        assert_eq!(
+            HostCommand::from_editor("ego:action:permissions".to_owned()),
+            Some(HostCommand::Action(ActionId::Permissions))
+        );
     }
 
     #[test]

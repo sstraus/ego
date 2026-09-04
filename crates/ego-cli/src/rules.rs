@@ -13,7 +13,7 @@ use ego_core::config::{
     UserConfigTarget,
 };
 use ego_core::permit::rule::{Rule, RuleId};
-use ego_core::permit::{CanonPath, PathResolver, PrepareCtx, PreparedCall, ToolError};
+use ego_core::permit::{CanonPath, PathResolver, PrepareCtx, PreparedCall, Tool, ToolError};
 use ego_core::run::RunTermination;
 use ego_tools::config::OsUserConfigStore;
 use ego_tools::fs::OsFs;
@@ -21,7 +21,7 @@ use ego_tools::store::OsIo;
 
 use crate::cli::{RulesAction, RulesArgs};
 use crate::config::{escape_field, rule_management, user_target};
-use crate::output::{self, Stdout};
+use crate::output::{Stdout, TextOutput};
 
 /// One prepared call whose representable permission rules may be remembered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,10 +522,7 @@ fn execute_inner(args: &RulesArgs, out: &Stdout) -> Result<(), RunTermination> {
                 .map_err(application_failure)?;
             if !yes {
                 render_remember_plan(preview.plan(), preview.effect(), out);
-                out.line(&format!(
-                    "RESULT\tstored_unchanged\teffective_unchanged\t{}\tnot_published",
-                    escape_field(&user_target(target))
-                ));
+                render_rows(render_remember_result_rows(target, None), out);
                 return Ok(());
             }
 
@@ -538,15 +535,8 @@ fn execute_inner(args: &RulesArgs, out: &Stdout) -> Result<(), RunTermination> {
                 .into_receipt(comparisons)
                 .map_err(application_failure)?;
             render_remember_plan(rendered_preview.plan(), rendered_preview.effect(), out);
-            let publication = publication(&receipt.mutation().publication);
-            out.line(&format!(
-                "RESULT\t{}\t{}\t{}\t{}",
-                stored_state(receipt.mutation().changed),
-                effective_state(receipt.effective_changed()),
-                escape_field(&user_target(target)),
-                publication
-            ));
-            publication_warning(&receipt.mutation().publication);
+            render_rows(render_remember_result_rows(target, Some(&receipt)), out);
+            publication_warning(&receipt.mutation().publication, out);
         }
         RulesAction::Explain {
             target,
@@ -616,45 +606,109 @@ fn workspace(directory: Option<&Path>) -> Result<CanonPath, RunTermination> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreparationError {
+    UnknownTool { name: String },
+    AmbiguousTool { name: String },
+    InvalidParams { diagnostic: String },
+    PreparationFailed { diagnostic: String },
+}
+
+impl std::fmt::Display for PreparationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownTool { name } => write!(formatter, "unknown admitted tool `{name}`"),
+            Self::AmbiguousTool { name } => {
+                write!(formatter, "admitted tool name `{name}` is ambiguous")
+            }
+            Self::InvalidParams { diagnostic } => {
+                write!(formatter, "tool arguments are invalid: {diagnostic}")
+            }
+            Self::PreparationFailed { diagnostic } => {
+                write!(formatter, "tool call could not be prepared: {diagnostic}")
+            }
+        }
+    }
+}
+
+pub(crate) fn prepare_from_catalogue(
+    name: &str,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    workspace: &CanonPath,
+    resolver: &dyn PathResolver,
+    admitted_tools: &[Arc<dyn Tool>],
+) -> Result<PreparedCall, PreparationError> {
+    let mut matches = admitted_tools
+        .iter()
+        .filter(|tool| tool.descriptor().name == name);
+    let Some(tool) = matches.next() else {
+        return Err(PreparationError::UnknownTool {
+            name: name.to_owned(),
+        });
+    };
+    if matches.next().is_some() {
+        return Err(PreparationError::AmbiguousTool {
+            name: name.to_owned(),
+        });
+    }
+    let context = PrepareCtx {
+        cwd: workspace.clone(),
+        resolver,
+    };
+    tool.prepare(serde_json::Value::Object(arguments.clone()), &context)
+        .map_err(|error| match error {
+            ToolError::InvalidParams(diagnostic) => PreparationError::InvalidParams { diagnostic },
+            other => PreparationError::PreparationFailed {
+                diagnostic: other.to_string(),
+            },
+        })
+}
+
 fn prepare_call(
     name: &str,
     arguments: &serde_json::Map<String, serde_json::Value>,
     workspace: &CanonPath,
 ) -> Result<PreparedCall, RunTermination> {
     let tools = ego_tools::tools::builtins();
-    let tool = tools
-        .iter()
-        .find(|tool| tool.descriptor().name == name)
-        .ok_or_else(|| RunTermination::UsageError {
+    prepare_from_catalogue(name, arguments, workspace, &OsFs, &tools).map_err(|error| match error {
+        PreparationError::UnknownTool { .. } => RunTermination::UsageError {
             message: "unknown rule-management builtin tool".to_owned(),
-        })?;
-    let resolver = OsFs;
-    let context = PrepareCtx {
-        cwd: workspace.clone(),
-        resolver: &resolver,
-    };
-    tool.prepare(serde_json::Value::Object(arguments.clone()), &context)
-        .map_err(|error| match error {
-            ToolError::InvalidParams(_) => RunTermination::UsageError {
-                message: "tool arguments do not satisfy the builtin schema".to_owned(),
-            },
-            other => RunTermination::Failed {
-                message: format!("tool call could not be prepared: {other}"),
-            },
-        })
+        },
+        PreparationError::AmbiguousTool { .. } => RunTermination::Failed {
+            message: "rule-management builtin tool name is ambiguous".to_owned(),
+        },
+        PreparationError::InvalidParams { .. } => RunTermination::UsageError {
+            message: "tool arguments do not satisfy the builtin schema".to_owned(),
+        },
+        PreparationError::PreparationFailed { diagnostic } => RunTermination::Failed {
+            message: format!("tool call could not be prepared: {diagnostic}"),
+        },
+    })
 }
 
-fn render_list_text(rows: &[EffectiveRule], out: &Stdout) {
+pub(crate) fn render_list_rows(rows: &[EffectiveRule]) -> Vec<String> {
+    rows.iter()
+        .map(|row| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}",
+                row.id,
+                effect_name(row.effect),
+                escape_field(&row.rule.to_string()),
+                row.from,
+                render_also(row.also)
+            )
+        })
+        .collect()
+}
+
+fn render_rows(rows: Vec<String>, out: &dyn TextOutput) {
     for row in rows {
-        out.line(&format!(
-            "{}\t{}\t{}\t{}\t{}",
-            row.id,
-            effect_name(row.effect),
-            escape_field(&row.rule.to_string()),
-            row.from,
-            render_also(row.also)
-        ));
+        out.line(&row);
     }
+}
+
+fn render_list_text(rows: &[EffectiveRule], out: &dyn TextOutput) {
+    render_rows(render_list_rows(rows), out);
 }
 
 fn render_list_json(target: &UserConfigTarget, rows: &[EffectiveRule], out: &Stdout) {
@@ -679,29 +733,51 @@ fn render_list_json(target: &UserConfigTarget, rows: &[EffectiveRule], out: &Std
     ));
 }
 
-fn render_mutation_receipt(receipt: &RuleMutationReceipt, effect: &str, out: &Stdout) {
-    let affected = receipt.affected().first();
-    out.line(&format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        stored_state(receipt.mutation().changed),
-        effective_state(receipt.effective_changed()),
-        effect,
-        affected
-            .map(|mutation| mutation.rule.id().to_string())
-            .unwrap_or_else(|| "-".to_owned()),
-        affected
-            .map(|mutation| escape_field(&mutation.rule.to_string()))
-            .unwrap_or_else(|| "-".to_owned()),
-        escape_field(&user_target(&receipt.mutation().target)),
-        render_authorities(receipt.comparisons()),
-        publication(&receipt.mutation().publication)
-    ));
-    publication_warning(&receipt.mutation().publication);
+pub(crate) fn render_mutation_receipt_rows(
+    receipt: &RuleMutationReceipt,
+    effect: ManagedRuleEffect,
+) -> Vec<String> {
+    render_mutation_receipt_rows_named(receipt, effect_name(effect))
 }
 
-fn render_remember_plan(plan: &RememberPlan, effect: ManagedRuleEffect, out: &Stdout) {
+pub(crate) fn render_revoke_receipt_rows(receipt: &RuleMutationReceipt) -> Vec<String> {
+    render_mutation_receipt_rows_named(receipt, "both")
+}
+
+fn render_mutation_receipt_rows_named(receipt: &RuleMutationReceipt, effect: &str) -> Vec<String> {
+    let row = |affected: Option<&RuleMutation>| {
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            stored_state(receipt.mutation().changed),
+            effective_state(receipt.effective_changed()),
+            effect,
+            affected
+                .map(|mutation| mutation.rule.id().to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+            affected
+                .map(|mutation| escape_field(&mutation.rule.to_string()))
+                .unwrap_or_else(|| "-".to_owned()),
+            escape_field(&user_target(&receipt.mutation().target)),
+            render_authorities(receipt.comparisons()),
+            publication(&receipt.mutation().publication)
+        )
+    };
+    vec![row(receipt.affected().first())]
+}
+
+fn render_mutation_receipt(receipt: &RuleMutationReceipt, effect: &str, out: &dyn TextOutput) {
+    render_rows(render_mutation_receipt_rows_named(receipt, effect), out);
+    publication_warning(&receipt.mutation().publication, out);
+}
+
+pub(crate) fn render_remember_preview_rows(preview: &RememberPreview) -> Vec<String> {
+    render_remember_plan_rows(preview.plan(), preview.effect())
+}
+
+fn render_remember_plan_rows(plan: &RememberPlan, effect: ManagedRuleEffect) -> Vec<String> {
+    let mut rows = Vec::new();
     for (operation, rule) in plan.candidate_rows() {
-        out.line(&format!(
+        rows.push(format!(
             "DERIVED\t{}\t{}\t{}\t{}",
             operation,
             effect_name(effect),
@@ -710,18 +786,26 @@ fn render_remember_plan(plan: &RememberPlan, effect: ManagedRuleEffect, out: &St
         ));
     }
     for (operation, dimension) in plan.omission_rows() {
-        out.line(&format!(
+        rows.push(format!(
             "OMITTED\t{}\t{}",
             operation,
             omitted_name(dimension)
         ));
     }
+    rows
 }
 
-fn render_explanation_text(call: &PreparedCall, explanation: &RuleExplanation, out: &Stdout) {
-    out.line(&format!("TOOL\t{}", escape_field(call.tool())));
+fn render_remember_plan(plan: &RememberPlan, effect: ManagedRuleEffect, out: &dyn TextOutput) {
+    render_rows(render_remember_plan_rows(plan, effect), out);
+}
+
+pub(crate) fn render_explanation_rows(
+    call: &PreparedCall,
+    explanation: &RuleExplanation,
+) -> Vec<String> {
+    let mut rows = vec![format!("TOOL\t{}", escape_field(call.tool()))];
     for operation in &explanation.operations {
-        out.line(&format!(
+        rows.push(format!(
             "OP\t{}\t{}\t{}",
             operation.index,
             operation.kind,
@@ -729,7 +813,7 @@ fn render_explanation_text(call: &PreparedCall, explanation: &RuleExplanation, o
         ));
     }
     for authority in &explanation.authorities {
-        out.line(&format!(
+        rows.push(format!(
             "MATCH\t{}\t{}\t{}\t{}\t{}",
             authority.operation,
             effect_name(authority.effect),
@@ -738,8 +822,8 @@ fn render_explanation_text(call: &PreparedCall, explanation: &RuleExplanation, o
             render_also(authority.also)
         ));
     }
-    out.line(&format!("OUTCOME\t{}", outcome_name(explanation.outcome)));
-    out.line(&format!(
+    rows.push(format!("OUTCOME\t{}", outcome_name(explanation.outcome)));
+    rows.push(format!(
         "UNCOVERED\t{}",
         if explanation.uncovered.is_empty() {
             "-".to_owned()
@@ -752,8 +836,17 @@ fn render_explanation_text(call: &PreparedCall, explanation: &RuleExplanation, o
                 .join(",")
         }
     ));
-    out.line("SETTLEMENT\tnot_run");
-    out.line("WOULD_EXECUTE\tfalse");
+    rows.push("SETTLEMENT\tnot_run".to_owned());
+    rows.push("WOULD_EXECUTE\tfalse".to_owned());
+    rows
+}
+
+fn render_explanation_text(
+    call: &PreparedCall,
+    explanation: &RuleExplanation,
+    out: &dyn TextOutput,
+) {
+    render_rows(render_explanation_rows(call, explanation), out);
 }
 
 fn render_explanation_json(
@@ -869,11 +962,38 @@ fn publication(publication: &UserConfigPublication) -> &'static str {
     }
 }
 
-fn publication_warning(publication: &UserConfigPublication) {
-    if let UserConfigPublication::PublishedDurabilityUncertain { diagnostic } = publication {
-        output::note(&format!(
+pub(crate) fn render_remember_result_rows(
+    target: &UserConfigTarget,
+    receipt: Option<&RuleMutationReceipt>,
+) -> Vec<String> {
+    let (stored, effective, publication) = receipt.map_or(
+        ("stored_unchanged", "effective_unchanged", "not_published"),
+        |receipt| {
+            (
+                stored_state(receipt.mutation().changed),
+                effective_state(receipt.effective_changed()),
+                publication(&receipt.mutation().publication),
+            )
+        },
+    );
+    vec![format!(
+        "RESULT\t{stored}\t{effective}\t{}\t{publication}",
+        escape_field(&user_target(target))
+    )]
+}
+
+pub(crate) fn publication_warning_text(publication: &UserConfigPublication) -> Option<String> {
+    match publication {
+        UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => Some(format!(
             "rules were published but durability is uncertain: {diagnostic}"
-        ));
+        )),
+        _ => None,
+    }
+}
+
+fn publication_warning(publication: &UserConfigPublication, out: &dyn TextOutput) {
+    if let Some(warning) = publication_warning_text(publication) {
+        out.note(&warning);
     }
 }
 
@@ -937,5 +1057,485 @@ fn application_failure(error: RuleApplicationError) -> RunTermination {
         RuleApplicationError::Contract(message) => RunTermination::Failed {
             message: message.to_owned(),
         },
+    }
+}
+
+#[cfg(test)]
+mod permission_red {
+    use super::*;
+    use crate::output::{Diagnostics, TextOutput};
+    use crate::repl::policy_controls::RememberPreview;
+    use ego_core::generator::attempt::DeliveryCertainty;
+    use ego_core::mcp::ToolExecution;
+    use ego_core::permit::{GuardedIo, Op, Tool, ToolDescriptor, ToolResult};
+    use futures::future::BoxFuture;
+    use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AdmittedToolFake {
+        name: String,
+        result: Result<PreparedCall, ToolError>,
+        prepares: Arc<AtomicUsize>,
+    }
+
+    impl Tool for AdmittedToolFake {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: self.name.clone(),
+                description: "permission fixture".into(),
+                schema: serde_json::from_value(serde_json::json!({"type":"object"}))
+                    .expect("fixture schema"),
+            }
+        }
+
+        fn prepare(
+            &self,
+            _params: Value,
+            _ctx: &PrepareCtx<'_>,
+        ) -> Result<PreparedCall, ToolError> {
+            self.prepares.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
+        }
+
+        fn execute<'a, 'io>(
+            &'a self,
+            _call: PreparedCall,
+            _io: &'a dyn GuardedIo<'io>,
+        ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+        where
+            'io: 'a,
+        {
+            Box::pin(async { Ok(ToolExecution::Complete(ToolResult::builtin("unused"))) })
+        }
+    }
+
+    #[test]
+    fn catalogue_preparation_has_closed_errors_and_no_discovery_or_mutation() {
+        let workspace = CanonPath::new("/workspace");
+        let arguments = serde_json::json!({"path": "src/main.rs"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let resolver = OsFs;
+        let prepares = Arc::new(AtomicUsize::new(0));
+        let expected = PreparedCall::new(
+            "foreign_read",
+            Op::Read {
+                path: CanonPath::new("/workspace/src/main.rs"),
+            },
+        );
+        let foreign: Arc<dyn Tool> = Arc::new(AdmittedToolFake {
+            name: "foreign_read".into(),
+            result: Ok(expected.clone()),
+            prepares: Arc::clone(&prepares),
+        });
+        let admitted = [Arc::clone(&foreign)];
+        let prepared =
+            prepare_from_catalogue("foreign_read", &arguments, &workspace, &resolver, &admitted)
+                .expect("admitted foreign tool prepares");
+        assert_eq!(prepared.into_parts(), expected.into_parts());
+        assert_eq!(prepares.load(Ordering::SeqCst), 1);
+
+        assert!(matches!(
+            prepare_from_catalogue("missing", &arguments, &workspace, &resolver, &admitted),
+            Err(PreparationError::UnknownTool { .. })
+        ));
+        assert_eq!(prepares.load(Ordering::SeqCst), 1);
+
+        let duplicate_calls = Arc::new(AtomicUsize::new(0));
+        let duplicate_a: Arc<dyn Tool> = Arc::new(AdmittedToolFake {
+            name: "foreign_read".into(),
+            result: Ok(PreparedCall::new(
+                "foreign_read",
+                Op::Read {
+                    path: CanonPath::new("/workspace/a"),
+                },
+            )),
+            prepares: Arc::clone(&duplicate_calls),
+        });
+        let duplicate_b: Arc<dyn Tool> = Arc::new(AdmittedToolFake {
+            name: "foreign_read".into(),
+            result: Ok(PreparedCall::new(
+                "foreign_read",
+                Op::Read {
+                    path: CanonPath::new("/workspace/b"),
+                },
+            )),
+            prepares: Arc::clone(&duplicate_calls),
+        });
+        let duplicates = [duplicate_a, duplicate_b];
+        assert!(matches!(
+            prepare_from_catalogue(
+                "foreign_read",
+                &arguments,
+                &workspace,
+                &resolver,
+                &duplicates,
+            ),
+            Err(PreparationError::AmbiguousTool { .. })
+        ));
+        assert_eq!(duplicate_calls.load(Ordering::SeqCst), 0);
+
+        let invalid: Arc<dyn Tool> = Arc::new(AdmittedToolFake {
+            name: "foreign_read".into(),
+            result: Err(ToolError::InvalidParams("bad params".into())),
+            prepares: Arc::new(AtomicUsize::new(0)),
+        });
+        let invalid_result = prepare_from_catalogue(
+            "foreign_read",
+            &arguments,
+            &workspace,
+            &resolver,
+            &[invalid],
+        )
+        .expect_err("invalid params are usage errors");
+        assert!(matches!(
+            invalid_result,
+            PreparationError::InvalidParams { .. }
+        ));
+
+        let failed: Arc<dyn Tool> = Arc::new(AdmittedToolFake {
+            name: "foreign_read".into(),
+            result: Err(ToolError::foreign(
+                "transport failed",
+                DeliveryCertainty::DefinitelyUnsent,
+            )),
+            prepares: Arc::new(AtomicUsize::new(0)),
+        });
+        assert!(matches!(
+            prepare_from_catalogue("foreign_read", &arguments, &workspace, &resolver, &[failed]),
+            Err(PreparationError::PreparationFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn permission_rows_are_shared_with_root_and_interactive_renderers() {
+        let rule = Rule::load("read(src/**)").unwrap();
+        let rules = Ruleset::from_layer(
+            ego_core::config::PermCfg {
+                judge: None,
+                allow: vec![rule],
+                deny: vec![],
+            },
+            Source::Project,
+        );
+        let expected_list = format!(
+            "{}\tallow\tread(src/**)\tproject\t-",
+            rules.allow[0].rule().id()
+        );
+        assert_eq!(
+            render_list_rows(&RuleManagement::rows(&rules)),
+            vec![expected_list]
+        );
+        let mutation = RuleMutation {
+            effect: ManagedRuleEffect::Allow,
+            rule: Rule::load("read(src/**)").unwrap(),
+        };
+        let before = RuleSnapshot {
+            target: UserConfigTarget::Base,
+            permissions_present: true,
+            allow: vec![],
+            deny: vec![],
+        };
+        let after = RuleSnapshot {
+            target: UserConfigTarget::Base,
+            permissions_present: true,
+            allow: vec![mutation.rule.clone()],
+            deny: vec![],
+        };
+        let receipt = crate::repl::policy_controls::RuleMutationReceipt::from_atomic_facts(
+            UserConfigMutationResult {
+                target: UserConfigTarget::Base,
+                facts: UserConfigMutationFacts::RuleTransaction {
+                    request: Box::new(UserConfigMutationFacts::Batch {
+                        changes: vec![mutation.clone()],
+                    }),
+                    before,
+                    after,
+                },
+                changed: true,
+                publication: UserConfigPublication::PublishedDurably,
+            },
+            vec![mutation.clone()],
+            vec![RuleMutationComparison {
+                stored_changed: true,
+                effective_changed: true,
+                authorities: vec![],
+            }],
+        )
+        .unwrap();
+        let receipt_rows = render_mutation_receipt_rows(&receipt, ManagedRuleEffect::Allow);
+        assert_eq!(receipt_rows.len(), 1);
+        assert_eq!(
+            receipt_rows[0],
+            format!(
+                "stored_changed\teffective_changed\tallow\t{}\tread(src/**)\tuser\t-\tpublished_durably",
+                mutation.rule.id()
+            )
+        );
+
+        let call = PreparedCall::new(
+            "remember",
+            Op::Read {
+                path: CanonPath::new("/workspace/src/main.rs"),
+            },
+        )
+        .with_op(Op::Write {
+            path: CanonPath::new("/workspace/src/main.rs"),
+            change: ego_core::permit::Change::Whole(b"next".to_vec()),
+        });
+        let plan =
+            RuleManagement::remember(&call, ManagedRuleEffect::Allow, Path::new("/workspace"))
+                .unwrap();
+        let preview = RememberPreview {
+            effect: ManagedRuleEffect::Allow,
+            plan,
+        };
+        let preview_rows = render_remember_preview_rows(&preview);
+        assert!(
+            preview_rows
+                .iter()
+                .any(|row| row.starts_with("DERIVED\t0\tallow\t"))
+        );
+        assert!(preview_rows.iter().any(|row| row == "OMITTED\t1\tChange"));
+        let call = PreparedCall::new(
+            "read",
+            Op::Read {
+                path: CanonPath::new("/workspace/src/main.rs"),
+            },
+        )
+        .with_op(Op::Read {
+            path: CanonPath::new("/workspace/other.txt"),
+        });
+        let explanation = RuleManagement::explain(&call, &rules, Path::new("/workspace"));
+        let rows = render_explanation_rows(&call, &explanation);
+        assert_eq!(rows[0], "TOOL\tread");
+        assert_eq!(rows[1], "OP\t0\tread\tsrc/main.rs");
+        assert_eq!(rows[2], "OP\t1\tread\tother.txt");
+        assert_eq!(
+            rows[3],
+            format!(
+                "MATCH\t0\tallow\t{}\tproject\t-",
+                rules.allow[0].rule().id()
+            )
+        );
+        assert_eq!(rows[4], "OUTCOME\tuncovered");
+        assert_eq!(rows[5], "UNCOVERED\t1");
+        assert_eq!(rows[6], "SETTLEMENT\tnot_run");
+        assert_eq!(rows[7], "WOULD_EXECUTE\tfalse");
+    }
+
+    #[test]
+    fn revoke_renderer_projects_one_row_for_dual_effect_atomic_removal() {
+        let rule = Rule::load("read(src/**)").unwrap();
+        let id = rule.id();
+        let receipt = RuleMutationReceipt::from_atomic_facts(
+            UserConfigMutationResult {
+                target: UserConfigTarget::Base,
+                facts: UserConfigMutationFacts::RuleTransaction {
+                    request: Box::new(UserConfigMutationFacts::Revoke { id }),
+                    before: RuleSnapshot {
+                        target: UserConfigTarget::Base,
+                        permissions_present: true,
+                        allow: vec![rule.clone()],
+                        deny: vec![rule.clone()],
+                    },
+                    after: RuleSnapshot {
+                        target: UserConfigTarget::Base,
+                        permissions_present: true,
+                        allow: vec![],
+                        deny: vec![],
+                    },
+                },
+                changed: true,
+                publication: UserConfigPublication::PublishedDurably,
+            },
+            vec![
+                RuleMutation {
+                    effect: ManagedRuleEffect::Allow,
+                    rule: rule.clone(),
+                },
+                RuleMutation {
+                    effect: ManagedRuleEffect::Deny,
+                    rule: rule.clone(),
+                },
+            ],
+            vec![
+                RuleMutationComparison {
+                    stored_changed: true,
+                    effective_changed: true,
+                    authorities: vec![],
+                },
+                RuleMutationComparison {
+                    stored_changed: true,
+                    effective_changed: true,
+                    authorities: vec![],
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            render_revoke_receipt_rows(&receipt),
+            vec![format!(
+                "stored_changed\teffective_changed\tboth\t{}\tread(src/**)\tuser\t-\tpublished_durably",
+                rule.id()
+            )]
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordedText(std::sync::Mutex<Vec<String>>);
+
+    impl Diagnostics for RecordedText {
+        fn note(&self, _message: &str) {}
+    }
+
+    impl TextOutput for RecordedText {
+        fn write(&self, text: &str) {
+            self.0.lock().unwrap().push(text.to_owned());
+        }
+
+        fn line(&self, text: &str) {
+            self.0.lock().unwrap().push(text.to_owned());
+        }
+    }
+
+    #[test]
+    fn root_text_wrappers_accept_text_output_and_match_pure_rows_byte_for_byte() {
+        let rules = Ruleset::from_layer(
+            ego_core::config::PermCfg {
+                judge: None,
+                allow: vec![Rule::load("read(src/**)").unwrap()],
+                deny: vec![],
+            },
+            Source::Project,
+        );
+        let rows = RuleManagement::rows(&rules);
+        let expected = render_list_rows(&rows);
+        let output = RecordedText::default();
+        render_list_text(&rows, &output);
+        assert_eq!(*output.0.lock().unwrap(), expected);
+
+        let call = PreparedCall::new(
+            "read",
+            Op::Read {
+                path: CanonPath::new("/workspace/src/main.rs"),
+            },
+        );
+        let explanation = RuleManagement::explain(&call, &rules, Path::new("/workspace"));
+        let expected = render_explanation_rows(&call, &explanation);
+        let output = RecordedText::default();
+        render_explanation_text(&call, &explanation, &output);
+        assert_eq!(*output.0.lock().unwrap(), expected);
+
+        let mutation = RuleMutation {
+            effect: ManagedRuleEffect::Allow,
+            rule: Rule::load("read(src/**)").unwrap(),
+        };
+        let receipt = RuleMutationReceipt::from_atomic_facts(
+            UserConfigMutationResult {
+                target: UserConfigTarget::Base,
+                facts: UserConfigMutationFacts::RuleTransaction {
+                    request: Box::new(UserConfigMutationFacts::Batch {
+                        changes: vec![mutation.clone()],
+                    }),
+                    before: RuleSnapshot {
+                        target: UserConfigTarget::Base,
+                        permissions_present: true,
+                        allow: vec![],
+                        deny: vec![],
+                    },
+                    after: RuleSnapshot {
+                        target: UserConfigTarget::Base,
+                        permissions_present: true,
+                        allow: vec![mutation.rule.clone()],
+                        deny: vec![],
+                    },
+                },
+                changed: true,
+                publication: UserConfigPublication::PublishedDurably,
+            },
+            vec![mutation],
+            vec![RuleMutationComparison {
+                stored_changed: true,
+                effective_changed: true,
+                authorities: vec![],
+            }],
+        )
+        .unwrap();
+        let expected = render_mutation_receipt_rows(&receipt, ManagedRuleEffect::Allow);
+        let output = RecordedText::default();
+        render_mutation_receipt(&receipt, "allow", &output);
+        assert_eq!(*output.0.lock().unwrap(), expected);
+
+        let preview = RememberPreview {
+            effect: ManagedRuleEffect::Allow,
+            plan: RuleManagement::remember(
+                &call,
+                ManagedRuleEffect::Allow,
+                Path::new("/workspace"),
+            )
+            .unwrap(),
+        };
+        let expected = render_remember_preview_rows(&preview);
+        let output = RecordedText::default();
+        render_remember_plan(&preview.plan, preview.effect, &output);
+        assert_eq!(*output.0.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn publication_warning_and_remember_result_rows_are_pure_and_typed() {
+        let uncertain = UserConfigPublication::PublishedDurabilityUncertain {
+            diagnostic: "sync pending".into(),
+        };
+        assert_eq!(
+            publication_warning_text(&uncertain),
+            Some("rules were published but durability is uncertain: sync pending".to_owned())
+        );
+        assert_eq!(
+            render_remember_result_rows(&UserConfigTarget::Base, None),
+            vec!["RESULT\tstored_unchanged\teffective_unchanged\tuser\tnot_published"]
+        );
+        let receipt = RuleMutationReceipt::from_atomic_facts(
+            UserConfigMutationResult {
+                target: UserConfigTarget::Base,
+                facts: UserConfigMutationFacts::RuleTransaction {
+                    request: Box::new(UserConfigMutationFacts::Batch {
+                        changes: vec![RuleMutation {
+                            effect: ManagedRuleEffect::Allow,
+                            rule: Rule::load("read(src/**)").unwrap(),
+                        }],
+                    }),
+                    before: RuleSnapshot {
+                        target: UserConfigTarget::Base,
+                        permissions_present: true,
+                        allow: vec![],
+                        deny: vec![],
+                    },
+                    after: RuleSnapshot {
+                        target: UserConfigTarget::Base,
+                        permissions_present: true,
+                        allow: vec![Rule::load("read(src/**)").unwrap()],
+                        deny: vec![],
+                    },
+                },
+                changed: true,
+                publication: UserConfigPublication::PublishedDurably,
+            },
+            vec![RuleMutation {
+                effect: ManagedRuleEffect::Allow,
+                rule: Rule::load("read(src/**)").unwrap(),
+            }],
+            vec![RuleMutationComparison {
+                stored_changed: true,
+                effective_changed: true,
+                authorities: vec![],
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            render_remember_result_rows(&UserConfigTarget::Base, Some(&receipt)),
+            vec!["RESULT\tstored_changed\teffective_changed\tuser\tpublished_durably"]
+        );
     }
 }

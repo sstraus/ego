@@ -42,6 +42,7 @@ pub enum PermissionInput {
     List,
     Revoke(RuleId),
     Remember(RememberRequest),
+    ConfirmRemember(RememberPreview),
     Explain {
         call: PreparedCall,
         workspace: CanonPath,
@@ -408,11 +409,11 @@ impl PolicyApplicationOwner {
                 .explain(&call, &workspace, RuleReadAuthority::Admitted(&ruleset))
                 .map(PermissionOutcome::Explain)
                 .map_err(map_rule_error),
-            PermissionInput::Revoke(_) | PermissionInput::Remember(_) => {
-                Err(PolicyControlError::RuleManagement {
-                    diagnostic: "a permission mutation must be applied, not inspected".into(),
-                })
-            }
+            PermissionInput::Revoke(_)
+            | PermissionInput::Remember(_)
+            | PermissionInput::ConfirmRemember(_) => Err(PolicyControlError::RuleManagement {
+                diagnostic: "a permission mutation must be applied, not inspected".into(),
+            }),
         }
     }
 
@@ -421,17 +422,6 @@ impl PolicyApplicationOwner {
         request: RememberRequest,
     ) -> Result<RememberPreview, PolicyControlError> {
         self.rules.preview_remember(request).map_err(map_rule_error)
-    }
-
-    pub fn confirm_remember(
-        &self,
-        preview: RememberPreview,
-    ) -> Result<RuleMutationReceipt, PolicyControlError> {
-        let change = self
-            .rules
-            .confirm_remember(preview)
-            .map_err(map_rule_error)?;
-        self.finish_rule_change(change).map(|(receipt, _)| receipt)
     }
 
     fn apply_mode(&self, mode: Mode) -> Result<PolicyControlOutcome, PolicyControlError> {
@@ -472,6 +462,14 @@ impl PolicyApplicationOwner {
             PermissionInput::Remember(request) => self
                 .preview_remember(request)
                 .map(PolicyControlOutcome::RememberPreview),
+            PermissionInput::ConfirmRemember(preview) => {
+                let change = self
+                    .rules
+                    .confirm_remember(preview)
+                    .map_err(map_rule_error)?;
+                let (receipt, staging) = self.finish_rule_change(change)?;
+                Ok(PolicyControlOutcome::Rule { receipt, staging })
+            }
         }
     }
 

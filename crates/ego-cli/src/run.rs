@@ -123,8 +123,9 @@ use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
 use crate::render::osc::{Osc, Progress, State};
 use crate::repl::policy_controls::{
     CliGenerationPolicySource, FrozenPolicyResolver, FrozenRuleResolution,
-    GenerationPolicySelection, GenerationPolicySnapshot, PolicyApplicationOwner,
-    PolicyControlError, PolicyControlOutcome, PolicyControlRequest, PreflightPort,
+    GenerationPolicySelection, GenerationPolicySnapshot, PermissionInput, PermissionOutcome,
+    PolicyApplicationOwner, PolicyControlError, PolicyControlOutcome, PolicyControlRequest,
+    PreflightPort, RememberPreview,
 };
 use crate::session::{self, ActiveSession, Opened};
 use crate::{attachment, config, hooks, model, prompt, repl, schema};
@@ -703,6 +704,7 @@ async fn interactive_through(
             elicitor: Some(elicitor),
             status: Some(status),
             diagnostics: output,
+            text_output: Some(output),
             mcp_runtime: services.mcp_runtime,
             evidence: services.evidence,
         },
@@ -915,6 +917,7 @@ async fn run_with_registry<S: EventSink>(
             elicitor: None,
             status: None,
             diagnostics: &Stderr,
+            text_output: None,
             mcp_runtime,
             evidence,
         },
@@ -1274,6 +1277,112 @@ impl FrozenPolicyResolver for FrozenRuleResolver {
             },
             comparisons,
         })
+    }
+}
+
+fn handle_policy_request(
+    request: PolicyControlRequest,
+    mut apply: impl FnMut(PolicyControlRequest) -> Result<PolicyControlOutcome, PolicyControlError>,
+    output: &dyn TextOutput,
+    mut confirm_remember: impl FnMut(&RememberPreview) -> repl::Confirmation,
+) -> Result<Option<repl::Line>, PolicyControlError> {
+    let mismatch = || PolicyControlError::RuleManagement {
+        diagnostic: "the policy-control outcome does not match its request".to_owned(),
+    };
+    let write_rows = |rows: Vec<String>| {
+        for row in rows {
+            output.line(&row);
+        }
+    };
+    let warn = |receipt: &crate::rules::RuleMutationReceipt| {
+        if let Some(warning) = crate::rules::publication_warning_text(&receipt.publication()) {
+            output.note(&warning);
+        }
+    };
+
+    match request {
+        PolicyControlRequest::SetMode(mode) => match apply(PolicyControlRequest::SetMode(mode))? {
+            PolicyControlOutcome::Mode { .. } => Ok(None),
+            _ => Err(mismatch()),
+        },
+        PolicyControlRequest::Rule(mutation) => {
+            let effect = mutation.effect;
+            let PolicyControlOutcome::Rule { receipt, .. } =
+                apply(PolicyControlRequest::Rule(mutation))?
+            else {
+                return Err(mismatch());
+            };
+            write_rows(crate::rules::render_mutation_receipt_rows(&receipt, effect));
+            warn(&receipt);
+            Ok(None)
+        }
+        PolicyControlRequest::Permission(PermissionInput::List) => {
+            let PolicyControlOutcome::Permission(PermissionOutcome::List(rows)) =
+                apply(PolicyControlRequest::Permission(PermissionInput::List))?
+            else {
+                return Err(mismatch());
+            };
+            write_rows(crate::rules::render_list_rows(&rows));
+            Ok(None)
+        }
+        PolicyControlRequest::Permission(PermissionInput::Explain { call, workspace }) => {
+            let PolicyControlOutcome::Permission(PermissionOutcome::Explain(explanation)) =
+                apply(PolicyControlRequest::Permission(PermissionInput::Explain {
+                    call: call.clone(),
+                    workspace,
+                }))?
+            else {
+                return Err(mismatch());
+            };
+            write_rows(crate::rules::render_explanation_rows(&call, &explanation));
+            Ok(None)
+        }
+        PolicyControlRequest::Permission(PermissionInput::Revoke(id)) => {
+            let PolicyControlOutcome::Rule { receipt, .. } = apply(
+                PolicyControlRequest::Permission(PermissionInput::Revoke(id)),
+            )?
+            else {
+                return Err(mismatch());
+            };
+            write_rows(crate::rules::render_revoke_receipt_rows(&receipt));
+            warn(&receipt);
+            Ok(None)
+        }
+        PolicyControlRequest::Permission(PermissionInput::Remember(request)) => {
+            let PolicyControlOutcome::RememberPreview(preview) = apply(
+                PolicyControlRequest::Permission(PermissionInput::Remember(request)),
+            )?
+            else {
+                return Err(mismatch());
+            };
+            write_rows(crate::rules::render_remember_preview_rows(&preview));
+            output.finish();
+            match confirm_remember(&preview) {
+                repl::Confirmation::Confirmed => {
+                    let PolicyControlOutcome::Rule { receipt, .. } = apply(
+                        PolicyControlRequest::Permission(PermissionInput::ConfirmRemember(preview)),
+                    )?
+                    else {
+                        return Err(mismatch());
+                    };
+                    write_rows(crate::rules::render_remember_result_rows(
+                        &UserConfigTarget::Base,
+                        Some(&receipt),
+                    ));
+                    warn(&receipt);
+                    Ok(None)
+                }
+                repl::Confirmation::Declined => {
+                    write_rows(crate::rules::render_remember_result_rows(
+                        &UserConfigTarget::Base,
+                        None,
+                    ));
+                    Ok(None)
+                }
+                repl::Confirmation::Propagate(line) => Ok(Some(line)),
+            }
+        }
+        PolicyControlRequest::Permission(PermissionInput::ConfirmRemember(_)) => Err(mismatch()),
     }
 }
 
@@ -4273,6 +4382,7 @@ async fn execute<S: EventSink>(
         elicitor,
         mut status,
         diagnostics,
+        text_output,
         mcp_runtime,
         evidence,
     } = host;
@@ -5428,17 +5538,25 @@ async fn execute<S: EventSink>(
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Policy(request)) => {
-                                        let requested_mode = match &request {
-                                            PolicyControlRequest::SetMode(mode) => Some(*mode),
-                                            PolicyControlRequest::Rule(_)
-                                            | PolicyControlRequest::Permission(_) => None,
+                                        let Some(owner) = policy_application.as_ref() else {
+                                            let notice =
+                                                "interactive policy controls are unavailable"
+                                                    .to_owned();
+                                            if let Some(status) = status.as_ref()
+                                                && status.human
+                                            {
+                                                status.seat.set_notice(notice);
+                                            } else {
+                                                diagnostics.note(&notice);
+                                            }
+                                            continue;
                                         };
-                                        let notice = match policy_application.as_ref() {
-                                            Some(owner) => match owner.apply(request) {
+                                        if let PolicyControlRequest::SetMode(mode) = &request {
+                                            let mode = *mode;
+                                            let notice = match owner
+                                                .apply(PolicyControlRequest::SetMode(mode))
+                                            {
                                                 Ok(PolicyControlOutcome::Mode { staging }) => {
-                                                    let mode = requested_mode.expect(
-                                                        "a mode outcome follows a mode request",
-                                                    );
                                                     if staging.changed {
                                                         format!(
                                                             "mode `{mode}` staged for the next generation"
@@ -5447,20 +5565,67 @@ async fn execute<S: EventSink>(
                                                         format!("mode `{mode}` is already selected")
                                                     }
                                                 }
-                                                Ok(_) => "policy control applied".to_owned(),
+                                                Ok(_) => "policy control failed: the outcome did not match the mode request".to_owned(),
                                                 Err(error) => {
                                                     format!("policy control failed: {error}")
                                                 }
-                                            },
-                                            None => "interactive policy controls are unavailable"
-                                                .to_owned(),
+                                            };
+                                            if let Some(status) = status.as_ref()
+                                                && status.human
+                                            {
+                                                status.seat.set_notice(notice);
+                                            } else {
+                                                diagnostics.note(&notice);
+                                            }
+                                            continue;
+                                        }
+                                        let Some(output) = text_output else {
+                                            let notice =
+                                                "interactive permission output is unavailable"
+                                                    .to_owned();
+                                            if let Some(status) = status.as_ref()
+                                                && status.human
+                                            {
+                                                status.seat.set_notice(notice);
+                                            } else {
+                                                diagnostics.note(&notice);
+                                            }
+                                            continue;
                                         };
-                                        if let Some(status) = status.as_ref()
-                                            && status.human
-                                        {
-                                            status.seat.set_notice(notice);
-                                        } else {
-                                            diagnostics.note(&notice);
+                                        let handled = handle_policy_request(
+                                            request,
+                                            |request| owner.apply(request),
+                                            output,
+                                            |_preview| {
+                                                status
+                                                    .as_ref()
+                                                    .filter(|status| status.human)
+                                                    .map_or(
+                                                        repl::Confirmation::Declined,
+                                                        |status| status.seat.confirm_remember(),
+                                                    )
+                                            },
+                                        );
+                                        match handled {
+                                            Ok(Some(
+                                                repl::Line::Ended
+                                                | repl::Line::ExternalBreak(_),
+                                            )) => break 'epoch EpochTransition::Exit,
+                                            Ok(Some(_)) => diagnostics.note(
+                                                "permission confirmation returned a non-terminal line",
+                                            ),
+                                            Ok(None) => {}
+                                            Err(error) => {
+                                                let notice =
+                                                    format!("policy control failed: {error}");
+                                                if let Some(status) = status.as_ref()
+                                                    && status.human
+                                                {
+                                                    status.seat.set_notice(notice);
+                                                } else {
+                                                    diagnostics.note(&notice);
+                                                }
+                                            }
                                         }
                                         continue;
                                     }
@@ -6272,6 +6437,7 @@ struct RunHost<'a> {
     elicitor: Option<Arc<dyn Elicitor>>,
     status: Option<InteractiveStatus>,
     diagnostics: &'a dyn Diagnostics,
+    text_output: Option<&'a dyn TextOutput>,
     mcp_runtime: Arc<McpRegistryRuntime>,
     evidence: Arc<EvidenceAdmissionService>,
 }
@@ -7278,6 +7444,33 @@ mod tests {
     use ego_core::store::session_store::{SessionStore, StoreError};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
+
+    struct UnusedStore;
+
+    impl ego_core::config::UserConfigStore for UnusedStore {
+        fn snapshot(
+            &self,
+            _target: ego_core::config::UserConfigTarget,
+        ) -> Result<ego_core::config::UserConfigSnapshot, ego_core::config::UserConfigError>
+        {
+            panic!("remember preview must not read the store")
+        }
+
+        fn rule_snapshot(
+            &self,
+            _target: ego_core::config::UserConfigTarget,
+        ) -> Result<ego_core::config::RuleSnapshot, ego_core::config::UserConfigError> {
+            panic!("remember preview must not read the store")
+        }
+
+        fn mutate(
+            &self,
+            _mutation: ego_core::config::UserConfigMutation,
+        ) -> Result<ego_core::config::UserConfigMutationResult, ego_core::config::UserConfigError>
+        {
+            panic!("remember preview must not mutate the store")
+        }
+    }
 
     #[derive(Default)]
     struct HookCaptureStore;
@@ -8400,5 +8593,343 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[derive(Default)]
+    struct PolicyTextOutput(std::sync::Mutex<Vec<String>>, AtomicUsize);
+
+    impl crate::output::Diagnostics for PolicyTextOutput {
+        fn note(&self, _message: &str) {}
+    }
+
+    impl crate::output::TextOutput for PolicyTextOutput {
+        fn write(&self, text: &str) {
+            self.0.lock().unwrap().push(text.to_owned());
+        }
+
+        fn line(&self, text: &str) {
+            self.0.lock().unwrap().push(text.to_owned());
+        }
+
+        fn finish(&self) {
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn real_remember_preview() -> crate::rules::RememberPreview {
+        crate::rules::RuleApplication::new(
+            Arc::new(UnusedStore),
+            ego_core::config::UserConfigTarget::Base,
+        )
+        .preview_remember(crate::rules::RememberRequest::new(
+            ego_core::permit::PreparedCall::new(
+                "read",
+                ego_core::permit::Op::Read {
+                    path: ego_core::permit::CanonPath::new("/workspace/src/main.rs"),
+                },
+            ),
+            ego_core::config::ManagedRuleEffect::Allow,
+            ego_core::permit::CanonPath::new("/workspace"),
+        ))
+        .unwrap()
+    }
+
+    fn real_rule_receipt() -> crate::repl::policy_controls::RuleMutationReceipt {
+        let rule = ego_core::permit::rule::Rule::load("read(src/**)").unwrap();
+        let mutation = ego_core::config::RuleMutation {
+            effect: ego_core::config::ManagedRuleEffect::Allow,
+            rule: rule.clone(),
+        };
+        crate::repl::policy_controls::RuleMutationReceipt::from_atomic_facts(
+            ego_core::config::UserConfigMutationResult {
+                target: ego_core::config::UserConfigTarget::Base,
+                facts: ego_core::config::UserConfigMutationFacts::RuleTransaction {
+                    request: Box::new(ego_core::config::UserConfigMutationFacts::Batch {
+                        changes: vec![mutation.clone()],
+                    }),
+                    before: ego_core::config::RuleSnapshot {
+                        target: ego_core::config::UserConfigTarget::Base,
+                        permissions_present: true,
+                        allow: vec![],
+                        deny: vec![],
+                    },
+                    after: ego_core::config::RuleSnapshot {
+                        target: ego_core::config::UserConfigTarget::Base,
+                        permissions_present: true,
+                        allow: vec![rule],
+                        deny: vec![],
+                    },
+                },
+                changed: true,
+                publication: ego_core::config::UserConfigPublication::PublishedDurably,
+            },
+            vec![mutation],
+            vec![ego_core::config::rule_management::RuleMutationComparison {
+                stored_changed: true,
+                effective_changed: true,
+                authorities: vec![],
+            }],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn handle_policy_request_renders_list_explain_and_rule_without_confirmation() {
+        let output = PolicyTextOutput::default();
+        let mut applied = Vec::new();
+        let rules = ego_core::config::Ruleset::from_layer(
+            ego_core::config::PermCfg {
+                judge: None,
+                allow: vec![ego_core::permit::rule::Rule::load("read(src/**)").unwrap()],
+                deny: vec![],
+            },
+            ego_core::config::Source::Project,
+        );
+        let list = ego_core::config::rule_management::RuleManagement::rows(&rules);
+        let list_request =
+            PolicyControlRequest::Permission(crate::repl::policy_controls::PermissionInput::List);
+        let list_rows = crate::rules::render_list_rows(&list);
+        assert_eq!(
+            handle_policy_request(
+                list_request.clone(),
+                |request| {
+                    applied.push(request);
+                    Ok(PolicyControlOutcome::Permission(
+                        crate::repl::policy_controls::PermissionOutcome::List(list.clone()),
+                    ))
+                },
+                &output,
+                |_preview| unreachable!("confirmation is not requested for list"),
+            )
+            .expect("list request"),
+            None
+        );
+        assert_eq!(*output.0.lock().unwrap(), list_rows);
+        assert_eq!(applied, vec![list_request]);
+
+        let call = ego_core::permit::PreparedCall::new(
+            "read",
+            ego_core::permit::Op::Read {
+                path: ego_core::permit::CanonPath::new("/workspace/src/main.rs"),
+            },
+        );
+        let explanation = ego_core::config::rule_management::RuleManagement::explain(
+            &call,
+            &rules,
+            std::path::Path::new("/workspace"),
+        );
+        let explain_request = PolicyControlRequest::Permission(
+            crate::repl::policy_controls::PermissionInput::Explain {
+                call: call.clone(),
+                workspace: ego_core::permit::CanonPath::new("/workspace"),
+            },
+        );
+        let explain_rows = crate::rules::render_explanation_rows(&call, &explanation);
+        let explain_output = PolicyTextOutput::default();
+        assert_eq!(
+            handle_policy_request(
+                explain_request.clone(),
+                |request| {
+                    applied.push(request);
+                    Ok(PolicyControlOutcome::Permission(
+                        crate::repl::policy_controls::PermissionOutcome::Explain(
+                            explanation.clone(),
+                        ),
+                    ))
+                },
+                &explain_output,
+                |_preview| unreachable!("confirmation is not requested for explain"),
+            )
+            .expect("explain request"),
+            None
+        );
+        assert_eq!(*explain_output.0.lock().unwrap(), explain_rows);
+
+        let receipt = real_rule_receipt();
+        let rule_request = PolicyControlRequest::Rule(ego_core::config::RuleMutation {
+            effect: ego_core::config::ManagedRuleEffect::Allow,
+            rule: ego_core::permit::rule::Rule::load("read(src/**)").unwrap(),
+        });
+        let rule_rows = crate::rules::render_mutation_receipt_rows(
+            &receipt,
+            ego_core::config::ManagedRuleEffect::Allow,
+        );
+        let rule_output = PolicyTextOutput::default();
+        assert_eq!(
+            handle_policy_request(
+                rule_request.clone(),
+                |request| {
+                    applied.push(request);
+                    Ok(PolicyControlOutcome::Rule {
+                        receipt: receipt.clone(),
+                        staging: crate::repl::policy_controls::PolicyStageOutcome { changed: true },
+                    })
+                },
+                &rule_output,
+                |_preview| unreachable!("confirmation is not requested for rule"),
+            )
+            .expect("rule request"),
+            None
+        );
+        assert_eq!(*rule_output.0.lock().unwrap(), rule_rows);
+        assert_eq!(applied.len(), 3);
+    }
+
+    #[test]
+    fn handle_policy_request_remember_confirmed_applies_preview_once_in_order() {
+        let output = PolicyTextOutput::default();
+        let mut applied = Vec::new();
+        let request = PolicyControlRequest::Permission(
+            crate::repl::policy_controls::PermissionInput::Remember(
+                crate::rules::RememberRequest::new(
+                    ego_core::permit::PreparedCall::new(
+                        "read",
+                        ego_core::permit::Op::Read {
+                            path: ego_core::permit::CanonPath::new("/workspace/src/main.rs"),
+                        },
+                    ),
+                    ego_core::config::ManagedRuleEffect::Allow,
+                    ego_core::permit::CanonPath::new("/workspace"),
+                ),
+            ),
+        );
+        let preview = real_remember_preview();
+        let result = handle_policy_request(
+            request,
+            |request| {
+                applied.push(request);
+                if applied.len() == 1 {
+                    Ok(PolicyControlOutcome::RememberPreview(preview.clone()))
+                } else {
+                    Ok(PolicyControlOutcome::Rule {
+                        receipt: real_rule_receipt(),
+                        staging: crate::repl::policy_controls::PolicyStageOutcome { changed: true },
+                    })
+                }
+            },
+            &output,
+            |confirmed_preview| {
+                assert_eq!(confirmed_preview, &preview);
+                assert_eq!(
+                    *output.0.lock().unwrap(),
+                    crate::rules::render_remember_preview_rows(&preview)
+                );
+                assert_eq!(output.1.load(Ordering::SeqCst), 1);
+                crate::repl::Confirmation::Confirmed
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(output.1.load(Ordering::SeqCst), 1);
+        assert_eq!(applied.len(), 2);
+        assert!(matches!(
+            &applied[0],
+            PolicyControlRequest::Permission(
+                crate::repl::policy_controls::PermissionInput::Remember(_)
+            )
+        ));
+        assert!(matches!(
+            &applied[1],
+            PolicyControlRequest::Permission(
+                crate::repl::policy_controls::PermissionInput::ConfirmRemember(observed)
+            ) if observed == &preview
+        ));
+        let mut expected_output = crate::rules::render_remember_preview_rows(&preview);
+        expected_output.extend(crate::rules::render_remember_result_rows(
+            &ego_core::config::UserConfigTarget::Base,
+            Some(&real_rule_receipt()),
+        ));
+        assert_eq!(*output.0.lock().unwrap(), expected_output);
+    }
+
+    #[test]
+    fn handle_policy_request_declined_remember_does_not_apply_again() {
+        let output = PolicyTextOutput::default();
+        let preview = real_remember_preview();
+        let mut applies = 0;
+        let result = handle_policy_request(
+            PolicyControlRequest::Permission(
+                crate::repl::policy_controls::PermissionInput::Remember(
+                    crate::rules::RememberRequest::new(
+                        ego_core::permit::PreparedCall::new(
+                            "read",
+                            ego_core::permit::Op::Read {
+                                path: ego_core::permit::CanonPath::new("/workspace/src/main.rs"),
+                            },
+                        ),
+                        ego_core::config::ManagedRuleEffect::Allow,
+                        ego_core::permit::CanonPath::new("/workspace"),
+                    ),
+                ),
+            ),
+            |_request| {
+                applies += 1;
+                Ok(PolicyControlOutcome::RememberPreview(preview.clone()))
+            },
+            &output,
+            |_preview| crate::repl::Confirmation::Declined,
+        );
+        assert!(result.is_ok());
+        assert_eq!(applies, 1);
+        let mut expected_output = crate::rules::render_remember_preview_rows(&preview);
+        expected_output.extend(crate::rules::render_remember_result_rows(
+            &ego_core::config::UserConfigTarget::Base,
+            None,
+        ));
+        assert_eq!(*output.0.lock().unwrap(), expected_output);
+    }
+
+    #[test]
+    fn handle_policy_request_propagates_confirmation_terminal_lines_without_second_apply() {
+        let output = PolicyTextOutput::default();
+        for propagated in [
+            crate::repl::Line::Ended,
+            crate::repl::Line::ExternalBreak("draft".to_owned()),
+        ] {
+            let preview = real_remember_preview();
+            let mut applies = 0;
+            let result = handle_policy_request(
+                PolicyControlRequest::Permission(
+                    crate::repl::policy_controls::PermissionInput::Remember(
+                        crate::rules::RememberRequest::new(
+                            ego_core::permit::PreparedCall::new(
+                                "read",
+                                ego_core::permit::Op::Read {
+                                    path: ego_core::permit::CanonPath::new(
+                                        "/workspace/src/main.rs",
+                                    ),
+                                },
+                            ),
+                            ego_core::config::ManagedRuleEffect::Allow,
+                            ego_core::permit::CanonPath::new("/workspace"),
+                        ),
+                    ),
+                ),
+                |_request| {
+                    applies += 1;
+                    Ok(PolicyControlOutcome::RememberPreview(preview.clone()))
+                },
+                &output,
+                |_preview| crate::repl::Confirmation::Propagate(propagated.clone()),
+            );
+            assert_eq!(result.unwrap(), Some(propagated));
+            assert_eq!(applies, 1);
+        }
+    }
+
+    #[test]
+    fn handle_policy_request_rejects_mismatched_request_and_outcome_without_rows() {
+        let output = PolicyTextOutput::default();
+        let result = handle_policy_request(
+            PolicyControlRequest::Permission(crate::repl::policy_controls::PermissionInput::List),
+            |_request| {
+                Ok(PolicyControlOutcome::Mode {
+                    staging: crate::repl::policy_controls::PolicyStageOutcome { changed: false },
+                })
+            },
+            &output,
+            |_preview| unreachable!("mismatched outcome cannot request confirmation"),
+        );
+        assert!(result.is_err());
+        assert!(output.0.lock().unwrap().is_empty());
     }
 }
