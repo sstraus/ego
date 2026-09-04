@@ -71,6 +71,7 @@ use ego_core::run::{
     RunTermination, Signal,
 };
 use ego_core::session::{ReplaySource, ReplaySourceError};
+use ego_core::session_lifecycle::{LeasedSharedJournal, SessionMetadata};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::skill::{
     AdmittedSkillOperation, SkillError, SkillInvocation, SkillInvocationOutcome,
@@ -4833,6 +4834,7 @@ async fn execute<S: EventSink>(
         effective.clamped.money,
         currency,
     ));
+    let interactive_metadata_ceilings = effective.ceilings.clone();
 
     let mut config = TurnConfig {
         system,
@@ -4945,14 +4947,9 @@ async fn execute<S: EventSink>(
                 $hook_ports.one_hop_handle(),
                 $hook_ports.duplex_handle(),
             );
-            let journal = SharedJournal::new(Journal::new(
-                $active.id(),
-                $active.store(),
-                &clock,
-                sink,
-                Producer::Main,
-                $state,
-            ));
+            let leased_journal =
+                LeasedSharedJournal::new($active.writer(), &clock, sink, Producer::Main, $state);
+            let journal = leased_journal.shared();
             let hooks = compose_session_hooks(
                 $active.id(),
                 journal.clone(),
@@ -4973,7 +4970,7 @@ async fn execute<S: EventSink>(
                 config.system.is_some(),
             )
             .await?;
-            (journal, hooks)
+            (leased_journal, journal, hooks)
         }};
     }
 
@@ -5075,6 +5072,8 @@ async fn execute<S: EventSink>(
             Ok(ended)
         }
         Driver::Interactive { seat, between } => {
+            let interactive_metadata =
+                SessionMetadata::new(Arc::clone(&jsonl_store), Arc::new(clock));
             type CompactionRuntime = (
                 Option<SystemPrompt>,
                 Vec<RegisteredTool>,
@@ -5152,7 +5151,7 @@ async fn execute<S: EventSink>(
                             .current()
                             .map_err(|message| RunTermination::Failed { message })?,
                     };
-                    let (session_journal, session_hooks) = open_session_hooks!(
+                    let (leased_session_journal, session_journal, session_hooks) = open_session_hooks!(
                         active,
                         active.state().clone(),
                         session_hook_ports,
@@ -5367,6 +5366,49 @@ async fn execute<S: EventSink>(
                                     repl::Line::Ended => break 'epoch EpochTransition::Exit,
                                     repl::Line::Refused(why) => {
                                         diagnostics.note(why);
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(
+                                        repl::HostCommand::SessionMetadata(operation),
+                                    ) => {
+                                        if pending_work {
+                                            diagnostics.note(
+                                                "session metadata is unavailable while source work is pending",
+                                            );
+                                            continue;
+                                        }
+                                        if let Err(error) = crate::metadata::execute_interactive(
+                                            &interactive_metadata,
+                                            &leased_session_journal,
+                                            &session_journal,
+                                            &operation,
+                                            &interactive_metadata_ceilings,
+                                            &mut |message| diagnostics.note(message),
+                                        ) {
+                                            diagnostics.note(&format!(
+                                                "session metadata operation failed: {error}"
+                                            ));
+                                        }
+                                        state = match session_journal.inspect(Clone::clone) {
+                                            Ok(state) => state,
+                                            Err(error) => {
+                                                last.termination = hook_journal_termination(error);
+                                                break 'epoch EpochTransition::Exit;
+                                            }
+                                        };
+                                        last.state = state.clone();
+                                        if let Some(status) = status.as_ref()
+                                            && status.human
+                                        {
+                                            match selection.snapshot() {
+                                                Ok(selected) => {
+                                                    status.seat.refresh_status(&state, selected)
+                                                }
+                                                Err(error) => diagnostics.note(&format!(
+                                                    "the metadata status selection could not be refreshed: {error}"
+                                                )),
+                                            }
+                                        }
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Skill(
@@ -6297,7 +6339,8 @@ async fn execute<S: EventSink>(
                     };
                     drop(skill_owner);
                     drop(session_hooks);
-                    let source_state = session_journal
+                    drop(session_journal);
+                    let source_state = leased_session_journal
                         .try_into_state()
                         .map_err(hook_journal_termination)?;
                     drop(session_hook_ports);

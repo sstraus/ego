@@ -1,13 +1,17 @@
-//! Non-interactive durable session metadata execution.
+//! Durable session metadata execution.
 
 use std::sync::Arc;
 
 use ego_core::event::id::{GoalId, Seq, SessionId};
 use ego_core::goal::{GoalOwner, GoalRecord, GoalState, GoalTransition};
 use ego_core::run::RunTermination;
-use ego_core::session_lifecycle::{LifecycleError, LifecyclePublication, SessionMetadata};
+use ego_core::session_lifecycle::{
+    LeasedLifecycleAppend, LifecycleError, LifecyclePublication, SessionLifecycleStore,
+    SessionMetadata,
+};
 use ego_core::store::evidence::EvidenceRef;
 use ego_core::store::session_store::SessionMeta;
+use ego_core::turn::SharedJournal;
 use ego_tools::clock::SystemClock;
 use serde::Serialize;
 
@@ -111,6 +115,88 @@ fn execute_inner(args: &SessionMetadataArgs, out: &Stdout) -> Result<(), RunTerm
     Ok(())
 }
 
+pub(crate) fn execute_interactive<S>(
+    metadata: &SessionMetadata<S>,
+    append: &dyn LeasedLifecycleAppend,
+    journal: &SharedJournal<'_>,
+    operation: &SessionMetadataOperation,
+    ceilings: &ego_core::ceiling::Ceilings,
+    emit: &mut impl FnMut(&str),
+) -> Result<(), LifecycleError>
+where
+    S: SessionLifecycleStore,
+{
+    let current = journal
+        .inspect(Clone::clone)
+        .map_err(|error| LifecycleError::Store(error.into()))?;
+    let expected = current.last_seq;
+    let result = match operation {
+        SessionMetadataOperation::Name(NameOperation::Show) => {
+            emit(&name_text_from_title(current.title.as_deref()));
+            return Ok(());
+        }
+        SessionMetadataOperation::Name(operation) => {
+            let title = match operation {
+                NameOperation::Set(title) => Some(title.clone()),
+                NameOperation::Clear => None,
+                NameOperation::Show => unreachable!(),
+            };
+            metadata.set_title(append, expected, title).map(|changed| {
+                emit_publication_warning(changed.publication.as_ref(), emit);
+                emit(&name_text(&changed.value));
+            })
+        }
+        SessionMetadataOperation::Goal(GoalOperation::Show) => {
+            emit(&goal_text(current.goal.as_ref()));
+            return Ok(());
+        }
+        SessionMetadataOperation::Goal(operation) => {
+            let changed = match operation {
+                GoalOperation::Set(objective) => metadata.set_goal(
+                    append,
+                    expected,
+                    objective.clone(),
+                    GoalOwner::Operator,
+                    ceilings.clone(),
+                ),
+                GoalOperation::Achieve => metadata.transition_goal(
+                    append,
+                    expected,
+                    GoalTransition::Achieved {
+                        attested_by: GoalOwner::Operator,
+                        evidence: None,
+                    },
+                ),
+                GoalOperation::Block(reason) => metadata.transition_goal(
+                    append,
+                    expected,
+                    GoalTransition::BlockerObserved {
+                        reason: reason.clone(),
+                    },
+                ),
+                GoalOperation::Show => unreachable!(),
+            };
+            changed.map(|changed| {
+                emit_publication_warning(changed.publication.as_ref(), emit);
+                emit(&goal_text(Some(&changed.value)));
+            })
+        }
+    };
+
+    if let Err(error) = result {
+        if let Ok(state) = journal.inspect(Clone::clone) {
+            match operation {
+                SessionMetadataOperation::Name(_) => {
+                    emit(&name_text_from_title(state.title.as_deref()))
+                }
+                SessionMetadataOperation::Goal(_) => emit(&goal_text(state.goal.as_ref())),
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn mutation_refusal<S>(
     metadata: &SessionMetadata<S>,
     args: &SessionMetadataArgs,
@@ -156,20 +242,31 @@ fn failed(error: impl std::fmt::Display) -> RunTermination {
 }
 
 fn warn_if_publication_issue(publication: Option<&LifecyclePublication>) {
+    if let Some(warning) = publication_warning(publication) {
+        output::note(&warning);
+    }
+}
+
+fn emit_publication_warning(
+    publication: Option<&LifecyclePublication>,
+    emit: &mut impl FnMut(&str),
+) {
+    if let Some(warning) = publication_warning(publication) {
+        emit(&warning);
+    }
+}
+
+fn publication_warning(publication: Option<&LifecyclePublication>) -> Option<String> {
     match publication {
-        Some(LifecyclePublication::PublishedWithProjectionWarning { diagnostic }) => {
-            output::note(&format!(
-                "metadata is visible, but its manifest projection failed: {diagnostic}"
-            ));
-        }
-        Some(LifecyclePublication::PublishedDurabilityUncertain { diagnostic }) => {
-            output::note(&format!(
-                "metadata is visible, but its durability is uncertain: {diagnostic}"
-            ));
-        }
+        Some(LifecyclePublication::PublishedWithProjectionWarning { diagnostic }) => Some(format!(
+            "metadata is visible, but its manifest projection failed: {diagnostic}"
+        )),
+        Some(LifecyclePublication::PublishedDurabilityUncertain { diagnostic }) => Some(format!(
+            "metadata is visible, but its durability is uncertain: {diagnostic}"
+        )),
         Some(LifecyclePublication::NotPublished { .. })
         | Some(LifecyclePublication::Published)
-        | None => {}
+        | None => None,
     }
 }
 
@@ -222,10 +319,7 @@ impl<'a> From<&'a GoalRecord> for GoalView<'a> {
 
 fn render_name(args: &SessionMetadataArgs, meta: &SessionMeta, out: &Stdout) {
     match args.output {
-        Output::Text => out.line(&format!(
-            "name: {}",
-            meta.title.as_deref().unwrap_or("(none)")
-        )),
+        Output::Text => out.line(&name_text(meta)),
         Output::Json | Output::Jsonl => render_machine(
             &NameReport {
                 v: 1,
@@ -235,6 +329,14 @@ fn render_name(args: &SessionMetadataArgs, meta: &SessionMeta, out: &Stdout) {
             out,
         ),
     }
+}
+
+fn name_text(meta: &SessionMeta) -> String {
+    name_text_from_title(meta.title.as_deref())
+}
+
+fn name_text_from_title(title: Option<&str>) -> String {
+    format!("name: {}", title.unwrap_or("(none)"))
 }
 
 fn render_goal(args: &SessionMetadataArgs, goal: Option<&GoalRecord>, out: &Stdout) {
@@ -276,5 +378,132 @@ fn render_machine(value: &impl Serialize, out: &Stdout) {
     match serde_json::to_string(value) {
         Ok(line) => out.line(&line),
         Err(error) => output::note(&format!("session metadata could not be rendered: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod regression_case_tests {
+    use super::*;
+    use ego_core::event::domain::EventKind;
+    use ego_core::event::id::{Producer, Seq, TurnId};
+    use ego_core::event::time::{Clock, Timestamp};
+    use ego_core::session_lifecycle::{LeasedSharedJournal, LifecycleError, SessionLifecycleStore};
+    use ego_core::sink::NullSink;
+    use ego_tools::store::{JsonlStore, OsIo};
+    use std::path::Path;
+
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now(&self) -> Timestamp {
+            Timestamp::from_millis(1)
+        }
+    }
+
+    #[test]
+    fn regression_case_runtime_epoch_persists_and_replays() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = Arc::new(JsonlStore::new(
+            root.path(),
+            workspace.path(),
+            Box::new(OsIo),
+        ));
+        let id = ego_core::event::id::SessionId::new();
+        store
+            .publish_empty_session(id, Path::new(workspace.path()), Timestamp::from_millis(1))
+            .unwrap();
+        let opened = crate::session::open(store.as_ref(), &id, &FixedClock).unwrap();
+        let metadata = SessionMetadata::new(Arc::clone(&store), Arc::new(FixedClock));
+        let journal = LeasedSharedJournal::new(
+            &opened.writer,
+            &FixedClock,
+            &NullSink,
+            Producer::Main,
+            opened.state.clone(),
+        );
+        let shared = journal.shared();
+        let mut notices = Vec::new();
+        let ceilings = ego_core::ceiling::Ceilings::default();
+        execute_interactive(
+            &metadata,
+            &journal,
+            &shared,
+            &SessionMetadataOperation::Name(NameOperation::Set("project alpha".into())),
+            &ceilings,
+            &mut |n| notices.push(n.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(notices.last().unwrap(), "name: project alpha");
+        notices.clear();
+        let before = shared.inspect(|state| state.last_seq).unwrap();
+        assert!(matches!(
+            execute_interactive(
+                &metadata,
+                &journal,
+                &shared,
+                &SessionMetadataOperation::Name(NameOperation::Set(" \t".into())),
+                &ceilings,
+                &mut |n| notices.push(n.to_owned())
+            ),
+            Err(LifecycleError::InvalidText)
+        ));
+        assert_eq!(notices, ["name: project alpha"]);
+        assert_eq!(shared.inspect(|state| state.last_seq).unwrap(), before);
+        execute_interactive(
+            &metadata,
+            &journal,
+            &shared,
+            &SessionMetadataOperation::Goal(GoalOperation::Set("ship cleanly".into())),
+            &ceilings,
+            &mut |n| notices.push(n.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(notices.last().unwrap(), "goal active: ship cleanly");
+        shared
+            .append(
+                TurnId::new(),
+                None,
+                None,
+                EventKind::UserPrompt {
+                    text: "ordinary".into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            )
+            .unwrap();
+        let expected = {
+            let mut seq = Seq::ZERO;
+            seq.next();
+            seq.next();
+            seq.next()
+        };
+        drop(shared);
+        let state = journal.try_into_state().unwrap();
+        assert_eq!(state.last_seq, expected);
+        assert_eq!(state.title.as_deref(), Some("project alpha"));
+        assert_eq!(
+            state.goal.as_ref().map(|goal| goal.objective.as_str()),
+            Some("ship cleanly")
+        );
+        assert_eq!(
+            state.goal.as_ref().map(|goal| goal.state),
+            Some(ego_core::goal::GoalState::Active)
+        );
+        drop(opened);
+        let reopened = crate::session::open(store.as_ref(), &id, &FixedClock).unwrap();
+        assert_eq!(reopened.state.last_seq, expected);
+        assert_eq!(reopened.state.title.as_deref(), Some("project alpha"));
+        assert_eq!(
+            reopened
+                .state
+                .goal
+                .as_ref()
+                .map(|goal| goal.objective.as_str()),
+            Some("ship cleanly")
+        );
+        assert_eq!(
+            reopened.state.goal.as_ref().map(|goal| goal.state),
+            Some(ego_core::goal::GoalState::Active)
+        );
     }
 }

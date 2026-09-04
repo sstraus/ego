@@ -239,6 +239,11 @@ impl<'a> ActiveSession<'a> {
         self.opened.store()
     }
 
+    pub(crate) fn writer(&self) -> &ego_tools::store::SessionWriter<'a> {
+        let Opened::Durable(open) = &self.opened;
+        &open.writer
+    }
+
     pub fn run_evidence(&self) -> &dyn EvidenceStore {
         let Opened::Durable(open) = &self.opened;
         &open.writer
