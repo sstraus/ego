@@ -5,6 +5,7 @@
 //! public projection that every host must share.
 
 use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
+use ego_core::ceiling::Ceilings;
 use ego_core::compact::{
     COMPACTION_PROMPT, COMPACTION_PROMPT_REVISION, Checkpoint, CompactionBusy, CompactionError,
     PreparedCompaction,
@@ -36,6 +37,7 @@ use ego_core::generator::port::{AiEvent, Generator, RequestExpressibilityError};
 use ego_core::generator::types::{
     Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel, ToolDescriptor,
 };
+use ego_core::goal::GoalOwner;
 use ego_core::permit::fake::FakeFs;
 use ego_core::permit::{
     CanonPath, DuplexHandle, DuplexSpawner, OneHop, OneHopResponse, ProcessError, ProcessExecutor,
@@ -988,14 +990,27 @@ fn prepared_seed_event_starts_at_seq_one_with_fresh_target_identity() {
         (GenerationRole::Compaction, Ok(compact_profile)),
         (GenerationRole::Main, Ok(main_profile)),
     ]);
-    let (mut turn, _store, _cancel) = compaction_turn(source);
+    let source_goal = ego_core::event::id::GoalId::new();
+    let mut source_state = SessionState::default();
+    source_state.apply(&event(EventKind::SessionTitleChanged {
+        title: Some("source title".into()),
+    }));
+    source_state.apply(&event(EventKind::GoalSet {
+        id: source_goal,
+        objective: "active objective".into(),
+        owner: GoalOwner::Operator,
+        ceilings: Ceilings::default(),
+        derived_from: None,
+    }));
+    let (mut turn, _store, _cancel) = compaction_turn_with_state(source, source_state);
     let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new()))
         .expect("valid compaction prepares");
     let source = prepared.source();
     let source_seq = prepared.source_seq();
     let checkpoint_text = prepared.checkpoint().text().to_string();
     let seed = prepared.target_seed(Timestamp::from_millis(10_000));
-    let event = seed.event();
+    let events = seed.events().cloned().collect::<Vec<_>>();
+    let event = &events[0];
 
     assert_eq!(event.env.seq, seq(1));
     assert!(event.env.item.is_some());
@@ -1015,6 +1030,75 @@ fn prepared_seed_event_starts_at_seq_one_with_fresh_target_identity() {
             && *prompt_revision == COMPACTION_PROMPT_REVISION
             && *checkpoint == checkpoint_text
     ));
+    assert!(
+        matches!(events[1].kind, EventKind::SessionTitleChanged { title: Some(ref title) } if title == "source title")
+    );
+    let copied = match &events[2].kind {
+        EventKind::GoalSet {
+            id,
+            objective,
+            owner,
+            ceilings,
+            derived_from,
+        } => (id, objective, owner, ceilings, derived_from),
+        other => panic!("expected trailing GoalSet, got {other:?}"),
+    };
+    assert_ne!(*copied.0, source_goal);
+    assert_eq!(copied.1, "active objective");
+    assert_eq!(*copied.2, GoalOwner::Operator);
+    assert_eq!(*copied.3, Ceilings::default());
+    assert_eq!(*copied.4, Some(source_goal));
+}
+
+#[test]
+fn prepared_seed_omits_terminal_goal() {
+    let mut state = SessionState::default();
+    let id = ego_core::event::id::GoalId::new();
+    state.apply(&event(EventKind::GoalSet {
+        id,
+        objective: "done".into(),
+        owner: GoalOwner::Operator,
+        ceilings: Ceilings::default(),
+        derived_from: None,
+    }));
+    state.apply(&event(EventKind::GoalTransitioned {
+        id,
+        transition: ego_core::goal::GoalTransition::Achieved {
+            attested_by: GoalOwner::Operator,
+            evidence: None,
+        },
+    }));
+    let (compact_profile, _) = compaction_profile(
+        "compaction-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (main_profile, _) = compaction_profile(
+        "main-model",
+        ThinkingLevel::Low,
+        8_192,
+        512,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(compact_profile)),
+        (GenerationRole::Main, Ok(main_profile)),
+    ]);
+    let (mut turn, _, _) = compaction_turn_with_state(source, state);
+    let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+    assert!(
+        !prepared
+            .target_seed(Timestamp::from_millis(10_000))
+            .events()
+            .any(|event| matches!(event.kind, EventKind::GoalSet { .. }))
+    );
 }
 
 #[test]

@@ -1243,6 +1243,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         target_system: Option<SystemPrompt>,
         target_tools: Vec<ToolDescriptor>,
     ) -> Result<PreparedCompaction, CompactionError> {
+        let title = self.state().title.clone();
+        let goal = self.state().goal.clone();
         let (history, repairs) =
             conversation_from_with_blobs(&self.state(), self.tools.blob_store())
                 .map_err(CompactionError::History)?;
@@ -1463,6 +1465,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             source_seq,
             checkpoint,
             baseline,
+            title,
+            goal,
         })
     }
 

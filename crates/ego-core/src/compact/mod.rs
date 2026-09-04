@@ -14,6 +14,7 @@ use crate::generation_model_source::GenerationModelError;
 use crate::generator::capabilities::CapabilityGap;
 use crate::generator::port::RequestExpressibilityError;
 use crate::generator::types::{GenRequest, HistoryError, StopReason};
+use crate::goal::GoalRecord;
 use crate::run::RequestId;
 use crate::session::{TargetPublication, TargetSeed};
 use crate::store::session_store::StoreError;
@@ -143,6 +144,8 @@ pub struct PreparedCompaction {
     pub(crate) source_seq: Seq,
     pub(crate) checkpoint: Checkpoint,
     pub(crate) baseline: GenRequest,
+    pub(crate) title: Option<String>,
+    pub(crate) goal: Option<GoalRecord>,
 }
 
 impl PreparedCompaction {
@@ -174,6 +177,8 @@ impl PreparedCompaction {
             self.checkpoint.text().to_string(),
             at,
         )
+        .with_title(self.title.clone())
+        .with_goal(self.goal.as_ref())
     }
 }
 
@@ -634,6 +639,8 @@ mod transition_contract_tests {
                 max_output_tokens: Some(256),
                 parallel_tool_calls: false,
             },
+            title: None,
+            goal: None,
         }
     }
 
