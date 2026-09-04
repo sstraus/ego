@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ceiling::Ceilings;
 use crate::event::id::{GoalId, Seq, TurnId};
+use crate::store::evidence::EvidenceRef;
 
 /// Authority responsible for a goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +27,23 @@ pub enum GoalState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GoalTransition {
-    BlockerObserved { reason: String },
+    BlockerObserved {
+        reason: String,
+    },
+    Achieved {
+        attested_by: GoalOwner,
+        evidence: Option<EvidenceRef>,
+    },
+}
+
+/// A goal transition that would contradict its durable authority or state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalRefusal {
+    NoActiveGoal,
+    AlreadyTerminal(GoalState),
+    ActiveGoalExists,
+    EvidenceRequired,
+    AttestationWouldWiden,
 }
 
 /// Immutable goal facts plus the current blocker audit projected by replay.
@@ -41,11 +58,32 @@ pub struct GoalRecord {
     pub state: GoalState,
     pub blocker_reason: Option<String>,
     pub blocker_observations: u64,
+    pub achieved_by: Option<GoalOwner>,
+    pub achievement_evidence: Option<EvidenceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) blocker_turns: Vec<TurnId>,
 }
 
 impl GoalRecord {
+    pub fn admits(&self, transition: &GoalTransition) -> Result<(), GoalRefusal> {
+        if self.state != GoalState::Active {
+            return Err(GoalRefusal::AlreadyTerminal(self.state));
+        }
+        if let GoalTransition::Achieved {
+            attested_by: GoalOwner::Automated,
+            evidence,
+        } = transition
+        {
+            if self.owner != GoalOwner::Automated {
+                return Err(GoalRefusal::AttestationWouldWiden);
+            }
+            if evidence.is_none() {
+                return Err(GoalRefusal::EvidenceRequired);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn observe_blocker(&mut self, turn: TurnId, reason: &str) {
         if self.state != GoalState::Active {
             return;

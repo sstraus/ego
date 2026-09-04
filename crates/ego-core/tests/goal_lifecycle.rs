@@ -6,6 +6,7 @@ use ego_core::event::id::{EventId, GoalId, Producer, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::goal::{GoalOwner, GoalState, GoalTransition};
 use ego_core::state::SessionState;
+use ego_core::store::evidence::{EvidenceId, EvidenceRef};
 
 fn event(turn: TurnId, seq: u64, kind: EventKind) -> DomainEvent {
     DomainEvent {
@@ -127,4 +128,81 @@ fn changed_condition_and_intervening_completed_turn_reset_blocker_audit() {
         GoalState::Active
     ));
     assert_eq!(state.goal.as_ref().unwrap().blocker_observations, 1);
+}
+
+#[test]
+fn achievement_matrix_enforces_attester_and_evidence_and_is_terminal() {
+    let evidence = || EvidenceRef {
+        id: EvidenceId::parse("a".repeat(64)).unwrap(),
+        bytes: 1,
+    };
+    let achieve = |owner, attested_by, current_evidence| {
+        let turn = TurnId::new();
+        let (creation, id) = started(turn, 1, owner);
+        let mut state = SessionState::default();
+        state.apply(&creation);
+        state.apply(&event(
+            turn,
+            2,
+            EventKind::GoalTransitioned {
+                id,
+                transition: GoalTransition::Achieved {
+                    attested_by,
+                    evidence: current_evidence,
+                },
+            },
+        ));
+        (state, turn, id)
+    };
+
+    for owner in [GoalOwner::Operator, GoalOwner::Automated] {
+        let (state, _, _) = achieve(owner, GoalOwner::Operator, None);
+        assert!(matches!(state.goal.unwrap().state, GoalState::Achieved));
+    }
+    let current_evidence = evidence();
+    let (state, turn, id) = achieve(
+        GoalOwner::Automated,
+        GoalOwner::Automated,
+        Some(current_evidence.clone()),
+    );
+    let record = state.goal.as_ref().unwrap();
+    assert!(matches!(record.state, GoalState::Achieved));
+    assert_eq!(record.achieved_by, Some(GoalOwner::Automated));
+    assert_eq!(record.achievement_evidence, Some(current_evidence.clone()));
+    let admitted = EventKind::GoalTransitioned {
+        id,
+        transition: GoalTransition::Achieved {
+            attested_by: GoalOwner::Automated,
+            evidence: Some(current_evidence.clone()),
+        },
+    };
+    assert_eq!(
+        admitted.blob_references(),
+        vec![current_evidence.blob_ref()]
+    );
+    let mut state = state;
+    state.apply(&event(
+        turn,
+        3,
+        EventKind::GoalTransitioned {
+            id,
+            transition: GoalTransition::Achieved {
+                attested_by: GoalOwner::Operator,
+                evidence: None,
+            },
+        },
+    ));
+    assert_eq!(
+        state.goal.as_ref().unwrap().achieved_by,
+        Some(GoalOwner::Automated)
+    );
+    assert_eq!(
+        state.goal.as_ref().unwrap().achievement_evidence,
+        Some(current_evidence)
+    );
+
+    let (state, _, _) = achieve(GoalOwner::Automated, GoalOwner::Automated, None);
+    assert!(matches!(state.goal.unwrap().state, GoalState::Active));
+    let (state, _, _) = achieve(GoalOwner::Operator, GoalOwner::Automated, Some(evidence()));
+    assert!(matches!(state.goal.unwrap().state, GoalState::Active));
 }

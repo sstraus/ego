@@ -1603,6 +1603,8 @@ impl SessionState {
                         state: GoalState::Active,
                         blocker_reason: None,
                         blocker_observations: 0,
+                        achieved_by: None,
+                        achievement_evidence: None,
                         blocker_turns: Vec::new(),
                     });
                 }
@@ -1611,9 +1613,20 @@ impl SessionState {
                 let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) else {
                     return;
                 };
+                if goal.admits(transition).is_err() {
+                    return;
+                }
                 match transition {
                     GoalTransition::BlockerObserved { reason } => {
                         goal.observe_blocker(ev.env.turn, reason);
+                    }
+                    GoalTransition::Achieved {
+                        attested_by,
+                        evidence,
+                    } => {
+                        goal.state = GoalState::Achieved;
+                        goal.achieved_by = Some(*attested_by);
+                        goal.achievement_evidence = evidence.clone();
                     }
                 }
             }

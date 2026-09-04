@@ -559,6 +559,14 @@ impl EventKind {
                     references.push(feedback.reference().blob_ref());
                 }
             }
+            Self::GoalTransitioned {
+                transition:
+                    GoalTransition::Achieved {
+                        evidence: Some(evidence),
+                        ..
+                    },
+                ..
+            } => references.push(evidence.blob_ref()),
             Self::SubagentRequested { task, .. } => references.push(task.clone()),
             Self::SubagentSettled { terminal, .. } => match terminal {
                 SubagentTerminal::Returned { final_message }
