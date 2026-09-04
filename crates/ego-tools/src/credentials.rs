@@ -9,14 +9,23 @@ use ego_core::credentials::{
     CredentialStoreErrorKind, CredentialStoreOperation, SecretMaterial,
 };
 use ego_core::suspension::{ContinuationError, ResumeKeySource};
+use ego_core::turn::{
+    GenerationPolicyCaptureStore, GenerationPolicyCaptureStoreError,
+    GenerationPolicyCaptureStoreErrorKind, GenerationPolicyCaptureStoreOperation,
+    GenerationPolicyDigest, GenerationPolicySnapshot,
+};
 use fd_lock::RwLock;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 const SERVICE: &str = "ego";
-const USER_PREFIX: &str = "mcp/oauth/v1/";
-const ENVELOPE_MAGIC: &[u8; 8] = b"EGO-MCP\0";
-const ENVELOPE_VERSION: u8 = 1;
+const OAUTH_USER_PREFIX: &str = "mcp/oauth/v1/";
+const OAUTH_ENVELOPE_MAGIC: &[u8; 8] = b"EGO-MCP\0";
+const OAUTH_ENVELOPE_VERSION: u8 = 1;
+const CAPTURE_USER_PREFIX: &str = "mcp/generation-policy-capture/v1/";
+const CAPTURE_KEY_DOMAIN: &[u8] = b"ego:generation-policy-capture-key:v1";
+const CAPTURE_ENVELOPE_MAGIC: &[u8; 8] = b"EGO-GPC\0";
+const CAPTURE_ENVELOPE_VERSION: u8 = 1;
 const RESUME_USER: &str = "mcp/resume/v1";
 const RESUME_LOCK: &str = "mcp-resume-key.lock";
 
@@ -146,6 +155,23 @@ impl Default for OsCredentialStore<NativeKeyringBackend> {
     }
 }
 
+/// Native confidential storage for generation policy captures.
+pub struct OsGenerationPolicyCaptureStore<B = NativeKeyringBackend> {
+    backend: B,
+}
+
+impl<B> OsGenerationPolicyCaptureStore<B> {
+    pub fn new(backend: B) -> Self {
+        Self { backend }
+    }
+}
+
+impl Default for OsGenerationPolicyCaptureStore<NativeKeyringBackend> {
+    fn default() -> Self {
+        Self::new(NativeKeyringBackend)
+    }
+}
+
 /// Stable machine resume key stored in the native credential backend.
 pub struct OsResumeKey<B = NativeKeyringBackend> {
     backend: B,
@@ -224,13 +250,124 @@ fn resume_key_unavailable() -> ContinuationError {
     ContinuationError::Unavailable("native resume key is unavailable".to_owned())
 }
 
+impl<B> GenerationPolicyCaptureStore for OsGenerationPolicyCaptureStore<B>
+where
+    B: CredentialBackend,
+{
+    fn store(
+        &self,
+        id: &str,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<(), GenerationPolicyCaptureStoreError> {
+        let canonical_key = Zeroizing::new(capture_key(id));
+        let user = user_for(CAPTURE_USER_PREFIX, &canonical_key);
+        match self.backend.get(SERVICE, &user) {
+            Ok(Some(existing)) => {
+                let existing = Zeroizing::new(existing);
+                decode_capture_snapshot(&canonical_key, &existing).map_err(|kind| {
+                    capture_error(GenerationPolicyCaptureStoreOperation::Store, kind)
+                })?;
+            }
+            Ok(None) | Err(CredentialBackendError::NoEntry) => {}
+            Err(error) => {
+                return Err(capture_backend_error(
+                    GenerationPolicyCaptureStoreOperation::Store,
+                    error,
+                    false,
+                ));
+            }
+        }
+
+        let confidential = snapshot.encode_confidential();
+        let envelope = encode_envelope(
+            CAPTURE_ENVELOPE_MAGIC,
+            CAPTURE_ENVELOPE_VERSION,
+            &canonical_key,
+            confidential.expose_secret_bytes(),
+        )
+        .ok_or_else(|| {
+            capture_error(
+                GenerationPolicyCaptureStoreOperation::Store,
+                GenerationPolicyCaptureStoreErrorKind::CapacityExceeded,
+            )
+        })?;
+        self.backend.put(SERVICE, &user, envelope).map_err(|error| {
+            capture_backend_error(GenerationPolicyCaptureStoreOperation::Store, error, true)
+        })
+    }
+
+    fn load(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<Arc<GenerationPolicySnapshot>, GenerationPolicyCaptureStoreError> {
+        let canonical_key = Zeroizing::new(capture_key(id));
+        let user = user_for(CAPTURE_USER_PREFIX, &canonical_key);
+        let envelope = match self.backend.get(SERVICE, &user) {
+            Ok(Some(envelope)) => envelope,
+            Ok(None) | Err(CredentialBackendError::NoEntry) => {
+                return Err(capture_error(
+                    GenerationPolicyCaptureStoreOperation::Load,
+                    GenerationPolicyCaptureStoreErrorKind::Missing,
+                ));
+            }
+            Err(error) => {
+                return Err(capture_backend_error(
+                    GenerationPolicyCaptureStoreOperation::Load,
+                    error,
+                    false,
+                ));
+            }
+        };
+        let envelope = Zeroizing::new(envelope);
+        let snapshot = Arc::new(
+            decode_capture_snapshot(&canonical_key, &envelope)
+                .map_err(|kind| capture_error(GenerationPolicyCaptureStoreOperation::Load, kind))?,
+        );
+        if snapshot.digest() != expected.clone() {
+            return Err(capture_error(
+                GenerationPolicyCaptureStoreOperation::Load,
+                GenerationPolicyCaptureStoreErrorKind::DigestMismatch,
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    fn delete(&self, id: &str) -> Result<(), GenerationPolicyCaptureStoreError> {
+        let canonical_key = Zeroizing::new(capture_key(id));
+        let user = user_for(CAPTURE_USER_PREFIX, &canonical_key);
+        let envelope = match self.backend.get(SERVICE, &user) {
+            Ok(Some(envelope)) => envelope,
+            Ok(None) | Err(CredentialBackendError::NoEntry) => return Ok(()),
+            Err(error) => {
+                return Err(capture_backend_error(
+                    GenerationPolicyCaptureStoreOperation::Delete,
+                    error,
+                    false,
+                ));
+            }
+        };
+        let envelope = Zeroizing::new(envelope);
+        decode_capture_snapshot(&canonical_key, &envelope)
+            .map_err(|kind| capture_error(GenerationPolicyCaptureStoreOperation::Delete, kind))?;
+        match self.backend.delete(SERVICE, &user) {
+            Ok(_) | Err(CredentialBackendError::NoEntry) => Ok(()),
+            Err(error) => Err(capture_backend_error(
+                GenerationPolicyCaptureStoreOperation::Delete,
+                error,
+                false,
+            )),
+        }
+    }
+}
+
 impl<B> CredentialStore for OsCredentialStore<B>
 where
     B: CredentialBackend,
 {
     fn get(&self, key: &CredentialKey) -> Result<Option<SecretMaterial>, CredentialStoreError> {
         let canonical_key = key.canonical_bytes();
-        let user = user_for(&canonical_key);
+        let user = user_for(OAUTH_USER_PREFIX, &canonical_key);
         let Some(envelope) = self
             .backend
             .get(SERVICE, &user)
@@ -242,30 +379,47 @@ where
             return Ok(None);
         };
         let envelope = Zeroizing::new(envelope);
-        let secret = decode_envelope(&canonical_key, &envelope)
-            .map_err(|kind| envelope_error(CredentialStoreOperation::Get, kind))?;
+        let secret = decode_envelope(
+            OAUTH_ENVELOPE_MAGIC,
+            OAUTH_ENVELOPE_VERSION,
+            &canonical_key,
+            &envelope,
+        )
+        .map_err(|error| envelope_error(CredentialStoreOperation::Get, error.credential_kind()))?;
         Ok(Some(SecretMaterial::new(secret.to_vec())))
     }
 
     fn put(&self, key: &CredentialKey, value: SecretMaterial) -> Result<(), CredentialStoreError> {
         let canonical_key = key.canonical_bytes();
-        let user = user_for(&canonical_key);
+        let user = user_for(OAUTH_USER_PREFIX, &canonical_key);
         if let Some(existing) = self
             .backend
             .get(SERVICE, &user)
             .map_err(|error| backend_error(CredentialStoreOperation::Put, error))?
         {
             let existing = Zeroizing::new(existing);
-            decode_envelope(&canonical_key, &existing)
-                .map_err(|kind| envelope_error(CredentialStoreOperation::Put, kind))?;
-        }
-        let envelope =
-            encode_envelope(&canonical_key, value.expose_secret_bytes()).ok_or_else(|| {
-                CredentialStoreError::new(
-                    CredentialStoreOperation::Put,
-                    CredentialStoreErrorKind::Invalid,
-                )
+            decode_envelope(
+                OAUTH_ENVELOPE_MAGIC,
+                OAUTH_ENVELOPE_VERSION,
+                &canonical_key,
+                &existing,
+            )
+            .map_err(|error| {
+                envelope_error(CredentialStoreOperation::Put, error.credential_kind())
             })?;
+        }
+        let envelope = encode_envelope(
+            OAUTH_ENVELOPE_MAGIC,
+            OAUTH_ENVELOPE_VERSION,
+            &canonical_key,
+            value.expose_secret_bytes(),
+        )
+        .ok_or_else(|| {
+            CredentialStoreError::new(
+                CredentialStoreOperation::Put,
+                CredentialStoreErrorKind::Invalid,
+            )
+        })?;
         self.backend
             .put(SERVICE, &user, envelope)
             .map_err(|error| backend_error(CredentialStoreOperation::Put, error))
@@ -273,7 +427,7 @@ where
 
     fn delete(&self, key: &CredentialKey) -> Result<CredentialRemoval, CredentialStoreError> {
         let canonical_key = key.canonical_bytes();
-        let user = user_for(&canonical_key);
+        let user = user_for(OAUTH_USER_PREFIX, &canonical_key);
         let Some(envelope) = self
             .backend
             .get(SERVICE, &user)
@@ -285,8 +439,15 @@ where
             return Ok(CredentialRemoval::Absent);
         };
         let envelope = Zeroizing::new(envelope);
-        decode_envelope(&canonical_key, &envelope)
-            .map_err(|kind| envelope_error(CredentialStoreOperation::Delete, kind))?;
+        decode_envelope(
+            OAUTH_ENVELOPE_MAGIC,
+            OAUTH_ENVELOPE_VERSION,
+            &canonical_key,
+            &envelope,
+        )
+        .map_err(|error| {
+            envelope_error(CredentialStoreOperation::Delete, error.credential_kind())
+        })?;
         self.backend.delete(SERVICE, &user).map_or_else(
             |error| match error {
                 CredentialBackendError::NoEntry => Ok(CredentialRemoval::Absent),
@@ -332,10 +493,71 @@ fn envelope_error(
     CredentialStoreError::new(operation, kind)
 }
 
-fn user_for(canonical_key: &[u8]) -> String {
+fn capture_backend_error(
+    operation: GenerationPolicyCaptureStoreOperation,
+    error: CredentialBackendError,
+    capacity_on_too_long: bool,
+) -> GenerationPolicyCaptureStoreError {
+    let kind = match error {
+        CredentialBackendError::TooLong if capacity_on_too_long => {
+            GenerationPolicyCaptureStoreErrorKind::CapacityExceeded
+        }
+        CredentialBackendError::BadEncoding
+        | CredentialBackendError::BadDataFormat
+        | CredentialBackendError::BadStoreFormat => GenerationPolicyCaptureStoreErrorKind::Corrupt,
+        CredentialBackendError::NoEntry
+        | CredentialBackendError::Invalid
+        | CredentialBackendError::TooLong
+        | CredentialBackendError::Ambiguous
+        | CredentialBackendError::NotSupportedByStore
+        | CredentialBackendError::PlatformFailure
+        | CredentialBackendError::NoStorageAccess
+        | CredentialBackendError::NoDefaultStore
+        | CredentialBackendError::Unavailable => GenerationPolicyCaptureStoreErrorKind::Unavailable,
+    };
+    capture_error(operation, kind)
+}
+
+fn capture_error(
+    operation: GenerationPolicyCaptureStoreOperation,
+    kind: GenerationPolicyCaptureStoreErrorKind,
+) -> GenerationPolicyCaptureStoreError {
+    GenerationPolicyCaptureStoreError::new(operation, kind)
+}
+
+fn capture_key(id: &str) -> Vec<u8> {
+    let mut key = Vec::new();
+    push_capture_key_field(&mut key, 0, CAPTURE_KEY_DOMAIN);
+    push_capture_key_field(&mut key, 1, id.as_bytes());
+    key
+}
+
+fn push_capture_key_field(key: &mut Vec<u8>, tag: u8, value: &[u8]) {
+    key.push(tag);
+    key.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    key.extend_from_slice(value);
+}
+
+fn decode_capture_snapshot(
+    canonical_key: &[u8],
+    envelope: &[u8],
+) -> Result<GenerationPolicySnapshot, GenerationPolicyCaptureStoreErrorKind> {
+    let encoded = decode_envelope(
+        CAPTURE_ENVELOPE_MAGIC,
+        CAPTURE_ENVELOPE_VERSION,
+        canonical_key,
+        envelope,
+    )
+    .map_err(|_| GenerationPolicyCaptureStoreErrorKind::Corrupt)?;
+    let encoded = SecretMaterial::new(encoded.to_vec());
+    GenerationPolicySnapshot::decode_confidential(&encoded)
+        .map_err(|_| GenerationPolicyCaptureStoreErrorKind::Corrupt)
+}
+
+fn user_for(prefix: &str, canonical_key: &[u8]) -> String {
     let digest = Sha256::digest(canonical_key);
-    let mut user = String::with_capacity(USER_PREFIX.len() + digest.len() * 2);
-    user.push_str(USER_PREFIX);
+    let mut user = String::with_capacity(prefix.len() + digest.len() * 2);
+    user.push_str(prefix);
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in digest {
         user.push(HEX[usize::from(byte >> 4)] as char);
@@ -344,13 +566,18 @@ fn user_for(canonical_key: &[u8]) -> String {
     user
 }
 
-fn encode_envelope(canonical_key: &[u8], secret: &[u8]) -> Option<Vec<u8>> {
+fn encode_envelope(
+    magic: &[u8; 8],
+    version: u8,
+    canonical_key: &[u8],
+    secret: &[u8],
+) -> Option<Vec<u8>> {
     let key_len = u32::try_from(canonical_key.len()).ok()?;
     let secret_len = u32::try_from(secret.len()).ok()?;
     let mut envelope =
-        Vec::with_capacity(ENVELOPE_MAGIC.len() + 1 + 4 + canonical_key.len() + 4 + secret.len());
-    envelope.extend_from_slice(ENVELOPE_MAGIC);
-    envelope.push(ENVELOPE_VERSION);
+        Vec::with_capacity(magic.len() + 1 + 4 + canonical_key.len() + 4 + secret.len());
+    envelope.extend_from_slice(magic);
+    envelope.push(version);
     envelope.extend_from_slice(&key_len.to_be_bytes());
     envelope.extend_from_slice(canonical_key);
     envelope.extend_from_slice(&secret_len.to_be_bytes());
@@ -358,43 +585,60 @@ fn encode_envelope(canonical_key: &[u8], secret: &[u8]) -> Option<Vec<u8>> {
     Some(envelope)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvelopeError {
+    Corrupt,
+    UnsupportedVersion,
+    Collision,
+}
+
+impl EnvelopeError {
+    fn credential_kind(self) -> CredentialStoreErrorKind {
+        match self {
+            Self::Corrupt => CredentialStoreErrorKind::Corrupt,
+            Self::UnsupportedVersion => CredentialStoreErrorKind::UnsupportedVersion,
+            Self::Collision => CredentialStoreErrorKind::Collision,
+        }
+    }
+}
+
 fn decode_envelope<'a>(
+    magic: &[u8; 8],
+    expected_version: u8,
     expected_key: &[u8],
     envelope: &'a [u8],
-) -> Result<&'a [u8], CredentialStoreErrorKind> {
-    let Some(rest) = envelope.strip_prefix(ENVELOPE_MAGIC) else {
-        return Err(CredentialStoreErrorKind::Corrupt);
+) -> Result<&'a [u8], EnvelopeError> {
+    let Some(rest) = envelope.strip_prefix(magic) else {
+        return Err(EnvelopeError::Corrupt);
     };
     let Some((&version, mut rest)) = rest.split_first() else {
-        return Err(CredentialStoreErrorKind::Corrupt);
+        return Err(EnvelopeError::Corrupt);
     };
-    if version != ENVELOPE_VERSION {
-        return Err(CredentialStoreErrorKind::UnsupportedVersion);
+    if version != expected_version {
+        return Err(EnvelopeError::UnsupportedVersion);
     }
     let key_len = take_u32(&mut rest)?;
     let stored_key = take_bytes(&mut rest, key_len)?;
     let secret_len = take_u32(&mut rest)?;
     let secret = take_bytes(&mut rest, secret_len)?;
     if !rest.is_empty() {
-        return Err(CredentialStoreErrorKind::Corrupt);
+        return Err(EnvelopeError::Corrupt);
     }
     if stored_key != expected_key {
-        return Err(CredentialStoreErrorKind::Collision);
+        return Err(EnvelopeError::Collision);
     }
     Ok(secret)
 }
 
-fn take_u32(bytes: &mut &[u8]) -> Result<usize, CredentialStoreErrorKind> {
+fn take_u32(bytes: &mut &[u8]) -> Result<usize, EnvelopeError> {
     let raw = take_bytes(bytes, 4)?;
-    let raw: [u8; 4] = raw
-        .try_into()
-        .map_err(|_| CredentialStoreErrorKind::Corrupt)?;
+    let raw: [u8; 4] = raw.try_into().map_err(|_| EnvelopeError::Corrupt)?;
     Ok(u32::from_be_bytes(raw) as usize)
 }
 
-fn take_bytes<'a>(bytes: &mut &'a [u8], len: usize) -> Result<&'a [u8], CredentialStoreErrorKind> {
+fn take_bytes<'a>(bytes: &mut &'a [u8], len: usize) -> Result<&'a [u8], EnvelopeError> {
     if bytes.len() < len {
-        return Err(CredentialStoreErrorKind::Corrupt);
+        return Err(EnvelopeError::Corrupt);
     }
     let (taken, rest) = bytes.split_at(len);
     *bytes = rest;
