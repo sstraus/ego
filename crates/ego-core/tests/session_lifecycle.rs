@@ -383,12 +383,53 @@ fn fork_preserves_lineage_and_title_but_not_session_identity() {
     let (service, _store, _runs) = service();
     let source = service.create(PathBuf::from("/workspace")).unwrap();
     service.set_title(source.id, Some("named".into())).unwrap();
+    let source_goal = service
+        .set_goal(
+            source.id,
+            "active objective".into(),
+            GoalOwner::Operator,
+            ego_core::ceiling::Ceilings::default(),
+        )
+        .unwrap();
     let child = futures::executor::block_on(service.fork(source.id)).unwrap();
     assert_ne!(source.id, child.id);
     assert_eq!(
         service.meta(child.id).unwrap().title.as_deref(),
         Some("named")
     );
+    let child_goal = service.goal(child.id).unwrap().unwrap();
+    assert_ne!(child_goal.id, source_goal.id);
+    assert_eq!(child_goal.derived_from, Some(source_goal.id));
+    assert_eq!(child_goal.objective, source_goal.objective);
+    assert_eq!(child_goal.owner, source_goal.owner);
+    assert_eq!(child_goal.ceilings, source_goal.ceilings);
+    assert_eq!(child_goal.state, GoalState::Active);
+    assert_eq!(service.goal(source.id).unwrap().unwrap(), source_goal);
+}
+
+#[test]
+fn fork_does_not_copy_terminal_goal() {
+    let (service, _store, _runs) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap();
+    service
+        .set_goal(
+            source.id,
+            "completed objective".into(),
+            GoalOwner::Operator,
+            ego_core::ceiling::Ceilings::default(),
+        )
+        .unwrap();
+    service
+        .transition_goal(
+            source.id,
+            GoalTransition::Achieved {
+                attested_by: GoalOwner::Operator,
+                evidence: None,
+            },
+        )
+        .unwrap();
+    let child = futures::executor::block_on(service.fork(source.id)).unwrap();
+    assert_eq!(service.goal(child.id).unwrap(), None);
 }
 
 #[test]

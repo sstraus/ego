@@ -472,7 +472,11 @@ where
         let (state, _) = self.replay(source)?;
         let prepared = PreparedFork::new(source, &state, self.clock.now())?;
         ReplayContext::new(&*self.store, &*self.store).replay_lineage(prepared.seed().lineage())?;
-        let seed = prepared.seed().clone().with_title(meta.title);
+        let seed = prepared
+            .seed()
+            .clone()
+            .with_title(meta.title)
+            .with_goal(state.goal.as_ref());
         let target = SessionId::new();
         let publication = self.store.publish_fork(target, &seed);
         if !publication.switch_target() {

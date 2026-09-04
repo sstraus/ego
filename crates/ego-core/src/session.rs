@@ -11,6 +11,7 @@ use crate::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use crate::event::time::Timestamp;
 use crate::generator::history::conversation_from_with_blob_reader;
 use crate::generator::types::Conversation;
+use crate::goal::{GoalRecord, GoalState};
 use crate::state::SessionState;
 use crate::store::blob::{BlobError, BlobRef};
 use crate::store::session_store::{SessionEntry, SessionStore};
@@ -456,7 +457,27 @@ impl TargetSeed {
         let Some(title) = title else {
             return self;
         };
-        let mut seq = self.event.env.seq;
+        self.push_trailing(EventKind::SessionTitleChanged { title: Some(title) });
+        self
+    }
+
+    pub(crate) fn with_goal(mut self, goal: Option<&GoalRecord>) -> Self {
+        let Some(goal) = goal.filter(|goal| goal.state == GoalState::Active) else {
+            return self;
+        };
+        self.push_trailing(EventKind::GoalSet {
+            id: crate::event::id::GoalId::new(),
+            objective: goal.objective.clone(),
+            owner: goal.owner,
+            ceilings: goal.ceilings.clone(),
+            derived_from: Some(goal.id),
+        });
+        self
+    }
+
+    fn push_trailing(&mut self, kind: EventKind) {
+        let previous = self.trailing_events.last().unwrap_or(&self.event);
+        let mut seq = previous.env.seq;
         seq.next();
         self.trailing_events.push(DomainEvent {
             env: Envelope {
@@ -464,13 +485,12 @@ impl TargetSeed {
                 id: EventId::new(),
                 turn: self.event.env.turn,
                 item: None,
-                parent: Some(self.event.env.id),
+                parent: Some(previous.env.id),
                 ts: self.event.env.ts,
                 producer: Producer::Main,
             },
-            kind: EventKind::SessionTitleChanged { title: Some(title) },
+            kind,
         });
-        self
     }
 
     /// The complete semantic prefix published for the target, beginning
