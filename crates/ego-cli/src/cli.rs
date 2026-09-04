@@ -58,6 +58,8 @@ pub enum Invocation {
     /// "which session" is identical, and a `ResumeArgs` would be the parallel
     /// implementation `AGENTS.md`'s reuse rule forbids.
     Resume(Box<Args>),
+    /// `ego resume ID --name ...|--goal ...` — durable metadata only.
+    SessionMetadata(Box<SessionMetadataArgs>),
     /// `ego ls` — the catalogue, this workspace's by default.
     Ls(Box<LsArgs>),
     /// `ego usage` — one versioned report for this workspace.
@@ -316,6 +318,38 @@ pub struct LsArgs {
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
     pub output: Output,
+}
+
+/// One closed metadata-only resume request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMetadataArgs {
+    pub session: SessionId,
+    pub operation: SessionMetadataOperation,
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    pub output: Output,
+    pub(crate) profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionMetadataOperation {
+    Name(NameOperation),
+    Goal(GoalOperation),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameOperation {
+    Show,
+    Set(String),
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalOperation {
+    Show,
+    Set(String),
+    Achieve,
+    Block(String),
 }
 
 /// The exact `ego usage [--period P] [--json]` request.
@@ -616,6 +650,26 @@ struct ResumeCommand {
 
     #[command(flatten)]
     flags: Flags,
+}
+
+/// The metadata-only `resume` grammar. No run flag is present by construction.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego resume",
+    about = "Read or change durable session metadata.",
+    disable_help_subcommand = true
+)]
+struct SessionMetadataCommand {
+    id: String,
+
+    #[arg(long, value_parser = parse_name_operation, conflicts_with = "goal", required_unless_present = "goal")]
+    name: Option<NameOperation>,
+
+    #[arg(long, value_parser = parse_goal_operation, conflicts_with = "name", required_unless_present = "name")]
+    goal: Option<GoalOperation>,
+
+    #[command(flatten)]
+    common: Common,
 }
 
 /// `ego ls` — the catalogue.
@@ -1353,6 +1407,35 @@ fn parse_resume_answer(value: &str) -> Result<ResumeAnswer, String> {
     })
 }
 
+fn parse_name_operation(value: &str) -> Result<NameOperation, String> {
+    match value {
+        "show" => Ok(NameOperation::Show),
+        "clear" => Ok(NameOperation::Clear),
+        _ => value
+            .strip_prefix("set=")
+            .filter(|text| !text.is_empty())
+            .map(|text| NameOperation::Set(text.to_owned()))
+            .ok_or_else(|| "expected show, set=TEXT, or clear".to_owned()),
+    }
+}
+
+fn parse_goal_operation(value: &str) -> Result<GoalOperation, String> {
+    match value {
+        "show" => Ok(GoalOperation::Show),
+        "achieve" => Ok(GoalOperation::Achieve),
+        _ => {
+            if let Some(text) = value.strip_prefix("set=").filter(|text| !text.is_empty()) {
+                return Ok(GoalOperation::Set(text.to_owned()));
+            }
+            value
+                .strip_prefix("block=")
+                .filter(|text| !text.is_empty())
+                .map(|text| GoalOperation::Block(text.to_owned()))
+                .ok_or_else(|| "expected show, set=TEXT, achieve, or block=REASON".to_owned())
+        }
+    }
+}
+
 /// Split `argv` at the first bare `--`.
 ///
 /// Everything after it is opaque positional input. It is prompt text for the
@@ -1543,6 +1626,10 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         Some(name) if BUILT.contains(&name) => Some(name.to_string()),
         _ => None,
     };
+    let resume_metadata = subcommand.as_deref() == Some("resume")
+        && head
+            .iter()
+            .any(|token| matches!(flag_name(token), Some("--name") | Some("--goal")));
 
     let mut tokens: Vec<String> = head;
     // Both words, not just the program. clap takes the command it names in
@@ -1575,6 +1662,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Interactive(Box::new(into_args(parsed)?))),
         },
+        Some("resume") if resume_metadata => {
+            match clap_or_answer::<SessionMetadataCommand>(&tokens)? {
+                Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+                Parsed::Command(parsed) => Ok(Invocation::SessionMetadata(Box::new(
+                    into_session_metadata_args(parsed)?,
+                ))),
+            }
+        }
         Some("resume") => match clap_or_answer::<ResumeCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
@@ -1942,6 +2037,30 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
     args.session = SessionChoice::Resume(id);
     args.answers = answers;
     Ok(args)
+}
+
+fn into_session_metadata_args(
+    command: SessionMetadataCommand,
+) -> Result<SessionMetadataArgs, UsageError> {
+    let session = SessionId::from_str(&command.id).map_err(|error| {
+        UsageError(format!(
+            "`{}` is not a session id: {error}. Metadata operations require an explicit id",
+            command.id
+        ))
+    })?;
+    let operation = match (command.name, command.goal) {
+        (Some(operation), None) => SessionMetadataOperation::Name(operation),
+        (None, Some(operation)) => SessionMetadataOperation::Goal(operation),
+        _ => unreachable!("clap requires exactly one metadata operation"),
+    };
+    Ok(SessionMetadataArgs {
+        session,
+        operation,
+        session_dir: command.common.places.session_dir,
+        directory: command.common.places.directory,
+        output: command.common.output,
+        profile: None,
+    })
 }
 
 fn into_args(command: RunCommand) -> Result<Args, UsageError> {

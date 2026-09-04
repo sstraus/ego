@@ -28,6 +28,7 @@ pub mod hook;
 pub mod hooks;
 pub mod mcp;
 pub mod mcp_server;
+pub mod metadata;
 pub mod model;
 pub mod model_picker;
 pub mod models;

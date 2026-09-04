@@ -15,9 +15,10 @@ use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Clock;
 use ego_core::event::time::Timestamp;
 use ego_core::goal::{GoalOwner, GoalTransition};
+use ego_core::session_lifecycle::LeasedLifecycleAppend;
 use ego_core::session_lifecycle::{
-    ActivityFuture, CloseFuture, ClosedSession, LifecycleAppendError, SessionActivity,
-    SessionLifecycle, SessionLifecycleStore, SessionRunLifecycle,
+    ActivityFuture, CloseFuture, ClosedSession, LifecycleAppendError,
+    SessionActivity, SessionLifecycle, SessionLifecycleStore, SessionMetadata, SessionRunLifecycle,
 };
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionStore};
@@ -239,6 +240,18 @@ fn session_entries(store: &JsonlStore, id: &SessionId) -> Vec<SessionEntry> {
         .collect()
 }
 
+fn append_lifecycle(
+    store: &JsonlStore,
+    id: SessionId,
+    expected: Seq,
+    event: DomainEvent,
+) -> Result<ego_core::session_lifecycle::LifecyclePublication, LifecycleAppendError> {
+    let opened = store
+        .open_writer(&id, lease())
+        .map_err(|_| LifecycleAppendError::LeaseHeld)?;
+    opened.writer.compare_and_append_lifecycle(expected, event)
+}
+
 #[test]
 fn create_header_only_publishes_manifest_and_empty_log() {
     let dir = tempdir().unwrap();
@@ -295,25 +308,25 @@ fn compare_and_append_title_and_delete_are_typed_single_session_mutations() {
     store
         .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
         .unwrap();
-    store
-        .compare_and_append_lifecycle(
-            id,
-            Seq::ZERO,
-            lifecycle_event(
-                1,
-                EventKind::SessionTitleChanged {
-                    title: Some("named".into()),
-                },
-            ),
-        )
-        .unwrap();
-    store
-        .compare_and_append_lifecycle(
-            id,
-            serde_json::from_value(serde_json::json!(1)).unwrap(),
-            lifecycle_event(2, EventKind::SessionDeleted),
-        )
-        .unwrap();
+    append_lifecycle(
+        &store,
+        id,
+        Seq::ZERO,
+        lifecycle_event(
+            1,
+            EventKind::SessionTitleChanged {
+                title: Some("named".into()),
+            },
+        ),
+    )
+    .unwrap();
+    append_lifecycle(
+        &store,
+        id,
+        serde_json::from_value(serde_json::json!(1)).unwrap(),
+        lifecycle_event(2, EventKind::SessionDeleted),
+    )
+    .unwrap();
     assert!(store.list().unwrap().is_empty());
 }
 
@@ -326,37 +339,37 @@ fn jsonl_lifecycle_allows_goal_events_and_replays_them_after_restart() {
         .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
         .unwrap();
     let goal = ego_core::event::id::GoalId::new();
-    jsonl
-        .compare_and_append_lifecycle(
-            id,
-            Seq::ZERO,
-            lifecycle_event(
-                1,
-                EventKind::GoalSet {
-                    id: goal,
-                    objective: "ship".into(),
-                    owner: GoalOwner::Operator,
-                    ceilings: Ceilings::default(),
-                    derived_from: None,
+    append_lifecycle(
+        &jsonl,
+        id,
+        Seq::ZERO,
+        lifecycle_event(
+            1,
+            EventKind::GoalSet {
+                id: goal,
+                objective: "ship".into(),
+                owner: GoalOwner::Operator,
+                ceilings: Ceilings::default(),
+                derived_from: None,
+            },
+        ),
+    )
+    .unwrap();
+    append_lifecycle(
+        &jsonl,
+        id,
+        serde_json::from_value(serde_json::json!(1)).unwrap(),
+        lifecycle_event(
+            2,
+            EventKind::GoalTransitioned {
+                id: goal,
+                transition: GoalTransition::BlockerObserved {
+                    reason: "blocked".into(),
                 },
-            ),
-        )
-        .unwrap();
-    jsonl
-        .compare_and_append_lifecycle(
-            id,
-            serde_json::from_value(serde_json::json!(1)).unwrap(),
-            lifecycle_event(
-                2,
-                EventKind::GoalTransitioned {
-                    id: goal,
-                    transition: GoalTransition::BlockerObserved {
-                        reason: "blocked".into(),
-                    },
-                },
-            ),
-        )
-        .unwrap();
+            },
+        ),
+    )
+    .unwrap();
     let restarted = store(dir.path(), Arc::new(Mutex::new(Vec::new())));
     let events = session_entries(&restarted, &id)
         .into_iter()
@@ -376,19 +389,20 @@ fn stale_compare_and_append_is_a_conflict_without_a_second_lifecycle_event() {
     store
         .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
         .unwrap();
-    store
-        .compare_and_append_lifecycle(
-            id,
-            Seq::ZERO,
-            lifecycle_event(
-                1,
-                EventKind::SessionTitleChanged {
-                    title: Some("named".into()),
-                },
-            ),
-        )
-        .unwrap();
-    let result = store.compare_and_append_lifecycle(
+    append_lifecycle(
+        &store,
+        id,
+        Seq::ZERO,
+        lifecycle_event(
+            1,
+            EventKind::SessionTitleChanged {
+                title: Some("named".into()),
+            },
+        ),
+    )
+    .unwrap();
+    let result = append_lifecycle(
+        &store,
         id,
         Seq::ZERO,
         lifecycle_event(2, EventKind::SessionDeleted),
@@ -485,7 +499,8 @@ fn lifecycle_title_prepublication_failure_preserves_authority_after_restart() {
         .unwrap();
     control.set(PublicationCut::BeforeRename);
 
-    let result = store.compare_and_append_lifecycle(
+    let result = append_lifecycle(
+        &store,
         id,
         Seq::ZERO,
         lifecycle_event(
@@ -516,18 +531,18 @@ fn lifecycle_title_postpublication_uncertainty_is_visible_once_after_restart() {
         .unwrap();
     control.set(PublicationCut::AfterRename);
 
-    let publication = store
-        .compare_and_append_lifecycle(
-            id,
-            Seq::ZERO,
-            lifecycle_event(
-                1,
-                EventKind::SessionTitleChanged {
-                    title: Some("named".into()),
-                },
-            ),
-        )
-        .unwrap();
+    let publication = append_lifecycle(
+        &store,
+        id,
+        Seq::ZERO,
+        lifecycle_event(
+            1,
+            EventKind::SessionTitleChanged {
+                title: Some("named".into()),
+            },
+        ),
+    )
+    .unwrap();
     assert!(publication.is_visible());
     assert!(!publication.retry_safe());
     assert_eq!(control.publication_calls(), 2);
@@ -553,7 +568,8 @@ fn lifecycle_delete_prepublication_failure_preserves_authority_after_restart() {
         .unwrap();
     control.set(PublicationCut::BeforeRename);
 
-    let result = store.compare_and_append_lifecycle(
+    let result = append_lifecycle(
+        &store,
         id,
         Seq::ZERO,
         lifecycle_event(1, EventKind::SessionDeleted),
@@ -579,9 +595,13 @@ fn lifecycle_delete_postpublication_uncertainty_is_visible_once_after_restart() 
         .unwrap();
     control.set(PublicationCut::AfterRename);
 
-    let publication = store
-        .compare_and_append_lifecycle(id, Seq::ZERO, lifecycle_event(1, EventKind::SessionDeleted))
-        .unwrap();
+    let publication = append_lifecycle(
+        &store,
+        id,
+        Seq::ZERO,
+        lifecycle_event(1, EventKind::SessionDeleted),
+    )
+    .unwrap();
     assert!(publication.is_visible());
     assert!(!publication.retry_safe());
     assert_eq!(control.publication_calls(), 2);
@@ -616,16 +636,25 @@ fn reopened_lifecycle_preserves_title_lineage_and_keyset_catalogue_order() {
     service.create_with_id(source, workspace.clone()).unwrap();
     service.create_with_id(peer, workspace.clone()).unwrap();
     service.create_with_id(third, workspace.clone()).unwrap();
-    service
-        .set_title(source, Some("source title".into()))
+    let mutation_store = JsonlStore::new(&sessions, &workspace, Box::new(OsIo));
+    let metadata = SessionMetadata::new(Arc::new(mutation_store), Arc::new(FixedClock));
+    let writer_store = JsonlStore::new(&sessions, &workspace, Box::new(OsIo));
+    let writer = writer_store.open_writer(&source, lease()).unwrap();
+    metadata
+        .set_title(&writer.writer, Seq::ZERO, Some("source title".into()))
         .unwrap();
+    drop(writer);
     let child = futures::executor::block_on(service.fork(source))
         .unwrap()
         .id;
     drop(service);
 
     let reopened = make_service();
-    let child_meta = reopened.meta(child).unwrap();
+    let reopened_meta = SessionMetadata::new(
+        Arc::new(JsonlStore::new(&sessions, &workspace, Box::new(OsIo))),
+        Arc::new(FixedClock),
+    );
+    let child_meta = reopened_meta.meta(child).unwrap();
     assert_eq!(child_meta.title.as_deref(), Some("source title"));
     assert!(matches!(
         child_meta.lineage,
@@ -648,6 +677,43 @@ fn reopened_lifecycle_preserves_title_lineage_and_keyset_catalogue_order() {
 }
 
 #[test]
+fn lifecycle_title_requires_the_session_writer_lease() {
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let lifecycle_store = JsonlStore::new(
+        dir.path().join("sessions"),
+        workspace.clone(),
+        Box::new(OsIo),
+    );
+    let service = SessionLifecycle::new(
+        Arc::new(lifecycle_store),
+        Arc::new(InactiveRuns),
+        Arc::new(FixedClock),
+    );
+    let id = service.create(workspace.clone()).unwrap().id;
+    let holder_store = JsonlStore::new(dir.path().join("sessions"), workspace, Box::new(OsIo));
+    let _held = holder_store.open_writer(&id, lease()).unwrap();
+    let metadata_store = JsonlStore::new(
+        dir.path().join("sessions"),
+        dir.path().join("workspace"),
+        Box::new(OsIo),
+    );
+    let metadata = SessionMetadata::new(Arc::new(metadata_store), Arc::new(FixedClock));
+    let blocked_writer_store = JsonlStore::new(
+        dir.path().join("sessions"),
+        dir.path().join("workspace"),
+        Box::new(OsIo),
+    );
+    assert!(matches!(
+        blocked_writer_store.open_writer(&id, lease()),
+        Err(ego_tools::store::OpenError::Lease(_))
+    ));
+    assert_eq!(metadata.meta(id).unwrap().title, None);
+    assert_eq!(session_entries(&holder_store, &id).len(), 0);
+}
+
+#[test]
 fn reopened_fork_seed_accepts_active_goal_with_and_without_title() {
     let dir = tempdir().unwrap();
     let sessions = dir.path().join("sessions");
@@ -663,40 +729,62 @@ fn reopened_fork_seed_accepts_active_goal_with_and_without_title() {
 
     let service = make_service();
     let titled = service.create(workspace.clone()).unwrap().id;
-    service.set_title(titled, Some("named".into())).unwrap();
-    let titled_goal = service
+    let mutation_store = JsonlStore::new(&sessions, &workspace, Box::new(OsIo));
+    let metadata = SessionMetadata::new(Arc::new(mutation_store), Arc::new(FixedClock));
+    let writer_store = JsonlStore::new(&sessions, &workspace, Box::new(OsIo));
+    let titled_writer = writer_store.open_writer(&titled, lease()).unwrap();
+    metadata
+        .set_title(&titled_writer.writer, Seq::ZERO, Some("named".into()))
+        .unwrap();
+    let mut one = Seq::ZERO;
+    one.next();
+    let titled_goal = metadata
         .set_goal(
-            titled,
+            &titled_writer.writer,
+            one,
             "titled objective".into(),
             GoalOwner::Operator,
             Ceilings::default(),
         )
         .unwrap();
+    drop(titled_writer);
     let titled_child = futures::executor::block_on(service.fork(titled))
         .unwrap()
         .id;
 
     let untitled = service.create(workspace.clone()).unwrap().id;
-    let untitled_goal = service
+    let untitled_store = JsonlStore::new(&sessions, &workspace, Box::new(OsIo));
+    let untitled_metadata = SessionMetadata::new(Arc::new(untitled_store), Arc::new(FixedClock));
+    let untitled_writer_store = JsonlStore::new(&sessions, &workspace, Box::new(OsIo));
+    let untitled_writer = untitled_writer_store
+        .open_writer(&untitled, lease())
+        .unwrap();
+    let untitled_goal = untitled_metadata
         .set_goal(
-            untitled,
+            &untitled_writer.writer,
+            Seq::ZERO,
             "untitled objective".into(),
             GoalOwner::Operator,
             Ceilings::default(),
         )
         .unwrap();
+    drop(untitled_writer);
     let untitled_child = futures::executor::block_on(service.fork(untitled))
         .unwrap()
         .id;
     drop(service);
 
-    let reopened = make_service();
+    let _reopened = make_service();
+    let reopened_meta = SessionMetadata::new(
+        Arc::new(JsonlStore::new(&sessions, &workspace, Box::new(OsIo))),
+        Arc::new(FixedClock),
+    );
     for (child, source_goal) in [(titled_child, titled_goal), (untitled_child, untitled_goal)] {
-        let inherited = reopened.goal(child).unwrap().unwrap();
-        assert_ne!(inherited.id, source_goal.id);
-        assert_eq!(inherited.derived_from, Some(source_goal.id));
-        assert_eq!(inherited.objective, source_goal.objective);
-        assert_eq!(inherited.owner, source_goal.owner);
-        assert_eq!(inherited.ceilings, source_goal.ceilings);
+        let inherited = reopened_meta.goal(child).unwrap().unwrap();
+        assert_ne!(inherited.id, source_goal.value.id);
+        assert_eq!(inherited.derived_from, Some(source_goal.value.id));
+        assert_eq!(inherited.objective, source_goal.value.objective);
+        assert_eq!(inherited.owner, source_goal.value.owner);
+        assert_eq!(inherited.ceilings, source_goal.value.ceilings);
     }
 }

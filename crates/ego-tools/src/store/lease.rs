@@ -163,8 +163,6 @@ pub struct Lease {
     path: PathBuf,
 }
 
-impl ego_core::session_lifecycle::InactiveSessionLease for Lease {}
-
 impl std::fmt::Debug for Lease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Lease")

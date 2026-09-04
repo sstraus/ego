@@ -17,9 +17,9 @@ use ego_core::session::{
     TargetSeed,
 };
 use ego_core::session_lifecycle::{
-    ActivityFuture, CloseFuture, ClosedSession, InactiveSessionLease, LifecycleAppendError,
-    LifecycleError, LifecyclePublication, SessionActivity, SessionCursor, SessionLifecycle,
-    SessionLifecycleStore, SessionRunLifecycle,
+    ActivityFuture, CloseFuture, ClosedSession, InactiveSessionLease, LeasedLifecycleAppend,
+    LifecycleAppendError, LifecycleError, LifecyclePublication, SessionActivity, SessionCursor,
+    SessionLifecycle, SessionLifecycleStore, SessionMetadata, SessionRunLifecycle,
 };
 use ego_core::store::blob::{BlobError, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -121,7 +121,39 @@ impl SessionBlobSource for FakeStore {
     }
 }
 
-struct FakeLease;
+struct FakeLease {
+    session: SessionId,
+    store: FakeStore,
+}
+
+impl LeasedLifecycleAppend for FakeLease {
+    fn session_id(&self) -> SessionId {
+        self.session
+    }
+    fn compare_and_append_lifecycle(
+        &self,
+        _expected: Seq,
+        event: DomainEvent,
+    ) -> Result<LifecyclePublication, LifecycleAppendError> {
+        if let EventKind::SessionTitleChanged { title } = &event.kind {
+            if let Some(meta) = self
+                .store
+                .0
+                .lock()
+                .unwrap()
+                .metadata
+                .iter_mut()
+                .find(|meta| meta.id == self.session)
+            {
+                meta.title = title.clone();
+            }
+        }
+        self.store
+            .append(&self.session, &event)
+            .map(|_| LifecyclePublication::Published)
+            .map_err(LifecycleAppendError::Store)
+    }
+}
 impl InactiveSessionLease for FakeLease {}
 
 impl SessionLifecycleStore for FakeStore {
@@ -142,28 +174,6 @@ impl SessionLifecycleStore for FakeStore {
         });
         Ok(LifecyclePublication::Published)
     }
-    fn compare_and_append_lifecycle(
-        &self,
-        id: SessionId,
-        _expected: Seq,
-        event: DomainEvent,
-    ) -> Result<LifecyclePublication, LifecycleAppendError> {
-        if let EventKind::SessionTitleChanged { title } = &event.kind
-            && let Some(meta) = self
-                .0
-                .lock()
-                .unwrap()
-                .metadata
-                .iter_mut()
-                .find(|meta| meta.id == id)
-        {
-            meta.title = title.clone();
-            meta.updated = event.env.ts;
-        }
-        self.append(&id, &event)
-            .map_err(LifecycleAppendError::Store)?;
-        Ok(LifecyclePublication::Published)
-    }
     fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {
         Ok(self
             .0
@@ -178,7 +188,10 @@ impl SessionLifecycleStore for FakeStore {
         &self,
         _id: SessionId,
     ) -> Result<Box<dyn InactiveSessionLease>, LifecycleAppendError> {
-        Ok(Box::new(FakeLease))
+        Ok(Box::new(FakeLease {
+            session: _id,
+            store: self.clone(),
+        }))
     }
     fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication {
         let mut state = self.0.lock().unwrap();
@@ -295,6 +308,25 @@ fn service() -> (
     )
 }
 
+fn metadata_fixture(control: &FakeStoreControl) -> SessionMetadata<FakeStore> {
+    SessionMetadata::new(Arc::new(control.0.clone()), Arc::new(FixedClock))
+}
+
+fn lease(control: &FakeStoreControl, session: SessionId) -> FakeLease {
+    FakeLease {
+        session,
+        store: control.0.clone(),
+    }
+}
+
+fn expected(control: &FakeStoreControl, session: SessionId) -> Seq {
+    let mut seq = Seq::ZERO;
+    for _ in 0..control.event_count(session) {
+        seq.next();
+    }
+    seq
+}
+
 fn event(text: &str, seq: u64) -> DomainEvent {
     DomainEvent {
         env: Envelope {
@@ -380,12 +412,19 @@ fn corrupt_semantic_prefix_and_wrong_root_refuse_before_attachment() {
 
 #[test]
 fn fork_preserves_lineage_and_title_but_not_session_identity() {
-    let (service, _store, _runs) = service();
+    let (service, store, _runs) = service();
+    let meta = metadata_fixture(&store);
     let source = service.create(PathBuf::from("/workspace")).unwrap();
-    service.set_title(source.id, Some("named".into())).unwrap();
-    let source_goal = service
+    meta.set_title(
+        &lease(&store, source.id),
+        expected(&store, source.id),
+        Some("named".into()),
+    )
+    .unwrap();
+    let source_goal = meta
         .set_goal(
-            source.id,
+            &lease(&store, source.id),
+            expected(&store, source.id),
             "active objective".into(),
             GoalOwner::Operator,
             ego_core::ceiling::Ceilings::default(),
@@ -393,43 +432,41 @@ fn fork_preserves_lineage_and_title_but_not_session_identity() {
         .unwrap();
     let child = futures::executor::block_on(service.fork(source.id)).unwrap();
     assert_ne!(source.id, child.id);
-    assert_eq!(
-        service.meta(child.id).unwrap().title.as_deref(),
-        Some("named")
-    );
-    let child_goal = service.goal(child.id).unwrap().unwrap();
-    assert_ne!(child_goal.id, source_goal.id);
-    assert_eq!(child_goal.derived_from, Some(source_goal.id));
-    assert_eq!(child_goal.objective, source_goal.objective);
-    assert_eq!(child_goal.owner, source_goal.owner);
-    assert_eq!(child_goal.ceilings, source_goal.ceilings);
+    assert_eq!(meta.meta(child.id).unwrap().title.as_deref(), Some("named"));
+    let child_goal = meta.goal(child.id).unwrap().unwrap();
+    assert_ne!(child_goal.id, source_goal.value.id);
+    assert_eq!(child_goal.derived_from, Some(source_goal.value.id));
+    assert_eq!(child_goal.objective, source_goal.value.objective);
+    assert_eq!(child_goal.owner, source_goal.value.owner);
+    assert_eq!(child_goal.ceilings, source_goal.value.ceilings);
     assert_eq!(child_goal.state, GoalState::Active);
-    assert_eq!(service.goal(source.id).unwrap().unwrap(), source_goal);
+    assert_eq!(meta.goal(source.id).unwrap().unwrap(), source_goal.value);
 }
 
 #[test]
 fn fork_does_not_copy_terminal_goal() {
-    let (service, _store, _runs) = service();
+    let (service, store, _runs) = service();
+    let meta = metadata_fixture(&store);
     let source = service.create(PathBuf::from("/workspace")).unwrap();
-    service
-        .set_goal(
-            source.id,
-            "completed objective".into(),
-            GoalOwner::Operator,
-            ego_core::ceiling::Ceilings::default(),
-        )
-        .unwrap();
-    service
-        .transition_goal(
-            source.id,
-            GoalTransition::Achieved {
-                attested_by: GoalOwner::Operator,
-                evidence: None,
-            },
-        )
-        .unwrap();
+    meta.set_goal(
+        &lease(&store, source.id),
+        expected(&store, source.id),
+        "completed objective".into(),
+        GoalOwner::Operator,
+        ego_core::ceiling::Ceilings::default(),
+    )
+    .unwrap();
+    meta.transition_goal(
+        &lease(&store, source.id),
+        expected(&store, source.id),
+        GoalTransition::Achieved {
+            attested_by: GoalOwner::Operator,
+            evidence: None,
+        },
+    )
+    .unwrap();
     let child = futures::executor::block_on(service.fork(source.id)).unwrap();
-    assert_eq!(service.goal(child.id).unwrap(), None);
+    assert_eq!(meta.goal(child.id).unwrap(), None);
 }
 
 #[test]
@@ -488,9 +525,9 @@ fn restart_rebuilds_from_shared_durable_state() {
     let id = service.create(PathBuf::from("/workspace")).unwrap().id;
     drop(service);
     let run_port: Arc<dyn SessionRunLifecycle> = _runs.clone();
-    let restarted =
+    let _restarted =
         SessionLifecycle::new(Arc::new(store.0.clone()), run_port, Arc::new(FixedClock));
-    assert_eq!(restarted.meta(id).unwrap().id, id);
+    assert_eq!(metadata_fixture(&store).meta(id).unwrap().id, id);
 }
 
 #[test]
@@ -571,44 +608,49 @@ fn list_fails_closed_when_a_catalogued_session_has_corrupt_replay() {
 #[test]
 fn lifecycle_goal_operations_replay_and_refuse_invalid_transitions_without_append() {
     let (service, control, _runs) = service();
+    let meta = metadata_fixture(&control);
     let id = service.create(PathBuf::from("/workspace")).unwrap().id;
-    assert_eq!(service.goal(id).unwrap(), None);
+    assert_eq!(meta.goal(id).unwrap(), None);
     let ceilings = ego_core::ceiling::Ceilings::default();
-    service
-        .set_goal(
-            id,
-            "  Ship  the   product  ".into(),
-            GoalOwner::Operator,
-            ceilings.clone(),
-        )
-        .unwrap();
-    let goal = service.goal(id).unwrap().unwrap();
+    meta.set_goal(
+        &lease(&control, id),
+        expected(&control, id),
+        "  Ship  the   product  ".into(),
+        GoalOwner::Operator,
+        ceilings.clone(),
+    )
+    .unwrap();
+    let goal = meta.goal(id).unwrap().unwrap();
     assert_eq!(goal.objective, "Ship  the   product");
     assert_eq!(goal.state, GoalState::Active);
     let before = control.event_count(id);
     assert!(matches!(
-        service.set_goal(id, "second".into(), GoalOwner::Operator, ceilings.clone()),
+        meta.set_goal(
+            &lease(&control, id),
+            expected(&control, id),
+            "second".into(),
+            GoalOwner::Operator,
+            ceilings.clone()
+        ),
         Err(LifecycleError::Goal(_))
     ));
     assert_eq!(control.event_count(id), before);
-    service
-        .transition_goal(
-            id,
-            GoalTransition::Achieved {
-                attested_by: GoalOwner::Operator,
-                evidence: None,
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        service.goal(id).unwrap().unwrap().state,
-        GoalState::Achieved
-    );
-    let terminal = service.goal(id).unwrap().unwrap().id;
+    meta.transition_goal(
+        &lease(&control, id),
+        expected(&control, id),
+        GoalTransition::Achieved {
+            attested_by: GoalOwner::Operator,
+            evidence: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(meta.goal(id).unwrap().unwrap().state, GoalState::Achieved);
+    let terminal = meta.goal(id).unwrap().unwrap().id;
     let before = control.event_count(id);
     assert!(matches!(
-        service.transition_goal(
-            id,
+        meta.transition_goal(
+            &lease(&control, id),
+            expected(&control, id),
             GoalTransition::BlockerObserved {
                 reason: "late".into()
             }
@@ -618,31 +660,40 @@ fn lifecycle_goal_operations_replay_and_refuse_invalid_transitions_without_appen
         )))
     ));
     assert_eq!(control.event_count(id), before);
-    let replacement = service
-        .set_goal(id, "new objective".into(), GoalOwner::Operator, ceilings)
+    let replacement = meta
+        .set_goal(
+            &lease(&control, id),
+            expected(&control, id),
+            "new objective".into(),
+            GoalOwner::Operator,
+            ceilings,
+        )
         .unwrap();
-    assert_ne!(replacement.id, terminal);
-    assert_eq!(replacement.derived_from, None);
-    let achieved = service
+    assert_ne!(replacement.value.id, terminal);
+    assert_eq!(replacement.value.derived_from, None);
+    let achieved = meta
         .transition_goal(
-            id,
+            &lease(&control, id),
+            expected(&control, id),
             GoalTransition::Achieved {
                 attested_by: GoalOwner::Operator,
                 evidence: None,
             },
         )
         .unwrap();
-    assert_eq!(achieved.state, GoalState::Achieved);
+    assert_eq!(achieved.value.state, GoalState::Achieved);
 }
 
 #[test]
 fn lifecycle_goal_requires_active_goal_for_transition() {
     let (service, control, _runs) = service();
+    let meta = metadata_fixture(&control);
     let id = service.create(PathBuf::from("/workspace")).unwrap().id;
     let before = control.event_count(id);
     assert!(matches!(
-        service.transition_goal(
-            id,
+        meta.transition_goal(
+            &lease(&control, id),
+            expected(&control, id),
             GoalTransition::BlockerObserved {
                 reason: "blocked".into()
             }
@@ -655,34 +706,47 @@ fn lifecycle_goal_requires_active_goal_for_transition() {
 #[test]
 fn operator_text_is_trimmed_bounded_and_shared_by_title_goal_and_blocker() {
     let (lifecycle, control, _runs) = service();
+    let meta = metadata_fixture(&control);
     let id = lifecycle.create(PathBuf::from("/workspace")).unwrap().id;
     let accepted = "\u{2003}Release  Candidate\u{2003}";
-    lifecycle.set_title(id, Some(accepted.into())).unwrap();
+    meta.set_title(
+        &lease(&control, id),
+        expected(&control, id),
+        Some(accepted.into()),
+    )
+    .unwrap();
     assert_eq!(
-        lifecycle.meta(id).unwrap().title.as_deref(),
+        meta.meta(id).unwrap().title.as_deref(),
         Some("Release  Candidate")
     );
-    let goal = lifecycle
+    let goal = meta
         .set_goal(
-            id,
+            &lease(&control, id),
+            expected(&control, id),
             format!("\u{2003}{}\u{2003}", "x".repeat(1024)),
             GoalOwner::Operator,
             ego_core::ceiling::Ceilings::default(),
         )
         .unwrap();
-    assert_eq!(goal.objective.len(), 1024);
+    assert_eq!(goal.value.objective.len(), 1024);
     for invalid in ["", " \u{2003} ", "bad\ntext", &"x".repeat(1025)] {
         let (fresh, fresh_control, _runs) = service();
         let fresh_id = fresh.create(PathBuf::from("/workspace")).unwrap().id;
         let before = fresh_control.event_count(fresh_id);
+        let fresh_meta = metadata_fixture(&fresh_control);
         assert!(matches!(
-            fresh.set_title(fresh_id, Some((*invalid).into())),
+            fresh_meta.set_title(
+                &lease(&fresh_control, fresh_id),
+                expected(&fresh_control, fresh_id),
+                Some((*invalid).into())
+            ),
             Err(LifecycleError::InvalidText)
         ));
         assert_eq!(fresh_control.event_count(fresh_id), before);
         assert!(matches!(
-            fresh.set_goal(
-                fresh_id,
+            fresh_meta.set_goal(
+                &lease(&fresh_control, fresh_id),
+                expected(&fresh_control, fresh_id),
                 (*invalid).into(),
                 GoalOwner::Operator,
                 ego_core::ceiling::Ceilings::default()
@@ -693,8 +757,9 @@ fn operator_text_is_trimmed_bounded_and_shared_by_title_goal_and_blocker() {
     }
     let before = control.event_count(id);
     assert!(matches!(
-        lifecycle.transition_goal(
-            id,
+        meta.transition_goal(
+            &lease(&control, id),
+            expected(&control, id),
             GoalTransition::BlockerObserved {
                 reason: "bad\ntext".into()
             }
@@ -702,23 +767,23 @@ fn operator_text_is_trimmed_bounded_and_shared_by_title_goal_and_blocker() {
         Err(LifecycleError::InvalidText)
     ));
     assert_eq!(control.event_count(id), before);
-    lifecycle
-        .transition_goal(
-            id,
-            GoalTransition::BlockerObserved {
-                reason: " API   unavailable ".into(),
-            },
-        )
-        .unwrap();
-    lifecycle
-        .transition_goal(
-            id,
-            GoalTransition::BlockerObserved {
-                reason: "api unavailable".into(),
-            },
-        )
-        .unwrap();
-    let goal = lifecycle.goal(id).unwrap().unwrap();
+    meta.transition_goal(
+        &lease(&control, id),
+        expected(&control, id),
+        GoalTransition::BlockerObserved {
+            reason: " API   unavailable ".into(),
+        },
+    )
+    .unwrap();
+    meta.transition_goal(
+        &lease(&control, id),
+        expected(&control, id),
+        GoalTransition::BlockerObserved {
+            reason: "api unavailable".into(),
+        },
+    )
+    .unwrap();
+    let goal = meta.goal(id).unwrap().unwrap();
     assert_eq!(goal.blocker_reason.as_deref(), Some("API   unavailable"));
     assert_eq!(goal.blocker_observations, 2);
 }

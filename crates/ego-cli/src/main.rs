@@ -46,6 +46,9 @@ async fn ordinary_main() -> std::process::ExitCode {
     {
         ego_cli::config::capture_profile(args);
     }
+    if let Ok(Invocation::SessionMetadata(args)) = &mut invocation {
+        ego_cli::config::capture_metadata_profile(args);
+    }
     if matches!(
         &invocation,
         Ok(Invocation::Interactive(args)) if args.profile.as_deref() == Some("ci")
@@ -169,6 +172,13 @@ async fn ordinary_main() -> std::process::ExitCode {
             Ok(Invocation::Ls(args)) => Ended {
                 termination: run::ls(&args, &out),
                 session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
+            Ok(Invocation::SessionMetadata(args)) => Ended {
+                termination: ego_cli::metadata::execute(&args, &out),
+                session: args.session,
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
                 mcp_errors: Vec::new(),

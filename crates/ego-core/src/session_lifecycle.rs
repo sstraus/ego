@@ -64,25 +64,33 @@ pub trait SessionLifecycleStore:
         created: Timestamp,
     ) -> Result<LifecyclePublication, StoreError>;
 
-    fn compare_and_append_lifecycle(
-        &self,
-        id: SessionId,
-        expected: Seq,
-        event: DomainEvent,
-    ) -> Result<LifecyclePublication, LifecycleAppendError>;
-
     fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError>;
 
     fn acquire_inactive_lease(
         &self,
         id: SessionId,
-    ) -> Result<Box<dyn InactiveSessionLease>, LifecycleAppendError>;
+    ) -> Result<Box<dyn InactiveSessionLease + '_>, LifecycleAppendError>;
 
     fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication;
 }
 
-/// Exclusive proof that no session writer can attach until this value drops.
-pub trait InactiveSessionLease: Send {}
+/// Session-bound authority to append a lifecycle event while its writer lease is held.
+///
+/// A bare lifecycle store deliberately cannot implement this port. The session id
+/// comes from the capability so a caller cannot use one session's lease to mutate
+/// another session.
+pub trait LeasedLifecycleAppend: Send + Sync {
+    fn session_id(&self) -> SessionId;
+
+    fn compare_and_append_lifecycle(
+        &self,
+        expected: Seq,
+        event: DomainEvent,
+    ) -> Result<LifecyclePublication, LifecycleAppendError>;
+}
+
+/// Exclusive, session-bound authority to append while no writer can attach.
+pub trait InactiveSessionLease: LeasedLifecycleAppend {}
 
 #[derive(Debug)]
 pub enum LifecycleAppendError {
@@ -134,6 +142,13 @@ pub trait SessionRunLifecycle: Send + Sync {
 pub struct CreatedSession {
     pub id: SessionId,
     pub publication: LifecyclePublication,
+}
+
+/// A lifecycle value together with the publication outcome that made it current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleMutation<T> {
+    pub value: T,
+    pub publication: Option<LifecyclePublication>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,86 +340,18 @@ impl From<GoalRefusal> for LifecycleError {
     }
 }
 
-/// One shared lifecycle service. Durable facts are always reconstructed from
-/// the store; the run collaborator owns only live effect coordination.
-pub struct SessionLifecycle<S> {
+/// Durable session metadata operations, independent of live run coordination.
+pub struct SessionMetadata<S> {
     store: Arc<S>,
-    runs: Arc<dyn SessionRunLifecycle>,
     clock: Arc<dyn Clock>,
 }
 
-impl<S> SessionLifecycle<S>
+impl<S> SessionMetadata<S>
 where
     S: SessionLifecycleStore,
 {
-    pub fn new(store: Arc<S>, runs: Arc<dyn SessionRunLifecycle>, clock: Arc<dyn Clock>) -> Self {
-        Self { store, runs, clock }
-    }
-
-    pub fn create(&self, root: PathBuf) -> Result<CreatedSession, LifecycleError> {
-        self.create_with_id(SessionId::new(), root)
-    }
-
-    pub fn create_with_id(
-        &self,
-        id: SessionId,
-        root: PathBuf,
-    ) -> Result<CreatedSession, LifecycleError> {
-        let publication = self
-            .store
-            .publish_empty_session(id, &root, self.clock.now())?;
-        if let LifecyclePublication::NotPublished { diagnostic } = &publication {
-            return Err(LifecycleError::NotPublished(diagnostic.clone()));
-        }
-        Ok(CreatedSession { id, publication })
-    }
-
-    pub fn list(
-        &self,
-        cursor: Option<&SessionCursor>,
-        limit: usize,
-        root: Option<&Path>,
-    ) -> Result<SessionPage, LifecycleError> {
-        let limit = NonZeroUsize::new(limit)
-            .ok_or(LifecycleError::InvalidLimit)?
-            .get();
-        let after = cursor.map(SessionCursor::decode).transpose()?;
-        if after
-            .as_ref()
-            .is_some_and(|value| value.root.as_deref() != root)
-        {
-            return Err(LifecycleError::InvalidCursor);
-        }
-        let mut items = self.store.list()?;
-        items.retain(|meta| root.is_none_or(|root| meta.workspace_root == root));
-        let mut visible = Vec::with_capacity(items.len());
-        for meta in items {
-            if !self.state(meta.id)?.deleted {
-                visible.push(meta);
-            }
-        }
-        let mut items = visible;
-        items.sort_by(|left, right| {
-            right
-                .created
-                .cmp(&left.created)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        if let Some(after) = after {
-            items.retain(|meta| {
-                meta.created < after.created
-                    || (meta.created == after.created && meta.id > after.id)
-            });
-        }
-        let has_more = items.len() > limit;
-        items.truncate(limit);
-        let next_cursor = has_more.then(|| {
-            SessionCursor::new(
-                root,
-                items.last().expect("a non-zero full page has a last row"),
-            )
-        });
-        Ok(SessionPage { items, next_cursor })
+    pub fn new(store: Arc<S>, clock: Arc<dyn Clock>) -> Self {
+        Self { store, clock }
     }
 
     pub fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
@@ -415,105 +362,32 @@ where
         Ok(meta)
     }
 
-    pub async fn load(
-        &self,
-        id: SessionId,
-        root: &Path,
-    ) -> Result<SessionAttachment, LifecycleError> {
-        self.activate(id, root, true).await
-    }
-
-    pub async fn resume(
-        &self,
-        id: SessionId,
-        root: &Path,
-    ) -> Result<SessionAttachment, LifecycleError> {
-        self.activate(id, root, false).await
-    }
-
-    pub async fn attach(
-        &self,
-        id: SessionId,
-        root: &Path,
-    ) -> Result<SessionAttachment, LifecycleError> {
-        self.resume(id, root).await
-    }
-
-    async fn activate(
-        &self,
-        id: SessionId,
-        root: &Path,
-        replay: bool,
-    ) -> Result<SessionAttachment, LifecycleError> {
-        let meta = self.raw_meta(id)?;
-        if meta.workspace_root != root {
-            return Err(LifecycleError::RootMismatch {
-                stored: meta.workspace_root,
-                requested: root.to_path_buf(),
-            });
-        }
-        let (state, frames) = self.replay(id)?;
-        if state.deleted {
-            return Err(LifecycleError::Deleted);
-        }
-        if self.runs.activity(id).await? == SessionActivity::Uncertain {
-            return Err(LifecycleError::EffectUncertain);
-        }
-        Ok(SessionAttachment {
-            id,
-            root: root.to_path_buf(),
-            replay: if replay { frames } else { Vec::new() },
-        })
-    }
-
-    pub async fn fork(&self, source: SessionId) -> Result<CreatedSession, LifecycleError> {
-        let _source_lease = self.require_inactive(source).await?;
-        let meta = self.meta(source)?;
-        let (state, _) = self.replay(source)?;
-        let prepared = PreparedFork::new(source, &state, self.clock.now())?;
-        ReplayContext::new(&*self.store, &*self.store).replay_lineage(prepared.seed().lineage())?;
-        let seed = prepared
-            .seed()
-            .clone()
-            .with_title(meta.title)
-            .with_goal(state.goal.as_ref());
-        let target = SessionId::new();
-        let publication = self.store.publish_fork(target, &seed);
-        if !publication.switch_target() {
-            return Err(LifecycleError::NotPublished(
-                publication
-                    .diagnostic()
-                    .unwrap_or("fork was not published")
-                    .to_owned(),
-            ));
-        }
-        Ok(CreatedSession {
-            id: target,
-            publication: publication.into(),
-        })
-    }
-
     pub fn set_title(
         &self,
-        id: SessionId,
+        append: &dyn LeasedLifecycleAppend,
+        expected: Seq,
         title: Option<String>,
-    ) -> Result<SessionMeta, LifecycleError> {
+    ) -> Result<LifecycleMutation<SessionMeta>, LifecycleError> {
+        let id = append.session_id();
         let title = title.map(validate_operator_text).transpose()?;
         let current = self.meta(id)?;
         if current.title == title {
-            return Ok(current);
+            return Ok(LifecycleMutation {
+                value: current,
+                publication: None,
+            });
         }
-        let state = self.state(id)?;
         let event = lifecycle_event(
-            state.last_seq,
+            expected,
             self.clock.now(),
             EventKind::SessionTitleChanged { title },
         );
-        require_publication(
-            self.store
-                .compare_and_append_lifecycle(id, state.last_seq, event)?,
-        )?;
-        self.meta(id)
+        let publication = append.compare_and_append_lifecycle(expected, event)?;
+        require_publication(publication.clone())?;
+        Ok(LifecycleMutation {
+            value: self.meta(id)?,
+            publication: Some(publication),
+        })
     }
 
     pub fn goal(&self, id: SessionId) -> Result<Option<GoalRecord>, LifecycleError> {
@@ -523,11 +397,13 @@ where
 
     pub fn set_goal(
         &self,
-        session: SessionId,
+        append: &dyn LeasedLifecycleAppend,
+        expected: Seq,
         objective: String,
         owner: GoalOwner,
         ceilings: Ceilings,
-    ) -> Result<GoalRecord, LifecycleError> {
+    ) -> Result<LifecycleMutation<GoalRecord>, LifecycleError> {
+        let session = append.session_id();
         let objective = validate_operator_text(objective)?;
         self.meta(session)?;
         let state = self.state(session)?;
@@ -539,7 +415,7 @@ where
             return Err(GoalRefusal::ActiveGoalExists.into());
         }
         let event = lifecycle_event(
-            state.last_seq,
+            expected,
             self.clock.now(),
             EventKind::GoalSet {
                 id: crate::event::id::GoalId::new(),
@@ -549,20 +425,23 @@ where
                 derived_from: None,
             },
         );
-        require_publication(self.store.compare_and_append_lifecycle(
-            session,
-            state.last_seq,
-            event,
-        )?)?;
-        self.goal(session)?
-            .ok_or_else(|| GoalRefusal::NoActiveGoal.into())
+        let publication = append.compare_and_append_lifecycle(expected, event)?;
+        require_publication(publication.clone())?;
+        Ok(LifecycleMutation {
+            value: self
+                .goal(session)?
+                .ok_or_else(|| LifecycleError::from(GoalRefusal::NoActiveGoal))?,
+            publication: Some(publication),
+        })
     }
 
     pub fn transition_goal(
         &self,
-        session: SessionId,
+        append: &dyn LeasedLifecycleAppend,
+        expected: Seq,
         transition: GoalTransition,
-    ) -> Result<GoalRecord, LifecycleError> {
+    ) -> Result<LifecycleMutation<GoalRecord>, LifecycleError> {
+        let session = append.session_id();
         let transition = match transition {
             GoalTransition::BlockerObserved { reason } => GoalTransition::BlockerObserved {
                 reason: validate_operator_text(reason)?,
@@ -574,56 +453,21 @@ where
         let goal = state.goal.as_ref().ok_or(GoalRefusal::NoActiveGoal)?;
         goal.admits(&transition)?;
         let event = lifecycle_event(
-            state.last_seq,
+            expected,
             self.clock.now(),
             EventKind::GoalTransitioned {
                 id: goal.id,
                 transition,
             },
         );
-        require_publication(self.store.compare_and_append_lifecycle(
-            session,
-            state.last_seq,
-            event,
-        )?)?;
-        self.goal(session)?
-            .ok_or_else(|| GoalRefusal::NoActiveGoal.into())
-    }
-
-    pub async fn delete(&self, id: SessionId) -> Result<LifecyclePublication, LifecycleError> {
-        let state = self.state(id)?;
-        if state.deleted {
-            return Ok(LifecyclePublication::Published);
-        }
-        let _session_lease = self.require_inactive(id).await?;
-        let event = lifecycle_event(state.last_seq, self.clock.now(), EventKind::SessionDeleted);
-        let publication = self
-            .store
-            .compare_and_append_lifecycle(id, state.last_seq, event)?;
+        let publication = append.compare_and_append_lifecycle(expected, event)?;
         require_publication(publication.clone())?;
-        Ok(publication)
-    }
-
-    async fn require_inactive(
-        &self,
-        id: SessionId,
-    ) -> Result<Box<dyn InactiveSessionLease>, LifecycleError> {
-        let lease = self.store.acquire_inactive_lease(id)?;
-        match self.runs.activity(id).await? {
-            SessionActivity::Inactive => {}
-            SessionActivity::LeaseHeld => return Err(LifecycleError::LeaseHeld),
-            SessionActivity::Active => return Err(LifecycleError::Active),
-            SessionActivity::Uncertain => return Err(LifecycleError::EffectUncertain),
-        }
-        Ok(lease)
-    }
-
-    pub async fn close(&self, id: SessionId) -> Result<ClosedSession, LifecycleError> {
-        self.meta(id)?;
-        if self.runs.activity(id).await? == SessionActivity::Uncertain {
-            return Err(LifecycleError::EffectUncertain);
-        }
-        self.runs.cancel_and_settle(id).await
+        Ok(LifecycleMutation {
+            value: self
+                .goal(session)?
+                .ok_or_else(|| LifecycleError::from(GoalRefusal::NoActiveGoal))?,
+            publication: Some(publication),
+        })
     }
 
     fn raw_meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
@@ -669,6 +513,210 @@ where
             }));
         }
         Ok((state, frames))
+    }
+}
+
+/// One shared lifecycle service. Durable facts are always reconstructed from
+/// the store; the run collaborator owns only live effect coordination.
+pub struct SessionLifecycle<S> {
+    metadata: SessionMetadata<S>,
+    runs: Arc<dyn SessionRunLifecycle>,
+}
+
+impl<S> SessionLifecycle<S>
+where
+    S: SessionLifecycleStore,
+{
+    pub fn new(store: Arc<S>, runs: Arc<dyn SessionRunLifecycle>, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            metadata: SessionMetadata::new(store, clock),
+            runs,
+        }
+    }
+
+    pub fn create(&self, root: PathBuf) -> Result<CreatedSession, LifecycleError> {
+        self.create_with_id(SessionId::new(), root)
+    }
+
+    pub fn create_with_id(
+        &self,
+        id: SessionId,
+        root: PathBuf,
+    ) -> Result<CreatedSession, LifecycleError> {
+        let publication =
+            self.metadata
+                .store
+                .publish_empty_session(id, &root, self.metadata.clock.now())?;
+        if let LifecyclePublication::NotPublished { diagnostic } = &publication {
+            return Err(LifecycleError::NotPublished(diagnostic.clone()));
+        }
+        Ok(CreatedSession { id, publication })
+    }
+
+    pub fn list(
+        &self,
+        cursor: Option<&SessionCursor>,
+        limit: usize,
+        root: Option<&Path>,
+    ) -> Result<SessionPage, LifecycleError> {
+        let limit = NonZeroUsize::new(limit)
+            .ok_or(LifecycleError::InvalidLimit)?
+            .get();
+        let after = cursor.map(SessionCursor::decode).transpose()?;
+        if after
+            .as_ref()
+            .is_some_and(|value| value.root.as_deref() != root)
+        {
+            return Err(LifecycleError::InvalidCursor);
+        }
+        let mut items = self.metadata.store.list()?;
+        items.retain(|meta| root.is_none_or(|root| meta.workspace_root == root));
+        let mut visible = Vec::with_capacity(items.len());
+        for meta in items {
+            if !self.metadata.state(meta.id)?.deleted {
+                visible.push(meta);
+            }
+        }
+        let mut items = visible;
+        items.sort_by(|left, right| {
+            right
+                .created
+                .cmp(&left.created)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        if let Some(after) = after {
+            items.retain(|meta| {
+                meta.created < after.created
+                    || (meta.created == after.created && meta.id > after.id)
+            });
+        }
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        let next_cursor = has_more.then(|| {
+            SessionCursor::new(
+                root,
+                items.last().expect("a non-zero full page has a last row"),
+            )
+        });
+        Ok(SessionPage { items, next_cursor })
+    }
+
+    pub async fn load(
+        &self,
+        id: SessionId,
+        root: &Path,
+    ) -> Result<SessionAttachment, LifecycleError> {
+        self.activate(id, root, true).await
+    }
+
+    pub async fn resume(
+        &self,
+        id: SessionId,
+        root: &Path,
+    ) -> Result<SessionAttachment, LifecycleError> {
+        self.activate(id, root, false).await
+    }
+
+    pub async fn attach(
+        &self,
+        id: SessionId,
+        root: &Path,
+    ) -> Result<SessionAttachment, LifecycleError> {
+        self.resume(id, root).await
+    }
+
+    async fn activate(
+        &self,
+        id: SessionId,
+        root: &Path,
+        replay: bool,
+    ) -> Result<SessionAttachment, LifecycleError> {
+        let meta = self.metadata.raw_meta(id)?;
+        if meta.workspace_root != root {
+            return Err(LifecycleError::RootMismatch {
+                stored: meta.workspace_root,
+                requested: root.to_path_buf(),
+            });
+        }
+        let (state, frames) = self.metadata.replay(id)?;
+        if state.deleted {
+            return Err(LifecycleError::Deleted);
+        }
+        if self.runs.activity(id).await? == SessionActivity::Uncertain {
+            return Err(LifecycleError::EffectUncertain);
+        }
+        Ok(SessionAttachment {
+            id,
+            root: root.to_path_buf(),
+            replay: if replay { frames } else { Vec::new() },
+        })
+    }
+
+    pub async fn fork(&self, source: SessionId) -> Result<CreatedSession, LifecycleError> {
+        let _source_lease = self.require_inactive(source).await?;
+        let meta = self.metadata.meta(source)?;
+        let (state, _) = self.metadata.replay(source)?;
+        let prepared = PreparedFork::new(source, &state, self.metadata.clock.now())?;
+        ReplayContext::new(&*self.metadata.store, &*self.metadata.store)
+            .replay_lineage(prepared.seed().lineage())?;
+        let seed = prepared
+            .seed()
+            .clone()
+            .with_title(meta.title)
+            .with_goal(state.goal.as_ref());
+        let target = SessionId::new();
+        let publication = self.metadata.store.publish_fork(target, &seed);
+        if !publication.switch_target() {
+            return Err(LifecycleError::NotPublished(
+                publication
+                    .diagnostic()
+                    .unwrap_or("fork was not published")
+                    .to_owned(),
+            ));
+        }
+        Ok(CreatedSession {
+            id: target,
+            publication: publication.into(),
+        })
+    }
+
+    pub async fn delete(&self, id: SessionId) -> Result<LifecyclePublication, LifecycleError> {
+        let append = self.require_inactive(id).await?;
+        let state = self.metadata.state(id)?;
+        if state.deleted {
+            return Ok(LifecyclePublication::Published);
+        }
+        let expected = state.last_seq;
+        let event = lifecycle_event(
+            expected,
+            self.metadata.clock.now(),
+            EventKind::SessionDeleted,
+        );
+        let publication = append.compare_and_append_lifecycle(expected, event)?;
+        require_publication(publication.clone())?;
+        Ok(publication)
+    }
+
+    async fn require_inactive(
+        &self,
+        id: SessionId,
+    ) -> Result<Box<dyn InactiveSessionLease + '_>, LifecycleError> {
+        let lease = self.metadata.store.acquire_inactive_lease(id)?;
+        match self.runs.activity(id).await? {
+            SessionActivity::Inactive => {}
+            SessionActivity::LeaseHeld => return Err(LifecycleError::LeaseHeld),
+            SessionActivity::Active => return Err(LifecycleError::Active),
+            SessionActivity::Uncertain => return Err(LifecycleError::EffectUncertain),
+        }
+        Ok(lease)
+    }
+
+    pub async fn close(&self, id: SessionId) -> Result<ClosedSession, LifecycleError> {
+        self.metadata.meta(id)?;
+        if self.runs.activity(id).await? == SessionActivity::Uncertain {
+            return Err(LifecycleError::EffectUncertain);
+        }
+        self.runs.cancel_and_settle(id).await
     }
 }
 

@@ -36,6 +36,9 @@ use ego_core::session::{
     ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
     TargetSeed, TargetStore,
 };
+use ego_core::session_lifecycle::{
+    LeasedLifecycleAppend, LifecycleAppendError, LifecyclePublication,
+};
 use ego_core::state::SessionState;
 use ego_core::store::blob::BlobRef;
 use ego_core::store::evidence::EvidenceError as BlobEvidenceError;
@@ -213,6 +216,21 @@ impl SessionStore for SessionWriter<'_> {
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
         self.store.list()
+    }
+}
+
+impl LeasedLifecycleAppend for SessionWriter<'_> {
+    fn session_id(&self) -> SessionId {
+        self.id
+    }
+
+    fn compare_and_append_lifecycle(
+        &self,
+        expected: ego_core::event::id::Seq,
+        event: DomainEvent,
+    ) -> Result<LifecyclePublication, LifecycleAppendError> {
+        self.store
+            .compare_and_append_lifecycle_leased(self.id, expected, event)
     }
 }
 

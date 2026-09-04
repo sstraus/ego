@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ego_core::ceiling::Ceilings;
 use ego_core::config::{
     AuthProviderLayer, ConfigError, ConfigLayer, Effective, ManagedConfigValue,
     McpConfigProvenance, McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpLayerEntry,
@@ -28,7 +29,7 @@ use ego_tools::exec::run_editor_process;
 use ego_tools::store::{OsIo, StoreIo};
 use serde::Deserialize;
 
-use crate::cli::{Args, ConfigAction, ConfigArgs, McpSelector, UsageError};
+use crate::cli::{Args, ConfigAction, ConfigArgs, McpSelector, SessionMetadataArgs, UsageError};
 use crate::output::{self, Stdout};
 
 /// The system layer: an administrator's fleet defaults and the only source of
@@ -674,6 +675,31 @@ pub fn capture_profile(args: &mut Args) {
         args.profile = Some(name);
         args.profile_source = Some(Source::Env);
     }
+}
+
+/// Capture the metadata command's only ambient selector once at process entry.
+pub fn capture_metadata_profile(args: &mut SessionMetadataArgs) {
+    if let Ok(name) = std::env::var(ENV_PROFILE) {
+        args.profile = Some(name);
+    }
+}
+
+/// Resolve the immutable goal ceiling snapshot from system and user authority.
+/// Project/local files are never opened because metadata has no trusted seat.
+pub(crate) fn metadata_ceilings(
+    workspace: &Path,
+    args: &SessionMetadataArgs,
+) -> Result<Ceilings, UsageError> {
+    let layers = base_layers(workspace, Trust::Untrusted)?;
+    resolve_selected(
+        &layers,
+        Trust::Untrusted,
+        args.profile
+            .as_deref()
+            .map(|profile| (profile, Source::Env)),
+    )
+    .map(|effective| effective.ceilings)
+    .map_err(|error| UsageError(error.to_string()))
 }
 
 impl FrozenRunConfig {

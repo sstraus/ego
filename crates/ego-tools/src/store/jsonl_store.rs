@@ -31,7 +31,8 @@ use ego_core::session::{
     TargetSeed,
 };
 use ego_core::session_lifecycle::{
-    InactiveSessionLease, LifecycleAppendError, LifecyclePublication, SessionLifecycleStore,
+    InactiveSessionLease, LeasedLifecycleAppend, LifecycleAppendError, LifecyclePublication,
+    SessionLifecycleStore,
 };
 use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobError, BlobStore};
@@ -1688,6 +1689,29 @@ impl JsonlStore {
     }
 }
 
+struct InactiveLifecycleAppend<'a> {
+    store: &'a JsonlStore,
+    id: SessionId,
+    _lease: Lease,
+}
+
+impl LeasedLifecycleAppend for InactiveLifecycleAppend<'_> {
+    fn session_id(&self) -> SessionId {
+        self.id
+    }
+
+    fn compare_and_append_lifecycle(
+        &self,
+        expected: Seq,
+        event: DomainEvent,
+    ) -> Result<LifecyclePublication, LifecycleAppendError> {
+        self.store
+            .compare_and_append_lifecycle_leased(self.id, expected, event)
+    }
+}
+
+impl InactiveSessionLease for InactiveLifecycleAppend<'_> {}
+
 impl SessionStore for JsonlStore {
     fn append(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
         self.with_events_lock(id, || self.append_already_locked(id, ev))
@@ -1824,8 +1848,8 @@ impl SessionStore for JsonlStore {
     }
 }
 
-impl SessionLifecycleStore for JsonlStore {
-    fn publish_empty_session(
+impl JsonlStore {
+    fn publish_empty_session_lifecycle(
         &self,
         id: SessionId,
         root: &std::path::Path,
@@ -1856,8 +1880,10 @@ impl SessionLifecycleStore for JsonlStore {
             })
         })
     }
+}
 
-    fn compare_and_append_lifecycle(
+impl JsonlStore {
+    pub(super) fn compare_and_append_lifecycle_leased(
         &self,
         id: SessionId,
         expected: Seq,
@@ -1947,6 +1973,17 @@ impl SessionLifecycleStore for JsonlStore {
         })
         .map_err(LifecycleAppendError::Store)?
     }
+}
+
+impl SessionLifecycleStore for JsonlStore {
+    fn publish_empty_session(
+        &self,
+        id: SessionId,
+        root: &std::path::Path,
+        created: Timestamp,
+    ) -> Result<LifecyclePublication, StoreError> {
+        self.publish_empty_session_lifecycle(id, root, created)
+    }
 
     fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {
         let Some(bytes) = self.io.read(&self.log_path(&id))? else {
@@ -1972,10 +2009,16 @@ impl SessionLifecycleStore for JsonlStore {
     fn acquire_inactive_lease(
         &self,
         id: SessionId,
-    ) -> Result<Box<dyn InactiveSessionLease>, LifecycleAppendError> {
+    ) -> Result<Box<dyn InactiveSessionLease + '_>, LifecycleAppendError> {
         Lease::probe(&self.lease_path(&id))
             .map_err(StoreError::from)?
-            .map(|lease| Box::new(lease) as Box<dyn InactiveSessionLease>)
+            .map(|lease| {
+                Box::new(InactiveLifecycleAppend {
+                    store: self,
+                    id,
+                    _lease: lease,
+                }) as Box<dyn InactiveSessionLease + '_>
+            })
             .ok_or(LifecycleAppendError::LeaseHeld)
     }
 
