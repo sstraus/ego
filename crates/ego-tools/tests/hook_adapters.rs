@@ -464,7 +464,12 @@ fn guarded_http_offline_refusal_is_definitely_unsent_before_one_hop() {
     let connect = ego_core::permit::PreparedConnect::new(target, &request);
     let result = block_on(
         ego_core::permit::GuardedHttp::new(Arc::new(OfflineResolver), Arc::new(TestOneHop))
-            .execute_admitted(route, connect, request, None),
+            .execute_admitted(
+                route,
+                connect,
+                request,
+                Instant::now() + Duration::from_secs(60),
+            ),
     );
     let error = result.expect_err("offline hook HTTP must be refused");
     assert_eq!(
@@ -486,7 +491,7 @@ impl Resolver for OfflineResolver {
     fn resolve(
         &self,
         _target: NetworkTarget,
-        _deadline: Option<std::time::Instant>,
+        _deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         Box::pin(std::future::ready(Err(TransportError::definitely_unsent(
             ego_core::permit::TransportFailure::Offline,
@@ -509,7 +514,7 @@ impl Resolver for TestResolver {
     fn resolve(
         &self,
         target: NetworkTarget,
-        _deadline: Option<std::time::Instant>,
+        _deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         Box::pin(std::future::ready(Ok(DnsResolution::new(
             target,
@@ -520,11 +525,14 @@ impl Resolver for TestResolver {
 }
 
 impl OneHop for TestOneHop {
+    fn begin_call(&self) -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(60)
+    }
     fn execute(
         &self,
         _connect: ResolvedConnect,
         _request: HttpRequest,
-        _deadline: Option<std::time::Instant>,
+        _deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         Box::pin(std::future::ready(Ok(OneHopResponse::response(
             200,

@@ -209,7 +209,7 @@ impl McpHttpClaim {
     pub fn exchange(
         self,
         request: HttpRequest,
-        deadline: Option<std::time::Instant>,
+        deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         let connect = PreparedConnect::new(self.route.target().clone(), &request);
         self.http
@@ -383,12 +383,14 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         let http = self.http.clone();
         Box::pin(async move {
             let claim = claim?;
+            let deadline = http.begin_call();
             let route = claim
                 .transport
                 .into_http_route()
                 .ok_or_else(authority_mismatch)?;
             let connect = claim.connect.ok_or_else(authority_mismatch)?;
-            http.execute_admitted(route, connect, request, None).await
+            http.execute_admitted(route, connect, request, deadline)
+                .await
         })
     }
 
@@ -473,13 +475,8 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         let http = self.http.clone();
         Box::pin(async move {
             let (envelope, connect) = claimed?;
-            http.execute_admitted(
-                envelope.route().clone(),
-                connect,
-                request,
-                Some(scope.deadline()),
-            )
-            .await
+            http.execute_admitted(envelope.route().clone(), connect, request, scope.deadline())
+                .await
         })
     }
 

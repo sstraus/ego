@@ -1713,7 +1713,7 @@ impl McpHttpEffects for SplitMcpHttpEffects {
         };
         let state = Arc::clone(&self.state);
         Box::pin(async move {
-            let response = claim.exchange(parts.request, Some(parts.deadline)).await;
+            let response = claim.exchange(parts.request, parts.deadline).await;
             let delivery = match &response {
                 Ok(response) => response.delivery(),
                 Err(error) => error.delivery(),

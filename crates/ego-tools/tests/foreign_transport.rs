@@ -252,7 +252,7 @@ impl Resolver for RecordingResolver {
     fn resolve(
         &self,
         target: NetworkTarget,
-        _deadline: Option<Instant>,
+        _deadline: Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         self.calls.lock().expect("calls").push(target.clone());
         let delay = *self.delay.lock().expect("delay");
@@ -1847,6 +1847,73 @@ fn delayed_resolution_times_out_before_socket() {
         server.finish().is_empty(),
         "resolver timeout opened no socket"
     );
+}
+
+#[test]
+fn composed_dns_and_body_delays_share_one_absolute_call_deadline() {
+    let server = SocketServer::bind(|mut stream| {
+        let peer = stream.peer_addr().expect("peer");
+        let request = read_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabc")
+            .expect("first response phase");
+        stream.flush().expect("first response flush");
+        std::thread::sleep(Duration::from_millis(80));
+        stream.write_all(b"def").expect("second response phase");
+        stream.flush().expect("second response flush");
+        CapturedConnection {
+            peer,
+            request,
+            request_count: 1,
+        }
+    });
+    let target = NetworkTarget::new("composed-deadline.example.test", server.address.port())
+        .expect("target");
+    let resolver = RecordingResolver::default();
+    resolver.insert(target.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    resolver.delay(Duration::from_millis(40));
+    let timeout = Duration::from_millis(100);
+    let fixture = run_ports_with(
+        resolver.clone(),
+        false,
+        ego_core::turn::CancelToken::new(),
+        HttpCallTimeout::new(timeout).expect("HTTP call timeout"),
+    );
+    let request = request();
+    let auth = authorized(
+        http_call(&format!("{target}"), &request),
+        &["tool(srv/search)", &format!("net({target})")],
+    );
+    let (call, permit) = auth.into_parts();
+    let guarded = GuardedEffects::new(
+        permit,
+        &NoFs,
+        fixture.ports.process(),
+        &fixture.evidence,
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
+    );
+    fixture.runtime.block_on(async {
+        let mut response = guarded
+            .guarded_http(call, request)
+            .await
+            .expect("headers before absolute deadline");
+        let body = response.body().expect("streaming body");
+        assert_eq!(body.next().await, Some(Ok(b"abc".to_vec())));
+        let error = body
+            .next()
+            .await
+            .expect("timeout body item")
+            .expect_err("DNS plus body delay exceeds one absolute deadline");
+        assert!(matches!(error.failure(), TransportFailure::TimedOut));
+        assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+    });
+    assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
+    let captures = server.finish();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].request_count, 1);
+    assert!(!captures[0].request.is_empty());
 }
 
 #[test]

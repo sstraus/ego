@@ -506,7 +506,7 @@ impl Resolver for OfflineResolver {
     fn resolve(
         &self,
         _target: ego_core::permit::NetworkTarget,
-        _deadline: Option<std::time::Instant>,
+        _deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         Box::pin(futures::future::ready(Err(
             TransportError::definitely_unsent(TransportFailure::Offline),
@@ -517,11 +517,14 @@ impl Resolver for OfflineResolver {
 struct OfflineOneHop;
 
 impl OneHop for OfflineOneHop {
+    fn begin_call(&self) -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(60)
+    }
     fn execute(
         &self,
         _connect: ResolvedConnect,
         _request: ego_core::permit::HttpRequest,
-        _deadline: Option<std::time::Instant>,
+        _deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         Box::pin(futures::future::ready(Err(
             TransportError::definitely_unsent(TransportFailure::Offline),

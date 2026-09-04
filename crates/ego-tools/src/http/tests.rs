@@ -36,7 +36,7 @@ impl Resolver for FixedResolver {
     fn resolve(
         &self,
         target: NetworkTarget,
-        _deadline: Option<Instant>,
+        _deadline: Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(future::ready(
@@ -54,11 +54,14 @@ struct DelegatingHop {
 }
 
 impl OneHop for DelegatingHop {
+    fn begin_call(&self) -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
     fn execute(
         &self,
         connect: ego_core::permit::ResolvedConnect,
         request: HttpRequest,
-        deadline: Option<Instant>,
+        deadline: Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         self.transport.execute(connect, request, deadline)
     }
@@ -95,7 +98,7 @@ async fn one_hop_with_selected(
             route,
             connect,
             request,
-            Some(Instant::now() + Duration::from_secs(5)),
+            Instant::now() + Duration::from_secs(5),
         )
         .await
 }
@@ -117,7 +120,7 @@ async fn cancelled_literal(host: &str) -> Result<OneHopResponse, TransportError>
             route,
             connect,
             request,
-            Some(Instant::now() + Duration::from_secs(5)),
+            Instant::now() + Duration::from_secs(5),
         )
         .await
 }
@@ -141,7 +144,7 @@ async fn offline_localhost_uses_deterministic_loopback_without_injected_dns() {
     );
     let target = NetworkTarget::new("localhost", 80).expect("localhost target");
     let resolution = transport
-        .resolve(target, None)
+        .resolve(target, Instant::now() + Duration::from_secs(5))
         .await
         .expect("localhost is the offline DNS exception");
 
@@ -168,7 +171,7 @@ async fn offline_non_local_name_is_definitely_unsent_before_dns() {
     let error = transport
         .resolve(
             NetworkTarget::new("api.example.test", 443).expect("named target"),
-            None,
+            Instant::now() + Duration::from_secs(5),
         )
         .await
         .expect_err("offline named target must be refused");

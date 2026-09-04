@@ -31,7 +31,7 @@ impl Resolver for SystemResolver {
     fn resolve(
         &self,
         target: NetworkTarget,
-        deadline: Option<Instant>,
+        deadline: Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         let mut task = AbortOnDrop(runtime_handle().spawn(async move {
             let addresses = tokio::net::lookup_host((target.host().to_owned(), target.port()))
@@ -88,21 +88,13 @@ impl OneShotHttpTransport {
             offline,
         }
     }
-
-    pub(crate) fn call_deadline(&self) -> Instant {
-        let now = Instant::now();
-        let configured = now.checked_add(self.timeout.duration()).unwrap_or(now);
-        self.run_deadline.map_or(configured, |run_deadline| {
-            std::cmp::min(configured, run_deadline)
-        })
-    }
 }
 
 impl Resolver for OneShotHttpTransport {
     fn resolve(
         &self,
         target: NetworkTarget,
-        deadline: Option<Instant>,
+        deadline: Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         if self.offline {
             return Box::pin(futures::future::ready(offline_resolution(target)));
@@ -112,8 +104,7 @@ impl Resolver for OneShotHttpTransport {
                 cancellation_failure(&self.cancel),
             ))));
         }
-        let deadline = deadline.or_else(|| Some(self.call_deadline()));
-        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+        if deadline <= Instant::now() {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
                 TransportFailure::TimedOut,
             ))));
@@ -147,11 +138,19 @@ impl Resolver for OneShotHttpTransport {
 }
 
 impl OneHop for OneShotHttpTransport {
+    fn begin_call(&self) -> Instant {
+        let now = Instant::now();
+        let configured = now.checked_add(self.timeout.duration()).unwrap_or(now);
+        self.run_deadline.map_or(configured, |run_deadline| {
+            std::cmp::min(configured, run_deadline)
+        })
+    }
+
     fn execute(
         &self,
         connect: ResolvedConnect,
         request: HttpRequest,
-        deadline: Option<Instant>,
+        deadline: Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         if self.offline && !offline_connect_allowed(&connect) {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
@@ -168,7 +167,6 @@ impl OneHop for OneShotHttpTransport {
                 TransportFailure::AuthorityMismatch,
             ))));
         }
-        let deadline = deadline.unwrap_or_else(|| self.call_deadline());
         if deadline <= Instant::now() {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
                 TransportFailure::TimedOut,
@@ -258,7 +256,7 @@ async fn execute_one_hop(
     let response = loop {
         tokio::select! {
             result = &mut send => break result.map_err(exchange_error)?,
-            _ = deadline_elapsed(Some(deadline)) => {
+            _ = deadline_elapsed(deadline) => {
                 return Err(possibly_sent(TransportFailure::TimedOut));
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
@@ -285,7 +283,7 @@ async fn execute_one_hop(
         loop {
             let next = tokio::select! {
                 item = body.next() => item,
-                _ = deadline_elapsed(Some(deadline)) => {
+                _ = deadline_elapsed(deadline) => {
                     let _ = sender.send(Err(possibly_sent(TransportFailure::TimedOut))).await;
                     return;
                 }
@@ -383,11 +381,8 @@ fn cancellation_failure(cancel: &CancelToken) -> TransportFailure {
     }
 }
 
-async fn deadline_elapsed(deadline: Option<Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
-        None => std::future::pending().await,
-    }
+async fn deadline_elapsed(deadline: Instant) {
+    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
 }
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);

@@ -283,7 +283,7 @@ impl RunEffectPorts {
     }
 
     pub fn begin_http_call(&self) -> Instant {
-        self.http.call_deadline()
+        self.http.begin_call()
     }
 
     pub fn duplex(&self) -> &dyn DuplexSpawner {

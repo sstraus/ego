@@ -107,7 +107,7 @@ fn stdio_call(server: &str, argv: Vec<OsString>) -> PreparedCall {
 struct FakeResolver {
     answer: Arc<Mutex<Option<ego_core::permit::DnsResolution>>>,
     calls: Arc<Mutex<usize>>,
-    deadlines: Arc<Mutex<Vec<Option<Instant>>>>,
+    deadlines: Arc<Mutex<Vec<Instant>>>,
 }
 impl FakeResolver {
     fn one(target: NetworkTarget, ip: &str) -> Self {
@@ -124,7 +124,7 @@ impl FakeResolver {
         *self.calls.lock().expect("calls")
     }
 
-    fn deadlines(&self) -> Vec<Option<Instant>> {
+    fn deadlines(&self) -> Vec<Instant> {
         self.deadlines.lock().expect("deadlines").clone()
     }
 }
@@ -132,7 +132,7 @@ impl Resolver for FakeResolver {
     fn resolve(
         &self,
         _target: NetworkTarget,
-        deadline: Option<Instant>,
+        deadline: Instant,
     ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
         *self.calls.lock().expect("calls") += 1;
         self.deadlines.lock().expect("deadlines").push(deadline);
@@ -158,14 +158,17 @@ struct FakeOneHop {
     calls: Arc<Mutex<usize>>,
     observed: Arc<Mutex<Option<ObservedConnect>>>,
     failure: Arc<Mutex<Option<TransportError>>>,
-    deadlines: Arc<Mutex<Vec<Option<Instant>>>>,
+    deadlines: Arc<Mutex<Vec<Instant>>>,
 }
 impl OneHop for FakeOneHop {
+    fn begin_call(&self) -> Instant {
+        Instant::now() + std::time::Duration::from_secs(60)
+    }
     fn execute(
         &self,
         connect: ego_core::permit::ResolvedConnect,
         request: HttpRequest,
-        deadline: Option<Instant>,
+        deadline: Instant,
     ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>> {
         *self.calls.lock().expect("calls") += 1;
         self.deadlines.lock().expect("deadlines").push(deadline);
@@ -186,7 +189,7 @@ impl OneHop for FakeOneHop {
 }
 
 impl FakeOneHop {
-    fn deadlines(&self) -> Vec<Option<Instant>> {
+    fn deadlines(&self) -> Vec<Instant> {
         self.deadlines.lock().expect("deadlines").clone()
     }
 }
@@ -409,8 +412,9 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
         ego_core::generator::attempt::DeliveryCertainty::PossiblySent
     );
     assert_eq!(resolver.calls(), 1);
-    assert_eq!(resolver.deadlines(), vec![None]);
-    assert_eq!(one_hop.deadlines(), vec![None]);
+    let first_deadline = resolver.deadlines()[0];
+    assert!(first_deadline > Instant::now());
+    assert_eq!(one_hop.deadlines(), vec![first_deadline]);
     let second =
         futures::executor::block_on(guarded.guarded_http(call, req)).expect_err("spent authority");
     assert!(matches!(second.failure(), TransportFailure::AuthoritySpent));
@@ -447,15 +451,10 @@ fn guarded_http_passes_one_deadline_to_dns_and_hop_and_skips_dns_for_literal() {
     let one_hop = Arc::new(FakeOneHop::default());
     let guarded = GuardedHttp::new(resolver.clone(), one_hop.clone());
     let deadline = Instant::now() + std::time::Duration::from_secs(30);
-    futures::executor::block_on(guarded.execute_admitted(
-        named_route,
-        connect,
-        req,
-        Some(deadline),
-    ))
-    .expect("named target HTTP");
-    assert_eq!(resolver.deadlines(), vec![Some(deadline)]);
-    assert_eq!(one_hop.deadlines(), vec![Some(deadline)]);
+    futures::executor::block_on(guarded.execute_admitted(named_route, connect, req, deadline))
+        .expect("named target HTTP");
+    assert_eq!(resolver.deadlines(), vec![deadline]);
+    assert_eq!(one_hop.deadlines(), vec![deadline]);
 
     let literal_target = NetworkTarget::parse("127.0.0.1:443").expect("literal target");
     let literal_request = HttpRequest::get("/").expect("literal request");
@@ -467,12 +466,12 @@ fn guarded_http_passes_one_deadline_to_dns_and_hop_and_skips_dns_for_literal() {
         route("127.0.0.1:443"),
         literal_connect,
         literal_request,
-        Some(deadline),
+        deadline,
     ))
     .expect("literal target HTTP");
     assert_eq!(literal_resolver.calls(), 0);
     assert!(literal_resolver.deadlines().is_empty());
-    assert_eq!(literal_one_hop.deadlines(), vec![Some(deadline)]);
+    assert_eq!(literal_one_hop.deadlines(), vec![deadline]);
 }
 
 #[test]

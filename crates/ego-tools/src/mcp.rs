@@ -136,12 +136,7 @@ impl McpHttpEffects for RunMcpHttpEffects {
         let requests = Arc::clone(&self.requests);
         Box::pin(async move {
             let outcome = GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle())
-                .execute_admitted(
-                    parts.route,
-                    parts.connect,
-                    parts.request,
-                    Some(parts.deadline),
-                )
+                .execute_admitted(parts.route, parts.connect, parts.request, parts.deadline)
                 .await;
             match outcome {
                 Ok(response) => {

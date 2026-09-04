@@ -296,7 +296,7 @@ impl ego_core::permit::Resolver for NoResolver {
     fn resolve(
         &self,
         _target: ego_core::permit::NetworkTarget,
-        _deadline: Option<std::time::Instant>,
+        _deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, ego_core::permit::TransportError>>
     {
         Box::pin(futures::future::ready(Err(
@@ -310,11 +310,14 @@ impl ego_core::permit::Resolver for NoResolver {
 struct NoHop;
 
 impl ego_core::permit::OneHop for NoHop {
+    fn begin_call(&self) -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(60)
+    }
     fn execute(
         &self,
         _connect: ego_core::permit::ResolvedConnect,
         _request: ego_core::permit::HttpRequest,
-        _deadline: Option<std::time::Instant>,
+        _deadline: std::time::Instant,
     ) -> BoxFuture<
         'static,
         Result<ego_core::permit::OneHopResponse, ego_core::permit::TransportError>,

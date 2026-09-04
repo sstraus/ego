@@ -43,7 +43,7 @@ const LOGICAL_HOST: &str = "provider.test";
 const SECOND_HOST: &str = "other-provider.test";
 const BODY: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
 
-type ResolverObservation = (NetworkTarget, Option<Instant>);
+type ResolverObservation = (NetworkTarget, Instant);
 type SharedResolverLog = Arc<Mutex<Vec<ResolverObservation>>>;
 
 #[derive(Clone, Default)]
@@ -55,7 +55,7 @@ impl Resolver for RecordingResolver {
     fn resolve(
         &self,
         target: NetworkTarget,
-        deadline: Option<Instant>,
+        deadline: Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         self.deadlines
             .lock()
@@ -311,7 +311,11 @@ async fn one_logical_call_uses_one_deadline_across_a_redirect() {
     );
     let observed = deadlines.lock().expect("resolver recording lock");
     assert_eq!(observed.len(), 2, "one DNS effect per admitted hop");
-    assert!(observed.iter().all(|(_, deadline)| deadline.is_some()));
+    assert!(
+        observed
+            .iter()
+            .all(|(_, deadline)| *deadline > Instant::now())
+    );
     assert_eq!(
         observed[0].1, observed[1].1,
         "one logical deadline across redirect"

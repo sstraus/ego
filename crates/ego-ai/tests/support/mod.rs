@@ -37,7 +37,7 @@ impl Resolver for NoForeign {
     fn resolve(
         &self,
         _target: NetworkTarget,
-        _deadline: Option<Instant>,
+        _deadline: Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         Box::pin(futures::future::ready(Err(
             TransportError::definitely_unsent(TransportFailure::AuthorityMismatch),
@@ -46,11 +46,14 @@ impl Resolver for NoForeign {
 }
 
 impl OneHop for NoForeign {
+    fn begin_call(&self) -> Instant {
+        Instant::now() + std::time::Duration::from_secs(60)
+    }
     fn execute(
         &self,
         _connect: ResolvedConnect,
         _request: ego_core::permit::HttpRequest,
-        _deadline: Option<Instant>,
+        _deadline: Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         Box::pin(futures::future::ready(Err(
             TransportError::definitely_unsent(TransportFailure::AuthorityMismatch),

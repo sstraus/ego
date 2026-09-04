@@ -1810,7 +1810,7 @@ mod tests {
         fn resolve(
             &self,
             _target: NetworkTarget,
-            _deadline: Option<std::time::Instant>,
+            _deadline: std::time::Instant,
         ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
             Box::pin(future::ready(Err(TransportError::definitely_unsent(
                 TransportFailure::AuthorityMismatch,
@@ -1819,11 +1819,15 @@ mod tests {
     }
 
     impl OneHop for NoForeign {
+        fn begin_call(&self) -> std::time::Instant {
+            std::time::Instant::now() + std::time::Duration::from_secs(60)
+        }
+
         fn execute(
             &self,
             _connect: ResolvedConnect,
             _request: HttpRequest,
-            _deadline: Option<std::time::Instant>,
+            _deadline: std::time::Instant,
         ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
             Box::pin(future::ready(Err(TransportError::definitely_unsent(
                 TransportFailure::AuthorityMismatch,

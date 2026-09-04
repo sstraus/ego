@@ -821,7 +821,7 @@ pub trait Resolver: Send + Sync {
     fn resolve(
         &self,
         target: NetworkTarget,
-        deadline: Option<std::time::Instant>,
+        deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>>;
 }
 
@@ -1075,11 +1075,13 @@ impl fmt::Debug for OneHopResponse {
 }
 
 pub trait OneHop: Send + Sync {
+    fn begin_call(&self) -> std::time::Instant;
+
     fn execute(
         &self,
         connect: ResolvedConnect,
         request: HttpRequest,
-        deadline: Option<std::time::Instant>,
+        deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>>;
 }
 
@@ -1094,12 +1096,16 @@ impl GuardedHttp {
         Self { resolver, one_hop }
     }
 
+    pub fn begin_call(&self) -> std::time::Instant {
+        self.one_hop.begin_call()
+    }
+
     pub fn execute_admitted(
         &self,
         route: HttpRoute,
         connect: PreparedConnect,
         request: HttpRequest,
-        deadline: Option<std::time::Instant>,
+        deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         if route.target != connect.target || !connect.matches(&request) {
             return Box::pin(futures::future::ready(Err(authority_mismatch())));

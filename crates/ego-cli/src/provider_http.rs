@@ -76,7 +76,7 @@ impl HttpCall for ProviderHttpCall {
         let deadline = self.deadline;
         Box::pin(async move {
             GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle())
-                .execute_admitted(route, connect, request, Some(deadline))
+                .execute_admitted(route, connect, request, deadline)
                 .await
         })
     }

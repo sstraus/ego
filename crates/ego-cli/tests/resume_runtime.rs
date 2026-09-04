@@ -65,7 +65,8 @@ fn append_model_question(
     id: SessionId,
 ) -> ItemId {
     let sessions = home.join("sessions");
-    let store = JsonlStore::new(sessions, workspace.to_path_buf(), Box::new(OsIo));
+    let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
+    let store = JsonlStore::new(sessions, workspace, Box::new(OsIo));
     let question = ItemId::new();
     let turn = TurnId::new();
     let event = DomainEvent {

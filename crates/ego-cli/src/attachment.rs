@@ -262,7 +262,7 @@ async fn fetch_https(
     total: &mut u64,
     ports: &RunEffectPorts,
 ) -> Result<Vec<u8>, UsageError> {
-    let deadline = Some(ports.begin_http_call());
+    let deadline = ports.begin_http_call();
     let guarded = GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle());
     let mut seen = BTreeSet::new();
 

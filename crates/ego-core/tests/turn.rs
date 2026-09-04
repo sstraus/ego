@@ -107,7 +107,7 @@ mod turn {
         fn resolve(
             &self,
             _target: ego_core::permit::NetworkTarget,
-            _deadline: Option<std::time::Instant>,
+            _deadline: std::time::Instant,
         ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
             panic!("turn test unexpectedly resolved an HTTP target")
         }
@@ -116,11 +116,14 @@ mod turn {
     struct NoHop;
 
     impl OneHop for NoHop {
+        fn begin_call(&self) -> std::time::Instant {
+            std::time::Instant::now() + std::time::Duration::from_secs(60)
+        }
         fn execute(
             &self,
             _connect: ResolvedConnect,
             _request: ego_core::permit::HttpRequest,
-            _deadline: Option<std::time::Instant>,
+            _deadline: std::time::Instant,
         ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
             panic!("turn test unexpectedly executed an HTTP hop")
         }
