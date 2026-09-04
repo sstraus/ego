@@ -5640,6 +5640,8 @@ mod turn {
             GenerationModelError, GenerationModelErrorClass, GenerationModelRequest,
             GenerationModelSource, GenerationProfile, GenerationRole,
         };
+        use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty};
+        use ego_core::generator::capabilities::CapabilityGap;
 
         enum ResolutionStep {
             Ready(Box<Result<GenerationProfile, GenerationModelError>>),
@@ -5887,6 +5889,59 @@ mod turn {
                 };
                 Box::pin(futures::future::ready(*result))
             }
+        }
+
+        fn profile_with_carryover(
+            slug: &str,
+            script: Vec<AiEvent>,
+            trace: &GenerationTrace,
+            carryover: ReasoningCarryover,
+            dialect: Option<&str>,
+        ) -> GenerationProfile {
+            let mut profile = profile(slug, false, script, trace, Some(1_024));
+            profile.capabilities.reasoning_carryover = carryover;
+            profile.capabilities.reasoning_state_dialect = dialect.map(str::to_owned);
+            profile
+        }
+
+        fn run_scripted(
+            fx: &Fixture,
+            state: SessionState,
+            prompt: &str,
+            source: Arc<ScriptedGenerationSource>,
+            config: TurnConfig,
+        ) -> (ExitReason, bool, SessionState) {
+            let mut gate = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::open(
+                session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+                GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
+                    source,
+                    gate: gate.clone(),
+                    config,
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
+                },
+                tools,
+            );
+            let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
+            (
+                outcome.exit_reason,
+                outcome.ok,
+                turn.into_state().expect("unique turn journal state"),
+            )
         }
 
         #[test]
@@ -7024,6 +7079,576 @@ mod turn {
             drop(turn);
             assert_eq!(outstanding(&gate), Some(usd("0")));
             assert_eq!(committed(&gate), Some(usd("0.06144")));
+        }
+
+        /// regression case: one logical generation owns an ordered, delivery-safe
+        /// retry/fallback plan. Every wire journey is fresh, but all four
+        /// attempts remain attributable to the same generation.
+        #[test]
+        fn retry_and_fallback_are_ordered_per_candidate_and_delivery_safe() {
+            let primary = "ollama/primary-model";
+            let fallback_slug = "openai/fallback-model";
+            let transient_unsent = || {
+                vec![
+                    AiEvent::Error {
+                        message: "temporary refusal before write".to_owned(),
+                        kind: ErrorKind::Transient,
+                    },
+                    AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                    AiEvent::Stop(StopReason::Error),
+                ]
+            };
+            let success = || {
+                vec![
+                    AiEvent::TextDelta {
+                        text: "fallback answer".to_owned(),
+                    },
+                    AiEvent::Usage(tokens(2, 0, 0, 3)),
+                    AiEvent::Stop(StopReason::Stop),
+                ]
+            };
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile_with_carryover(
+                        primary,
+                        transient_unsent(),
+                        &trace,
+                        ReasoningCarryover::Portable,
+                        None,
+                    )),
+                    Ok(profile_with_carryover(
+                        primary,
+                        transient_unsent(),
+                        &trace,
+                        ReasoningCarryover::Portable,
+                        None,
+                    )),
+                    Ok(profile_with_carryover(
+                        fallback_slug,
+                        transient_unsent(),
+                        &trace,
+                        ReasoningCarryover::Portable,
+                        None,
+                    )),
+                    Ok(profile_with_carryover(
+                        fallback_slug,
+                        success(),
+                        &trace,
+                        ReasoningCarryover::Portable,
+                        None,
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let fallback = ModelRef(fallback_slug.to_owned());
+            let (_, ok, state) = run_scripted(
+                &fx,
+                SessionState::default(),
+                "retry safely",
+                source.clone(),
+                TurnConfig {
+                    system: None,
+                    token_ceiling: None,
+                    retry: 1,
+                    fallbacks: vec![fallback.clone()],
+                },
+            );
+            assert!(ok, "the final fallback attempt completed");
+
+            let events = fx.store.events();
+            let started: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event.kind {
+                    EventKind::GenerationStarted { attempt, .. } => Some(attempt),
+                    _ => None,
+                })
+                .collect();
+            let settled: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event.kind {
+                    EventKind::AttemptSettled { attempt, .. } => Some(attempt),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(started.len(), 4);
+            assert_eq!(settled.len(), 4);
+            assert_eq!(
+                started
+                    .iter()
+                    .map(|attempt| attempt.generation())
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                1,
+                "retries and fallback share one logical GenerationId"
+            );
+            assert_eq!(
+                started
+                    .iter()
+                    .map(|attempt| attempt.attempt())
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                4,
+                "every wire journey has a fresh AttemptId"
+            );
+            assert_eq!(
+                trace
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|request| request.model.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "primary-model",
+                    "primary-model",
+                    "fallback-model",
+                    "fallback-model"
+                ]
+            );
+            assert_eq!(
+                trace.steps.lock().unwrap().as_slice(),
+                [
+                    "resolve:Main",
+                    "generate:primary-model",
+                    "resolve:Main",
+                    "generate:primary-model",
+                    "resolve:Main",
+                    "generate:fallback-model",
+                    "resolve:Main",
+                    "generate:fallback-model",
+                ]
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::UsageUpdated { .. }))
+                    .count(),
+                4,
+                "missing usage still contributes one accounting line per attempt"
+            );
+            assert!(state.live_attempts.is_empty());
+
+            // A safely unsent permanent failure advances to the next
+            // candidate without spending this candidate's retry allowance.
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile(
+                        primary,
+                        false,
+                        vec![
+                            AiEvent::Error {
+                                message: "permanent refusal".to_owned(),
+                                kind: ErrorKind::Refused,
+                            },
+                            AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                            AiEvent::Stop(StopReason::Error),
+                        ],
+                        &trace,
+                        Some(1_024),
+                    )),
+                    Ok(profile(
+                        fallback_slug,
+                        false,
+                        success(),
+                        &trace,
+                        Some(1_024),
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let (_, ok, _) = run_scripted(
+                &fx,
+                SessionState::default(),
+                "permanent then fallback",
+                source,
+                TurnConfig {
+                    system: None,
+                    token_ceiling: None,
+                    retry: 1,
+                    fallbacks: vec![fallback.clone()],
+                },
+            );
+            assert!(ok);
+            assert_eq!(
+                trace
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|request| request.model.as_str())
+                    .collect::<Vec<_>>(),
+                ["primary-model", "fallback-model"]
+            );
+
+            // A possibly-sent transient failure is terminal for automatic
+            // delivery, even though its error class would otherwise retry.
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([Ok(profile(
+                    primary,
+                    false,
+                    vec![
+                        AiEvent::Error {
+                            message: "connection lost after write".to_owned(),
+                            kind: ErrorKind::Transient,
+                        },
+                        AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
+                        AiEvent::Stop(StopReason::Error),
+                    ],
+                    &trace,
+                    Some(1_024),
+                ))])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let (_, ok, _) = run_scripted(
+                &fx,
+                SessionState::default(),
+                "possibly sent",
+                source,
+                TurnConfig {
+                    system: None,
+                    token_ceiling: None,
+                    retry: 1,
+                    fallbacks: vec![fallback.clone()],
+                },
+            );
+            assert!(!ok);
+            assert_eq!(trace.requests.lock().unwrap().len(), 1);
+            assert_eq!(
+                trace.steps.lock().unwrap().as_slice(),
+                ["resolve:Main", "generate:primary-model"]
+            );
+        }
+
+        /// regression case: fallback preflight may remove only opaque reasoning
+        /// state, and must make both the removal and a skipped candidate
+        /// visible without exposing the state blob.
+        #[test]
+        fn fallback_preflight_drops_reasoning_or_typed_skips_without_admission() {
+            const OPAQUE: &str = "provider-private-reasoning-signature";
+            let fx = Fixture::new(vec![vec![
+                AiEvent::ReasoningDelta {
+                    text: "private thought".to_owned(),
+                },
+                AiEvent::ReasoningState(ReasoningState {
+                    blob: OPAQUE.to_owned(),
+                    dialect: "primary-dialect".to_owned(),
+                }),
+                AiEvent::TextDelta {
+                    text: "ordinary answer".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ]]);
+            let (_, _, state) = run(&fx, SessionState::default(), "seed ordinary content");
+            assert!(
+                !state.items.is_empty(),
+                "the fallback has a durable history"
+            );
+
+            let trace = GenerationTrace::default();
+            let primary = "ollama/primary-model";
+            let fallback = "anthropic/fallback-model";
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile_with_carryover(
+                        primary,
+                        vec![
+                            AiEvent::Error {
+                                message: "temporary refusal before write".to_owned(),
+                                kind: ErrorKind::Transient,
+                            },
+                            AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                            AiEvent::Stop(StopReason::Error),
+                        ],
+                        &trace,
+                        ReasoningCarryover::Portable,
+                        None,
+                    )),
+                    Ok(profile_with_carryover(
+                        fallback,
+                        vec![
+                            AiEvent::TextDelta {
+                                text: "fallback answer".to_owned(),
+                            },
+                            AiEvent::Stop(StopReason::Stop),
+                        ],
+                        &trace,
+                        ReasoningCarryover::SameProviderOnly,
+                        Some("fallback-dialect"),
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let (_, ok, _) = run_scripted(
+                &fx,
+                state,
+                "use the fallback",
+                source,
+                TurnConfig {
+                    system: None,
+                    token_ceiling: None,
+                    retry: 0,
+                    fallbacks: vec![ModelRef(fallback.to_owned())],
+                },
+            );
+            assert!(ok);
+            let requests = trace.requests.lock().unwrap();
+            let fallback_request = requests
+                .iter()
+                .find(|request| request.model == "fallback-model")
+                .expect("the reasoning-drop fallback reached its generator");
+            let blocks: Vec<_> = fallback_request
+                .messages
+                .messages()
+                .iter()
+                .flat_map(|message| message.content.iter())
+                .collect();
+            assert!(blocks.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text { text } if text == "seed ordinary content"
+            )));
+            assert!(blocks.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text { text } if text == "ordinary answer"
+            )));
+            assert!(
+                blocks
+                    .iter()
+                    .all(|block| !matches!(block, ContentBlock::Reasoning { .. })),
+                "only opaque reasoning state was removed"
+            );
+            drop(requests);
+
+            let decision = fx
+                .store
+                .events()
+                .into_iter()
+                .find_map(|event| match event.kind {
+                    EventKind::FallbackDecision {
+                        candidate,
+                        decision:
+                            ego_core::event::domain::FallbackDecision::ReasoningDropped {
+                                dropped_blocks,
+                                dialects,
+                            },
+                    } => Some((candidate, dropped_blocks, dialects)),
+                    _ => None,
+                })
+                .expect("reasoning removal is durable typed evidence");
+            assert_eq!(decision.0.0, fallback);
+            assert_eq!(decision.1, 1);
+            assert_eq!(decision.2, vec!["primary-dialect".to_owned()]);
+
+            let public = fx
+                .sink
+                .events()
+                .into_iter()
+                .find(|event| matches!(event, PublicEvent::FallbackDecision { .. }))
+                .expect("reasoning removal is visible to the public projection");
+            let public_json = serde_json::to_value(public).expect("public event is serialisable");
+            let public_text = public_json.to_string();
+            assert!(public_text.contains(fallback));
+            assert!(public_text.contains("primary-dialect"));
+            assert!(public_text.contains("1"));
+            assert!(!public_text.contains(OPAQUE));
+
+            // A non-reasoning gap is skipped before the gate and generator.
+            let trace = GenerationTrace::default();
+            let mut incapable = profile_with_settings(
+                "openai/too-small",
+                vec![],
+                &trace,
+                Some(1_024),
+                Some(8_192),
+                ThinkingLevel::Off,
+                false,
+            );
+            incapable.capabilities.max_tools = Some(0);
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile(
+                        primary,
+                        false,
+                        vec![
+                            AiEvent::Error {
+                                message: "temporary refusal before write".to_owned(),
+                                kind: ErrorKind::Transient,
+                            },
+                            AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                            AiEvent::Stop(StopReason::Error),
+                        ],
+                        &trace,
+                        Some(1_024),
+                    )),
+                    Ok(incapable),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]).with_read_tool();
+            let (_, _, _) = run_scripted(
+                &fx,
+                SessionState::default(),
+                "skip the candidate",
+                source,
+                TurnConfig {
+                    system: None,
+                    token_ceiling: None,
+                    retry: 0,
+                    fallbacks: vec![ModelRef("openai/too-small".to_owned())],
+                },
+            );
+            assert_eq!(trace.requests.lock().unwrap().len(), 1);
+            assert_eq!(
+                fx.sink
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event, PublicEvent::MeteringSelected { .. }))
+                    .count(),
+                1,
+                "a skipped candidate never reaches reservation admission"
+            );
+            let skipped = fx
+                .store
+                .events()
+                .into_iter()
+                .find_map(|event| match event.kind {
+                    EventKind::FallbackDecision {
+                        candidate,
+                        decision: ego_core::event::domain::FallbackDecision::Skipped { gaps },
+                    } => Some((candidate, gaps)),
+                    _ => None,
+                })
+                .expect("the incapable candidate is durably skipped");
+            assert_eq!(skipped.0.0, "openai/too-small");
+            assert!(
+                skipped
+                    .1
+                    .iter()
+                    .any(|gap| matches!(gap, CapabilityGap::TooManyTools { .. }))
+            );
+        }
+
+        /// regression case: accounting names definitely-unsent missing usage as
+        /// known zero, while possible delivery remains unknown. A replayed
+        /// live attempt refuses before accepting a new prompt or resolving a
+        /// model.
+        #[test]
+        fn missing_usage_is_attributed_and_live_replay_is_refused_before_prompt() {
+            let run_case = |certainty| {
+                let trace = GenerationTrace::default();
+                let source = Arc::new(
+                    ScriptedGenerationSource::new([Ok(profile(
+                        "ollama/accounting-model",
+                        false,
+                        vec![
+                            AiEvent::DeliveryObserved(certainty),
+                            AiEvent::Stop(StopReason::Error),
+                        ],
+                        &trace,
+                        Some(1_024),
+                    ))])
+                    .with_trace(trace.clone()),
+                );
+                let fx = Fixture::new(vec![]);
+                let (_, _, _) = run_scripted(
+                    &fx,
+                    SessionState::default(),
+                    "account missing usage",
+                    source,
+                    TurnConfig {
+                        system: None,
+                        token_ceiling: None,
+                        retry: 0,
+                        fallbacks: Vec::new(),
+                    },
+                );
+                let usage = fx
+                    .store
+                    .events()
+                    .into_iter()
+                    .find_map(|event| match event.kind {
+                        EventKind::UsageUpdated {
+                            usage, cost_delta, ..
+                        } => Some((usage, cost_delta)),
+                        _ => None,
+                    })
+                    .expect("every settled attempt contributes accounting");
+                (fx, usage)
+            };
+
+            let (_, usage) = run_case(DeliveryCertainty::DefinitelyUnsent);
+            assert_eq!(usage.0, tokens(0, 0, 0, 0));
+            assert!(matches!(
+                usage.1,
+                CostDelta::Known {
+                    amount,
+                    attribution: CostAttribution::DefinitelyUnsent,
+                    fx: None,
+                } if amount == usd("0")
+            ));
+
+            let (_, usage) = run_case(DeliveryCertainty::PossiblySent);
+            assert_eq!(usage.0, tokens(0, 0, 0, 0));
+            assert!(matches!(usage.1, CostDelta::Unknown(_)));
+
+            let attempt = AttemptRef::first(ego_core::event::id::GenerationId::new());
+            let turn_id = TurnId::new();
+            let seeded = DomainEvent {
+                env: Envelope {
+                    seq: Seq::ZERO.next(),
+                    id: EventId::new(),
+                    turn: turn_id,
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::from_millis(1_787_000_000_000),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::GenerationStarted {
+                    attempt,
+                    role: ego_core::generation_model_source::GenerationRole::Main,
+                },
+            };
+            let mut state = SessionState::default();
+            state.apply(&seeded);
+            assert_eq!(state.live_attempts.len(), 1);
+
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([Ok(profile(
+                    "ollama/never-reached",
+                    false,
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                    &trace,
+                    Some(1_024),
+                ))])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let _ = run_scripted(
+                &fx,
+                state,
+                "must refuse live replay",
+                source,
+                TurnConfig {
+                    system: None,
+                    token_ceiling: None,
+                    retry: 0,
+                    fallbacks: Vec::new(),
+                },
+            );
+            assert!(trace.requests.lock().unwrap().is_empty());
+            assert!(trace.steps.lock().unwrap().is_empty());
+            assert!(
+                fx.store
+                    .events()
+                    .iter()
+                    .all(|event| !matches!(event.kind, EventKind::UserPrompt { .. }))
+            );
         }
     }
 

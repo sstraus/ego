@@ -18,7 +18,7 @@ use ego_cli::cli::{self, Invocation, Output, SessionChoice, Stdin};
 use ego_cli::prompt::{self, StdinSource};
 use ego_core::budget::Ledger;
 use ego_core::ceiling::Ceilings;
-use ego_core::config::Mode;
+use ego_core::config::{Mode, ModelRef};
 use ego_core::cost::{Amount, CurrencyCode, Money};
 
 fn argv<const N: usize>(args: [&str; N]) -> Vec<String> {
@@ -424,6 +424,64 @@ fn the_rule_flags_are_repeatable_and_keep_their_order() {
 
     let none = parsed(["run", "Ask"]);
     assert!(none.allow.is_empty() && none.deny.is_empty());
+}
+
+// --- retry and fallback grammar ---
+
+#[test]
+fn retry_defaults_to_zero_and_accepts_explicit_nonnegative_values() {
+    assert_eq!(parsed(["run", "--model", "ollama/qwen3", "Ask"]).retry, 0);
+
+    for (value, expected) in [("0", 0), ("3", 3)] {
+        assert_eq!(
+            parsed_slice(&["run", "--model", "ollama/qwen3", "--retry", value, "Ask"]).retry,
+            expected,
+            "--retry {value}"
+        );
+    }
+}
+
+#[test]
+fn repeatable_fallbacks_preserve_ordered_model_refs() {
+    let args = parsed([
+        "run",
+        "--model",
+        "ollama/qwen3",
+        "--fallback",
+        "openai/gpt-5.1",
+        "--fallback",
+        "anthropic/claude-sonnet-4-6",
+        "Ask",
+    ]);
+
+    assert_eq!(
+        args.fallbacks,
+        vec![
+            ModelRef("openai/gpt-5.1".to_owned()),
+            ModelRef("anthropic/claude-sonnet-4-6".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn retry_and_fallback_values_refuse_when_missing_or_malformed() {
+    assert!(refused(["run", "--model", "ollama/qwen3", "--retry"]).contains("--retry"));
+    for value in ["nope", "-1"] {
+        assert!(
+            refused(["run", "--model", "ollama/qwen3", "--retry", value, "Ask"])
+                .contains("--retry"),
+            "malformed retry value was accepted: {value}"
+        );
+    }
+
+    assert!(refused(["run", "--model", "ollama/qwen3", "--fallback"]).contains("--fallback"));
+    for value in ["ollama", "/qwen3", "ollama/", "not a model"] {
+        assert!(
+            refused(["run", "--model", "ollama/qwen3", "--fallback", value, "Ask"])
+                .contains("--fallback"),
+            "malformed fallback value was accepted: {value}"
+        );
+    }
 }
 
 /// `-` is not a prompt that happens to be a hyphen; it says where the prompt
