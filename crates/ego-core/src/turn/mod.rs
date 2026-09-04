@@ -87,8 +87,9 @@ pub use mcp_registry::{
     McpRegistryJournalOperation,
 };
 pub use policy::{
-    GenerationPolicyCapture, GenerationPolicyCaptureError, GenerationPolicyDigest,
-    GenerationPolicySnapshot,
+    GenerationPolicyCapture, GenerationPolicyCaptureError, GenerationPolicyCaptureStore,
+    GenerationPolicyCaptureStoreError, GenerationPolicyCaptureStoreErrorKind,
+    GenerationPolicyCaptureStoreOperation, GenerationPolicyDigest, GenerationPolicySnapshot,
 };
 use tools::{GenerationToolCatalogue, PreparedToolCall};
 pub use tools::{ToolBatchError, ToolEffectPorts, Tools};

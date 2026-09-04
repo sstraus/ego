@@ -1,6 +1,6 @@
 //! RED contract for the confidential, immutable generation-policy value.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ego_core::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
@@ -17,7 +17,9 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::turn::{
-    GenerationPolicyCapture, GenerationPolicyCaptureError, GenerationPolicySnapshot,
+    GenerationPolicyCapture, GenerationPolicyCaptureError, GenerationPolicyCaptureStore,
+    GenerationPolicyCaptureStoreError, GenerationPolicyCaptureStoreErrorKind,
+    GenerationPolicyCaptureStoreOperation, GenerationPolicyDigest, GenerationPolicySnapshot,
 };
 use ego_core::turn::{ToolEffectPorts, Tools};
 use futures::future::BoxFuture;
@@ -96,7 +98,72 @@ const RULE_A: &str = "read(/sentinel/generation-policy-workspace/src/**)";
 const RULE_B: &str = "write(/sentinel/generation-policy-workspace/out/**)";
 const RULE_C: &str = "exec(sentinel-tool *)";
 const RULE_D: &str = "read(/sentinel/generation-policy-workspace/secrets/**)";
+const CONTINUATION_ID: &str = "mcp-sentinel-generation-policy-continuation";
+const RAW_BYTES: &str = "sentinel-raw-generation-policy-bytes";
 const CODEC_LIMIT: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct TypedCaptureStore {
+    stored: Mutex<Option<(String, Arc<GenerationPolicySnapshot>)>>,
+}
+
+impl GenerationPolicyCaptureStore for TypedCaptureStore {
+    fn store(
+        &self,
+        id: &str,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<(), GenerationPolicyCaptureStoreError> {
+        *self.stored.lock().map_err(|_| {
+            GenerationPolicyCaptureStoreError::new(
+                GenerationPolicyCaptureStoreOperation::Store,
+                GenerationPolicyCaptureStoreErrorKind::Unavailable,
+            )
+        })? = Some((id.to_owned(), snapshot));
+        Ok(())
+    }
+
+    fn load(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<Arc<GenerationPolicySnapshot>, GenerationPolicyCaptureStoreError> {
+        let stored = self.stored.lock().map_err(|_| {
+            GenerationPolicyCaptureStoreError::new(
+                GenerationPolicyCaptureStoreOperation::Load,
+                GenerationPolicyCaptureStoreErrorKind::Unavailable,
+            )
+        })?;
+        let Some((_, snapshot)) = stored.as_ref().filter(|(stored_id, _)| stored_id == id) else {
+            return Err(GenerationPolicyCaptureStoreError::new(
+                GenerationPolicyCaptureStoreOperation::Load,
+                GenerationPolicyCaptureStoreErrorKind::Missing,
+            ));
+        };
+        if snapshot.digest() != expected.clone() {
+            return Err(GenerationPolicyCaptureStoreError::new(
+                GenerationPolicyCaptureStoreOperation::Load,
+                GenerationPolicyCaptureStoreErrorKind::DigestMismatch,
+            ));
+        }
+        Ok(Arc::clone(snapshot))
+    }
+
+    fn delete(&self, id: &str) -> Result<(), GenerationPolicyCaptureStoreError> {
+        let mut stored = self.stored.lock().map_err(|_| {
+            GenerationPolicyCaptureStoreError::new(
+                GenerationPolicyCaptureStoreOperation::Delete,
+                GenerationPolicyCaptureStoreErrorKind::Unavailable,
+            )
+        })?;
+        if stored
+            .as_ref()
+            .is_some_and(|(stored_id, _)| stored_id == id)
+        {
+            *stored = None;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 struct AlwaysAllow;
@@ -528,6 +595,99 @@ fn repeated_access_preserves_arc_ownership_and_restore_reuses_snapshot_arc() {
     assert!(Arc::ptr_eq(&snapshot_a, &restored.snapshot()));
     assert!(!Arc::ptr_eq(&policy_a, &restored.policy()));
     assert_eq!(snapshot_a.digest(), restored.snapshot().digest());
+}
+
+fn assert_send_sync<T: Send + Sync + ?Sized>() {}
+
+#[test]
+fn typed_capture_store_contract_carries_only_verified_snapshot_values() {
+    assert_send_sync::<dyn GenerationPolicyCaptureStore>();
+
+    let store: Arc<dyn GenerationPolicyCaptureStore> = Arc::new(TypedCaptureStore::default());
+    let snapshot = capture(Mode::Auto, rules()).snapshot();
+    let expected = snapshot.digest();
+    store
+        .store(CONTINUATION_ID, Arc::clone(&snapshot))
+        .expect("typed snapshot stores");
+    let loaded = store
+        .load(CONTINUATION_ID, &expected)
+        .expect("expected digest loads the typed snapshot");
+    assert!(Arc::ptr_eq(&loaded, &snapshot));
+    store
+        .delete(CONTINUATION_ID)
+        .expect("typed snapshot deletes");
+}
+
+fn digest_text(digest: &GenerationPolicyDigest) -> String {
+    serde_json::to_value(digest)
+        .expect("digest serializes")
+        .as_str()
+        .expect("digest wire is a string")
+        .to_owned()
+}
+
+#[test]
+fn capture_store_errors_are_closed_stable_and_confidentially_redacted() {
+    let expected_digest = capture(Mode::Auto, rules()).snapshot().digest();
+    let actual_digest = capture(Mode::Plan, rules()).snapshot().digest();
+    let expected_digest = digest_text(&expected_digest);
+    let actual_digest = digest_text(&actual_digest);
+    assert_ne!(expected_digest, actual_digest);
+    let sentinels = [
+        CONTINUATION_ID,
+        WORKSPACE,
+        RULE_A,
+        RULE_B,
+        RULE_C,
+        RULE_D,
+        expected_digest.as_str(),
+        actual_digest.as_str(),
+        RAW_BYTES,
+    ];
+    let operations = [
+        GenerationPolicyCaptureStoreOperation::Store,
+        GenerationPolicyCaptureStoreOperation::Load,
+        GenerationPolicyCaptureStoreOperation::Delete,
+    ];
+    let kinds = [
+        (
+            GenerationPolicyCaptureStoreErrorKind::Unavailable,
+            "generation policy capture store is unavailable",
+        ),
+        (
+            GenerationPolicyCaptureStoreErrorKind::Missing,
+            "generation policy capture is missing",
+        ),
+        (
+            GenerationPolicyCaptureStoreErrorKind::CapacityExceeded,
+            "generation policy capture exceeds storage capacity",
+        ),
+        (
+            GenerationPolicyCaptureStoreErrorKind::Corrupt,
+            "stored generation policy capture is corrupt",
+        ),
+        (
+            GenerationPolicyCaptureStoreErrorKind::DigestMismatch,
+            "stored generation policy capture digest does not match",
+        ),
+    ];
+
+    for operation in operations {
+        for (kind, diagnostic) in kinds {
+            let error = GenerationPolicyCaptureStoreError::new(operation, kind);
+            assert_eq!(error.operation(), operation);
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.diagnostic(), diagnostic);
+            for rendered in [format!("{error:?}"), error.to_string()] {
+                for sentinel in sentinels {
+                    assert!(
+                        !rendered.contains(sentinel),
+                        "capture-store error leaked confidential input: {rendered}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 // Keep the error type in the contract's import surface even before the

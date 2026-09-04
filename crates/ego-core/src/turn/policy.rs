@@ -184,6 +184,121 @@ impl fmt::Debug for GenerationPolicyCapture {
     }
 }
 
+/// Confidential storage for one generation policy keyed by continuation id.
+pub trait GenerationPolicyCaptureStore: Send + Sync {
+    fn store(
+        &self,
+        id: &str,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<(), GenerationPolicyCaptureStoreError>;
+
+    fn load(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<Arc<GenerationPolicySnapshot>, GenerationPolicyCaptureStoreError>;
+
+    fn delete(&self, id: &str) -> Result<(), GenerationPolicyCaptureStoreError>;
+}
+
+/// Capture-store operation that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationPolicyCaptureStoreOperation {
+    Store,
+    Load,
+    Delete,
+}
+
+impl fmt::Display for GenerationPolicyCaptureStoreOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Store => "store",
+            Self::Load => "load",
+            Self::Delete => "delete",
+        })
+    }
+}
+
+/// Closed, non-secret capture-store failure classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationPolicyCaptureStoreErrorKind {
+    Unavailable,
+    Missing,
+    CapacityExceeded,
+    Corrupt,
+    DigestMismatch,
+}
+
+impl fmt::Display for GenerationPolicyCaptureStoreErrorKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Unavailable => "unavailable",
+            Self::Missing => "missing",
+            Self::CapacityExceeded => "capacity exceeded",
+            Self::Corrupt => "corrupt",
+            Self::DigestMismatch => "digest mismatch",
+        })
+    }
+}
+
+/// Redacted failure at the generation-policy capture-store boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationPolicyCaptureStoreError {
+    operation: GenerationPolicyCaptureStoreOperation,
+    kind: GenerationPolicyCaptureStoreErrorKind,
+}
+
+impl GenerationPolicyCaptureStoreError {
+    pub fn new(
+        operation: GenerationPolicyCaptureStoreOperation,
+        kind: GenerationPolicyCaptureStoreErrorKind,
+    ) -> Self {
+        Self { operation, kind }
+    }
+
+    pub fn operation(&self) -> GenerationPolicyCaptureStoreOperation {
+        self.operation
+    }
+
+    pub fn kind(&self) -> GenerationPolicyCaptureStoreErrorKind {
+        self.kind
+    }
+
+    pub fn diagnostic(&self) -> &'static str {
+        match self.kind {
+            GenerationPolicyCaptureStoreErrorKind::Unavailable => {
+                "generation policy capture store is unavailable"
+            }
+            GenerationPolicyCaptureStoreErrorKind::Missing => {
+                "generation policy capture is missing"
+            }
+            GenerationPolicyCaptureStoreErrorKind::CapacityExceeded => {
+                "generation policy capture exceeds storage capacity"
+            }
+            GenerationPolicyCaptureStoreErrorKind::Corrupt => {
+                "stored generation policy capture is corrupt"
+            }
+            GenerationPolicyCaptureStoreErrorKind::DigestMismatch => {
+                "stored generation policy capture digest does not match"
+            }
+        }
+    }
+}
+
+impl fmt::Display for GenerationPolicyCaptureStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "generation policy capture {operation} operation failed ({kind}): {diagnostic}",
+            operation = self.operation,
+            kind = self.kind,
+            diagnostic = self.diagnostic(),
+        )
+    }
+}
+
+impl std::error::Error for GenerationPolicyCaptureStoreError {}
+
 /// Closed failures that never retain or render confidential policy material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerationPolicyCaptureError {
