@@ -843,6 +843,7 @@ pub struct TurnLoop<'session, 'turn> {
 struct HookBindingState<'session> {
     state: SessionHookState<'session>,
     binding: Arc<dyn HookInvocationBinding + 'session>,
+    mcp: Option<Arc<dyn crate::mcp::McpRuntimeBinding>>,
 }
 
 fn admit_generation_evidence(
@@ -894,7 +895,7 @@ fn admit_generation_evidence(
     }
 }
 
-impl<'session, 'turn> TurnLoop<'session, 'turn> {
+impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     /// Open a loop over a session.
     ///
     /// Three arguments rather than ten loose ones: a turn is a session, a
@@ -993,15 +994,6 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         self
     }
 
-    /// Attach the adapter that owns foreign continuation recovery.
-    pub fn with_foreign_question_port(
-        mut self,
-        port: Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>,
-    ) -> Self {
-        self.foreign_question_port = Some(port);
-        self
-    }
-
     /// Attach the product's sole async fork owner.
     pub fn with_skill_invocation_port(
         mut self,
@@ -1038,23 +1030,40 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         mut self,
         state: SessionHookState<'session>,
         binding: Arc<dyn HookInvocationBinding + 'session>,
+        mcp: Option<Arc<dyn crate::mcp::McpRuntimeBinding>>,
     ) -> Result<Self, HookRunError> {
         if !self.journal.same_owner(&state.journal()) {
             return Err(HookRunError::new(
                 "the hook state does not own this turn loop's journal",
             ));
         }
-        self.hook_binding = Some(HookBindingState { state, binding });
+        self.hook_runtime = None;
+        self.foreign_question_port = None;
+        self.hook_binding = Some(HookBindingState {
+            state,
+            binding,
+            mcp,
+        });
         Ok(self)
     }
 
     fn bind_hook_policy(&mut self, policy: Arc<PolicyEngine>) -> Result<(), String> {
-        self.hook_runtime = None;
         let Some(binding) = self.hook_binding.as_ref() else {
             return Ok(());
         };
-        let runtime = binding.state.bind(binding.binding.bind(policy, None)?);
+        let invoker = binding
+            .binding
+            .bind(Arc::clone(&policy), binding.mcp.as_deref())?;
+        let runtime = binding.state.bind(invoker);
+        let foreign_question_port = binding.mcp.as_ref().map(|mcp| {
+            mcp.foreign_question_port(
+                runtime.clone(),
+                policy.resume_floor(),
+                self.tools.effect_ports(),
+            )
+        });
         self.hook_runtime = Some(runtime);
+        self.foreign_question_port = foreign_question_port;
         Ok(())
     }
 
@@ -1611,6 +1620,27 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                     turn,
                     StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)),
                 ));
+            }
+            let has_mcp_binding = self
+                .hook_binding
+                .as_ref()
+                .is_some_and(|binding| binding.mcp.is_some());
+            if has_mcp_binding {
+                let bound = self
+                    .policy_source
+                    .current()
+                    .and_then(|policy| self.bind_hook_policy(policy));
+                if let Err(error) = bound {
+                    tracing::warn!(%error, "the active foreign question policy could not be bound");
+                    let driven = match self.refuse_drive(turn, error, ExitReason::Internal) {
+                        Ok(driven) => driven,
+                        Err(cause) => return Err(self.abandon(turn, cause)),
+                    };
+                    return match self.finish_turn(turn, driven).await {
+                        Ok(outcome) => Ok(outcome),
+                        Err(cause) => Err(self.abandon(turn, cause)),
+                    };
+                }
             }
             let Some(port) = self.foreign_question_port.as_ref().map(Arc::clone) else {
                 self.close_control();

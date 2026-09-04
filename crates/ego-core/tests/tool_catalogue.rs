@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
-use ego_core::config::SystemPrompt;
+use ego_core::config::{Mode, Ruleset, SystemPrompt};
 use ego_core::cost::MeteringRevision;
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::SessionId;
@@ -323,10 +323,11 @@ impl ego_core::generation_model_source::GenerationModelSource for TestGeneration
     }
 }
 
-fn loop_with(
+fn loop_with_policy(
     generator: Arc<dyn ego_core::generator::port::Generator>,
     static_tools: &[RegisteredTool],
     source: Arc<dyn AdmittedToolSource>,
+    policy_source: Arc<dyn ego_core::turn::GenerationPolicySource>,
 ) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
     let store: &'static MemoryStore = Box::leak(Box::new(MemoryStore::default()));
     let clock = Box::leak(Box::new(FixedClock));
@@ -347,7 +348,7 @@ fn loop_with(
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
     ));
     let runtime = GenerationRuntime {
-        policy_source: common::default_policy_source(),
+        policy_source,
         source: Arc::new(TestGenerationSource { generator }),
         gate,
         config: TurnConfig {
@@ -370,6 +371,32 @@ fn loop_with(
         TurnLoop::new(session, runtime, tools).expect("budget gate is available"),
         store,
     ))
+}
+
+fn loop_with(
+    generator: Arc<dyn ego_core::generator::port::Generator>,
+    static_tools: &[RegisteredTool],
+    source: Arc<dyn AdmittedToolSource>,
+) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
+    loop_with_policy(
+        generator,
+        static_tools,
+        source,
+        common::default_policy_source(),
+    )
+}
+
+fn loop_with_yolo(
+    generator: Arc<dyn ego_core::generator::port::Generator>,
+    static_tools: &[RegisteredTool],
+    source: Arc<dyn AdmittedToolSource>,
+) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
+    loop_with_policy(
+        generator,
+        static_tools,
+        source,
+        common::policy_source_with_root("/workspace", Mode::Yolo, Ruleset::default()),
+    )
 }
 
 fn call(call_id: &str, name: &str) -> AiEvent {
@@ -593,7 +620,8 @@ fn sibling_calls_keep_old_arcs_after_refresh_and_removal_then_next_generation_se
             AiEvent::Stop(StopReason::Stop),
         ],
     ]));
-    let (mut turn, store) = loop_with(generator.clone(), &[], source).expect("valid catalogue");
+    let (mut turn, store) =
+        loop_with_yolo(generator.clone(), &[], source).expect("valid catalogue");
     let first = futures::executor::block_on(turn.run("refresh")).expect("first turn");
     assert_eq!(first.exit_reason, ExitReason::Completed);
     let calls = generator.calls();

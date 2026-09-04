@@ -19,14 +19,14 @@ use crate::McpRegistryCapture;
 
 pub(crate) struct McpHookPort<'a> {
     capture: McpRegistryCapture,
-    policy: &'a PolicyEngine,
+    policy: std::sync::Arc<PolicyEngine>,
     effects: ToolEffectPorts<'a>,
 }
 
 impl<'a> McpHookPort<'a> {
     pub(crate) fn new(
         capture: McpRegistryCapture,
-        policy: &'a PolicyEngine,
+        policy: std::sync::Arc<PolicyEngine>,
         effects: ToolEffectPorts<'a>,
     ) -> Self {
         Self {

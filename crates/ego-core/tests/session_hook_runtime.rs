@@ -521,7 +521,7 @@ struct RuntimeBinding;
 impl McpRuntimeBinding for RuntimeBinding {
     fn hook_invocation_port<'a>(
         &self,
-        _policy: &'a ego_core::permit::PolicyEngine,
+        _policy: Arc<ego_core::permit::PolicyEngine>,
         _effects: ToolEffectPorts<'a>,
     ) -> Result<Arc<dyn ego_core::hook::HookInvocationPort + 'a>, String> {
         panic!("this runtime-only binding is not exercised by the hook fixture")

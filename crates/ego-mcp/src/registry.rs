@@ -1498,7 +1498,7 @@ impl McpRegistryRuntime {
 impl McpRuntimeBinding for McpRegistryRuntime {
     fn hook_invocation_port<'a>(
         &self,
-        policy: &'a ego_core::permit::PolicyEngine,
+        policy: Arc<ego_core::permit::PolicyEngine>,
         effects: ToolEffectPorts<'a>,
     ) -> Result<Arc<dyn ego_core::hook::HookInvocationPort + 'a>, String> {
         let capture = self

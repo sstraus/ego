@@ -610,7 +610,7 @@ impl<P: HookInvocationPort + Clone + 'static> HookInvocationBinding for TestHook
     fn bind<'a>(
         &self,
         _policy: Arc<PolicyEngine>,
-        _mcp: Option<&'a dyn McpRuntimeBinding>,
+        _mcp: Option<&dyn McpRuntimeBinding>,
     ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
     where
         Self: 'a,
@@ -721,7 +721,7 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
         Instant::now() + Duration::from_secs(30),
     );
     turn = turn
-        .with_hook_binding(hook_state, Arc::new(TestHookBinding(port.clone())))
+        .with_hook_binding(hook_state, Arc::new(TestHookBinding(port.clone())), None)
         .expect("shared turn hook runtime");
     let _outcome = block_on(turn.run("prompt")).expect("TurnLoop owner");
     (

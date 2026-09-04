@@ -1800,11 +1800,12 @@ pub trait HookInvocationPort: Send + Sync {
 }
 
 /// Builds one immutable hook invocation authority from one captured policy.
+/// The returned port may borrow this binding, never the temporary MCP reference.
 pub trait HookInvocationBinding: Send + Sync {
     fn bind<'a>(
         &self,
         policy: Arc<PolicyEngine>,
-        mcp: Option<&'a dyn McpRuntimeBinding>,
+        mcp: Option<&dyn McpRuntimeBinding>,
     ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
     where
         Self: 'a;

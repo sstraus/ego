@@ -162,7 +162,7 @@ pub trait ForeignQuestionPort: Send + Sync {
 pub trait McpRuntimeBinding: Send + Sync {
     fn hook_invocation_port<'a>(
         &self,
-        policy: &'a crate::permit::PolicyEngine,
+        policy: Arc<crate::permit::PolicyEngine>,
         effects: crate::turn::ToolEffectPorts<'a>,
     ) -> Result<Arc<dyn crate::hook::HookInvocationPort + 'a>, String>;
 

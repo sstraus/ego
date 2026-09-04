@@ -53,7 +53,7 @@ impl HookInvocationPort for UnusedHookPort {
 impl McpRuntimeBinding for TestMcpRuntime {
     fn hook_invocation_port<'a>(
         &self,
-        _policy: &'a ego_core::permit::PolicyEngine,
+        _policy: Arc<ego_core::permit::PolicyEngine>,
         _effects: ToolEffectPorts<'a>,
     ) -> Result<Arc<dyn HookInvocationPort + 'a>, String> {
         Ok(Arc::new(UnusedHookPort))

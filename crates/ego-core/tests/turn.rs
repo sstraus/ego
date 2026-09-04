@@ -46,11 +46,11 @@ use ego_core::generator::types::{
     ToolDescriptor,
 };
 use ego_core::hook::{
-    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationBinding,
-    HookInvocationPort, HookInvocationRequest, HookLifecycleDispatcher, HookRunner,
-    SessionHookState,
+    HookCatalogue, HookCausality, HookConfigEntry, HookFuture, HookHandlerConfig,
+    HookInvocationBinding, HookInvocationPort, HookInvocationRequest, HookLifecycleDispatcher,
+    HookRunner, SessionHookState,
 };
-use ego_core::mcp::McpRuntimeBinding;
+use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authority, CanonPath, Confinement, EnvPolicy, ExecCaps, Fs, GuardedIo, HumanApprover, OneHop,
@@ -69,6 +69,7 @@ use ego_core::store::evidence::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{ChildWait, ChildWaitResult};
+use ego_core::suspension::ResumeFloor;
 use ego_core::turn::{
     CancelToken, ControlError, GenerationPolicySource, GenerationRuntime, Journal, JudgeContext,
     RegisteredTool, Session, SharedJournal, ToolEffectPorts, Tools, TurnConfig,
@@ -1235,6 +1236,49 @@ mod turn {
         lifecycles: Arc<Mutex<Vec<HookLifecycle>>>,
         timeline: Option<Arc<Mutex<Vec<String>>>>,
         block_prompt: bool,
+    }
+
+    #[derive(Default)]
+    struct RecordingMcpRuntime {
+        floors: Mutex<Vec<ResumeFloor>>,
+    }
+
+    impl McpRuntimeBinding for RecordingMcpRuntime {
+        fn hook_invocation_port<'a>(
+            &self,
+            _policy: Arc<PolicyEngine>,
+            _effects: ToolEffectPorts<'a>,
+        ) -> Result<Arc<dyn HookInvocationPort + 'a>, String> {
+            Ok(Arc::new(RecordingHookInvoker::default()))
+        }
+
+        fn foreign_question_port<'session, 'turn>(
+            &self,
+            runtime: ego_core::hook::SessionHookRuntime<'session>,
+            floor: ResumeFloor,
+            _effects: ToolEffectPorts<'turn>,
+        ) -> Arc<dyn ForeignQuestionPort + 'turn>
+        where
+            'session: 'turn,
+        {
+            self.floors.lock().unwrap().push(floor);
+            Arc::new(RecordingForeignPort { _runtime: runtime })
+        }
+    }
+
+    struct RecordingForeignPort<'s> {
+        _runtime: ego_core::hook::SessionHookRuntime<'s>,
+    }
+
+    impl ForeignQuestionPort for RecordingForeignPort<'_> {
+        fn resume<'a>(
+            &'a self,
+            _continuation_id: &'a str,
+            _canonical_json: &'a str,
+            _causality: HookCausality,
+        ) -> futures::future::BoxFuture<'a, Result<ToolExecution, String>> {
+            Box::pin(futures::future::ready(Err("not exercised".into())))
+        }
     }
 
     impl RecordingHookInvoker {
@@ -7031,6 +7075,7 @@ mod turn {
         let hook_binding = Arc::new(RecordingHookBinding {
             invoker: hook_invocations.clone(),
             policies: Mutex::new(Vec::new()),
+            mcp_bindings: Mutex::new(0),
             fail_at: None,
             timeline: Arc::new(Mutex::new(Vec::new())),
         });
@@ -7057,7 +7102,7 @@ mod turn {
         )
         .expect("synchronized budget gate")
         .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()))
-        .with_hook_binding(hook_state, hook_binding)
+        .with_hook_binding(hook_state, hook_binding, None)
         .expect("hook runtime shares the turn journal");
 
         let skill_outcome = block_on(turn.run("model invokes explain"))
@@ -7416,6 +7461,7 @@ mod turn {
     struct RecordingHookBinding {
         invoker: RecordingHookInvoker,
         policies: Mutex<Vec<Arc<PolicyEngine>>>,
+        mcp_bindings: Mutex<usize>,
         fail_at: Option<usize>,
         timeline: Arc<Mutex<Vec<String>>>,
     }
@@ -7424,13 +7470,16 @@ mod turn {
         fn bind<'a>(
             &self,
             policy: Arc<PolicyEngine>,
-            _mcp: Option<&'a dyn McpRuntimeBinding>,
+            _mcp: Option<&dyn McpRuntimeBinding>,
         ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
         where
             Self: 'a,
         {
             let mut policies = self.policies.lock().unwrap();
             policies.push(Arc::clone(&policy));
+            if _mcp.is_some() {
+                *self.mcp_bindings.lock().unwrap() += 1;
+            }
             self.timeline.lock().unwrap().push("bind".into());
             if self.fail_at == Some(policies.len()) {
                 return Err("hook policy binding failed".into());
@@ -7741,6 +7790,7 @@ mod turn {
         let binding = Arc::new(RecordingHookBinding {
             invoker: (*invoker).clone(),
             policies: Mutex::new(Vec::new()),
+            mcp_bindings: Mutex::new(0),
             fail_at: None,
             timeline: Arc::clone(&trace.timeline),
         });
@@ -7796,8 +7846,9 @@ mod turn {
             CancelToken::new(),
             std::time::Instant::now() + std::time::Duration::from_secs(30),
         );
+        let mcp = Arc::new(RecordingMcpRuntime::default());
         turn = turn
-            .with_hook_binding(state, binding.clone())
+            .with_hook_binding(state, binding.clone(), Some(mcp.clone()))
             .expect("hook binding attaches to turn");
         let outcome = block_on(turn.run("hook binding")).expect("turn completes");
         assert_eq!(outcome.exit_reason, ExitReason::Completed);
@@ -7805,6 +7856,11 @@ mod turn {
         assert_eq!(policies.len(), 2);
         assert!(Arc::ptr_eq(&policies[0], &active));
         assert!(Arc::ptr_eq(&policies[1], &captured));
+        assert_eq!(*binding.mcp_bindings.lock().unwrap(), 2);
+        assert_eq!(
+            mcp.floors.lock().unwrap().as_slice(),
+            [active.resume_floor(), captured.resume_floor()]
+        );
         assert_eq!(invoker.lifecycles(), vec![HookLifecycle::UserPromptSubmit]);
         assert_eq!(
             trace.timeline.lock().unwrap().as_slice(),
@@ -7841,6 +7897,7 @@ mod turn {
                 block_prompt: true,
             },
             policies: Mutex::new(Vec::new()),
+            mcp_bindings: Mutex::new(0),
             fail_at: None,
             timeline: Arc::clone(&trace.timeline),
         });
@@ -7887,7 +7944,7 @@ mod turn {
             std::time::Instant::now() + std::time::Duration::from_secs(30),
         );
         turn = turn
-            .with_hook_binding(state, binding)
+            .with_hook_binding(state, binding, None)
             .expect("hook binding attaches to turn");
         let _outcome = block_on(turn.run("blocked prompt")).expect("prompt block is durable");
         assert_eq!(
@@ -7934,6 +7991,7 @@ mod turn {
                 block_prompt: false,
             },
             policies: Mutex::new(Vec::new()),
+            mcp_bindings: Mutex::new(0),
             fail_at: Some(2),
             timeline: Arc::clone(&trace.timeline),
         });
@@ -7990,7 +8048,7 @@ mod turn {
             std::time::Instant::now() + std::time::Duration::from_secs(30),
         );
         turn = turn
-            .with_hook_binding(state, binding.clone())
+            .with_hook_binding(state, binding.clone(), None)
             .expect("hook binding attaches to turn");
         let outcome = block_on(turn.run("hook binding")).expect("binding refusal is durable");
         assert_eq!(outcome.exit_reason, ExitReason::Internal);

@@ -480,6 +480,7 @@ fn original_tool_causality(
         .item_id()
         .ok_or_else(|| hook_failure("MCP continuation has no tool item causality"))?;
     runtime
+        .hook_state()
         .inspect(|state| {
             state.items.get(&item).and_then(|tool| {
                 tool.tool_call_started

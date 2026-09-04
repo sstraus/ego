@@ -24,7 +24,7 @@ use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::{
     EffectScope, HookCatalogue, HookCausality, HookEvent, HookFuture, HookHandlerConfig,
     HookInvocationPort, HookInvocationRequest, HookLifecycleDispatcher, HookRunner,
-    HookStartedEvidence, SessionHookRuntime,
+    HookStartedEvidence, SessionHookRuntime, SessionHookState,
 };
 use ego_core::mcp::{ForeignQuestionPort, ToolExecution};
 use ego_core::permit::{
@@ -235,17 +235,18 @@ fn hooks_with_mode(mode: HookMode, trace: Trace) -> SessionHookRuntime<'static> 
             },
         )
         .expect("tool call start");
-    SessionHookRuntime::new(
+    let state = SessionHookState::new(
         HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
         shared,
-        Arc::new(RecordingPort::new(trace, mode)),
         CancelToken::new(),
         std::time::Instant::now() + Duration::from_secs(60),
-    )
+    );
+    state.bind(Arc::new(RecordingPort::new(trace, mode)))
 }
 
 fn tool_causality(runtime: &SessionHookRuntime<'_>) -> HookCausality {
     runtime
+        .hook_state()
         .inspect(|state| {
             state.items.iter().find_map(|(item, state)| {
                 state
@@ -265,6 +266,7 @@ fn settled_continuation_causality(
     let answer = QuestionAnswer::from_json(required.question_request(), canonical_json)
         .expect("fixture answer matches the durable MCP question schema");
     let (tool_call, turn, tool_started) = runtime
+        .hook_state()
         .inspect(|state| {
             state.items.iter().find_map(|(item, state)| {
                 state
@@ -276,6 +278,7 @@ fn settled_continuation_causality(
         .expect("MCP fixture has a tool item causality");
     let question_item = ItemId::new();
     let requested = runtime
+        .hook_state()
         .journal()
         .append(
             turn,
@@ -291,6 +294,7 @@ fn settled_continuation_causality(
         )
         .expect("durable foreign question request");
     let settled = runtime
+        .hook_state()
         .journal()
         .append(
             turn,
@@ -1392,6 +1396,7 @@ fn guarded_with_session_context(
     spawner: Arc<ScriptedSpawner>,
 ) -> (PreparedCall, GuardedEffects<'static>) {
     let causality = runtime
+        .hook_state()
         .inspect(|state| {
             state.items.iter().find_map(|(item, state)| {
                 state

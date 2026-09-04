@@ -253,6 +253,10 @@ impl<'a> Tools<'a> {
         self.effects.evidence
     }
 
+    pub(crate) fn effect_ports(&self) -> ToolEffectPorts<'a> {
+        self.effects.clone()
+    }
+
     pub(crate) fn skill_catalogue(&self) -> Option<std::sync::Arc<crate::skill::SkillCatalogue>> {
         self.registry
             .iter()

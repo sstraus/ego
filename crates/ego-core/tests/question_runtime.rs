@@ -6,6 +6,7 @@
 //! is the persisted QuestionRequested envelope ItemId.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -13,6 +14,7 @@ use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
 use ego_core::config::{Mode, ModelRef, Ruleset};
 use ego_core::cost::{Amount, CurrencyCode, MeteringRevision, Money};
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
+use ego_core::event::hook::{HookDecision, HookOutcome};
 use ego_core::event::id::ItemId;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{
@@ -29,12 +31,17 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::StopReason;
+use ego_core::hook::{
+    HookCatalogue, HookFuture, HookInvocationBinding, HookInvocationPort, HookInvocationRequest,
+    HookLifecycleDispatcher, HookRunner, SessionHookState,
+};
+use ego_core::mcp::McpRuntimeBinding;
 use ego_core::mcp::{ForeignInputRequired, ForeignQuestionPort, ToolExecution};
 use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 use ego_core::permit::{
     CanonPath, DuplexHandle, DuplexSpawner, GuardedIo, HttpRequest, OneHop, OneHopResponse, Op,
-    PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec,
-    Tool, ToolDescriptor, ToolError, ToolResult, TransportError, Typed,
+    PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, ResolvedConnect,
+    Resolver, SpawnSpec, Tool, ToolDescriptor, ToolError, ToolResult, TransportError, Typed,
 };
 use ego_core::question::{
     AskQuestionTool, Elicitor, ElicitorError, QuestionAnswer, QuestionMode, QuestionOption,
@@ -142,7 +149,10 @@ fn elicitor_receives_the_persisted_question_item_and_returns_a_typed_outcome() {
 fn turn_loop_accepts_the_core_elicitor<'session, 'turn>(
     turn: TurnLoop<'session, 'turn>,
     elicitor: Arc<dyn Elicitor>,
-) -> TurnLoop<'session, 'turn> {
+) -> TurnLoop<'session, 'turn>
+where
+    'session: 'turn,
+{
     turn.with_elicitor(elicitor)
 }
 
@@ -421,6 +431,94 @@ impl ForeignQuestionPort for RecordingForeignQuestionPort {
     }
 }
 
+#[derive(Clone, Default)]
+struct QuestionHookPort;
+
+impl HookInvocationPort for QuestionHookPort {
+    fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
+        Box::pin(futures::future::ready(Ok(HookOutcome::new(
+            HookDecision::Continue,
+            None,
+        ))))
+    }
+}
+
+struct QuestionHookBinding {
+    trace: Option<Arc<Mutex<Vec<&'static str>>>>,
+    bind_calls: AtomicUsize,
+    fail_at: Option<usize>,
+}
+
+impl HookInvocationBinding for QuestionHookBinding {
+    fn bind<'a>(
+        &self,
+        _policy: Arc<PolicyEngine>,
+        _mcp: Option<&dyn McpRuntimeBinding>,
+    ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
+    where
+        Self: 'a,
+    {
+        if let Some(trace) = &self.trace {
+            trace.lock().expect("question trace").push("bind");
+        }
+        let call = self.bind_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_at == Some(call) {
+            return Err("question hook binding failed".into());
+        }
+        Ok(Arc::new(QuestionHookPort))
+    }
+}
+
+struct QuestionMcpRuntime {
+    foreign: Arc<RecordingForeignQuestionPort>,
+    trace: Option<Arc<Mutex<Vec<&'static str>>>>,
+}
+
+struct TracingPolicySource {
+    policy: Arc<PolicyEngine>,
+    trace: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl ego_core::turn::GenerationPolicySource for TracingPolicySource {
+    fn current(&self) -> Result<Arc<PolicyEngine>, String> {
+        self.trace.lock().expect("question trace").push("current");
+        Ok(Arc::clone(&self.policy))
+    }
+
+    fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
+        self.trace.lock().expect("question trace").push("capture");
+        Ok(Arc::clone(&self.policy))
+    }
+}
+
+impl McpRuntimeBinding for QuestionMcpRuntime {
+    fn hook_invocation_port<'a>(
+        &self,
+        _policy: Arc<PolicyEngine>,
+        _effects: ToolEffectPorts<'a>,
+    ) -> Result<Arc<dyn HookInvocationPort + 'a>, String> {
+        Ok(Arc::new(QuestionHookPort))
+    }
+
+    fn foreign_question_port<'session, 'turn>(
+        &self,
+        _runtime: ego_core::hook::SessionHookRuntime<'session>,
+        _floor: ego_core::suspension::ResumeFloor,
+        _effects: ToolEffectPorts<'turn>,
+    ) -> Arc<dyn ForeignQuestionPort + 'turn>
+    where
+        'session: 'turn,
+    {
+        if let Some(trace) = &self.trace {
+            trace
+                .lock()
+                .expect("question trace")
+                .push("foreign-factory");
+        }
+        Arc::clone(&self.foreign) as Arc<dyn ForeignQuestionPort + 'turn>
+    }
+}
+
 impl Tool for ForeignInputTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
@@ -466,9 +564,17 @@ fn with_foreign_turn<R>(
     elicitor: Arc<dyn Elicitor>,
     foreign_port: Arc<RecordingForeignQuestionPort>,
     trace: Option<Arc<Mutex<Vec<&'static str>>>>,
-    test: impl FnOnce(TurnLoop<'_, '_>, &MemoryStore) -> R,
+    fail_at: Option<usize>,
+    trace_store: bool,
+    test: impl for<'a> FnOnce(TurnLoop<'a, 'a>, &'a MemoryStore) -> R,
 ) -> R {
-    let store = trace.map_or_else(MemoryStore::default, MemoryStore::with_trace);
+    let store = if trace_store {
+        trace
+            .clone()
+            .map_or_else(MemoryStore::default, MemoryStore::with_trace)
+    } else {
+        MemoryStore::default()
+    };
     let clock = FixedClock;
     let sink = CollectingSink::new();
     let gate = SharedBudgetGate::new(BudgetGate::new(Money::new(
@@ -495,7 +601,16 @@ fn with_foreign_turn<R>(
         CanonPath::new("/ws"),
     );
     let source = Arc::new(FixedSource { generator });
-    let turn = TurnLoop::new(
+    let policy = Arc::new(PolicyEngine::new(
+        CanonPath::new("/ws"),
+        Mode::Default,
+        Ruleset::default(),
+    ));
+    let policy_source: Arc<dyn ego_core::turn::GenerationPolicySource> = match trace.clone() {
+        Some(trace) => Arc::new(TracingPolicySource { policy, trace }),
+        None => common::default_policy_source(),
+    };
+    let mut turn = TurnLoop::new(
         Session {
             id: ego_core::event::id::SessionId::new(),
             state: SessionState::default(),
@@ -506,7 +621,7 @@ fn with_foreign_turn<R>(
             cancel: CancelToken::new(),
         },
         GenerationRuntime {
-            policy_source: common::default_policy_source(),
+            policy_source,
             source,
             gate,
             config: TurnConfig {
@@ -519,8 +634,31 @@ fn with_foreign_turn<R>(
         tools,
     )
     .expect("budget gate is available")
-    .with_elicitor(elicitor)
-    .with_foreign_question_port(foreign_port);
+    .with_elicitor(elicitor);
+    let state = SessionHookState::new(
+        HookLifecycleDispatcher::new(
+            HookRunner::new(),
+            HookCatalogue::admit_typed(&[], &[], ego_core::config::Trust::Trusted)
+                .expect("empty hook catalogue"),
+        ),
+        turn.journal(),
+        CancelToken::new(),
+        Instant::now() + std::time::Duration::from_secs(60),
+    );
+    turn = turn
+        .with_hook_binding(
+            state,
+            Arc::new(QuestionHookBinding {
+                trace: trace.clone(),
+                bind_calls: AtomicUsize::new(0),
+                fail_at,
+            }),
+            Some(Arc::new(QuestionMcpRuntime {
+                foreign: foreign_port,
+                trace: trace.clone(),
+            })),
+        )
+        .expect("hook and foreign binding shares the turn journal");
     test(turn, &store)
 }
 
@@ -715,12 +853,18 @@ fn foreign_input_required_carries_question_request_and_non_secret_continuation_i
 #[test]
 fn foreign_input_required_is_projected_to_a_durable_pending_question() {
     let generator = foreign_input_generator();
-    let foreign_port = Arc::new(RecordingForeignQuestionPort::default());
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let foreign_port = Arc::new(RecordingForeignQuestionPort::scripted(
+        Vec::new(),
+        Some(trace.clone()),
+    ));
     with_foreign_turn(
         generator,
         Arc::new(UnavailableElicitor),
         foreign_port.clone(),
+        Some(trace.clone()),
         None,
+        true,
         |mut turn, store| {
             let outcome = futures::executor::block_on(turn.run("invoke the MCP operation"))
                 .expect("foreign input suspension is a handled turn outcome");
@@ -750,6 +894,7 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
             );
             let answer = QuestionAnswer::from_json(pending.request(), r#"{"target":"staging"}"#)
                 .expect("schema-valid form answer");
+            trace.lock().expect("question trace").clear();
             let resumed = futures::executor::block_on(turn.resume_question(question, answer))
                 .expect("foreign continuation resumes the turn");
             assert!(resumed.ok);
@@ -760,6 +905,21 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
                     r#"{"target":"staging"}"#.to_owned()
                 )]
             );
+            let labels = trace.lock().expect("question trace").clone();
+            assert!(labels.starts_with(&[
+                "current",
+                "bind",
+                "foreign-factory",
+                "question-settled",
+                "foreign-port",
+            ]));
+            if let Some(capture) = labels.iter().position(|label| *label == "capture") {
+                let foreign_port = labels
+                    .iter()
+                    .position(|label| *label == "foreign-port")
+                    .expect("foreign adapter resumes");
+                assert!(foreign_port < capture);
+            }
             let completed = store
                 .events()
                 .into_iter()
@@ -816,6 +976,55 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
 }
 
 #[test]
+fn resume_binding_failure_refuses_before_foreign_adapter_or_effect() {
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let foreign_port = Arc::new(RecordingForeignQuestionPort::scripted(
+        Vec::new(),
+        Some(trace.clone()),
+    ));
+    let generator = foreign_input_generator();
+    with_foreign_turn(
+        generator.clone(),
+        Arc::new(UnavailableElicitor),
+        foreign_port.clone(),
+        Some(trace.clone()),
+        Some(3),
+        false,
+        |mut turn, store| {
+            let outcome = futures::executor::block_on(turn.run("invoke the MCP operation"))
+                .expect("foreign input suspension is handled");
+            assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
+            let state = turn.state();
+            let pending = state
+                .pending_question()
+                .expect("foreign continuation is durable");
+            let question = pending.item_id();
+            let answer = QuestionAnswer::from_json(pending.request(), r#"{"target":"staging"}"#)
+                .expect("schema-valid form answer");
+            let provider_calls = generator.calls().len();
+            trace.lock().expect("question trace").clear();
+
+            let resumed = futures::executor::block_on(turn.resume_question(question, answer))
+                .expect("binding refusal is a handled outcome");
+            assert_eq!(resumed.exit_reason, ExitReason::Internal);
+            assert!(!resumed.ok);
+            assert_eq!(
+                trace.lock().expect("question trace").as_slice(),
+                ["current", "bind"]
+            );
+            assert!(foreign_port.calls().is_empty());
+            assert_eq!(generator.calls().len(), provider_calls);
+            assert!(
+                store
+                    .events()
+                    .iter()
+                    .all(|event| !matches!(event.kind, EventKind::ToolCallCompleted { .. }))
+            );
+        },
+    );
+}
+
+#[test]
 fn available_elicitor_settles_foreign_input_before_one_port_resume_and_completion() {
     let trace = Arc::new(Mutex::new(Vec::new()));
     let elicitor = Arc::new(RecordingElicitor::answered_with_trace(
@@ -835,6 +1044,8 @@ fn available_elicitor_settles_foreign_input_before_one_port_resume_and_completio
         elicitor.clone(),
         foreign_port.clone(),
         Some(trace.clone()),
+        None,
+        true,
         |mut turn, store| {
             let outcome = futures::executor::block_on(turn.run("invoke the MCP operation"))
                 .expect("available elicitation completes the foreign operation");
@@ -927,6 +1138,8 @@ fn successor_foreign_input_is_exposed_after_settlement_and_keeps_predecessor_clo
         elicitor.clone(),
         foreign_port.clone(),
         Some(trace.clone()),
+        None,
+        true,
         |mut turn, store| {
             let outcome = futures::executor::block_on(turn.run("invoke the MCP operation"))
                 .expect("successor input is a handled suspension");
@@ -1024,6 +1237,8 @@ fn foreign_port_failure_after_settlement_does_not_complete_or_retry_the_call() {
         elicitor,
         foreign_port.clone(),
         None,
+        None,
+        true,
         |mut turn, store| {
             let abandoned = futures::executor::block_on(turn.run("invoke the MCP operation"));
             assert!(

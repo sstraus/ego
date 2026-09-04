@@ -21,7 +21,11 @@ use ego_core::config::{Mode, Ruleset};
 use ego_core::permit::{CanonPath, PolicyEngine};
 use ego_core::turn::GenerationPolicySource;
 
-struct FixedPolicySource;
+struct FixedPolicySource {
+    root: CanonPath,
+    mode: Mode,
+    rules: Ruleset,
+}
 
 impl GenerationPolicySource for FixedPolicySource {
     fn current(&self) -> Result<Arc<PolicyEngine>, String> {
@@ -30,15 +34,35 @@ impl GenerationPolicySource for FixedPolicySource {
 
     fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
         Ok(Arc::new(PolicyEngine::new(
-            CanonPath::new("/ws"),
-            Mode::Default,
-            Ruleset::default(),
+            self.root.clone(),
+            self.mode,
+            self.rules.clone(),
         )))
     }
 }
 
 pub fn default_policy_source() -> Arc<dyn GenerationPolicySource> {
-    Arc::new(FixedPolicySource)
+    policy_source(Mode::Default)
+}
+
+pub fn policy_source(mode: Mode) -> Arc<dyn GenerationPolicySource> {
+    policy_source_with_rules(mode, Ruleset::default())
+}
+
+pub fn policy_source_with_rules(mode: Mode, rules: Ruleset) -> Arc<dyn GenerationPolicySource> {
+    policy_source_with_root("/ws", mode, rules)
+}
+
+pub fn policy_source_with_root(
+    root: &str,
+    mode: Mode,
+    rules: Ruleset,
+) -> Arc<dyn GenerationPolicySource> {
+    Arc::new(FixedPolicySource {
+        root: CanonPath::new(root),
+        mode,
+        rules,
+    })
 }
 
 /// A no-op blob backend for tests whose contract does not use attachments.
