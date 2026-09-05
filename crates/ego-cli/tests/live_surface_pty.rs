@@ -15,6 +15,23 @@ use support::{Ego, Plan, Reply, Stub, gated_paced_tool_call_line, paced, text, t
 const DSR_QUERY: &[u8] = b"\x1b[6n";
 const DSR_RESPONSE: &[u8] = b"\x1b[4;1R";
 
+/// How long every wait below gives the child to make progress.
+///
+/// One name for what was ten copies of the same eight seconds. Each use is a
+/// liveness bailout and none is a pass condition: a wait that expires panics,
+/// and the one deadline that does not — the post-EOF exit wait — kills the
+/// child and then asserts on a status a killed child cannot have. So the value
+/// only decides how long a genuine hang takes to become legible, and raising
+/// it cannot turn a failing run green.
+///
+/// The gap it must clear is the child's, measured while the whole workspace's
+/// test binaries run at once rather than on an idle machine. Eight seconds was
+/// the idle figure: `live_surface_esc_expedites_sampling_once_and_reports_interrupt_state`
+/// passes alone and failed under `cargo test --workspace` having seen only the
+/// two idle prompt renders, on a startup gap rather than on anything it
+/// asserts.
+const PROGRESS_DEADLINE: Duration = Duration::from_secs(60);
+
 enum WriteRequest {
     Bytes(Vec<u8>),
     Flush,
@@ -118,7 +135,7 @@ fn until_from(
         .any(|window| window == needle)
     {
         let chunk = receiver
-            .recv_timeout(Duration::from_secs(8))
+            .recv_timeout(PROGRESS_DEADLINE)
             .unwrap_or_else(|error| {
                 drain(receiver, output);
                 panic!(
@@ -138,7 +155,7 @@ fn until_with_context(
     context: impl Fn() -> String,
 ) {
     while !output.windows(needle.len()).any(|window| window == needle) {
-        let chunk = match receiver.recv_timeout(Duration::from_secs(8)) {
+        let chunk = match receiver.recv_timeout(PROGRESS_DEADLINE) {
             Ok(chunk) => chunk,
             Err(error) => {
                 drain(receiver, output);
@@ -203,7 +220,7 @@ fn until_normalized(
     needle: &str,
 ) {
     while !normalized(&output[start..]).contains(needle) {
-        let chunk = match receiver.recv_timeout(Duration::from_secs(8)) {
+        let chunk = match receiver.recv_timeout(PROGRESS_DEADLINE) {
             Ok(chunk) => chunk,
             Err(error) => {
                 drain(receiver, output);
@@ -236,7 +253,7 @@ fn until_normalized_or_generation(
             );
         }
         let chunk = receiver
-            .recv_timeout(Duration::from_secs(8))
+            .recv_timeout(PROGRESS_DEADLINE)
             .unwrap_or_else(|error| {
                 drain(receiver, output);
                 panic!(
@@ -257,7 +274,7 @@ fn until_post_trust_prompt(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<
             .position(|window| window == DSR_QUERY)
         else {
             let chunk = receiver
-                .recv_timeout(Duration::from_secs(8))
+                .recv_timeout(PROGRESS_DEADLINE)
                 .expect("post-trust DSR query did not arrive");
             output.extend(chunk);
             continue;
@@ -270,7 +287,7 @@ fn until_post_trust_prompt(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<
             return;
         }
         let chunk = receiver
-            .recv_timeout(Duration::from_secs(8))
+            .recv_timeout(PROGRESS_DEADLINE)
             .expect("idle prompt did not follow the post-trust DSR query");
         output.extend(chunk);
     }
@@ -479,7 +496,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
         let status = child.wait();
         status_sender.send(status).expect("status receiver dropped");
     });
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
     let status = loop {
         drain(&reader, &mut output);
         match status_receiver.recv_timeout(Duration::from_millis(50)) {
@@ -651,7 +668,7 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
         let status = child.wait();
         status_sender.send(status).expect("status receiver dropped");
     });
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
     let status = loop {
         drain(&reader, &mut output);
         match status_receiver.recv_timeout(Duration::from_millis(50)) {
@@ -857,7 +874,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         let status = child.wait();
         status_sender.send(status).expect("status receiver dropped");
     });
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
     let status = loop {
         drain(&reader, &mut output);
         match status_receiver.recv_timeout(Duration::from_millis(50)) {
@@ -1023,7 +1040,7 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
         let status = child.wait();
         status_sender.send(status).expect("status receiver dropped");
     });
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
     let status = loop {
         drain(&reader, &mut output);
         match status_receiver.recv_timeout(Duration::from_millis(50)) {
