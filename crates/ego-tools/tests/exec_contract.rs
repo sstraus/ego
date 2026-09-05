@@ -89,6 +89,49 @@ fn run_confinement(level: Confinement, offline: bool, workspace: CanonPath) -> R
     RunConfinement::new(level, offline, workspace).unwrap()
 }
 
+/// One attempt to open a run, keeping the session evidence store whether the
+/// backend was accepted or refused. A refusal cites evidence stored in that
+/// session, so a test that drops the store cannot read what it cites.
+struct Attempt {
+    evidence_root: tempfile::TempDir,
+    evidence: SessionEvidenceStore,
+    cancel: CancelToken,
+    outcome: Result<(RunEffectPorts, ExecObservation), ProcessError>,
+}
+
+fn attempt_run(
+    level: Confinement,
+    offline: bool,
+    workspace: CanonPath,
+    hard_cap: u64,
+    preview: usize,
+) -> Attempt {
+    let evidence_root = tempfile::tempdir().expect("evidence root");
+    let evidence = SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), hard_cap)
+        .expect("session evidence store");
+    let cancel = CancelToken::new();
+    let outcome = (|| {
+        let limits = ExecLimits::new(preview, Duration::from_millis(250))?;
+        let http_call_timeout = HttpCallTimeout::new(Duration::from_secs(1))?;
+        let config = ExecRunConfig::new(
+            run_confinement(level, offline, workspace),
+            evidence.clone(),
+            cancel.clone(),
+            limits,
+            http_call_timeout,
+            None,
+            Arc::new(SystemResolver::new()),
+        );
+        block_on(RunEffectPorts::for_run(config))
+    })();
+    Attempt {
+        evidence_root,
+        evidence,
+        cancel,
+        outcome,
+    }
+}
+
 fn open_run(
     level: Confinement,
     offline: bool,
@@ -96,30 +139,65 @@ fn open_run(
     hard_cap: u64,
     preview: usize,
 ) -> Result<Run, ProcessError> {
-    let evidence_root = tempfile::tempdir().expect("evidence root");
-    let evidence = SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), hard_cap)
-        .map_err(ProcessError::Evidence)?;
-    let cancel = CancelToken::new();
-    let limits = ExecLimits::new(preview, Duration::from_millis(250))?;
-    let http_call_timeout = HttpCallTimeout::new(Duration::from_secs(1))?;
-    let policy = run_confinement(level, offline, workspace);
-    let config = ExecRunConfig::new(
-        policy,
-        evidence.clone(),
-        cancel.clone(),
-        limits,
-        http_call_timeout,
-        None,
-        Arc::new(SystemResolver::new()),
-    );
-    let (ports, observation) = block_on(RunEffectPorts::for_run(config))?;
+    let attempt = attempt_run(level, offline, workspace, hard_cap, preview);
+    let (ports, observation) = attempt.outcome?;
     Ok(Run {
-        _evidence_root: evidence_root,
-        evidence,
+        _evidence_root: attempt.evidence_root,
+        evidence: attempt.evidence,
         ports,
         observation,
-        cancel,
+        cancel: attempt.cancel,
     })
+}
+
+/// The one way a host may decline to demonstrate a confinement guarantee.
+///
+/// `MissingCapabilities` used to be an ordinary accepted outcome here, so the
+/// suite stayed green for months while `workspace` was refused on every macOS
+/// host. An installed backend must now prove the guarantee. A host that has no
+/// backend at all — no `sandbox-exec`, no usable Landlock ABI — has to say so
+/// by name, because that is a statement about the machine, not about ego.
+const BACKEND_ABSENT: &str = "EGO_TEST_CONFINEMENT_BACKEND_ABSENT";
+
+/// Open a run that requires real confinement, or `None` on a declared
+/// backend-less host, where the refusal itself is the contract.
+fn open_confined_run(
+    level: Confinement,
+    offline: bool,
+    workspace: CanonPath,
+    hard_cap: u64,
+    preview: usize,
+) -> Option<Run> {
+    match open_run(level, offline, workspace, hard_cap, preview) {
+        Ok(run) => Some(run),
+        Err(ProcessError::MissingCapabilities(missing))
+            if std::env::var_os(BACKEND_ABSENT).is_some() =>
+        {
+            assert_eq!(
+                missing.required(),
+                required_caps(level, offline),
+                "a refusal must still name the exact guarantees the run asked for"
+            );
+            None
+        }
+        Err(error) => panic!(
+            "{level} confinement must be demonstrated on this host: {error}. \
+             Set {BACKEND_ABSENT}=1 only if this machine has no confinement backend."
+        ),
+    }
+}
+
+fn required_caps(level: Confinement, offline: bool) -> ExecCaps {
+    let filesystem = match level {
+        Confinement::Ro => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED),
+        Confinement::Workspace => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+        Confinement::Off => ExecCaps::empty(),
+    };
+    if offline {
+        filesystem.union(ExecCaps::NO_IP_NETWORK)
+    } else {
+        filesystem
+    }
 }
 
 fn execute(run: &Run, spec: SpawnSpec) -> Result<(), ProcessError> {
@@ -242,14 +320,41 @@ fn fixture_spec(
     )
 }
 
+/// One mutation a confined child can actually reach.
+///
+/// Confinement admits `process-exec*` only inside the runtime roots and the
+/// workspace, and the test executable lives under `target/`, in neither. So a
+/// mutation driven by this crate's own fixture binary could never run under
+/// `ro` or `workspace` — which is how every confined assertion here used to
+/// settle for a capability refusal instead. These are the installed utilities
+/// the backend's own paired probes use, reached through the same production
+/// exec path.
 fn mutation_spec(operation: &str, paths: &[&std::path::Path], workspace: CanonPath) -> SpawnSpec {
-    let mut args = vec![OsString::from(operation)];
-    args.extend(
-        paths
-            .iter()
-            .map(|path| OsString::from(path.to_str().expect("fixture path is UTF-8"))),
-    );
-    fixture_arg_spec("exec_contract_fixture_mutates", args, None, workspace)
+    let path = |index: usize| {
+        OsString::from(
+            paths
+                .get(index)
+                .unwrap_or_else(|| panic!("{operation} needs a path at {index}"))
+                .to_str()
+                .expect("fixture path is UTF-8"),
+        )
+    };
+    let argv = match operation {
+        "create" => vec![OsString::from("/usr/bin/touch"), path(0)],
+        "overwrite" => vec![OsString::from("/bin/cp"), path(0), path(1)],
+        "truncate" => vec![
+            OsString::from("/usr/bin/truncate"),
+            OsString::from("-s"),
+            OsString::from("0"),
+            path(0),
+        ],
+        "remove" => vec![OsString::from("/bin/rm"), path(0)],
+        "rename" => vec![OsString::from("/bin/mv"), path(0), path(1)],
+        "link" => vec![OsString::from("/bin/ln"), path(0), path(1)],
+        other => panic!("unknown mutation operation: {other}"),
+    };
+    SpawnSpec::new(argv, Some(workspace), None, EnvPolicy::Inherited)
+        .expect("a mutation specification is valid before launch")
 }
 
 #[test]
@@ -366,35 +471,6 @@ fn exec_contract_fixture_consumes_stdin_to_eof() {
     let mut bytes = Vec::new();
     stdin.read_to_end(&mut bytes).unwrap();
     print!("stdin-eof:{}", bytes.len());
-}
-
-#[test]
-#[ignore]
-fn exec_contract_fixture_mutates() {
-    let mut args = std::env::args().skip_while(|arg| arg != "--").skip(1);
-    let operation = args.next().expect("mutation operation");
-    let target = std::path::PathBuf::from(args.next().expect("mutation target"));
-    match operation.as_str() {
-        "create" => std::fs::write(target, b"created").expect("create target"),
-        "overwrite" => std::fs::write(target, b"").expect("overwrite target"),
-        "truncate" => {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(target)
-                .expect("truncate target");
-        }
-        "remove" => std::fs::remove_file(target).expect("remove target"),
-        "rename" => {
-            let destination = std::path::PathBuf::from(args.next().expect("rename destination"));
-            std::fs::rename(target, destination).expect("rename target");
-        }
-        "link" => {
-            let destination = std::path::PathBuf::from(args.next().expect("link destination"));
-            std::fs::hard_link(target, destination).expect("link target");
-        }
-        other => panic!("unknown mutation operation: {other}"),
-    }
 }
 
 #[test]
@@ -1008,21 +1084,14 @@ fn missing_executable_is_a_launch_failure_not_a_capability_refusal() {
 #[test]
 fn linux_target_argv_must_name_an_exact_executable_file() {
     let root = cwd();
-    let run = match open_run(
+    let Some(run) = open_confined_run(
         Confinement::Workspace,
         false,
         root.clone(),
         1024 * 1024,
         1024,
-    ) {
-        Ok(run) => run,
-        Err(ProcessError::MissingCapabilities(missing)) => {
-            // The helper/backend prerequisite is itself fail-closed when
-            // this host cannot demonstrate the requested workspace contract.
-            assert!(missing.missing().contains(ExecCaps::READ_SCOPED));
-            return;
-        }
-        Err(error) => panic!("workspace failed without a precise capability refusal: {error:?}"),
+    ) else {
+        return;
     };
 
     let fixture_dir = tempfile::tempdir_in(&root).expect("target fixture directory");
@@ -1055,49 +1124,33 @@ fn filesystem_confinement_matrix_is_enforced_by_real_processes() {
     let inside = workspace_dir.path().join("inside");
     let outside_target = outside.path().join("outside");
 
-    let run = open_run(
+    if let Some(run) = open_confined_run(
         Confinement::Workspace,
         false,
         root.clone(),
         1024 * 1024,
         1024,
-    );
-    match run {
-        Ok(run) => {
-            execute(&run, mutation_spec("create", &[&inside], root.clone()))
-                .expect("workspace allows inside write");
-            assert!(inside.exists());
-            assert!(
-                execute(
-                    &run,
-                    mutation_spec("create", &[&outside_target], root.clone())
-                )
-                .is_err()
-            );
-            assert!(!outside_target.exists());
-        }
-        Err(ProcessError::MissingCapabilities(missing)) => assert_eq!(
-            missing.required(),
-            ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)
-        ),
-        Err(err) => panic!("workspace failed without a precise capability refusal: {err:?}"),
+    ) {
+        execute(&run, mutation_spec("create", &[&inside], root.clone()))
+            .expect("workspace allows inside write");
+        assert!(inside.exists());
+        assert!(
+            execute(
+                &run,
+                mutation_spec("create", &[&outside_target], root.clone())
+            )
+            .is_err()
+        );
+        assert!(!outside_target.exists());
     }
 
-    let run = open_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024);
-    match run {
-        Ok(run) => {
-            let ro_inside = workspace_dir.path().join("ro-inside");
-            let ro_outside = outside.path().join("ro-outside");
-            assert!(execute(&run, mutation_spec("create", &[&ro_inside], root.clone())).is_err());
-            assert!(!ro_inside.exists());
-            assert!(execute(&run, mutation_spec("create", &[&ro_outside], root.clone())).is_err());
-            assert!(!ro_outside.exists());
-        }
-        Err(ProcessError::MissingCapabilities(missing)) => assert_eq!(
-            missing.required(),
-            ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED)
-        ),
-        Err(err) => panic!("ro failed without a precise capability refusal: {err:?}"),
+    if let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024) {
+        let ro_inside = workspace_dir.path().join("ro-inside");
+        let ro_outside = outside.path().join("ro-outside");
+        assert!(execute(&run, mutation_spec("create", &[&ro_inside], root.clone())).is_err());
+        assert!(!ro_inside.exists());
+        assert!(execute(&run, mutation_spec("create", &[&ro_outside], root.clone())).is_err());
+        assert!(!ro_outside.exists());
     }
 
     let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
@@ -1134,34 +1187,20 @@ fn filesystem_read_matrix_covers_inside_and_outside_for_each_level() {
         execute(run, spec)
     };
 
-    match open_run(
+    if let Some(run) = open_confined_run(
         Confinement::Workspace,
         false,
         root.clone(),
         1024 * 1024,
         1024,
     ) {
-        Ok(run) => {
-            read(&run, &inside).expect("workspace allows an inside read");
-            assert!(read(&run, &outside_target).is_err());
-        }
-        Err(ProcessError::MissingCapabilities(missing)) => assert_eq!(
-            missing.required(),
-            ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)
-        ),
-        Err(err) => panic!("workspace failed without a precise capability refusal: {err:?}"),
+        read(&run, &inside).expect("workspace allows an inside read");
+        assert!(read(&run, &outside_target).is_err());
     }
 
-    match open_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024) {
-        Ok(run) => {
-            read(&run, &inside).expect("ro allows an inside read");
-            assert!(read(&run, &outside_target).is_err());
-        }
-        Err(ProcessError::MissingCapabilities(missing)) => assert_eq!(
-            missing.required(),
-            ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED)
-        ),
-        Err(err) => panic!("ro failed without a precise capability refusal: {err:?}"),
+    if let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024) {
+        read(&run, &inside).expect("ro allows an inside read");
+        assert!(read(&run, &outside_target).is_err());
     }
 
     let off_run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
@@ -1174,22 +1213,14 @@ fn workspace_confinement_covers_required_mutations_inside_and_outside() {
     let workspace = tempfile::tempdir().expect("workspace fixture directory");
     let outside = tempfile::tempdir().expect("outside fixture directory");
     let root = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
-    let run = match open_run(
+    let Some(run) = open_confined_run(
         Confinement::Workspace,
         false,
         root.clone(),
         1024 * 1024,
         1024,
-    ) {
-        Ok(run) => run,
-        Err(ProcessError::MissingCapabilities(missing)) => {
-            assert_eq!(
-                missing.required(),
-                ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)
-            );
-            return;
-        }
-        Err(err) => panic!("workspace failed without a precise capability refusal: {err:?}"),
+    ) else {
+        return;
     };
 
     let inside_create = workspace.path().join("create");
@@ -1199,14 +1230,20 @@ fn workspace_confinement_covers_required_mutations_inside_and_outside() {
     )
     .expect("create inside workspace");
 
-    let inside_overwrite = workspace.path().join("overwrite");
+    let inside_overwrite_source = workspace.path().join("overwrite-source");
+    let inside_overwrite = workspace.path().join("overwrite-destination");
+    std::fs::write(&inside_overwrite_source, "after").unwrap();
     std::fs::write(&inside_overwrite, "before").unwrap();
     execute(
         &run,
-        mutation_spec("overwrite", &[&inside_overwrite], root.clone()),
+        mutation_spec(
+            "overwrite",
+            &[&inside_overwrite_source, &inside_overwrite],
+            root.clone(),
+        ),
     )
     .expect("overwrite inside workspace");
-    assert!(std::fs::read(&inside_overwrite).unwrap().is_empty());
+    assert_eq!(std::fs::read_to_string(&inside_overwrite).unwrap(), "after");
 
     let inside_truncate = workspace.path().join("truncate");
     std::fs::write(&inside_truncate, "before").unwrap();
@@ -1308,8 +1345,9 @@ fn workspace_confinement_covers_required_mutations_inside_and_outside() {
 fn linux_landlock_rights_probe_repeats_the_full_mutation_matrix() {
     // Keep the ABI-sensitive gate explicit: the shared matrix is the paired
     // behavioural proof for create, overwrite/truncate, remove, rename and
-    // link, while its MissingCapabilities branch proves fail-closed status
-    // when the kernel/backend cannot demonstrate all required rights.
+    // link. A kernel that cannot demonstrate all required rights must be
+    // declared with `EGO_TEST_CONFINEMENT_BACKEND_ABSENT`; otherwise the
+    // refusal fails this test rather than passing it.
     workspace_confinement_covers_required_mutations_inside_and_outside();
 }
 
@@ -1317,29 +1355,23 @@ fn linux_landlock_rights_probe_repeats_the_full_mutation_matrix() {
 fn read_only_confinement_denies_every_required_mutation_inside_the_root() {
     let workspace = tempfile::tempdir().expect("workspace fixture directory");
     let root = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
-    let run = match open_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024) {
-        Ok(run) => run,
-        Err(ProcessError::MissingCapabilities(missing)) => {
-            assert!(
-                missing
-                    .missing()
-                    .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED))
-            );
-            return;
-        }
-        Err(err) => panic!("ro failed without a precise capability refusal: {err:?}"),
+    let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024)
+    else {
+        return;
     };
 
     let create = workspace.path().join("ro-create");
     assert!(execute(&run, mutation_spec("create", &[&create], root.clone())).is_err());
     assert!(!create.exists());
 
+    let overwrite_source = workspace.path().join("ro-overwrite-source");
     let overwrite = workspace.path().join("ro-overwrite");
+    std::fs::write(&overwrite_source, "after").unwrap();
     std::fs::write(&overwrite, "before").unwrap();
     assert!(
         execute(
             &run,
-            mutation_spec("overwrite", &[&overwrite], root.clone())
+            mutation_spec("overwrite", &[&overwrite_source, &overwrite], root.clone())
         )
         .is_err()
     );
@@ -1402,27 +1434,57 @@ fn off_confinement_allows_inside_and_outside_mutations() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_seatbelt_profile_path_fixture_is_data_not_profile_injection() {
-    let parent = tempfile::tempdir().expect("profile fixture directory");
-    let hostile = parent.path().join(r#"quote");(deny file-read*)"#);
-    std::fs::create_dir(&hostile).expect("hostile path fixture");
-    let root = CanonPath::new(std::fs::canonicalize(&hostile).unwrap());
-    let run = match open_run(
+fn macos_workspace_confinement_is_demonstrated_across_workspace_and_private_scratch() {
+    let workspace = tempfile::tempdir().expect("workspace fixture directory");
+    let outside = tempfile::tempdir().expect("outside fixture directory");
+    let root = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+    let run = open_run(
         Confinement::Workspace,
         false,
         root.clone(),
         1024 * 1024,
         1024,
-    ) {
-        Ok(run) => run,
-        Err(ProcessError::MissingCapabilities(missing)) => {
-            assert_eq!(
-                missing.required(),
-                ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)
-            );
-            return;
-        }
-        Err(err) => panic!("hostile profile path failed without capability refusal: {err:?}"),
+    )
+    .expect("the default sandbox must be demonstrable wherever sandbox-exec is installed");
+
+    // The private scratch root belongs to the backend, so no test can name it.
+    // WRITE_SCOPED is exactly its proof: the bit is set only after the paired
+    // mutation suite created, overwrote, truncated, removed, renamed and
+    // linked inside *both* writable roots, scratch included, and was refused
+    // outside them.
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)),
+        "workspace confinement must measure both scoped reads and scoped writes: {:?}",
+        run.observation.capabilities()
+    );
+
+    let inside = workspace.path().join("workspace-create");
+    execute(&run, mutation_spec("create", &[&inside], root.clone()))
+        .expect("workspace confinement allows a mutation inside the workspace");
+    assert!(inside.exists());
+
+    let outside_target = outside.path().join("outside-create");
+    assert!(execute(&run, mutation_spec("create", &[&outside_target], root)).is_err());
+    assert!(!outside_target.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_seatbelt_profile_path_fixture_is_data_not_profile_injection() {
+    let parent = tempfile::tempdir().expect("profile fixture directory");
+    let hostile = parent.path().join(r#"quote");(deny file-read*)"#);
+    std::fs::create_dir(&hostile).expect("hostile path fixture");
+    let root = CanonPath::new(std::fs::canonicalize(&hostile).unwrap());
+    let Some(run) = open_confined_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) else {
+        return;
     };
     let inside = hostile.join("inside");
     let outside = parent.path().join("outside");
@@ -1455,6 +1517,48 @@ fn macos_seatbelt_refuses_an_unrepresentable_profile_root() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_measured_refusal_cites_the_probe_transcript_stored_in_its_session() {
+    // Seatbelt claims offline only when all four paired network probes pass,
+    // so this is the one request that may be measured in full and still
+    // refused. Whichever way it lands, the run has to be able to say what it
+    // measured rather than leave an absent bit as the only account.
+    let attempt = attempt_run(Confinement::Off, true, cwd(), 1024 * 1024, 1024);
+    let missing = match &attempt.outcome {
+        Err(ProcessError::MissingCapabilities(missing)) => missing,
+        Err(error) => panic!("offline failed without a precise capability refusal: {error}"),
+        Ok(_) => return,
+    };
+    let reference = missing
+        .probe_evidence()
+        .expect("a refusal that follows a measurement carries its transcript");
+    let transcript = String::from_utf8(read_evidence_pages(&attempt.evidence, reference))
+        .expect("the probe transcript is UTF-8 JSON Lines");
+    assert!(
+        missing.to_string().contains(reference.id.as_str()),
+        "the refusal must cite the transcript by name: {missing}"
+    );
+
+    let records = transcript
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("transcript record"))
+        .collect::<Vec<_>>();
+    assert!(!records.is_empty());
+    for record in &records {
+        assert!(record["suite"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(record["root"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(record["argv"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(record["outcome"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+    assert!(
+        records.iter().any(|record| record["suite"]
+            .as_str()
+            .is_some_and(|suite| suite.starts_with("offline."))),
+        "an offline refusal must name the network suites it ran: {transcript}"
+    );
+}
+
 #[test]
 fn observation_reports_capabilities_and_audit_identity_without_granting_them() {
     let root = cwd();
@@ -1473,17 +1577,9 @@ fn observation_reports_capabilities_and_audit_identity_without_granting_them() {
 #[test]
 fn linux_landlock_abi_status_and_workspace_rights_are_fail_closed() {
     let root = cwd();
-    let run = match open_run(Confinement::Workspace, false, root, 1024 * 1024, 1024) {
-        Ok(run) => run,
-        Err(ProcessError::MissingCapabilities(missing)) => {
-            assert!(
-                missing
-                    .missing()
-                    .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED))
-            );
-            return;
-        }
-        Err(err) => panic!("workspace failed without a precise capability refusal: {err:?}"),
+    let Some(run) = open_confined_run(Confinement::Workspace, false, root, 1024 * 1024, 1024)
+    else {
+        return;
     };
     assert!(
         run.observation
@@ -1531,17 +1627,9 @@ fn linux_landlock_workspace_requires_refer_truncate_and_known_rights() {
     workspace_confinement_covers_required_mutations_inside_and_outside();
 
     let root = cwd();
-    let run = match open_run(Confinement::Workspace, false, root, 1024 * 1024, 1024) {
-        Ok(run) => run,
-        Err(ProcessError::MissingCapabilities(missing)) => {
-            assert!(
-                missing
-                    .missing()
-                    .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED))
-            );
-            return;
-        }
-        Err(error) => panic!("workspace rights refused without capability evidence: {error:?}"),
+    let Some(run) = open_confined_run(Confinement::Workspace, false, root, 1024 * 1024, 1024)
+    else {
+        return;
     };
     assert!(
         run.observation

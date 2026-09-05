@@ -13,7 +13,7 @@ use super::CanonPath;
 use super::tool::{StreamProvenance, ToolContentBlock, ToolResult};
 use crate::credentials::SecretMaterial;
 use crate::hook::EffectScope;
-use crate::store::evidence::EvidenceError;
+use crate::store::evidence::{EvidenceError, EvidenceRef};
 
 /// A validated, host-native environment variable name.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -493,6 +493,42 @@ impl ExecCaps {
     const fn missing_from(self, available: Self) -> Self {
         Self(self.0 & !available.0)
     }
+
+    /// Each guarantee in this set, in the words a person can act on.
+    ///
+    /// A refusal that prints the bit pattern tells the operator which integer
+    /// was absent, which is the one fact they cannot do anything with.
+    pub fn guarantees(self) -> Vec<&'static str> {
+        [
+            (
+                Self::READ_SCOPED,
+                "read only inside the workspace and the fixed runtime roots",
+            ),
+            (Self::WRITE_DENIED, "no filesystem mutation at all"),
+            (
+                Self::WRITE_SCOPED,
+                "write only inside the workspace and ego's private scratch directory",
+            ),
+            (
+                Self::NO_IP_NETWORK,
+                "no IP networking for spawned processes, loopback included",
+            ),
+        ]
+        .into_iter()
+        .filter(|(capability, _)| self.contains(*capability))
+        .map(|(_, words)| words)
+        .collect()
+    }
+}
+
+impl fmt::Display for ExecCaps {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let guarantees = self.guarantees();
+        if guarantees.is_empty() {
+            return f.write_str("no confinement guarantee");
+        }
+        f.write_str(&guarantees.join(", "))
+    }
 }
 
 impl Serialize for ExecCaps {
@@ -689,30 +725,44 @@ impl ExecRequirements {
                 required: self.required,
                 available,
                 missing,
+                probe_evidence: None,
             })
         }
     }
 }
 
 /// The exact guarantees absent from a selected backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingExecCaps {
     required: ExecCaps,
     available: ExecCaps,
     missing: ExecCaps,
+    probe_evidence: Option<EvidenceRef>,
 }
 
 impl MissingExecCaps {
-    pub const fn required(self) -> ExecCaps {
+    pub const fn required(&self) -> ExecCaps {
         self.required
     }
 
-    pub const fn available(self) -> ExecCaps {
+    pub const fn available(&self) -> ExecCaps {
         self.available
     }
 
-    pub const fn missing(self) -> ExecCaps {
+    pub const fn missing(&self) -> ExecCaps {
         self.missing
+    }
+
+    /// The measurement transcript this refusal came out of, when one was
+    /// taken. A refusal raised before any probe ran has nothing to cite.
+    pub const fn probe_evidence(&self) -> Option<&EvidenceRef> {
+        self.probe_evidence.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_probe_evidence(mut self, reference: Option<EvidenceRef>) -> Self {
+        self.probe_evidence = reference;
+        self
     }
 }
 
@@ -720,9 +770,13 @@ impl fmt::Display for MissingExecCaps {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "process backend capabilities {:?} do not satisfy {:?}; missing {:?}",
+            "the process backend demonstrated {}, but this run requires {}; missing {}",
             self.available, self.required, self.missing
-        )
+        )?;
+        if let Some(reference) = &self.probe_evidence {
+            write!(f, " (probe transcript {})", reference.id.as_str())?;
+        }
+        Ok(())
     }
 }
 

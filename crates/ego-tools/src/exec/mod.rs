@@ -178,6 +178,90 @@ impl From<HttpCallTimeoutError> for ProcessError {
     }
 }
 
+/// One probe command and how the child ended.
+///
+/// A cleared capability bit names the guarantee that is absent and nothing
+/// else. Which paired operation failed, in which root, and with what exit
+/// status is the difference between "this host has no sandbox" and "one rule
+/// in the generated profile is wrong", so the measurement keeps it.
+#[derive(Clone)]
+pub(crate) struct ProbeRecord {
+    pub(crate) suite: String,
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) argv: Vec<String>,
+    pub(crate) outcome: String,
+}
+
+/// The transcript of one measurement.
+///
+/// Capabilities are cached per effective policy, so the transcript is cached
+/// with them: a later run in the same process must still be able to explain a
+/// refusal it did not measure itself.
+#[derive(Default)]
+pub(crate) struct ProbeLog(std::sync::Mutex<Vec<ProbeRecord>>);
+
+impl ProbeLog {
+    fn entries(&self) -> std::sync::MutexGuard<'_, Vec<ProbeRecord>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn record(&self, record: ProbeRecord) {
+        self.entries().push(record);
+    }
+
+    pub(crate) fn snapshot(&self) -> Arc<[ProbeRecord]> {
+        self.entries().as_slice().into()
+    }
+
+    pub(crate) fn extend(&self, records: &[ProbeRecord]) {
+        self.entries().extend_from_slice(records);
+    }
+
+    /// The transcript as one JSON Lines blob, or `None` when nothing ran.
+    fn transcript(&self) -> Option<Vec<u8>> {
+        let entries = self.entries();
+        if entries.is_empty() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        for record in entries.iter() {
+            let line = serde_json::json!({
+                "suite": record.suite,
+                "root": record.root.to_string_lossy(),
+                "argv": record.argv,
+                "outcome": record.outcome,
+            });
+            bytes.extend_from_slice(line.to_string().as_bytes());
+            bytes.push(b'\n');
+        }
+        Some(bytes)
+    }
+}
+
+/// Store the measurement transcript as ordinary session evidence.
+///
+/// It is content-addressed like any other tool evidence, so it is readable
+/// only inside the session that measured it, and a run that measured nothing
+/// stores nothing.
+fn commit_probe_transcript(
+    evidence: &SessionEvidenceStore,
+    log: &ProbeLog,
+) -> Result<Option<ego_core::store::evidence::EvidenceRef>, ProcessError> {
+    use ego_core::store::evidence::EvidenceStore as _;
+
+    let Some(transcript) = log.transcript() else {
+        return Ok(None);
+    };
+    let mut writer = evidence.begin().map_err(ProcessError::Evidence)?;
+    if let Err(error) = writer.append(&transcript) {
+        let _ = writer.abort();
+        return Err(ProcessError::Evidence(error));
+    }
+    writer.commit().map(Some).map_err(ProcessError::Evidence)
+}
+
 /// The only public process executor. Policy, evidence ownership,
 /// cancellation and lifecycle bounds are captured before any call can run.
 pub struct GuardedExec {
@@ -217,15 +301,27 @@ pub struct RunEffectPorts {
 
 impl RunEffectPorts {
     pub async fn for_run(config: ExecRunConfig) -> Result<(Self, ExecObservation), ProcessError> {
-        let (selected, runtime_roots) =
-            select_backend(&config.policy, config.cancel.clone(), config.exec_limits).await?;
+        let measurement = ProbeLog::default();
+        let (selected, runtime_roots) = select_backend(
+            &config.policy,
+            config.cancel.clone(),
+            config.exec_limits,
+            &measurement,
+        )
+        .await?;
         selected.prerequisite(&config.policy)?;
         let capabilities = selected.capabilities();
+        // The transcript lands in the session before the refusal that cites
+        // it, so an operator can read what was measured rather than infer it
+        // from a capability that is merely absent.
+        let transcript = commit_probe_transcript(&config.evidence, &measurement)?;
         config
             .policy
             .requirements()
             .check(capabilities)
-            .map_err(ProcessError::MissingCapabilities)?;
+            .map_err(|missing| {
+                ProcessError::MissingCapabilities(missing.with_probe_evidence(transcript))
+            })?;
         let observation = ExecObservation::new(
             selected.identity(),
             capabilities,
@@ -301,12 +397,13 @@ async fn select_backend(
     policy: &RunConfinement,
     cancel: CancelToken,
     limits: ExecLimits,
+    log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
     if policy.level() == ego_core::permit::Confinement::Off {
         return MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
             .map(|backend| (Arc::new(backend), Vec::new()));
     }
-    match probe::landlock(policy, cancel, limits).await {
+    match probe::landlock(policy, cancel, limits, log).await {
         Ok(backend) => Ok(backend),
         Err(ProcessError::Cancelled) => Err(ProcessError::Cancelled),
         Err(_) => MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
@@ -319,9 +416,10 @@ async fn select_backend(
     policy: &RunConfinement,
     cancel: CancelToken,
     limits: ExecLimits,
+    log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
     if policy.level() != ego_core::permit::Confinement::Off || policy.offline() {
-        return match probe::seatbelt(policy, cancel, limits).await {
+        return match probe::seatbelt(policy, cancel, limits, log).await {
             Ok(backend) => Ok(backend),
             Err(ProcessError::Cancelled) => Err(ProcessError::Cancelled),
             Err(_) => MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
@@ -340,6 +438,7 @@ async fn select_backend(
     _policy: &RunConfinement,
     _cancel: CancelToken,
     _limits: ExecLimits,
+    _log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
     MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
         .map(|backend| (Arc::new(backend), Vec::new()))

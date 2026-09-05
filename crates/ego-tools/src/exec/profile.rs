@@ -65,6 +65,16 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
             }
             profile.push_str(")\n");
 
+            // A writable root the child cannot stat is not usable: `touch`,
+            // `cp`, `rm`, `mv` and `ln` all read metadata before they mutate,
+            // so a write-only scratch fails with `Operation not permitted`.
+            // Scratch joins the read set with the other writable root, and
+            // never the exec set above: ego does not let a child run a program
+            // it has just written into its own scratch.
+            if matches!(input.level, Confinement::Workspace) {
+                readable.insert(scratch.clone());
+            }
+
             profile.push_str("(allow file-read* file-test-existence\n");
             for root in readable {
                 profile.push_str("  (subpath ");
@@ -139,4 +149,60 @@ fn path_literal(path: &Path) -> Result<String, ProfileError> {
 
 fn path_label(path: &Path) -> String {
     format!("{:?}", path.as_os_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{Confinement, ProfileInput, render};
+
+    fn input(level: Confinement) -> ProfileInput<'static> {
+        static RUNTIME: &[&Path] = &[];
+        ProfileInput {
+            level,
+            offline: false,
+            workspace: Path::new("/work"),
+            private_scratch: Path::new("/scratch"),
+            runtime_roots: RUNTIME,
+        }
+    }
+
+    #[test]
+    fn workspace_grants_read_and_existence_on_both_writable_roots() {
+        assert_eq!(
+            render(&input(Confinement::Workspace)).expect("workspace profile"),
+            concat!(
+                "(version 1)\n",
+                "(deny default)\n",
+                "(import \"system.sb\")\n",
+                "(allow process-fork)\n",
+                "(allow process-exec*\n",
+                "  (subpath \"/work\")\n",
+                ")\n",
+                "(allow file-read* file-test-existence\n",
+                "  (subpath \"/scratch\")\n",
+                "  (subpath \"/work\")\n",
+                ")\n",
+                "(deny file-write*\n",
+                "  (require-not (require-any\n",
+                "    (subpath \"/work\")\n",
+                "    (subpath \"/scratch\")\n",
+                "  )))\n",
+                "(allow file-write*\n",
+                "  (subpath \"/work\")\n",
+                "  (subpath \"/scratch\")\n",
+                ")\n",
+                "(allow network*)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn read_only_keeps_the_private_scratch_out_of_every_rule() {
+        // `ro` mutates nothing, so scratch is not a root the child needs, and
+        // an unused read grant would still be reach the level does not promise.
+        let profile = render(&input(Confinement::Ro)).expect("ro profile");
+        assert!(!profile.contains("/scratch"), "{profile}");
+    }
 }
