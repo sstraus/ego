@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
-use ego_core::config::{Mode, ModelRef};
+use ego_core::config::{Mode, ModelRef, Trust};
 use ego_core::cost::CumulativeCost;
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
@@ -38,16 +38,23 @@ pub struct SeatFacts {
     queue: QueueStatus,
     drafts: usize,
     cwd: String,
+    trust: Trust,
     modal: bool,
 }
 
 impl SeatFacts {
     /// Build a seat projection outside a modal selector.
-    pub fn new(queue: QueueStatus, drafts: usize, cwd: impl Into<String>) -> Self {
+    ///
+    /// `trust` is a launch fact rather than a live one — it is answered once,
+    /// before the seat exists, and never moves — but it is carried here
+    /// because the status row is the only place a silently untrusted session
+    /// gets to say so.
+    pub fn new(queue: QueueStatus, drafts: usize, cwd: impl Into<String>, trust: Trust) -> Self {
         Self {
             queue,
             drafts,
             cwd: cwd.into(),
+            trust,
             modal: false,
         }
     }
@@ -107,6 +114,7 @@ impl From<ego_core::config::StatusSegmentName> for StatusSegmentName {
             ego_core::config::StatusSegmentName::Interrupt => Self::Interrupt,
             ego_core::config::StatusSegmentName::Cwd => Self::Cwd,
             ego_core::config::StatusSegmentName::Git => Self::Git,
+            ego_core::config::StatusSegmentName::Trust => Self::Trust,
         }
     }
 }
@@ -229,6 +237,7 @@ pub struct SurfaceSnapshot {
     queue: QueueStatus,
     drafts: usize,
     cwd: String,
+    trust: Trust,
     git: Option<GitFacts>,
     git_failed: bool,
     modal: bool,
@@ -279,6 +288,7 @@ impl SurfaceSnapshot {
             queue: seat.queue,
             drafts: seat.drafts,
             cwd: seat.cwd,
+            trust: seat.trust,
             git,
             git_failed: false,
             modal: seat.modal,
@@ -402,6 +412,10 @@ impl SurfaceSnapshot {
                 }))
             }
             StatusSegmentName::Cwd => Some(SegmentValue::text(&self.cwd)),
+            StatusSegmentName::Trust => Some(SegmentValue::text(match self.trust {
+                Trust::Trusted => "trusted",
+                Trust::Untrusted => "untrusted",
+            })),
             StatusSegmentName::Git => self
                 .git
                 .as_ref()
@@ -417,6 +431,7 @@ impl SurfaceSnapshot {
             StatusSegmentName::Interrupt => self.queue.interrupt_pending,
             StatusSegmentName::Cost => self.cost != "unstarted",
             StatusSegmentName::Git => self.git.is_some(),
+            StatusSegmentName::Trust => self.trust == Trust::Untrusted,
             _ => self.value(name).is_some(),
         }
     }
@@ -456,6 +471,7 @@ pub enum StatusSegmentName {
     Interrupt,
     Cwd,
     Git,
+    Trust,
     Custom(String),
 }
 
@@ -477,6 +493,7 @@ impl StatusSegmentName {
             Self::Interrupt => "interrupt",
             Self::Cwd => "cwd",
             Self::Git => "git",
+            Self::Trust => "trust",
             Self::Custom(name) => name,
         }
     }
@@ -493,6 +510,10 @@ impl StatusSegmentName {
             Self::Mode => 3,
             Self::Effort => 4,
             Self::Context => 5,
+            // Last of the optional segments to go: an active `trust` segment
+            // is the session saying it is running without ambient authority,
+            // which outranks every other convenience on the row.
+            Self::Trust => 6,
             Self::Model => usize::MAX,
             Self::Queue | Self::Drafts | Self::Interrupt => usize::MAX,
         }

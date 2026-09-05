@@ -22,7 +22,7 @@ pub async fn execute(args: &UsageArgs, out: &Stdout) -> RunTermination {
                     }
                 }
             } else {
-                out.write(&render_text(&report));
+                out.write(&render_text(&report, args.all_roles));
             }
             RunTermination::Done
         }
@@ -53,85 +53,143 @@ async fn report_workspace(args: &UsageArgs) -> Result<UsageReport, RunTerminatio
         })
 }
 
+/// The columns of the text table, in order.
+///
+/// Six facts and no more: the report is the complete record and `--json`
+/// hands it over whole. The text view exists for a person deciding whether a
+/// session cost anything, and every column it does not have is one that was
+/// pushing the answer off the right-hand edge.
+const COLUMNS: [&str; 7] = ["session", "model", "role", "in", "out", "cached", "cost"];
+
 /// Render an already-reconciled report without performing accounting.
-pub(crate) fn render_text(report: &UsageReport) -> String {
+///
+/// The `total` line is not one of the hideable roles: it is how a session
+/// appears in the table at all, so a session that spent nothing still has a
+/// row saying so rather than vanishing from its own report.
+///
+/// `all_roles` keeps the role rows that recorded nothing. Hidden by default
+/// because four of the five are zero in every session nobody judged, compacted,
+/// forked or hooked, and five zero rows per session is how the one row that
+/// mattered got lost.
+pub(crate) fn render_text(report: &UsageReport, all_roles: bool) -> String {
     let period = match report.period {
         UsagePeriod::All => "all".to_string(),
         UsagePeriod::Last { seconds } => format!("last {}s", seconds.get()),
     };
+    let mut cells = vec![COLUMNS.map(str::to_owned).to_vec()];
+    for session in &report.sessions {
+        let id = session.session.to_string();
+        let model = session
+            .model
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        for (role, line) in role_lines(&session.lines) {
+            if !all_roles && role != "total" && !spent(line) {
+                continue;
+            }
+            cells.push(row(&id, &model, role, line));
+        }
+    }
+    cells.push(row("workspace", "-", "total", &report.totals.total));
+
     let mut rows = vec![format!(
         "usage as_of={} period={period}",
         report.as_of.as_millis()
     )];
-    for session in &report.sessions {
-        rows.push(format!(
-            "session {} model={}",
-            session.session,
-            session.model.as_deref().unwrap_or("unknown")
-        ));
-        if let Some(lineage) = session.lineage {
-            rows.push(format!("  lineage={lineage:?}"));
-        }
-        if let Some(context) = session.context {
-            rows.push(format!(
-                "  context used_tokens={} provenance={:?}",
-                context.used_tokens, context.provenance
-            ));
-        }
-        append_lines(&mut rows, "  ", &session.lines);
-    }
-    rows.push("workspace".to_string());
-    append_lines(&mut rows, "  ", &report.totals);
+    rows.extend(aligned(&cells));
     rows.push(String::new());
     rows.join("\n")
 }
 
-fn append_lines(rows: &mut Vec<String>, prefix: &str, lines: &ego_core::usage::UsageLines) {
-    for (name, line) in [
+/// Every accounting line of one set, in the fixed report order.
+fn role_lines(lines: &ego_core::usage::UsageLines) -> [(&'static str, &UsageLine); 6] {
+    [
         ("main", &lines.main),
         ("judge", &lines.judge),
         ("compaction", &lines.compaction),
         ("subagent", &lines.subagent),
         ("hook", &lines.hook),
         ("total", &lines.total),
-    ] {
-        rows.push(format!(
-            "{prefix}{name}: {} cost={}",
-            usage_text(line),
-            cost_text(&line.cost)
-        ));
-    }
+    ]
 }
 
-fn usage_text(line: &UsageLine) -> String {
+/// Whether a role line records anything at all.
+///
+/// A cost with no tokens is still activity — an unknown-cost reason is
+/// something the reader has to see — so this is not a token test alone.
+fn spent(line: &UsageLine) -> bool {
     let usage = &line.usage;
-    let reasoning = usage
-        .reasoning_tokens
-        .map_or_else(|| "unknown".to_string(), |tokens| tokens.to_string());
-    format!(
-        "uncached_input={} cache_read={} cache_write={} cache_write_extended={} output={} reasoning={reasoning}",
-        usage.uncached_input_tokens,
-        usage.cache_read_tokens,
-        usage.cache_write_tokens,
-        usage.cache_write_extended_tokens,
-        usage.output_tokens,
-    )
+    usage.uncached_input_tokens > 0
+        || usage.cache_read_tokens > 0
+        || usage.cache_write_tokens > 0
+        || usage.cache_write_extended_tokens > 0
+        || usage.output_tokens > 0
+        || usage.reasoning_tokens.is_some_and(|tokens| tokens > 0)
+        || !line.cost.known.is_empty()
+        || !line.cost.unknown.is_empty()
 }
 
+fn row(session: &str, model: &str, role: &str, line: &UsageLine) -> Vec<String> {
+    let usage = &line.usage;
+    let cached =
+        usage.cache_read_tokens + usage.cache_write_tokens + usage.cache_write_extended_tokens;
+    vec![
+        session.to_owned(),
+        model.to_owned(),
+        role.to_owned(),
+        usage.uncached_input_tokens.to_string(),
+        usage.output_tokens.to_string(),
+        cached.to_string(),
+        cost_text(&line.cost),
+    ]
+}
+
+/// Pad every column to its widest cell, so the numbers line up in a terminal.
+///
+/// The last column is never padded: trailing spaces are invisible and a reader
+/// that splits on whitespace should not have to strip them.
+fn aligned(cells: &[Vec<String>]) -> Vec<String> {
+    let mut widths = vec![0usize; COLUMNS.len()];
+    for row in cells {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.chars().count());
+        }
+    }
+    cells
+        .iter()
+        .map(|row| {
+            let last = row.len() - 1;
+            row.iter()
+                .enumerate()
+                .map(|(index, cell)| {
+                    if index == last {
+                        cell.clone()
+                    } else {
+                        format!("{cell:<width$}", width = widths[index])
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("  ")
+        })
+        .collect()
+}
+
+/// One compact cost cell.
+///
+/// The unknown-cost *reasons* stay in the report rather than the table: they
+/// are JSON objects, and one of them is wider than every other column
+/// together. The cell says that some spend is unpriced; `--json` says why.
 fn cost_text(cost: &CostBreakdown) -> String {
-    let mut parts: Vec<String> = cost
+    let known = cost
         .known
         .iter()
         .map(|money| format!("{} {}", money.amount, money.currency))
-        .collect();
-    parts.extend(
-        cost.unknown
-            .iter()
-            .map(|reason| serde_json::to_string(reason).unwrap_or_else(|_| format!("{reason:?}"))),
-    );
-    if parts.is_empty() {
-        "none".to_string()
-    } else {
-        parts.join(", ")
+        .collect::<Vec<_>>()
+        .join(", ");
+    match (known.is_empty(), cost.unknown.is_empty()) {
+        (true, true) => "-".to_string(),
+        (true, false) => "unknown".to_string(),
+        (false, true) => known,
+        (false, false) => format!("{known} +unknown"),
     }
 }

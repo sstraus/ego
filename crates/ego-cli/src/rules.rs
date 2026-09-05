@@ -21,7 +21,7 @@ use ego_tools::store::OsIo;
 
 use crate::cli::{RulesAction, RulesArgs};
 use crate::config::{escape_field, rule_management, user_target};
-use crate::output::{Stdout, TextOutput};
+use crate::output::{Stdout, TextOutput, empty_listing};
 
 /// One prepared call whose representable permission rules may be remembered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -708,6 +708,15 @@ fn render_rows(rows: Vec<String>, out: &dyn TextOutput) {
 }
 
 fn render_list_text(rows: &[EffectiveRule], out: &dyn TextOutput) {
+    if rows.is_empty() {
+        // The rule ADR fixes the text listing as tab-separated rows, so an
+        // empty one has no stdout at all and says why on stderr instead.
+        out.note(&empty_listing(
+            "no permission rules are in effect",
+            "ego rules allow RULE",
+        ));
+        return;
+    }
     render_rows(render_list_rows(rows), out);
 }
 

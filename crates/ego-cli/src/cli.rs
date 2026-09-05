@@ -352,6 +352,7 @@ pub struct UsageArgs {
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
     pub json: bool,
+    pub all_roles: bool,
 }
 
 /// The exact `ego fork ID` request and its shared store/workspace/output flags.
@@ -705,6 +706,10 @@ struct UsageCommand {
     /// Emit the exact versioned usage-report object.
     #[arg(long)]
     json: bool,
+
+    /// Keep role rows that recorded no activity in the text table.
+    #[arg(long)]
+    all_roles: bool,
 
     #[command(flatten)]
     places: Places,
@@ -1734,6 +1739,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 session_dir: parsed.places.session_dir,
                 directory: parsed.places.directory,
                 json: parsed.json,
+                all_roles: parsed.all_roles,
             }))),
         },
         Some("fork") => match clap_or_answer::<ForkCommand>(&tokens)? {

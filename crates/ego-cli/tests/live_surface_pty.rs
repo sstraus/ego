@@ -365,6 +365,10 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
         "--sandbox",
         "off",
     ]);
+    // These cases all begin by answering the trust question, so the workspace
+    // has to hold something worth asking about. An empty checkout is asked
+    // nothing at all.
+    ego.file("AGENTS.md", "# live surface fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
             rows: 24,
@@ -572,6 +576,10 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
         "--sandbox",
         "off",
     ]);
+    // These cases all begin by answering the trust question, so the workspace
+    // has to hold something worth asking about. An empty checkout is asked
+    // nothing at all.
+    ego.file("AGENTS.md", "# live surface fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
             rows: 24,
@@ -712,6 +720,10 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         "--sandbox",
         "off",
     ]);
+    // These cases all begin by answering the trust question, so the workspace
+    // has to hold something worth asking about. An empty checkout is asked
+    // nothing at all.
+    ego.file("AGENTS.md", "# live surface fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
             rows: 24,
@@ -914,6 +926,10 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
         "--sandbox",
         "off",
     ]);
+    // These cases all begin by answering the trust question, so the workspace
+    // has to hold something worth asking about. An empty checkout is asked
+    // nothing at all.
+    ego.file("AGENTS.md", "# live surface fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
             rows: 24,

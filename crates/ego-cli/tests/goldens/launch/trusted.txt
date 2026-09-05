@@ -1,0 +1,10 @@
+# trusted: first launch
+Trust project files in <workspace>? [y/N] yes
+hello
+a launch transcript
+εgo: 0 unsent drafts, 0 accepted inputs
+
+# trusted: next launch
+hello
+a launch transcript
+εgo: 0 unsent drafts, 0 accepted inputs
