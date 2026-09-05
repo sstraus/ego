@@ -77,6 +77,15 @@ pub(crate) fn resolve(
     decision
 }
 
+/// The digest of what this workspace offers to be trusted with, if anything.
+///
+/// Public so a test can prove what the answer covers. `None` means an empty
+/// inventory: nothing here that a trust answer would change.
+pub fn inventory_digest(root: &Path) -> Option<String> {
+    let inventory = inventory(root);
+    (!inventory.is_empty()).then(|| inventory.digest())
+}
+
 /// Everything under `root` whose admission the trust answer governs.
 fn inventory(root: &Path) -> TrustInventory {
     let mut paths: Vec<PathBuf> = PROJECT_CONFIGS
@@ -85,7 +94,107 @@ fn inventory(root: &Path) -> TrustInventory {
         .collect();
     paths.push(root.join(INSTRUCTIONS_FILE));
     paths.extend(skill_files(root));
+    paths.extend(referenced_commands(root));
     TrustInventory::new(paths.iter().filter_map(|path| content(root, path)))
+}
+
+/// The workspace files a trusted config would run.
+///
+/// Three config fields are free strings naming a program: a hook handler, an
+/// MCP stdio server, and a credential command. Digesting the config that names
+/// one but not the file it names would make the remembered answer a lie — the
+/// bytes that execute could be replaced by a `git pull` while the digest, and
+/// so the answer, stayed the same.
+///
+/// Only paths that stay inside the root are inventoried. `/usr/bin/env` is not
+/// workspace content, and digesting it would re-ask every workspace on every
+/// OS update, which teaches operators to answer without reading.
+///
+/// A handler that runs through an explicit `shell` is resolved the same way.
+/// Its command is a shell fragment rather than a path, but nothing here guesses
+/// what a shell would do with it: the fragment is resolved as a path and kept
+/// only when that path is a file inside the root. `foo && bar` names no such
+/// file and adds nothing; `./scripts/hook.sh` names the file it runs.
+fn referenced_commands(root: &Path) -> Vec<PathBuf> {
+    PROJECT_CONFIGS
+        .iter()
+        .filter_map(|relative| fs::read_to_string(root.join(relative)).ok())
+        // A config that does not parse declares nothing this build would run:
+        // it fails the load that comes later, so it names no command to cover.
+        .filter_map(|text| text.parse::<toml::Table>().ok())
+        .flat_map(|config| commands_in(&config))
+        .filter_map(|command| inside(root, &command))
+        .collect()
+}
+
+/// Every program string one parsed config declares.
+fn commands_in(config: &toml::Table) -> Vec<String> {
+    let mut commands = Vec::new();
+    if let Some(hooks) = config.get("hooks").and_then(toml::Value::as_array) {
+        for hook in hooks {
+            let handler = hook.get("handler");
+            // Only the command handler names a program; `http` names a URL and
+            // `mcp_tool` names a server already covered by its own entry.
+            if handler
+                .and_then(|handler| handler.get("type"))
+                .and_then(toml::Value::as_str)
+                == Some("command")
+                && let Some(command) = handler
+                    .and_then(|handler| handler.get("command"))
+                    .and_then(toml::Value::as_str)
+            {
+                commands.push(command.to_owned());
+            }
+        }
+    }
+    if let Some(servers) = config
+        .get("mcp")
+        .and_then(|mcp| mcp.get("servers"))
+        .and_then(toml::Value::as_table)
+    {
+        commands.extend(
+            servers
+                .values()
+                .filter_map(|server| server.get("command"))
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned),
+        );
+    }
+    if let Some(providers) = config.get("auth").and_then(toml::Value::as_table) {
+        commands.extend(
+            providers
+                .values()
+                .filter_map(|provider| provider.get("credential_command"))
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned),
+        );
+    }
+    commands
+}
+
+/// The path this command names, but only while it stays under `root`.
+///
+/// Resolved lexically rather than through `canonicalize`, because the target
+/// may not exist yet and because following a symlink here would let a link
+/// decide what the digest covers. A `..` that would climb above the root ends
+/// the walk: whatever it reaches is not this workspace's content.
+fn inside(root: &Path, command: &str) -> Option<PathBuf> {
+    use std::path::Component;
+
+    let candidate = root.join(command);
+    let mut resolved = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::ParentDir => {
+                if !resolved.pop() {
+                    return None;
+                }
+            }
+            Component::CurDir => {}
+            other => resolved.push(other),
+        }
+    }
+    resolved.starts_with(root).then_some(resolved)
 }
 
 /// `<root>/.ego/skills/*/SKILL.md`, exactly as the skill loader finds them.
@@ -219,6 +328,28 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    /// `inside` is the containment check itself, and no test that goes through
+    /// `inventory_digest` can prove it: `content` refuses a path outside the
+    /// root too, so the digest comes out identical either way. Calling it
+    /// directly is what makes the guard falsifiable rather than merely asserted.
+    #[test]
+    fn inside_keeps_only_what_stays_under_the_root() {
+        let root = Path::new("/workspace");
+        assert_eq!(
+            inside(root, "./scripts/hook.sh"),
+            Some(PathBuf::from("/workspace/scripts/hook.sh"))
+        );
+        assert_eq!(inside(root, "../escape.sh"), None);
+        assert_eq!(inside(root, "scripts/../../escape.sh"), None);
+        // Absolute, so `root.join` discards the root entirely.
+        assert_eq!(inside(root, "/usr/bin/env"), None);
+        // Climbing back down to the root is not an escape.
+        assert_eq!(
+            inside(root, "scripts/../hook.sh"),
+            Some(PathBuf::from("/workspace/hook.sh"))
+        );
+    }
 
     struct Silent;
 
