@@ -28,6 +28,36 @@ fn auth_status_names_the_login_command_when_nothing_is_stored() {
     );
 }
 
+/// `auth status` has no `--json`, and that absence is a contract rather than an
+/// omission.
+///
+/// regression case asks that "`--json` variants emit an empty array/object". Four of
+/// the five listings declare one; `auth` does not — CLI.md gives its surface as
+/// `login|logout|status [PROVIDER]`, and §2's command set is closed the same way
+/// the trust ADR relies on when it refuses to add an `ego trust`. Growing one
+/// here would mean inventing an unspecified schema on the one command that
+/// handles credentials: array or provider-keyed object, how a version is
+/// carried, how "that provider is absent" differs from "nothing is stored", and
+/// which credential metadata is safe to serialise. "Empty array/object" answers
+/// none of those, and a machine format for credentials is not a detail to guess
+/// at. So the flag stays absent, and this test is what makes that a decision:
+/// add it without amending CLI.md and this fails.
+#[test]
+fn auth_status_has_no_json_variant_while_the_cli_contract_excludes_it() {
+    let listed = empty().subcommand("auth").args(["status", "--json"]).run();
+    assert_ne!(
+        listed.code,
+        Some(0),
+        "an undeclared flag must be refused, not quietly accepted: {}",
+        listed.stdout
+    );
+    assert_eq!(
+        listed.stdout, "",
+        "a rejected invocation prints no listing: {}",
+        listed.stdout
+    );
+}
+
 #[test]
 fn config_ls_names_the_set_command_when_the_user_document_is_empty() {
     let listed = empty().subcommand("config").arg("ls").run();
