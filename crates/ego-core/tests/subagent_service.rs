@@ -221,6 +221,54 @@ struct RecoverySelectionAdmission {
     calls: Arc<Mutex<usize>>,
 }
 
+#[derive(Clone, Default)]
+struct ChildTurnAuthorityAdmission {
+    calls: Arc<Mutex<usize>>,
+    unpublished_mcp_denials: Arc<Mutex<usize>>,
+}
+
+impl ChildTurnAuthorityAdmission {
+    fn calls(&self) -> usize {
+        *self.calls.lock().expect("child authority admissions")
+    }
+
+    fn unpublished_mcp_denials(&self) -> usize {
+        *self
+            .unpublished_mcp_denials
+            .lock()
+            .expect("unpublished MCP denials")
+    }
+}
+
+impl ChildSelectionAdmission for ChildTurnAuthorityAdmission {
+    fn admit(
+        &self,
+        request: &ChildRequest,
+        bindings: &RunExecutionBindings,
+    ) -> Result<(RunSelections, RunExecutionBindings), String> {
+        *self.calls.lock().expect("child authority admissions") += 1;
+        if request
+            .requested_sandbox()
+            .is_some_and(|sandbox| !matches!(sandbox, "workspace" | "ro"))
+        {
+            return Err("requested sandbox widens parent sandbox".to_owned());
+        }
+        if request.requested_offline().is_some_and(|offline| !offline) {
+            return Err("requested offline widens parent offline authority".to_owned());
+        }
+        if request.requested_mcp().is_some()
+            && (bindings.admitted_tools().is_none() || bindings.mcp_runtime().is_none())
+        {
+            *self
+                .unpublished_mcp_denials
+                .lock()
+                .expect("unpublished MCP denials") += 1;
+            return Err("MCP authority is not published for this child turn".to_owned());
+        }
+        Ok((request.selections().clone(), bindings.clone()))
+    }
+}
+
 impl RecoverySelectionAdmission {
     fn calls(&self) -> usize {
         *self.calls.lock().expect("recovery admissions")
@@ -286,6 +334,20 @@ fn request_with_task(
     .with_requested_offline(true)
     .with_requested_mcp(["trusted"])
     .with_requested_profile(profile_name_from_owner())
+}
+
+fn unprofiled_request(invocation: SubagentInvocationId, wait: ChildWait) -> ChildRequest {
+    ChildRequest::new(
+        invocation,
+        ChildRequestOrigin::new(parent_run(), parent_turn(), parent_item(), parent_event()),
+        blob_for_bytes(DEFAULT_TASK_BYTES),
+        selections(),
+        wait,
+    )
+    .with_requested_tools(["read"])
+    .with_requested_permission("allow(read(src/**))")
+    .with_requested_sandbox("workspace")
+    .with_requested_offline(true)
 }
 
 #[derive(Clone)]
@@ -2548,6 +2610,155 @@ fn profile_owner_refuses_unknown_untrusted_and_widening_profiles_before_controll
             if dimension == "tools"
     ));
     assert_eq!(harness.executor.call_count(), calls_after_known);
+}
+
+#[test]
+fn unprofiled_child_cannot_widen_sandbox_or_offline_before_any_run_effect() {
+    let harness = Harness::new(RunSettlement::Completed);
+    let authority = Arc::new(ChildTurnAuthorityAdmission::default());
+    let profile_calls = Arc::new(Mutex::new(0));
+    let service = harness.service_with_ports(
+        SharedBudgetGate::new(BudgetGate::unlimited(
+            ego_core::cost::CurrencyCode::new("USD").expect("currency"),
+        )),
+        ChildServicePorts::new(
+            harness.parent_run,
+            Arc::new(harness.journal.clone()),
+            Arc::new(harness.task_reader.clone()),
+            Arc::new(harness.results.clone()),
+            Arc::new(harness.parent_blobs.clone()),
+            Arc::new(ExistingProfileOwner {
+                layers: vec![
+                    ConfigLayer::parse(Source::User, "[profile.worker]\n").expect("profile layer"),
+                ],
+                trust: Trust::Trusted,
+                calls: Arc::clone(&profile_calls),
+            }),
+            authority.clone(),
+        ),
+        ReturnHookPort::new(HookDecision::Continue),
+    );
+
+    let baseline_calls = harness.executor.call_count();
+    let baseline_reservations = harness.executor.reservation_count();
+    let baseline_transactions = harness.store.all_transactions().len();
+    let baseline_child_events = harness
+        .journal
+        .records()
+        .iter()
+        .filter_map(child_event_kind)
+        .count();
+    for (request, dimension) in [
+        (
+            unprofiled_request(SubagentInvocationId::new(), ChildWait::Background)
+                .with_requested_sandbox("off"),
+            "sandbox",
+        ),
+        (
+            unprofiled_request(SubagentInvocationId::new(), ChildWait::Background)
+                .with_requested_offline(false),
+            "offline",
+        ),
+    ] {
+        let refused = futures::executor::block_on(service.start(request));
+        assert!(matches!(
+            refused,
+            Err(ego_core::subagent::ChildServiceError::AuthorityWouldWiden {
+                dimension: found
+            }) if found == dimension
+        ));
+    }
+    assert_eq!(*profile_calls.lock().expect("profile resolutions"), 0);
+    assert_eq!(authority.calls(), 2);
+    assert_eq!(harness.executor.call_count(), baseline_calls);
+    assert_eq!(harness.executor.reservation_count(), baseline_reservations);
+    assert_eq!(
+        harness.store.all_transactions().len(),
+        baseline_transactions
+    );
+    assert_eq!(
+        harness
+            .journal
+            .records()
+            .iter()
+            .filter_map(child_event_kind)
+            .count(),
+        baseline_child_events,
+    );
+}
+
+#[test]
+fn unprofiled_narrower_child_is_admitted_and_inherited_mcp_stays_denied_at_child_authority() {
+    let harness = Harness::new(RunSettlement::Completed);
+    let authority = Arc::new(ChildTurnAuthorityAdmission::default());
+    let service = harness.service_with_gate_and_authority(
+        SharedBudgetGate::new(BudgetGate::unlimited(
+            ego_core::cost::CurrencyCode::new("USD").expect("currency"),
+        )),
+        authority.clone(),
+    );
+    let narrower = futures::executor::block_on(
+        service.start(
+            unprofiled_request(SubagentInvocationId::new(), ChildWait::Background)
+                .with_requested_sandbox("ro"),
+        ),
+    )
+    .expect("a genuinely narrower child remains admitted");
+    assert_eq!(authority.calls(), 1);
+    assert_eq!(
+        harness.executor.call_count(),
+        1,
+        "admission prepares the genuinely narrower child exactly once"
+    );
+    assert_eq!(
+        harness
+            .journal
+            .records()
+            .iter()
+            .filter_map(child_event_kind)
+            .collect::<Vec<_>>(),
+        ["subagent_requested", "subagent_spawned"],
+    );
+    harness.results.record_evidence(
+        narrower.child_run(),
+        blob_for_bytes(RESULT.as_bytes()),
+        RESULT.as_bytes().to_vec(),
+    );
+    futures::executor::block_on(narrower.host_launch()).expect("host launches narrower child");
+    assert!(matches!(
+        futures::executor::block_on(narrower.wait()).expect("narrower child settles"),
+        ChildWaitResult::Returned { .. }
+    ));
+
+    let mcp_before_calls = harness.executor.call_count();
+    let mcp_before_reservations = harness.executor.reservation_count();
+    let denied = futures::executor::block_on(
+        service.start(
+            unprofiled_request(SubagentInvocationId::new(), ChildWait::Background)
+                .with_requested_mcp(["inherited"]),
+        ),
+    );
+    assert!(matches!(
+        denied,
+        Err(ego_core::subagent::ChildServiceError::AuthorityWouldWiden { dimension })
+            if dimension == "MCP"
+    ));
+    assert_eq!(authority.calls(), 2);
+    assert_eq!(authority.unpublished_mcp_denials(), 1);
+    assert_eq!(harness.executor.call_count(), mcp_before_calls);
+    assert_eq!(
+        harness.executor.reservation_count(),
+        mcp_before_reservations
+    );
+    assert_eq!(
+        harness
+            .journal
+            .records()
+            .iter()
+            .filter_map(child_event_kind)
+            .collect::<Vec<_>>(),
+        ["subagent_requested", "subagent_spawned", "subagent_settled"],
+    );
 }
 
 #[test]

@@ -14,29 +14,16 @@ use ego_cli::run::Ended;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::run::RunTermination;
 use ego_core::turn::CancelToken;
-use ego_mcp::McpRegistryRuntime;
 
 fn assert_direct_surface<F>(_surface: F)
 where
-    F: for<'a> AsyncFn(
-        Args,
-        &'a Stdout,
-        CancelToken,
-        Arc<McpRegistryRuntime>,
-        Arc<EvidenceAdmissionService>,
-    ) -> Ended,
+    F: for<'a> AsyncFn(Args, &'a Stdout, CancelToken, Arc<EvidenceAdmissionService>) -> Ended,
 {
 }
 
 fn assert_interactive_surface<F>(_surface: F)
 where
-    F: for<'a> AsyncFn(
-        Args,
-        &'a Stdout,
-        CancelToken,
-        Arc<McpRegistryRuntime>,
-        Arc<EvidenceAdmissionService>,
-    ) -> Ended,
+    F: for<'a> AsyncFn(Args, &'a Stdout, CancelToken, Arc<EvidenceAdmissionService>) -> Ended,
 {
 }
 

@@ -226,10 +226,28 @@ pub struct Recorded {
 pub struct Stub {
     pub address: String,
     seen: Arc<Mutex<Vec<Recorded>>>,
+    mode: StubMode,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StubMode {
+    ProviderOnly,
+    ProviderAndMcp,
 }
 
 impl Stub {
     pub fn start(plan: Plan) -> Self {
+        Self::start_mode(plan, StubMode::ProviderOnly)
+    }
+
+    /// Start the same provider fixture with a minimal streamable MCP endpoint
+    /// on the same listener, so tests can observe discovery without a second
+    /// network adapter.
+    pub fn start_mcp(plan: Plan) -> Self {
+        Self::start_mode(plan, StubMode::ProviderAndMcp)
+    }
+
+    fn start_mode(plan: Plan, mode: StubMode) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
         let address = listener
             .local_addr()
@@ -245,13 +263,17 @@ impl Stub {
                 // One request per connection, then closed. Keep-alive would
                 // buy nothing here and would make the reply logic guess where
                 // one exchange ends.
-                if serve(stream, &plan, &thread_seen, &mut generation).is_err() {
+                if serve(stream, &plan, &thread_seen, &mut generation, mode).is_err() {
                     break;
                 }
             }
         });
 
-        Stub { address, seen }
+        Stub {
+            address,
+            seen,
+            mode,
+        }
     }
 
     /// Every request the stub has been sent, in order.
@@ -274,6 +296,7 @@ fn serve(
     plan: &Plan,
     seen: &Arc<Mutex<Vec<Recorded>>>,
     generation: &mut usize,
+    mode: StubMode,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
 
@@ -308,8 +331,12 @@ fn serve(
 
     seen.lock().expect("no writer panics").push(Recorded {
         path: path.clone(),
-        body,
+        body: body.clone(),
     });
+
+    if matches!(mode, StubMode::ProviderAndMcp) && path == "/mcp" {
+        return mcp_response(&mut stream, &body);
+    }
 
     match path.as_str() {
         "/api/tags" => {
@@ -345,6 +372,51 @@ fn serve(
             sse(&mut stream, reply)
         }
     }
+}
+
+fn mcp_response(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+    let request: serde_json::Value =
+        serde_json::from_str(body).expect("MCP probe receives JSON-RPC request");
+    let Some(id) = request.get("id") else {
+        write!(
+            stream,
+            "HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )?;
+        return stream.flush();
+    };
+    let method = request["method"].as_str().unwrap_or_default();
+    let result = match method {
+        "initialize" => serde_json::json!({
+            "resultType": "complete",
+            "supportedVersions": ["2026-07-28"],
+            "capabilities": {},
+            "ttlMs": 0,
+            "cacheScope": "private"
+        }),
+        "tools/list" => serde_json::json!({
+            "resultType": "complete",
+            "tools": [],
+            "nextCursor": null,
+            "ttlMs": 0,
+            "cacheScope": "private"
+        }),
+        _ => serde_json::json!({
+            "resultType": "complete",
+            "resources": [],
+            "prompts": [],
+            "nextCursor": null,
+            "ttlMs": 0,
+            "cacheScope": "private"
+        }),
+    };
+    let response = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+    let body = response.to_string();
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()
 }
 
 fn json(stream: &mut TcpStream, value: &serde_json::Value) -> std::io::Result<()> {
@@ -479,6 +551,31 @@ impl Finished {
                     .get("type")
                     .and_then(|kind| kind.as_str())
                     .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// Read durable event payloads from the invocation-owned temporary homes.
+    pub fn durable_payloads(&self) -> Vec<serde_json::Value> {
+        self._keep
+            .iter()
+            .flat_map(|home| {
+                let sessions = home.path().join("sessions");
+                let Ok(entries) = std::fs::read_dir(sessions) else {
+                    return Vec::new();
+                };
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path().join("events.jsonl"))
+                    .filter_map(|path| std::fs::read_to_string(path).ok())
+                    .flat_map(|contents| {
+                        contents
+                            .lines()
+                            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                            .filter_map(|record| record.get("payload").cloned())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -705,6 +802,14 @@ impl Ego {
         }
         std::fs::write(&path, contents).expect("a temp dir is writable");
         path
+    }
+
+    pub fn home_path(&self) -> &Path {
+        &self.home
+    }
+
+    pub fn workspace_path(&self) -> &Path {
+        &self.workspace
     }
 
     fn command(&self) -> Command {

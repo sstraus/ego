@@ -128,6 +128,24 @@ fn advertised_surface_is_exactly_five_tools_and_three_resources() {
 }
 
 #[test]
+fn forbidden_management_method_is_rejected_before_run_publication() {
+    let (controller, executor) = run_fixture::mcp_controller_fixture();
+    let server = server(controller);
+    let error = futures::executor::block_on(server.call_tool(call(
+        "initialize",
+        json!({"request_id":"00000000-0000-0000-0000-000000000057"}),
+    )))
+    .expect_err("management methods are not run operations");
+    assert!(error.to_string().contains("invalid MCP run tool name"));
+    assert!(
+        !executor
+            .calls()
+            .iter()
+            .any(|call| matches!(call, run_fixture::ExecutorCall::Prepare))
+    );
+}
+
+#[test]
 fn capabilities_advertise_independent_money_and_token_budget_axes() {
     let (controller, _) = run_fixture::mcp_controller_fixture();
     let server = server(controller);

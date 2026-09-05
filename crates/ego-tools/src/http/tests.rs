@@ -9,14 +9,20 @@ use std::time::{Duration, Instant};
 use ego_core::event::domain::CancelCause;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::permit::{
-    DnsResolution, GuardedHttp, HttpRequest, HttpRoute, HttpScheme, NetworkTarget, OneHop,
-    OneHopResponse, PreparedConnect, Resolver, TransportError, TransportFailure,
+    CanonPath, Confinement, DnsResolution, GuardedHttp, HttpRequest, HttpRoute, HttpScheme,
+    NetworkTarget, OneHop, OneHopResponse, PreparedConnect, Resolver, RunConfinement,
+    TransportError, TransportFailure,
 };
 use ego_core::turn::CancelToken;
 use futures::future::BoxFuture;
 
 use super::{OneShotHttpTransport, canonical_is_loopback};
 use crate::exec::HttpCallTimeout;
+
+fn offline_confinement() -> RunConfinement {
+    RunConfinement::new(Confinement::Off, true, CanonPath::new("/workspace"))
+        .expect("offline test confinement")
+}
 
 struct FixedResolver {
     calls: Arc<AtomicUsize>,
@@ -76,7 +82,7 @@ fn offline_transport(
         cancel,
         HttpCallTimeout::default(),
         None,
-        true,
+        offline_confinement(),
     ))
 }
 
@@ -140,7 +146,7 @@ async fn offline_localhost_uses_deterministic_loopback_without_injected_dns() {
         CancelToken::new(),
         HttpCallTimeout::default(),
         None,
-        true,
+        offline_confinement(),
     );
     let target = NetworkTarget::new("localhost", 80).expect("localhost target");
     let resolution = transport
@@ -166,7 +172,7 @@ async fn offline_non_local_name_is_definitely_unsent_before_dns() {
         CancelToken::new(),
         HttpCallTimeout::default(),
         None,
-        true,
+        offline_confinement(),
     );
     let error = transport
         .resolve(
