@@ -115,6 +115,55 @@ const CREDENTIALS: &[(&str, &str)] = &[
     ("openrouter", "sk-or-secret"),
 ];
 
+/// Every shipped row's own header defaults, scanned at the row rather than
+/// through a request.
+///
+/// The request scan below goes through `profiles::ALL`, which is a list of the
+/// profiles that have canonical goldens — not a list of the rows this build
+/// ships. `kimi-coding` has a row and no profile, so a header added to it would
+/// pass every other test here. That is precisely the drift a guard against
+/// impersonation cannot afford: the hole opens by adding a row, which is the
+/// same act that would add the header.
+#[test]
+fn no_shipped_row_carries_another_vendors_client_in_its_own_defaults() {
+    use ego_ai::provider::ProviderRow;
+
+    let rows = [
+        ProviderRow::ollama_default(),
+        ProviderRow::openai_codex_default(),
+        ProviderRow::github_copilot_default(),
+        ProviderRow::xai_oauth_default(),
+        ProviderRow::kimi_coding_default(),
+        ProviderRow::minimax_oauth_default(),
+        ProviderRow::nous_default(),
+        ProviderRow::openrouter_default(),
+        ProviderRow::anthropic_default(),
+        ProviderRow::gemini_default(),
+    ];
+    let mut all = Vec::new();
+    for row in &rows {
+        for (name, value) in &row.extra_headers {
+            let rendered = format!("{name}: {value}");
+            let lowered = rendered.to_ascii_lowercase();
+            for forbidden in FORBIDDEN {
+                if lowered.contains(forbidden.marker) {
+                    all.push(format!(
+                        "{}: `{rendered}` names {}",
+                        row.id(),
+                        forbidden.client
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        all.is_empty(),
+        "a shipped provider row carries somebody else's client identity in its \
+         own defaults.\n\n{}",
+        all.join("\n")
+    );
+}
+
 #[test]
 fn no_request_a_default_row_builds_names_another_vendors_client() {
     let mut all = Vec::new();
