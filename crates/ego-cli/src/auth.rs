@@ -578,6 +578,15 @@ fn status(store: &AuthStore, selected: Option<&str>) -> Result<String, AuthError
         }
         text.push('\n');
     }
+    // Silence here is indistinguishable from a broken command, and the rows
+    // are stdout's contract, so the explanation goes to the diagnostic
+    // channel like every other empty listing.
+    if text.is_empty() {
+        crate::output::note(&crate::output::empty_listing(
+            "no provider credentials are stored",
+            "ego auth login PROVIDER",
+        ));
+    }
     Ok(text)
 }
 

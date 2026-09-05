@@ -30,7 +30,7 @@ use ego_tools::store::{OsIo, StoreIo};
 use serde::Deserialize;
 
 use crate::cli::{Args, ConfigAction, ConfigArgs, McpSelector, SessionMetadataArgs, UsageError};
-use crate::output::{self, Stdout};
+use crate::output::{self, Diagnostics, Stdout, empty_listing};
 
 /// The system layer: an administrator's fleet defaults and the only source of
 /// non-relaxable ceilings.
@@ -88,6 +88,14 @@ async fn execute_inner(
                 .collect::<Vec<_>>();
             if *json {
                 render_json(target, values, out)?;
+            } else if values.is_empty() {
+                // The ADR fixes an empty text `ls` as empty stdout, so the
+                // explanation goes to the diagnostic channel rather than
+                // becoming a row no reader of this format expects.
+                out.note(&empty_listing(
+                    "no user configuration values are set",
+                    "ego config set KEY=VALUE",
+                ));
             } else {
                 for (key, value) in values {
                     out.line(&format!(

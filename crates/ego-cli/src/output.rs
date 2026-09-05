@@ -205,6 +205,18 @@ fn write_note(mut err: impl Write, message: &str) {
     let _ = writeln!(err, "{DISPLAY_NAME}: {message}");
 }
 
+/// The one sentence every empty listing says: what is missing, and the command
+/// that would add the first entry.
+///
+/// A listing that exits 0 having written nothing at all is indistinguishable,
+/// to the person who ran it, from one that is broken. It is a *diagnostic*
+/// rather than a row because stdout belongs to the row contracts — `config ls`
+/// and `rules ls` have their empty text output fixed by their ADRs, and a
+/// prose line on stdout would corrupt every reader of the tab-separated shape.
+pub fn empty_listing(missing: &str, add_with: &str) -> String {
+    format!("{missing}; add the first with `{add_with}`")
+}
+
 /// The live view of a run: one `PublicEvent` per line, as it happens.
 ///
 /// `CLI.md` §4.2 says *live*, and the only way a sink can be live is to write

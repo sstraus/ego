@@ -8,9 +8,15 @@ use serde::Serialize;
 
 use crate::cli::{HooksArgs, UsageError};
 use crate::config;
-use crate::output::Stdout;
+use crate::output::{Diagnostics, Stdout, empty_listing};
 
 const HOOK_LISTING_VERSION: u8 = 1;
+
+/// What an empty catalogue means, shared by `ego hooks ls` and `/hooks`.
+///
+/// There is no `ego hooks add`: hooks are a config table by design, so the
+/// command that adds one is the config editor.
+pub(crate) const EMPTY_HOOKS: &str = "no hooks are admitted";
 
 /// Admit and render the one non-interactive system/user hook snapshot.
 pub fn execute(args: &HooksArgs, out: &Stdout) -> RunTermination {
@@ -27,7 +33,14 @@ fn execute_inner(args: &HooksArgs, out: &Stdout) -> Result<(), RunTermination> {
     let rendered = render(&catalogue, args.json).map_err(|error| RunTermination::Failed {
         message: format!("the hook catalogue could not be rendered: {error}"),
     })?;
-    out.line(&rendered);
+    // An empty text listing has no rows, so it has nothing to put on stdout;
+    // the explanation belongs on the diagnostic channel. `--json` already
+    // answers with one complete object carrying an empty array.
+    if rendered.is_empty() {
+        out.note(&empty_listing(EMPTY_HOOKS, "ego config edit"));
+    } else {
+        out.line(&rendered);
+    }
     Ok(())
 }
 
@@ -68,9 +81,6 @@ impl HookListing {
     }
 
     fn render_text(&self) -> String {
-        if self.hooks.is_empty() {
-            return "no hooks are admitted".to_owned();
-        }
         self.hooks
             .iter()
             .map(HookListingRow::render_text)

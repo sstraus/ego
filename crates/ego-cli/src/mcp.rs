@@ -23,7 +23,7 @@ use serde::Serialize;
 
 use crate::cli::{McpAction, McpArgs, UsageError};
 use crate::config::{self, McpManagementConfig};
-use crate::output::Stdout;
+use crate::output::{Diagnostics, Stdout, empty_listing};
 
 /// Execute MCP management through the process's sole live registry authority.
 pub async fn execute(
@@ -391,7 +391,12 @@ async fn list(
         })?;
         out.line(&rendered);
     } else if listing.servers.is_empty() {
-        out.line("no MCP servers are configured or admitted");
+        // No rows, so nothing belongs on stdout; the explanation is a
+        // diagnostic, exactly as it is for every other empty listing.
+        out.note(&empty_listing(
+            "no MCP servers are configured or admitted",
+            "ego mcp add",
+        ));
     } else {
         for server in listing.servers {
             let state = if server.configured {

@@ -5584,6 +5584,11 @@ async fn execute<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Hooks) => {
                                         match session_hooks.state.catalogue_snapshot() {
                                             Ok(catalogue) => match hooks::render(&catalogue, false) {
+                                                Ok(rendered) if rendered.is_empty() => diagnostics
+                                                    .note(&crate::output::empty_listing(
+                                                        hooks::EMPTY_HOOKS,
+                                                        "ego config edit",
+                                                    )),
                                                 Ok(rendered) => diagnostics.note(&rendered),
                                                 Err(error) => diagnostics.note(&format!(
                                                     "the hook catalogue could not be rendered: {error}"
@@ -5774,7 +5779,10 @@ async fn execute<S: EventSink>(
                                             .await
                                         {
                                             Ok(report) => {
-                                                let rendered = crate::usage::render_text(&report);
+                                                // `/usage` has no flags, so it
+                                                // gets the compact default.
+                                                let rendered =
+                                                    crate::usage::render_text(&report, false);
                                                 diagnostics.note(rendered.trim_end());
                                             }
                                             Err(error) => diagnostics.note(&format!(
