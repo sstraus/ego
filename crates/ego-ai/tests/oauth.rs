@@ -508,6 +508,7 @@ async fn token_exchange_runs_only_through_the_injected_fixture_transport() {
         &http,
         flow,
         flow.device_poll_request("device", None).unwrap(),
+        &ego_ai::oauth::LoginHeaders::default(),
     )
     .await
     .unwrap();

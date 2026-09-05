@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use ego_ai::oauth::{self, BuiltInFlow, LoginGrant, OAuthToken, PollOutcome};
+use ego_ai::oauth::{self, BuiltInFlow, LoginGrant, LoginHeaders, OAuthToken, PollOutcome};
 use ego_ai::provider::{Credentials, EnvCredentials, MissingCredential, Secret};
 use ego_core::credentials::SecretMaterial;
 use ego_core::event::domain::CancelCause;
@@ -593,6 +593,16 @@ async fn login(
     let command = config
         .get(id)
         .and_then(|provider| provider.credential_command.as_deref());
+    // The same declared table the generation path applies. A login is the
+    // request that establishes the credential rather than spending it, so a
+    // vendor that gates it on a client it recognises would otherwise be
+    // unreachable — and ego does not answer that by claiming to be one.
+    let headers = LoginHeaders::new(
+        config
+            .get(id)
+            .map(|provider| provider.headers.clone())
+            .unwrap_or_default(),
+    );
     let plugin = discover_plugin(id, home, None);
     let source = select_source(id, command, plugin, oauth::built_in(id).is_some(), None);
     let entry = match source {
@@ -614,6 +624,7 @@ async fn login(
                 std::io::stdin().is_terminal(),
                 device,
                 scope.http().as_ref(),
+                &headers,
             )
             .await?
         }
@@ -697,6 +708,7 @@ async fn built_in_login(
     tty: bool,
     force_device: bool,
     http: &dyn ego_ai::http::Http,
+    headers: &LoginHeaders,
 ) -> Result<AuthEntry, AuthError> {
     let flow = oauth::built_in(id).ok_or_else(|| AuthError::MissingCredential {
         program: format!("ego built-in {id} login"),
@@ -704,9 +716,9 @@ async fn built_in_login(
     })?;
     let method = choose_login_method(&login_methods(flow, tty, force_device))?;
     let token = match (flow, method) {
-        (BuiltInFlow::MiniMax, _) => minimax_login(flow, http).await?,
-        (_, LoginMethod::Browser) => browser_login(flow, http).await?,
-        (_, LoginMethod::Device) => device_login(flow, http).await?,
+        (BuiltInFlow::MiniMax, _) => minimax_login(flow, http, headers).await?,
+        (_, LoginMethod::Browser) => browser_login(flow, http, headers).await?,
+        (_, LoginMethod::Device) => device_login(flow, http, headers).await?,
     };
     token_entry(flow, token)
 }
@@ -714,9 +726,10 @@ async fn built_in_login(
 async fn device_login(
     flow: BuiltInFlow,
     http: &dyn ego_ai::http::Http,
+    headers: &LoginHeaders,
 ) -> Result<OAuthToken, AuthError> {
     let start = flow.device_authorization_request().map_err(flow_error)?;
-    let response = oauth::execute(http, flow, start)
+    let response = oauth::execute(http, flow, start, headers)
         .await
         .map_err(flow_error)?;
     let device = flow
@@ -734,7 +747,7 @@ async fn device_login(
         let request = flow
             .device_poll_request(&device.device_code, Some(&device.user_code))
             .map_err(flow_error)?;
-        let response = oauth::execute(http, flow, request)
+        let response = oauth::execute(http, flow, request, headers)
             .await
             .map_err(flow_error)?;
         match flow
@@ -746,7 +759,7 @@ async fn device_login(
             PollOutcome::Token(token) => return Ok(token),
             PollOutcome::GitHubToken(github) => {
                 let request = flow.copilot_exchange_request(&github).map_err(flow_error)?;
-                let response = oauth::execute(http, flow, request)
+                let response = oauth::execute(http, flow, request, headers)
                     .await
                     .map_err(flow_error)?;
                 return flow
@@ -762,7 +775,7 @@ async fn device_login(
                         state: None,
                     })
                     .map_err(flow_error)?;
-                let response = oauth::execute(http, flow, request)
+                let response = oauth::execute(http, flow, request, headers)
                     .await
                     .map_err(flow_error)?;
                 return flow
@@ -780,6 +793,7 @@ async fn device_login(
 async fn browser_login(
     flow: BuiltInFlow,
     http: &dyn ego_ai::http::Http,
+    headers: &LoginHeaders,
 ) -> Result<OAuthToken, AuthError> {
     let verifier = verifier();
     let state = uuid::Uuid::new_v4().simple().to_string();
@@ -832,7 +846,7 @@ async fn browser_login(
             state: Some(&state),
         })
         .map_err(flow_error)?;
-    let response = oauth::execute(http, flow, request)
+    let response = oauth::execute(http, flow, request, headers)
         .await
         .map_err(flow_error)?;
     flow.read_token(response, now_ms(), None)
@@ -946,13 +960,14 @@ fn validated_authorization_code(
 async fn minimax_login(
     flow: BuiltInFlow,
     http: &dyn ego_ai::http::Http,
+    headers: &LoginHeaders,
 ) -> Result<OAuthToken, AuthError> {
     let verifier = verifier();
     let state = uuid::Uuid::new_v4().simple().to_string();
     let request = flow
         .minimax_user_code_request(&oauth::pkce_challenge(&verifier), &state)
         .map_err(flow_error)?;
-    let response = oauth::execute(http, flow, request)
+    let response = oauth::execute(http, flow, request, headers)
         .await
         .map_err(flow_error)?;
     let code = flow
@@ -971,7 +986,7 @@ async fn minimax_login(
                 verifier: &verifier,
             })
             .map_err(flow_error)?;
-        let response = oauth::execute(http, flow, request)
+        let response = oauth::execute(http, flow, request, headers)
             .await
             .map_err(flow_error)?;
         match flow
@@ -1215,6 +1230,15 @@ async fn refresh_for_run_at(
         return Ok(());
     }
 
+    // A refresh talks to the same endpoint the login did, so it needs the same
+    // declared identity. Reading it here rather than threading it from the
+    // caller keeps the two halves of one credential's life on one table.
+    let headers = LoginHeaders::new(
+        crate::config::auth()
+            .ok()
+            .and_then(|config| config.get(id).map(|provider| provider.headers.clone()))
+            .unwrap_or_default(),
+    );
     let plugin = discover_plugin(id, home, None);
     let source = select_source(id, command, plugin, oauth::built_in(id).is_some(), None);
     let refreshed = match source {
@@ -1240,7 +1264,7 @@ async fn refresh_for_run_at(
             )
             .await
         }
-        CredentialSource::BuiltIn(_) => refresh_built_in(id, &current, http).await,
+        CredentialSource::BuiltIn(_) => refresh_built_in(id, &current, http, &headers).await,
         CredentialSource::Environment(_) | CredentialSource::Missing(_) => {
             return Err(AuthError::MissingCredential {
                 program: format!("ego auth login {id}"),
@@ -1277,6 +1301,7 @@ async fn refresh_built_in(
     id: &str,
     current: &AuthEntry,
     http: &dyn ego_ai::http::Http,
+    headers: &LoginHeaders,
 ) -> Result<AuthEntry, AuthError> {
     let flow = oauth::built_in(id).ok_or_else(|| AuthError::MissingCredential {
         program: format!("ego auth login {id}"),
@@ -1302,7 +1327,7 @@ async fn refresh_built_in(
         flow.refresh_request(refresh)
     }
     .map_err(flow_error)?;
-    let response = oauth::execute(http, flow, request)
+    let response = oauth::execute(http, flow, request, headers)
         .await
         .map_err(flow_error)?;
     let token = flow

@@ -728,23 +728,40 @@ pub struct AuthProviderLayer {
     pub headers: HashMap<String, String>,
 }
 
+/// Header names an operator's `[auth.<provider>.headers]` table may not set.
+///
+/// Two kinds, refused for the same reason: the first two carry the credential
+/// itself, and the last four are the wire contract the profile owns. A table
+/// that could set either would be able to change what a request *is* rather
+/// than who it says it is, which is the whole of what the table is for.
+///
+/// Public because refusal has to happen twice. Config refuses at
+/// deserialization, and the transport that finally applies the table refuses
+/// again — an override reaching a login exchange is exactly where honouring
+/// `authorization` would hand a declared table the bearer token.
+pub const FORBIDDEN_AUTH_HEADER_NAMES: [&str; 6] = [
+    "authorization",
+    "x-api-key",
+    "content-type",
+    "accept",
+    "openai-beta",
+    "chatgpt-account-id",
+];
+
+/// Whether this header name is one no declared table may set.
+pub fn is_forbidden_auth_header(name: &str) -> bool {
+    FORBIDDEN_AUTH_HEADER_NAMES
+        .iter()
+        .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+}
+
 fn auth_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let headers = HashMap::<String, String>::deserialize(deserializer)?;
     for name in headers.keys() {
-        if [
-            "authorization",
-            "x-api-key",
-            "content-type",
-            "accept",
-            "openai-beta",
-            "chatgpt-account-id",
-        ]
-        .iter()
-        .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
-        {
+        if is_forbidden_auth_header(name) {
             return Err(serde::de::Error::custom(format!(
                 "forbidden authentication header `{name}`"
             )));

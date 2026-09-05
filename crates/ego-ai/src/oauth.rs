@@ -15,6 +15,8 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method, bearer_header, public_header};
+use ego_core::config::is_forbidden_auth_header;
+use ego_core::permit::HttpHeader;
 
 const CODEX_CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ANTHROPIC_CLIENT: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -744,14 +746,71 @@ pub fn pkce_challenge(verifier: &str) -> String {
 
 /// Execute one OAuth request through the injected transport and buffer only
 /// the small token response. Generation bodies remain streamed elsewhere.
+/// The operator's `[auth.<provider>.headers]` table, applied to login.
+///
+/// The same declared table the generation path applies, reaching the requests
+/// that establish a credential rather than only the ones that spend it.
+/// Without it, removing a vendor disguise from a login exchange leaves an
+/// operator whose vendor gates on a client it recognises with no way back —
+/// and putting the disguise back is not one.
+///
+/// Empty by default, because the shipped identity is ego's own and an operator
+/// who declares nothing has declared exactly that.
+#[derive(Debug, Clone, Default)]
+pub struct LoginHeaders(std::collections::HashMap<String, String>);
+
+impl LoginHeaders {
+    pub fn new(headers: std::collections::HashMap<String, String>) -> Self {
+        Self(headers)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Overlay the declared table onto one login request.
+    ///
+    /// A declared name replaces the built-in of the same name, which is what
+    /// makes the table an escape hatch rather than an append-only annotation.
+    /// The refusal is the exception and it is deliberate: config already
+    /// refuses these names at deserialization, so a table carrying one here is
+    /// a bug in a caller, and this is the one request family where honouring
+    /// it would let a declared string stand in for the credential itself.
+    #[must_use]
+    pub fn apply(&self, mut request: HttpRequest) -> HttpRequest {
+        for (name, value) in &self.0 {
+            if is_forbidden_auth_header(name) {
+                continue;
+            }
+            let Ok(header) =
+                HttpHeader::new(&name.to_ascii_lowercase(), value.clone().into_bytes())
+            else {
+                continue;
+            };
+            request
+                .headers
+                .retain(|existing| !existing.name().eq_ignore_ascii_case(name));
+            request.headers.push(header);
+        }
+        request
+    }
+}
+
+/// Run one login request through the injected transport.
+///
+/// `headers` is not optional on purpose. Every built-in login request goes
+/// through this one function, so requiring the table here is what makes the
+/// escape hatch reach all of them: a call site cannot forget what it cannot
+/// omit, and the next vendor to gate a login needs no second hatch.
 pub async fn execute(
     http: &dyn Http,
     flow: BuiltInFlow,
     request: HttpRequest,
+    headers: &LoginHeaders,
 ) -> Result<TokenStatus, FlowError> {
     let response = flow
         .http_profile()
-        .execute(http, request)
+        .execute(http, headers.apply(request))
         .await
         .map_err(|err| FlowError::Temporary {
             provider: "OAuth transport".to_string(),

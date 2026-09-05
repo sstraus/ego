@@ -1126,10 +1126,14 @@ lands, root doctor is unavailable and slash doctor remains MCP-only.
 
 ### 7.1 Operator-supplied identity headers
 
-**ego does not ship them.** Every request ego builds says who ego is —
-`User-Agent: ego/<version>`, plus `originator: ego` where the Codex backend
-reads one — and no request claims to be Claude Code, the Copilot Chat
-extension, or VS Code. maintainer ruled it on 2026-09-05
+**ego does not ship them.** No request ego builds claims to be Claude Code,
+the Copilot Chat extension, or VS Code. Where a row declares a client at all it
+declares ego — `User-Agent: ego/<version>`, plus `originator: ego` where the
+Codex backend reads one. Most rows declare none: `anthropic`, `openai`,
+`gemini`, `xai`, `xai-oauth`, `nous`, `openrouter`, `minimax-oauth` and
+`ollama` send no `user-agent` at all, and nothing downstream fills one in.
+Sending no name is not the same as sending someone else's, which is the whole
+of what was removed. maintainer ruled it on 2026-09-05
 (`docs/decisions/2026-08-22-subscription-login-is-built-in-plus-two-overrides.md`
 §1 and §3, amended), and a test fails the build that reintroduces one.
 
@@ -1157,8 +1161,8 @@ copilot-integration-id = "vscode-chat"
 `docs/16-subscription-login.md` §7.8 carries the same values with their pinned
 client source, the vendor terms each one touches — Anthropic reserves OAuth to
 its own applications; GitHub's four are a VS Code extension version gate — and
-the one place the overlay cannot reach, which is the Copilot token exchange
-during `ego auth login`.
+which requests it reaches. It reaches all of them: generation, `ego auth
+login`, and the refresh that follows, the Copilot token exchange included.
 
 Overlaying `authorization`, `x-api-key`, `content-type`, `accept`,
 `openai-beta` or `chatgpt-account-id` is refused at config load: the first two
