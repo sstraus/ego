@@ -952,6 +952,7 @@ pub struct RunExecutionBindings {
     budget_gate: Option<SharedBudgetGate>,
     effect_tools: Option<Arc<BTreeSet<String>>>,
     human: Option<Arc<dyn HumanApprover>>,
+    controls: Option<Arc<dyn crate::control::SessionControls>>,
 }
 
 impl RunExecutionBindings {
@@ -968,6 +969,7 @@ impl RunExecutionBindings {
             budget_gate: None,
             effect_tools: None,
             human: None,
+            controls: None,
         }
     }
 
@@ -985,6 +987,22 @@ impl RunExecutionBindings {
 
     pub fn human(&self) -> Option<Arc<dyn HumanApprover>> {
         self.human.as_ref().map(Arc::clone)
+    }
+
+    /// Attach the operator seat's generation controls for this execution.
+    ///
+    /// Travels beside `human` for the same reason: the connection, not the
+    /// process, is what knows whether a person is sitting in front of a
+    /// picker. A headless run leaves it `None` and keeps whatever the
+    /// configuration resolved, which is why an unattended run cannot have its
+    /// model changed out from under it by a window nobody is watching.
+    pub fn with_controls(mut self, controls: Arc<dyn crate::control::SessionControls>) -> Self {
+        self.controls = Some(controls);
+        self
+    }
+
+    pub fn controls(&self) -> Option<Arc<dyn crate::control::SessionControls>> {
+        self.controls.as_ref().map(Arc::clone)
     }
 
     /// Attach the live admitted MCP source owned by this execution context.

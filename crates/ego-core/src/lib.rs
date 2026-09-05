@@ -12,6 +12,7 @@ pub mod budget;
 pub mod ceiling;
 pub mod compact;
 pub mod config;
+pub mod control;
 pub mod cost;
 pub mod credentials;
 pub mod digest;

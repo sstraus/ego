@@ -16,6 +16,7 @@
 pub(crate) const DISPLAY_NAME: &str = "εgo";
 
 pub mod acp;
+pub mod acp_controls;
 pub(crate) mod agent_file;
 pub(crate) mod attachment;
 pub mod auth;

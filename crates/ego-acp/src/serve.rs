@@ -16,6 +16,7 @@ use agent_client_protocol::{
 };
 use agent_client_protocol_schema::v1;
 use ego_core::compact::{CompactionCommand, CompactionReceipt, CompactionTransitionRequest};
+use ego_core::control::{ControlError, SessionControls};
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ModelCapabilities;
@@ -114,7 +115,19 @@ pub trait RunBindingsBuilder: Send + Sync {
 
 /// Production ACP bindings: live updates plus the existing question adapter.
 #[derive(Debug, Default)]
-pub struct AcpRunBindingsBuilder;
+pub struct AcpRunBindingsBuilder {
+    controls: Option<Arc<dyn SessionControls>>,
+}
+
+impl AcpRunBindingsBuilder {
+    /// Bind the connection's operator seat, if it owns one.
+    ///
+    /// The same seat the router answers `session/set_config_option` from, so
+    /// what a host was told it picked is what the next generation reads.
+    pub fn with_controls(controls: Option<Arc<dyn SessionControls>>) -> Self {
+        Self { controls }
+    }
+}
 
 struct AcpSinkFactory {
     connection: ConnectionTo<Client>,
@@ -145,14 +158,18 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
         let human =
             crate::permission::AcpPermissionAdapter::live(session.clone(), connection.clone())
                 .approver();
-        ego_core::run::RunExecutionBindings::new(
+        let bindings = ego_core::run::RunExecutionBindings::new(
             Arc::new(AcpSinkFactory {
                 connection,
                 session,
             }),
             Some(elicitor),
         )
-        .with_human(human)
+        .with_human(human);
+        match &self.controls {
+            Some(controls) => bindings.with_controls(Arc::clone(controls)),
+            None => bindings,
+        }
     }
 }
 
@@ -791,6 +808,36 @@ where
     }
 }
 
+/// The generation controls this session offers, or nothing.
+///
+/// Absent controls stay absent rather than becoming an empty picker, which is
+/// the same fallback rule `docs/06-acp.md` §3 applies to usage and cost. A
+/// seat that cannot be read is a warning and an omission, not a refusal to
+/// open the session: creating a session has never depended on the picker.
+fn config_options(
+    controls: Option<&Arc<dyn SessionControls>>,
+    session: SessionId,
+) -> Option<Vec<v1::SessionConfigOption>> {
+    match controls?.state(session) {
+        Ok(state) => Some(crate::controls::options(&state)),
+        Err(error) => {
+            tracing::warn!(%error, "the session config options could not be read");
+            None
+        }
+    }
+}
+
+fn control_error(error: &ControlError) -> Error {
+    match error {
+        // Both name a value the caller sent, so both are the caller's
+        // parameters being wrong rather than ego failing.
+        ControlError::Unavailable { .. } | ControlError::Refused { .. } => {
+            Error::invalid_params().data(error.to_string())
+        }
+        ControlError::Internal(message) => Error::internal_error().data(message.clone()),
+    }
+}
+
 fn parse_session(id: &v1::SessionId) -> Result<SessionId, Error> {
     id.to_string()
         .parse::<SessionId>()
@@ -853,6 +900,7 @@ where
         mcp_admitter,
         None,
         None,
+        None,
     ))
 }
 
@@ -881,10 +929,12 @@ where
         mcp_admitter,
         None,
         Some(lifecycle),
+        None,
     ))
 }
 
 /// Build the production ACP router with the versioned compaction extension.
+#[allow(clippy::too_many_arguments)]
 pub fn agent_with_compaction<S, E, C, I>(
     controller: Arc<RunController<S, E, C, I>>,
     roots: Arc<dyn RootResolver>,
@@ -893,6 +943,7 @@ pub fn agent_with_compaction<S, E, C, I>(
     bindings_builder: Arc<dyn RunBindingsBuilder>,
     mcp_admitter: Arc<dyn McpSessionAdmitter>,
     compaction: Arc<dyn CompactionCommand>,
+    controls: Option<Arc<dyn SessionControls>>,
 ) -> AgentProtocolRouter
 where
     S: SessionStore + 'static,
@@ -909,6 +960,7 @@ where
         mcp_admitter,
         Some(compaction),
         None,
+        controls,
     ))
 }
 
@@ -923,6 +975,7 @@ pub fn durable_agent_with_compaction<S, E, C, I>(
     bindings_builder: Arc<dyn RunBindingsBuilder>,
     mcp_admitter: Arc<dyn McpSessionAdmitter>,
     compaction: Arc<dyn CompactionCommand>,
+    controls: Option<Arc<dyn SessionControls>>,
 ) -> AgentProtocolRouter
 where
     S: SessionLifecycleStore + 'static,
@@ -939,6 +992,7 @@ where
         mcp_admitter,
         Some(compaction),
         Some(lifecycle),
+        controls,
     ))
 }
 
@@ -952,6 +1006,7 @@ fn v1_agent<S, E, C, I>(
     mcp_admitter: Arc<dyn McpSessionAdmitter>,
     compaction: Option<Arc<dyn CompactionCommand>>,
     lifecycle: Option<Arc<dyn LifecycleOperations>>,
+    controls: Option<Arc<dyn SessionControls>>,
 ) -> impl agent_client_protocol::ConnectTo<Client>
 where
     S: SessionStore + 'static,
@@ -1004,6 +1059,7 @@ where
                 let ids = Arc::clone(&ids);
                 let mcp_admitter = Arc::clone(&mcp_admitter);
                 let lifecycle = lifecycle.clone();
+                let controls = controls.clone();
                 async move |request: v1::NewSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
@@ -1043,7 +1099,10 @@ where
                             Err(error) => return responder.respond_with_error(lifecycle_error(error)),
                         }
                     }
-                    responder.respond(v1::NewSessionResponse::new(id))
+                    responder.respond(
+                        v1::NewSessionResponse::new(id)
+                            .config_options(config_options(controls.as_ref(), session)),
+                    )
                 }
             },
             on_receive_request!(),
@@ -1088,6 +1147,7 @@ where
                 let spawner = Arc::clone(&spawner);
                 let bindings_builder = Arc::clone(&bindings_builder);
                 let client_capabilities = Arc::clone(&client_capabilities);
+                let controls = controls.clone();
                 async move |request: v1::LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
@@ -1168,7 +1228,10 @@ where
                     if let Err(error) = emit_attachment(&cx, &request.session_id, &attachment) {
                         return responder.respond_with_error(error);
                     }
-                    responder.respond(v1::LoadSessionResponse::new())
+                    responder.respond(
+                        v1::LoadSessionResponse::new()
+                            .config_options(config_options(controls.as_ref(), id)),
+                    )
                 }
             },
             on_receive_request!(),
@@ -1184,6 +1247,7 @@ where
                 let spawner = Arc::clone(&spawner);
                 let bindings_builder = Arc::clone(&bindings_builder);
                 let client_capabilities = Arc::clone(&client_capabilities);
+                let controls = controls.clone();
                 async move |request: v1::ResumeSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
@@ -1264,7 +1328,10 @@ where
                     if let Err(error) = emit_attachment(&cx, &request.session_id, &attachment) {
                         return responder.respond_with_error(error);
                     }
-                    responder.respond(v1::ResumeSessionResponse::new())
+                    responder.respond(
+                        v1::ResumeSessionResponse::new()
+                            .config_options(config_options(controls.as_ref(), id)),
+                    )
                 }
             },
             on_receive_request!(),
@@ -1276,6 +1343,7 @@ where
                 let roots = Arc::clone(&roots);
                 let ids = Arc::clone(&ids);
                 let mcp_admitter = Arc::clone(&mcp_admitter);
+                let controls = controls.clone();
                 async move |request: v1::ForkSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
@@ -1324,7 +1392,10 @@ where
                         sessions.close(&child_id);
                         return responder.respond_with_error(error);
                     }
-                    responder.respond(v1::ForkSessionResponse::new(child_id))
+                    responder.respond(
+                        v1::ForkSessionResponse::new(child_id)
+                            .config_options(config_options(controls.as_ref(), child)),
+                    )
                 }
             },
             on_receive_request!(),
@@ -1592,6 +1663,44 @@ where
                             Error::internal_error().data(error.to_string()),
                         ),
                     }
+                    }
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let controls = controls.clone();
+                async move |request: v1::SetSessionConfigOptionRequest, responder, _cx| {
+                    // Absent controls are unavailable, not partially emulated:
+                    // the same rule that makes an unadvertised lifecycle method
+                    // answer `method_not_found` rather than pretend.
+                    let Some(controls) = &controls else {
+                        return responder.respond_with_error(Error::method_not_found());
+                    };
+                    let session = match parse_session(&request.session_id) {
+                        Ok(session) => session,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    // Read the offer, resolve against it, then stage. Reading
+                    // first is what makes "a value ego never offered" and "a
+                    // control ego never advertised" the same refusal instead of
+                    // two rules that can drift apart.
+                    let state = match controls.state(session) {
+                        Ok(state) => state,
+                        Err(error) => {
+                            return responder.respond_with_error(control_error(&error));
+                        }
+                    };
+                    let change = match crate::controls::change(&state, &request) {
+                        Ok(change) => change,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    match controls.stage(session, change) {
+                        Ok(state) => responder.respond(v1::SetSessionConfigOptionResponse::new(
+                            crate::controls::options(&state),
+                        )),
+                        Err(error) => responder.respond_with_error(control_error(&error)),
                     }
                 }
             },

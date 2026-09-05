@@ -5,6 +5,7 @@
 //! protocol correlation and active opaque cancellation keys while core owns
 //! the durable run lifecycle.
 
+pub mod controls;
 pub mod negotiate;
 pub mod permission;
 pub mod project;

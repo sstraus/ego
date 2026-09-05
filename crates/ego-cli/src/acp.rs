@@ -37,7 +37,7 @@ use ego_tools::store::OsIo;
 use futures::future::BoxFuture;
 
 use crate::cli::AcpArgs;
-use crate::provider_http::CommandHttpScope;
+use crate::provider_http::{CommandHttpScope, ProviderHttpAdapter};
 use crate::{run, session};
 
 struct CanonicalRoots {
@@ -365,15 +365,56 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         MCP_DEFAULT_OPERATION_TIMEOUT,
     ));
 
+    // The connected host is this connection's operator seat, so it gets the
+    // picker a terminal seat gets. `run.rs` builds the catalogue only where
+    // there is a human, and the ACP client is one. Discovery reuses the HTTP
+    // scope this server already opened rather than a second egress: an `ego
+    // acp` invocation is online by construction, so this adds no reach it did
+    // not already have.
+    let controls: Option<Arc<dyn ego_core::control::SessionControls>> =
+        match run::protocol_effective(root.as_path(), args.session_dir.clone()) {
+            Ok(effective) => {
+                let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(mcp_effects.ports())))
+                    as Arc<dyn ego_ai::http::Http>;
+                let catalogue = match crate::models::build_catalogue_snapshot(
+                    &crate::cli::ModelsArgs {
+                        provider: None,
+                        refresh: false,
+                        json: false,
+                    },
+                    &http,
+                )
+                .await
+                {
+                    Ok(catalogue) => Some(catalogue),
+                    // A picker that lists only the configured model is worse
+                    // than one that lists every model; a connection that
+                    // refuses to start is worse than both.
+                    Err(error) => {
+                        tracing::warn!(?error, "the ACP model catalogue is unavailable");
+                        None
+                    }
+                };
+                Some(Arc::new(crate::acp_controls::AcpSessionControls::new(
+                    &effective, catalogue,
+                )))
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the ACP operator seat could not be seeded");
+                None
+            }
+        };
+
     let agent = ego_acp::serve::durable_agent_with_compaction(
         controller,
         lifecycle,
         Arc::new(CanonicalRoots { base: root }),
         Arc::new(TokioExecutionSpawner),
         ids,
-        Arc::new(AcpRunBindingsBuilder),
+        Arc::new(AcpRunBindingsBuilder::with_controls(controls.clone())),
         mcp_admitter,
         compaction,
+        controls,
     );
     let outcome = agent.connect_to(Stdio::new()).await;
     mcp_cancel.cancel(CancelCause::Host);

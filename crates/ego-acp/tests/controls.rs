@@ -1,0 +1,212 @@
+//! RED contract for ACP session config options (regression case, criterion 1).
+//!
+//! `docs/06-acp.md` §2 says model and config control is projected as
+//! `session/set_config_option` over model-category options, and that a valid
+//! change is staged and applied only at a safe generation boundary. These
+//! pin the wire half of that: what a host is offered, and what ego does with
+//! every answer a host can send back.
+//!
+//! Nothing here may accept a value ego did not offer. The available list is
+//! the whole authority: the adapter matches an incoming value against it
+//! rather than parsing the string a second way, which is the same rule the
+//! permission seat applies to option ids.
+
+use agent_client_protocol::Error;
+use agent_client_protocol_schema::v1;
+use ego_acp::controls;
+use ego_core::config::{Mode, ModelRef};
+use ego_core::control::{ControlSelect, SessionControlChange, SessionControlState};
+use ego_core::generator::types::ThinkingLevel;
+
+fn state() -> SessionControlState {
+    SessionControlState {
+        model: ControlSelect {
+            current: ModelRef("ollama/gemma4:e4b-mlx".to_owned()),
+            chosen: None,
+            available: vec![
+                ModelRef("ollama/gemma4:e4b-mlx".to_owned()),
+                ModelRef("anthropic/claude-sonnet-5".to_owned()),
+            ],
+        },
+        effort: ControlSelect {
+            current: ThinkingLevel::Low,
+            chosen: Some(ThinkingLevel::Low),
+            available: vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High],
+        },
+        mode: ControlSelect {
+            current: Mode::Default,
+            chosen: None,
+            available: vec![Mode::Plan, Mode::Default, Mode::Edits],
+        },
+    }
+}
+
+fn request(config: &str, value: &str) -> v1::SetSessionConfigOptionRequest {
+    v1::SetSessionConfigOptionRequest::new(
+        v1::SessionId::new("session-under-test"),
+        v1::SessionConfigId::new(config),
+        v1::SessionConfigOptionValue::ValueId {
+            value: v1::SessionConfigValueId::new(value),
+        },
+    )
+}
+
+fn option<'a>(options: &'a [v1::SessionConfigOption], id: &str) -> &'a v1::SessionConfigOption {
+    options
+        .iter()
+        .find(|option| option.id.0.as_ref() == id)
+        .unwrap_or_else(|| panic!("no config option `{id}`"))
+}
+
+fn select(option: &v1::SessionConfigOption) -> &v1::SessionConfigSelect {
+    match &option.kind {
+        v1::SessionConfigKind::Select(select) => select,
+        other => panic!("a generation control is never {other:?}"),
+    }
+}
+
+fn values(option: &v1::SessionConfigOption) -> Vec<String> {
+    match &select(option).options {
+        v1::SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .map(|option| option.value.0.to_string())
+            .collect(),
+        other => panic!("ego offers one flat list per control, not {other:?}"),
+    }
+}
+
+/// The three controls ego can actually change between generations, each in
+/// the ACP category a host uses to decide where to render it.
+#[test]
+fn every_generation_control_is_offered_in_its_own_acp_category() {
+    let options = controls::options(&state());
+    let ids: Vec<_> = options.iter().map(|o| o.id.0.to_string()).collect();
+    assert_eq!(ids, vec![controls::MODEL, controls::EFFORT, controls::MODE]);
+    assert_eq!(
+        option(&options, controls::MODEL).category,
+        Some(v1::SessionConfigOptionCategory::Model)
+    );
+    assert_eq!(
+        option(&options, controls::EFFORT).category,
+        Some(v1::SessionConfigOptionCategory::ThoughtLevel)
+    );
+    assert_eq!(
+        option(&options, controls::MODE).category,
+        Some(v1::SessionConfigOptionCategory::Mode)
+    );
+}
+
+/// A host renders the value the next generation will use. Reporting anything
+/// else would make the picker disagree with the run.
+#[test]
+fn each_control_reports_the_value_the_next_generation_would_use() {
+    let options = controls::options(&state());
+    assert_eq!(
+        select(option(&options, controls::MODEL))
+            .current_value
+            .0
+            .as_ref(),
+        "ollama/gemma4:e4b-mlx"
+    );
+    assert_eq!(
+        select(option(&options, controls::EFFORT))
+            .current_value
+            .0
+            .as_ref(),
+        "low"
+    );
+    assert_eq!(
+        select(option(&options, controls::MODE))
+            .current_value
+            .0
+            .as_ref(),
+        "default"
+    );
+}
+
+/// The available list is the offer. Effort is per-model and mode excludes
+/// what this seat may not set, so the wire list must be exactly the core
+/// list rather than every variant the enum happens to have.
+#[test]
+fn the_offered_values_are_exactly_the_ones_core_says_are_available() {
+    let options = controls::options(&state());
+    assert_eq!(
+        values(option(&options, controls::MODEL)),
+        vec!["ollama/gemma4:e4b-mlx", "anthropic/claude-sonnet-5"]
+    );
+    assert_eq!(
+        values(option(&options, controls::EFFORT)),
+        vec!["off", "low", "high"]
+    );
+    assert_eq!(
+        values(option(&options, controls::MODE)),
+        vec!["plan", "default", "edits"]
+    );
+}
+
+#[test]
+fn a_value_the_host_was_offered_becomes_the_change_it_names() {
+    let state = state();
+    assert_eq!(
+        controls::change(
+            &state,
+            &request(controls::MODEL, "anthropic/claude-sonnet-5")
+        ),
+        Ok(SessionControlChange::Model(ModelRef(
+            "anthropic/claude-sonnet-5".to_owned()
+        )))
+    );
+    assert_eq!(
+        controls::change(&state, &request(controls::EFFORT, "high")),
+        Ok(SessionControlChange::Effort(ThinkingLevel::High))
+    );
+    assert_eq!(
+        controls::change(&state, &request(controls::MODE, "plan")),
+        Ok(SessionControlChange::Mode(Mode::Plan))
+    );
+}
+
+/// A value ego never offered cannot be the value ego honours. `yolo` is a
+/// real `Mode` and `max` is a real `ThinkingLevel`; neither is in this
+/// session's available list, so both are refused by the same rule rather
+/// than by a special case.
+#[test]
+fn a_value_ego_never_offered_is_refused_even_when_the_type_can_hold_it() {
+    let state = state();
+    for (config, value) in [
+        (controls::MODE, "yolo"),
+        (controls::EFFORT, "max"),
+        (controls::MODEL, "openai/gpt-5"),
+        (controls::MODE, ""),
+    ] {
+        let refusal = controls::change(&state, &request(config, value))
+            .expect_err("an unoffered value must not resolve to a change");
+        assert_eq!(
+            refusal.code,
+            Error::invalid_params().code,
+            "{config}={value}"
+        );
+    }
+}
+
+#[test]
+fn a_config_id_ego_never_advertised_is_refused_rather_than_guessed() {
+    let refusal = controls::change(&state(), &request("temperature", "0.7"))
+        .expect_err("an unknown config id must not resolve to a change");
+    assert_eq!(refusal.code, Error::invalid_params().code);
+}
+
+/// ACP lets a client send a boolean for a config option, and a client must
+/// advertise that capability first. Every ego control is a select, so a
+/// boolean answer is a client asserting a shape ego never published.
+#[test]
+fn a_boolean_answer_to_a_select_control_is_refused() {
+    let boolean = v1::SetSessionConfigOptionRequest::new(
+        v1::SessionId::new("session-under-test"),
+        v1::SessionConfigId::new(controls::MODE),
+        v1::SessionConfigOptionValue::Boolean { value: true },
+    );
+    let refusal = controls::change(&state(), &boolean)
+        .expect_err("a boolean must not resolve to a select change");
+    assert_eq!(refusal.code, Error::invalid_params().code);
+}

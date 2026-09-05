@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use agent_client_protocol::{ConnectTo, Lines};
+use agent_client_protocol_schema::ProtocolVersion;
 use ego_acp::serve::{
     AcpRunBindingsBuilder, ExecutionSpawner, McpSessionAdmissionError, McpSessionAdmitter,
     RootResolver, SessionMcpAdmission,
@@ -47,8 +49,10 @@ use ego_core::sink::EventSink;
 use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobError, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use futures::channel::mpsc;
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
+use futures::{SinkExt, StreamExt};
 use tokio::sync::Notify;
 
 pub const SESSION_PAGE_SIZE: usize = 50;
@@ -119,7 +123,7 @@ impl DurableAcpFixture {
             Arc::new(TestRoots::with_effects(Arc::clone(&self.effects))),
             self.spawner.clone(),
             self.ids.clone(),
-            Arc::new(AcpRunBindingsBuilder),
+            Arc::new(AcpRunBindingsBuilder::default()),
             Arc::new(RejectingMcpAdmitter::with_effects(Arc::clone(
                 &self.effects,
             ))),
@@ -436,7 +440,7 @@ fn generation_evidence(session: SessionId, context_window: u64) -> EvidenceRecor
 }
 
 #[derive(Clone, Default)]
-struct Store {
+pub struct Store {
     entries: Arc<Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>>,
     metadata: Arc<Mutex<BTreeMap<SessionId, SessionMeta>>>,
     effects: Arc<EffectCounts>,
@@ -713,7 +717,7 @@ impl SessionLifecycleStore for Store {
 // Shared by integration crates; some crates exercise only the alternate injected adapters.
 #[allow(dead_code)]
 #[derive(Default)]
-struct Executor {
+pub struct Executor {
     block_next: AtomicBool,
     recover_running: AtomicBool,
     block_observe: AtomicBool,
@@ -730,7 +734,7 @@ struct Executor {
 }
 
 #[allow(dead_code)]
-struct Prepared;
+pub struct Prepared;
 
 #[derive(Default)]
 pub struct CompactionCommandFixture;
@@ -870,7 +874,7 @@ impl RunExecutor for Executor {
 
 #[allow(dead_code)]
 #[derive(Default)]
-struct TestClock;
+pub struct TestClock;
 
 impl Clock for TestClock {
     fn now(&self) -> Timestamp {
@@ -880,7 +884,7 @@ impl Clock for TestClock {
 
 #[allow(dead_code)]
 #[derive(Default)]
-struct TestIds {
+pub struct TestIds {
     next: Mutex<u128>,
 }
 
@@ -970,6 +974,7 @@ pub fn agent() -> agent_client_protocol::AgentProtocolRouter {
         Arc::new(TestClock),
         ids,
         Arc::new(CompactionCommandFixture),
+        None,
     )
 }
 
@@ -980,6 +985,7 @@ pub fn agent_with_compaction<S, E, C, I>(
     clock: Arc<C>,
     ids: Arc<I>,
     compaction: Arc<dyn CompactionCommand>,
+    controls: Option<Arc<dyn ego_core::control::SessionControls>>,
 ) -> agent_client_protocol::AgentProtocolRouter
 where
     S: SessionStore + 'static,
@@ -999,9 +1005,10 @@ where
         Arc::new(TestRoots::default()),
         Arc::new(TestSpawner::default()),
         ids,
-        Arc::new(AcpRunBindingsBuilder),
+        Arc::new(AcpRunBindingsBuilder::default()),
         Arc::new(RejectingMcpAdmitter::default()),
         compaction,
+        controls,
     )
 }
 
@@ -1057,7 +1064,98 @@ where
         Arc::new(TestRoots::default()),
         Arc::new(TestSpawner::default()),
         ids,
-        Arc::new(AcpRunBindingsBuilder),
+        Arc::new(AcpRunBindingsBuilder::default()),
         admitter,
     )
+}
+
+/// One in-memory ACP connection to the real pinned SDK router.
+///
+/// Three suites grew their own copy of this before it had a home; those are
+/// left alone here and tracked on regression case rather than reconciled mid-story.
+/// New router tests use this one so the fourth copy is the last.
+pub struct Connected {
+    to_agent: mpsc::UnboundedSender<String>,
+    from_agent: mpsc::UnboundedReceiver<String>,
+    agent: tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>>,
+    next_id: u64,
+}
+
+impl Connected {
+    pub fn new(router: agent_client_protocol::AgentProtocolRouter) -> Self {
+        let (to_agent, to_agent_rx) = mpsc::unbounded::<String>();
+        let (from_agent, from_agent_rx) = mpsc::unbounded::<String>();
+        let transport = Lines::new(
+            from_agent.sink_map_err(std::io::Error::other),
+            to_agent_rx.map(Ok::<_, std::io::Error>),
+        );
+        Self {
+            to_agent,
+            from_agent: from_agent_rx,
+            agent: tokio::spawn(router.connect_to(transport)),
+            next_id: 1,
+        }
+    }
+
+    pub async fn request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> (serde_json::Value, Vec<serde_json::Value>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.to_agent
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params,
+                })
+                .to_string(),
+            )
+            .await
+            .expect("the ACP agent is listening");
+        let mut notifications = Vec::new();
+        loop {
+            let line = self
+                .from_agent
+                .next()
+                .await
+                .expect("every request is answered");
+            let message: serde_json::Value =
+                serde_json::from_str(&line).expect("the agent writes JSON-RPC");
+            if message.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+                return (message, notifications);
+            }
+            notifications.push(message);
+        }
+    }
+
+    pub async fn initialize(&mut self) -> serde_json::Value {
+        self.request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": ProtocolVersion::V1.as_u16(),
+                "clientCapabilities": {},
+            }),
+        )
+        .await
+        .0
+    }
+
+    pub async fn new_session(&mut self, root: &str) -> serde_json::Value {
+        self.request(
+            "session/new",
+            serde_json::json!({"cwd": root, "mcpServers": []}),
+        )
+        .await
+        .0
+    }
+
+    pub async fn abort(self) {
+        self.to_agent.close_channel();
+        self.agent.abort();
+        let _ = self.agent.await;
+    }
 }

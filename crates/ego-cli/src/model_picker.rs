@@ -412,34 +412,8 @@ impl ModelPicker {
         Ok(())
     }
 
-    fn ensure_model_available(&self, slug: &str) -> Result<&ModelCatalogueEntry, PickerError> {
-        let row = self
-            .snapshot
-            .models
-            .iter()
-            .find(|row| row.slug.to_string() == slug)
-            .ok_or_else(|| PickerError::UnknownModel {
-                slug: slug.to_string(),
-            })?;
-        if let ModelAvailability::Unavailable { cause, message } = &row.availability {
-            return Err(PickerError::Unavailable {
-                slug: slug.to_string(),
-                cause: *cause,
-                message: message.clone(),
-            });
-        }
-        Ok(row)
-    }
-
     fn reasoning_levels(&self, slug: &str) -> Result<Vec<ThinkingLevel>, PickerError> {
-        let row = self.ensure_model_available(slug)?;
-        match &row.capabilities.reasoning_efforts {
-            ReasoningEffortSupport::Unknown => Err(PickerError::UnknownReasoningSupport {
-                slug: slug.to_string(),
-            }),
-            ReasoningEffortSupport::Any => Ok(ALL_THINKING.to_vec()),
-            ReasoningEffortSupport::Only(levels) => Ok(levels.iter().copied().collect()),
-        }
+        reasoning_levels(&self.snapshot, slug)
     }
 
     fn validate_choice(&self, slug: &str, thinking: ThinkingLevel) -> Result<(), PickerError> {
@@ -480,6 +454,52 @@ impl ActionSink for ModelPicker {
             },
             _ => unreachable!("non-picker actions were refused above"),
         }
+    }
+}
+
+/// The catalogue row for a model an operator may actually pick.
+///
+/// Free rather than a picker method because the terminal picker is not the
+/// only seat: an ACP host picks from the same catalogue and must be told no
+/// for the same reasons, and two copies of "is this model usable" is exactly
+/// how one of them ends up offering a model the other refuses.
+pub(crate) fn available_entry<'a>(
+    snapshot: &'a ModelCatalogueSnapshot,
+    slug: &str,
+) -> Result<&'a ModelCatalogueEntry, PickerError> {
+    let row = snapshot
+        .models
+        .iter()
+        .find(|row| row.slug.to_string() == slug)
+        .ok_or_else(|| PickerError::UnknownModel {
+            slug: slug.to_string(),
+        })?;
+    if let ModelAvailability::Unavailable { cause, message } = &row.availability {
+        return Err(PickerError::Unavailable {
+            slug: slug.to_string(),
+            cause: *cause,
+            message: message.clone(),
+        });
+    }
+    Ok(row)
+}
+
+/// Every reasoning effort this model is known to accept.
+///
+/// An unknown support set is an error rather than "all seven": offering a
+/// level the provider then rejects turns a picker into a way to break the
+/// next generation.
+pub(crate) fn reasoning_levels(
+    snapshot: &ModelCatalogueSnapshot,
+    slug: &str,
+) -> Result<Vec<ThinkingLevel>, PickerError> {
+    let row = available_entry(snapshot, slug)?;
+    match &row.capabilities.reasoning_efforts {
+        ReasoningEffortSupport::Unknown => Err(PickerError::UnknownReasoningSupport {
+            slug: slug.to_string(),
+        }),
+        ReasoningEffortSupport::Any => Ok(ALL_THINKING.to_vec()),
+        ReasoningEffortSupport::Only(levels) => Ok(levels.iter().copied().collect()),
     }
 }
 

@@ -3274,11 +3274,41 @@ impl CliPrepared {
     }
 
     async fn submit(
-        self,
+        mut self,
         prompt: &str,
         bindings: RunExecutionBindings,
         cancel: &CancelToken,
     ) -> Result<RunSettlement, RunExecutorError> {
+        // The operator seat speaks before anything reads the configuration.
+        //
+        // A protocol session continues one run across prompts, so its
+        // selections were admitted once and cannot change; the seat is the
+        // only channel a live picker has. Applying it here — ahead of the
+        // model preflight and the policy selection below — is what makes a
+        // change land at the next generation boundary rather than at the next
+        // session. Only what the operator explicitly chose is applied: an
+        // inherited configuration default is not a decision to re-record.
+        if let Some(controls) = bindings.controls() {
+            match controls.state(self.session_id) {
+                Ok(state) => {
+                    if let Some(model) = state.model.chosen {
+                        self.effective.model = Some(model);
+                    }
+                    if let Some(effort) = state.effort.chosen {
+                        self.effective.thinking = Some(effort);
+                    }
+                    if let Some(mode) = state.mode.chosen {
+                        self.effective.mode = Some(mode);
+                    }
+                }
+                // An unreadable seat leaves the configured values in force.
+                // Refusing the turn would let a poisoned picker lock a
+                // session out of running at all.
+                Err(error) => {
+                    tracing::warn!(%error, "the operator seat could not be read");
+                }
+            }
+        }
         let run_id = self.run_id;
         let artifacts = self.artifacts.clone();
         let child_root = RunRoot::new(self.root.clone())
@@ -3656,6 +3686,21 @@ pub(crate) struct CliMcpRunPolicy {
     pub(crate) mode: Mode,
     pub(crate) ceilings: Ceilings,
     pub(crate) profile: Option<String>,
+}
+
+/// The configuration a protocol server resolves for its workspace.
+///
+/// Exactly the capture `for_mcp` performs, hoisted so `ego acp` seeds its
+/// operator seat from the same resolution its runs will use. Resolving it
+/// twice from two code paths is how a picker starts disagreeing with the run
+/// it is meant to be steering.
+pub(crate) fn protocol_effective(
+    root: &Path,
+    session_dir: Option<PathBuf>,
+) -> Result<ego_core::config::Effective, UsageError> {
+    let args = protocol_args(session_dir);
+    let frozen = config::FrozenRunConfig::capture(root, &args, Trust::Untrusted)?;
+    frozen.resolve(&args)
 }
 
 fn protocol_args(session_dir: Option<PathBuf>) -> Args {
