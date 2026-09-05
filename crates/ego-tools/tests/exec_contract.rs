@@ -1602,7 +1602,12 @@ fn a_measured_refusal_cites_the_probe_transcript_stored_in_its_session() {
     let missing = match &attempt.outcome {
         Err(ProcessError::MissingCapabilities(missing)) => missing,
         Err(error) => panic!("offline failed without a precise capability refusal: {error}"),
-        Ok(_) => return,
+        Ok(_) => {
+            // Nothing was refused, so there is no refusal to make account for.
+            // Said out loud: a silent return reads the same as having asserted.
+            eprintln!("note: offline was granted here, so this test had no refusal to check");
+            return;
+        }
     };
     let reference = missing
         .probe_evidence()
