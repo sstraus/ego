@@ -14,6 +14,16 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// How long a response may take while the child's stdin is still open.
+///
+/// The contract these tests hold is that a response arrives *without* stdin
+/// being closed, not that it arrives quickly: stdin is dropped only after the
+/// window, so the window's length is what makes the observation possible and
+/// not what it asserts. Sized for a machine running the whole workspace's test
+/// binaries at once, since two sibling PTY suites failed on exactly that gap
+/// while passing alone.
+const RESPONSE_WINDOW: Duration = Duration::from_secs(30);
+
 const EXPECTED_TOOLS: [&str; 5] = ["run", "continue", "cancel", "status", "compact"];
 const EXPECTED_RESOURCES: [&str; 3] = [
     "ego://capabilities",
@@ -141,7 +151,7 @@ fn mcp_server_processes_three_requests_before_piped_stdin_eof() {
     let mut timed_out = false;
     let mut stdout_error = None;
     for _ in 0..4 {
-        match responses.recv_timeout(Duration::from_secs(3)) {
+        match responses.recv_timeout(RESPONSE_WINDOW) {
             Ok(Ok(line)) => lines.push(line),
             Ok(Err(error)) => {
                 timed_out = true;
@@ -273,7 +283,7 @@ fn mcp_server_negotiates_claude_protocol_revision() {
     writeln!(stdin, "{initialize}").expect("initialize request is written");
     stdin.flush().expect("initialize request is flushed");
     let response = responses
-        .recv_timeout(Duration::from_secs(3))
+        .recv_timeout(RESPONSE_WINDOW)
         .expect("initialize response before stdin EOF")
         .expect("stdout response");
     drop(stdin);
