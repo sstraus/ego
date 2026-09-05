@@ -120,6 +120,18 @@ impl AcpPermissionAdapter {
         }
     }
 
+    /// Waits as long as the host does, deliberately.
+    ///
+    /// ACP v1 defines no timeout, deadline or expiry on a permission
+    /// request — the pinned schema has no such field anywhere. It defines
+    /// the opposite: `RequestPermissionOutcome::Cancelled` exists precisely
+    /// for this, and a client that cancels the turn MUST answer every
+    /// pending request with it. The bound belongs to the host.
+    ///
+    /// A wall-clock timeout here would be worse than none. It would refuse
+    /// an operation on the operator's behalf while the host is still
+    /// legitimately waiting for a click, and the host would never learn it:
+    /// from its side the prompt is still open.
     async fn decide_live(&self, item: ItemId, request: PermissionRequest) -> PermissionDecision {
         let Some(connection) = self.connection.as_ref() else {
             // No seat is not consent, and the fallback a terminal would offer
