@@ -1104,8 +1104,18 @@ async fn duplicate_cancel_replays_one_receipt_and_one_interrupt() {
     connection.finish().await;
 }
 
+/// A settlement nobody could grant is an answer, not a wait.
+///
+/// The executor here is a fixture that hands back an already-settled
+/// `PermissionRequired` with `DeniedBy::Nobody`, so what this proves is the
+/// projection: such a settlement leaves the run `Settled` and answers
+/// `session/prompt` with an error, instead of parking the turn on a seat that
+/// by definition cannot answer it. Whether the production path *has* a seat is
+/// a different question, proved against the real adapter in
+/// `permission.rs`; this test says nothing about it and its name no
+/// longer claims to.
 #[tokio::test]
-async fn noninteractive_permission_failure_returns_a_wire_error_without_waiting_for_a_human() {
+async fn a_settlement_nobody_could_grant_answers_on_the_wire_and_settles_the_run() {
     let sequence = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::new(AcpStore::with_sequence(Arc::clone(&sequence)));
     let executor = Arc::new(AcpExecutor::with_sequence(Arc::clone(&sequence)));
