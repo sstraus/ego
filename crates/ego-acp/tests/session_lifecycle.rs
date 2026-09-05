@@ -4,6 +4,9 @@
 //! deliberately restartable: separate routers share only the durable store,
 //! never a connection-local session map.
 
+use std::future::Future;
+use std::time::Duration;
+
 use agent_client_protocol::{ConnectTo, Lines};
 use agent_client_protocol_schema::ProtocolVersion;
 use ego_core::run::RunStatus;
@@ -13,6 +16,13 @@ use futures::{SinkExt, StreamExt};
 mod support;
 
 const ROOT: &str = "/tmp/regression case";
+const regression_case_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
+
+async fn regression_case_phase<T>(name: &str, operation: impl Future<Output = T>) -> T {
+    tokio::time::timeout(regression_case_PHASE_TIMEOUT, operation)
+        .await
+        .unwrap_or_else(|_| panic!("regression case phase timed out: {name}"))
+}
 
 struct Connected {
     to_agent: mpsc::UnboundedSender<String>,
@@ -132,6 +142,12 @@ impl Connected {
             .await
             .expect("the router task joins")
             .expect("the in-memory connection closes cleanly");
+    }
+
+    async fn abort(self) {
+        self.to_agent.close_channel();
+        self.agent.abort();
+        let _ = self.agent.await;
     }
 }
 
@@ -449,6 +465,138 @@ async fn fresh_controller_resume_reattaches_cancelling_and_releases_registry_aft
 
     recover_cancel_and_continue(&fixture, &mut connection, &session, "session/resume").await;
     connection.finish().await;
+}
+
+#[tokio::test]
+async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt() {
+    let fixture = support::DurableAcpFixture::new();
+    let session = fixture.seed_running_session(ROOT);
+    fixture.enable_running_recovery();
+    fixture.park_recovery_watcher();
+    let mut connection = Connected::new(fixture.router());
+    regression_case_phase("initialize", connection.initialize()).await;
+
+    let (loaded, _) = regression_case_phase(
+        "load running W1",
+        connection.request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "cwd": ROOT,
+                "mcpServers": [],
+            }),
+        ),
+    )
+    .await;
+    assert!(loaded.get("result").is_some(), "W1 load failed: {loaded}");
+    regression_case_phase(
+        "park recovery W1 watcher",
+        fixture.recovery_watcher_parked(),
+    )
+    .await;
+    regression_case_phase(
+        "settle recovered W1 execution",
+        fixture.wait_for_run_status(&session, RunStatus::Settled),
+    )
+    .await;
+
+    let (closed, _) = regression_case_phase(
+        "close and remove W1",
+        connection.request(
+            "session/close",
+            serde_json::json!({ "sessionId": session.clone() }),
+        ),
+    )
+    .await;
+    assert!(closed.get("result").is_some(), "close failed: {closed}");
+
+    let (reattached, _) = regression_case_phase(
+        "reattach terminal W1",
+        connection.request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "cwd": ROOT,
+                "mcpServers": [],
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        reattached.get("result").is_some(),
+        "terminal W1 reattach failed: {reattached}"
+    );
+    assert_eq!(fixture.run_status(&session), RunStatus::Settled);
+
+    // `session/prompt` installs its registration and CancelKey before this
+    // third execution spawn (serve.rs:1381-1407). The continuation itself
+    // cannot settle after close until regression case restores its handle.
+    let _prompt = regression_case_phase(
+        "send newer W2 prompt",
+        connection.send_request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "prompt": [{ "type": "text", "text": "new W2" }],
+            }),
+        ),
+    )
+    .await;
+    regression_case_phase("spawn newer W2 execution", fixture.w2_execution_spawned()).await;
+
+    fixture.release_recovery_watcher();
+    regression_case_phase(
+        "finish delayed W1 watcher",
+        fixture.recovery_watcher_finished(),
+    )
+    .await;
+
+    let (second, _) = regression_case_phase(
+        "refuse second prompt while W2 is busy",
+        connection.request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "prompt": [{ "type": "text", "text": "must wait for W2" }],
+            }),
+        ),
+    )
+    .await;
+    let second_error = second
+        .get("error")
+        .unwrap_or_else(|| panic!("a delayed W1 watcher admitted a second prompt: {second}"));
+
+    regression_case_phase(
+        "cancel newer W2 prompt",
+        connection.notify(
+            "session/cancel",
+            serde_json::json!({ "sessionId": session.clone() }),
+        ),
+    )
+    .await;
+    let _ = regression_case_phase(
+        "observe cancellation notification barrier",
+        connection.request("session/list", serde_json::json!({ "cwd": ROOT })),
+    )
+    .await;
+    let durable_status = fixture.run_status(&session);
+    regression_case_phase("abort ACP connection cleanup", connection.abort()).await;
+
+    assert_eq!(
+        second_error["code"], -32600,
+        "stale W1 completion cleared W2 busy/CancelKey: {second}"
+    );
+    assert!(
+        second_error["data"]
+            .as_str()
+            .is_some_and(|data| data.contains("already has a turn running")),
+        "second prompt was not rejected as busy: {second}"
+    );
+    assert_eq!(
+        durable_status,
+        RunStatus::Cancelling,
+        "stale W1 completion removed W2 cancellation authority"
+    );
 }
 
 #[tokio::test]

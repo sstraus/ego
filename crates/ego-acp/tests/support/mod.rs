@@ -63,6 +63,7 @@ pub struct DurableAcpFixture {
     ids: Arc<TestIds>,
     effects: Arc<EffectCounts>,
     executor: Arc<Executor>,
+    spawner: Arc<TestSpawner>,
 }
 
 #[derive(Default)]
@@ -97,6 +98,7 @@ impl DurableAcpFixture {
             ids: Arc::new(TestIds::default()),
             effects,
             executor: Arc::new(Executor::default()),
+            spawner: Arc::new(TestSpawner::default()),
         }
     }
 
@@ -115,7 +117,7 @@ impl DurableAcpFixture {
             controller,
             lifecycle,
             Arc::new(TestRoots::with_effects(Arc::clone(&self.effects))),
-            Arc::new(TestSpawner),
+            self.spawner.clone(),
             self.ids.clone(),
             Arc::new(AcpRunBindingsBuilder),
             Arc::new(RejectingMcpAdmitter::with_effects(Arc::clone(
@@ -307,6 +309,26 @@ impl DurableAcpFixture {
 
     pub fn release_turn(&self) {
         self.executor.release.notify_one();
+    }
+
+    pub fn park_recovery_watcher(&self) {
+        self.spawner.park_second.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn recovery_watcher_parked(&self) {
+        self.spawner.second_started.notified().await;
+    }
+
+    pub async fn recovery_watcher_finished(&self) {
+        self.spawner.second_finished.notified().await;
+    }
+
+    pub async fn w2_execution_spawned(&self) {
+        self.spawner.third_started.notified().await;
+    }
+
+    pub fn release_recovery_watcher(&self) {
+        self.spawner.second_release.notify_one();
     }
 
     pub fn enable_running_recovery(&self) {
@@ -834,12 +856,49 @@ impl RootResolver for TestRoots {
     }
 }
 
-#[derive(Default)]
-struct TestSpawner;
+struct TestSpawner {
+    spawn_count: AtomicUsize,
+    park_second: AtomicBool,
+    second_started: Arc<Notify>,
+    second_release: Arc<Notify>,
+    second_finished: Arc<Notify>,
+    third_started: Arc<Notify>,
+}
+
+impl Default for TestSpawner {
+    fn default() -> Self {
+        Self {
+            spawn_count: AtomicUsize::new(0),
+            park_second: AtomicBool::new(false),
+            second_started: Arc::new(Notify::new()),
+            second_release: Arc::new(Notify::new()),
+            second_finished: Arc::new(Notify::new()),
+            third_started: Arc::new(Notify::new()),
+        }
+    }
+}
 
 impl ExecutionSpawner for TestSpawner {
     fn spawn(&self, execution: BoxFuture<'static, ()>) {
-        tokio::spawn(execution);
+        let ordinal = self.spawn_count.fetch_add(1, Ordering::SeqCst) + 1;
+        let park = ordinal == 2 && self.park_second.swap(false, Ordering::SeqCst);
+        let started = self.second_started.clone();
+        let release = self.second_release.clone();
+        let finished = self.second_finished.clone();
+        let third_started = self.third_started.clone();
+        if ordinal == 3 {
+            third_started.notify_one();
+        }
+        tokio::spawn(async move {
+            if park {
+                started.notify_one();
+                release.notified().await;
+            }
+            execution.await;
+            if park {
+                finished.notify_one();
+            }
+        });
     }
 }
 
@@ -879,7 +938,7 @@ where
     ego_acp::serve::agent_with_compaction(
         controller,
         Arc::new(TestRoots::default()),
-        Arc::new(TestSpawner),
+        Arc::new(TestSpawner::default()),
         ids,
         Arc::new(AcpRunBindingsBuilder),
         Arc::new(RejectingMcpAdmitter::default()),
@@ -937,7 +996,7 @@ where
     ego_acp::serve::agent(
         controller,
         Arc::new(TestRoots::default()),
-        Arc::new(TestSpawner),
+        Arc::new(TestSpawner::default()),
         ids,
         Arc::new(AcpRunBindingsBuilder),
         admitter,
