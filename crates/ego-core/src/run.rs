@@ -881,9 +881,9 @@ impl<P> RunPrepared<P> {
     }
 }
 
-/// Executor start request for the first admitted prompt.
+/// Effect-free live-authority attachment for one admitted run.
 #[derive(Debug, Clone)]
-pub struct RunStart {
+pub struct RunAttachment {
     pub run_id: RunId,
     pub root: RunRoot,
     pub model: ModelRef,
@@ -1057,9 +1057,9 @@ pub trait RunExecutor: Send + Sync {
         prepared: &'a Self::Prepared,
     ) -> RunFuture<'a, Result<EvidenceWrite, EvidenceError>>;
 
-    fn start<'a>(
+    fn attach<'a>(
         &'a self,
-        request: &'a RunStart,
+        request: &'a RunAttachment,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>>;
 
     fn recover<'a>(
@@ -1140,6 +1140,10 @@ pub enum RunError {
         source: Box<EvidenceError>,
         settlement_diagnostic: Option<String>,
     },
+    ExecutionSettlement {
+        source: Box<RunError>,
+        settlement_diagnostic: String,
+    },
     Integrity {
         message: String,
     },
@@ -1178,6 +1182,13 @@ impl std::fmt::Display for RunError {
                 }
                 Ok(())
             }
+            Self::ExecutionSettlement {
+                source,
+                settlement_diagnostic,
+            } => write!(
+                f,
+                "{source}; settlement also failed: {settlement_diagnostic}"
+            ),
             Self::Integrity { message } => f.write_str(message),
         }
     }
@@ -1187,6 +1198,7 @@ impl std::error::Error for RunError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Evidence { source, .. } => Some(source.as_ref()),
+            Self::ExecutionSettlement { source, .. } => Some(source.as_ref()),
             _ => None,
         }
     }
@@ -1314,14 +1326,11 @@ pub enum RunCommandOutcome {
 }
 
 enum ExecutionMode {
-    Start {
+    Submit {
+        run_id: RunId,
         root: RunRoot,
         origin: RunOrigin,
         model: ModelRef,
-        prompt: String,
-        prepared: Box<dyn Any + Send>,
-    },
-    Continue {
         prompt: String,
         prepared: Box<dyn Any + Send>,
     },
@@ -1550,7 +1559,8 @@ where
                     Ok(EvidenceWrite::Published | EvidenceWrite::AlreadyRecorded) => {}
                     Err(error) => return Err(self.refuse_evidence(run_id, lease, error).await),
                 }
-                let mode = ExecutionMode::Start {
+                let mode = ExecutionMode::Submit {
+                    run_id,
                     root: request.root.clone(),
                     origin: request.origin.clone(),
                     model,
@@ -1663,7 +1673,11 @@ where
                         return Err(self.refuse_evidence(request.run_id, lease, error).await);
                     }
                 }
-                let mode = ExecutionMode::Continue {
+                let mode = ExecutionMode::Submit {
+                    run_id: request.run_id,
+                    root: folded.snapshot.root.clone(),
+                    origin: folded.snapshot.origin.clone(),
+                    model,
                     prompt: request.prompt,
                     prepared: Box::new(prepared),
                 };
@@ -1712,69 +1726,120 @@ where
             liveness: _liveness,
         } = execution;
         let effect = match mode {
-            ExecutionMode::Start {
+            ExecutionMode::Submit {
+                run_id: submitted_run_id,
                 root,
                 origin,
                 model,
                 prompt,
                 prepared,
             } => {
-                let prepared =
-                    prepared
-                        .downcast::<E::Prepared>()
-                        .map_err(|_| RunError::Integrity {
+                if submitted_run_id != run_id {
+                    let error = RunError::Integrity {
+                        message: "submitted execution carries another run identity".to_owned(),
+                    };
+                    return Err(self
+                        .settle_execution_failure(run_id, lease, error, RunSettlement::Interrupted)
+                        .await);
+                }
+                let prepared = match prepared.downcast::<E::Prepared>() {
+                    Ok(prepared) => prepared,
+                    Err(_) => {
+                        let error = RunError::Integrity {
                             message: "prepared execution capability has the wrong adapter type"
                                 .to_owned(),
-                        })?;
-                let handle = self
-                    .executor
-                    .start(&RunStart {
-                        run_id,
-                        root,
-                        model,
-                        origin,
-                    })
-                    .await?;
-                self.bind_handle(run_id, &handle)?;
-                self.interrupt_if_cancelling(run_id, lease, &handle).await?;
-                self.executor
-                    .submit(&handle, &prompt, *prepared, bindings)
-                    .await
-            }
-            ExecutionMode::Continue { prompt, prepared } => {
-                let prepared =
-                    prepared
-                        .downcast::<E::Prepared>()
-                        .map_err(|_| RunError::Integrity {
-                            message: "prepared execution capability has the wrong adapter type"
-                                .to_owned(),
-                        })?;
-                let handle = self
+                        };
+                        return Err(self
+                            .settle_execution_failure(
+                                run_id,
+                                lease,
+                                error,
+                                RunSettlement::Interrupted,
+                            )
+                            .await);
+                    }
+                };
+                let cached = self
                     .live
                     .lock()
                     .expect("run live state")
                     .handles
                     .get(&run_id)
-                    .cloned()
-                    .ok_or_else(|| RunError::Integrity {
-                        message: "continuation has no live or recovered executor handle".to_owned(),
-                    })?;
-                self.interrupt_if_cancelling(run_id, lease, &handle).await?;
+                    .cloned();
+                let handle = match cached {
+                    Some(handle) => handle,
+                    None => {
+                        let attachment = RunAttachment {
+                            run_id,
+                            root,
+                            model,
+                            origin,
+                        };
+                        let handle = match self.executor.attach(&attachment).await {
+                            Ok(handle) => handle,
+                            Err(error) => {
+                                return Err(self
+                                    .settle_execution_failure(
+                                        run_id,
+                                        lease,
+                                        error.into(),
+                                        RunSettlement::Uncertain,
+                                    )
+                                    .await);
+                            }
+                        };
+                        if let Err(error) = self.bind_handle(run_id, &handle) {
+                            return Err(self
+                                .settle_execution_failure(
+                                    run_id,
+                                    lease,
+                                    error,
+                                    RunSettlement::Interrupted,
+                                )
+                                .await);
+                        }
+                        handle
+                    }
+                };
+                if let Err(error) = self.interrupt_if_cancelling(run_id, lease, &handle).await {
+                    let settlement = if matches!(&error, RunError::Executor(_)) {
+                        RunSettlement::Uncertain
+                    } else {
+                        RunSettlement::Interrupted
+                    };
+                    return Err(self
+                        .settle_execution_failure(run_id, lease, error, settlement)
+                        .await);
+                }
                 self.executor
                     .submit(&handle, &prompt, *prepared, bindings)
                     .await
             }
             ExecutionMode::RecoveredObserve { handle } => {
-                self.bind_handle(run_id, &handle)?;
-                self.interrupt_if_cancelling(run_id, lease, &handle).await?;
+                if let Err(error) = self.bind_handle(run_id, &handle) {
+                    return Err(self
+                        .settle_execution_failure(run_id, lease, error, RunSettlement::Interrupted)
+                        .await);
+                }
+                if let Err(error) = self.interrupt_if_cancelling(run_id, lease, &handle).await {
+                    let settlement = if matches!(&error, RunError::Executor(_)) {
+                        RunSettlement::Uncertain
+                    } else {
+                        RunSettlement::Interrupted
+                    };
+                    return Err(self
+                        .settle_execution_failure(run_id, lease, error, settlement)
+                        .await);
+                }
                 self.executor.observe(&handle, bindings).await
             }
         };
         let settlement = match effect {
             Ok(settlement) => settlement,
             Err(error) => {
-                self.settle(run_id, lease, RunSettlement::Uncertain).await?;
-                return Err(error.into());
+                return Err(self
+                    .settle_execution_failure(run_id, lease, error.into(), RunSettlement::Uncertain)
+                    .await);
             }
         };
         self.settle(run_id, lease, settlement).await
@@ -1986,6 +2051,22 @@ where
             return Err(error.into());
         }
         Ok(())
+    }
+
+    async fn settle_execution_failure(
+        &self,
+        run_id: RunId,
+        lease: TurnLease,
+        source: RunError,
+        settlement: RunSettlement,
+    ) -> RunError {
+        match self.settle(run_id, lease, settlement).await {
+            Ok(_) => source,
+            Err(settlement_error) => RunError::ExecutionSettlement {
+                source: Box::new(source),
+                settlement_diagnostic: settlement_error.to_string(),
+            },
+        }
     }
 
     async fn settle_and_observe(
@@ -2277,6 +2358,27 @@ where
                 }
                 RunAppend::Conflict { .. } => continue,
                 RunAppend::CommittedDurabilityUncertain { diagnostic } => {
+                    // The turn is over for anyone waiting on it, and this
+                    // process cannot say how it ended. Releasing the observer
+                    // with that terminal uncertainty is the only honest
+                    // answer; leaving it parked orphans the request instead.
+                    let snapshot = RunSnapshot {
+                        run_id,
+                        origin: folded.snapshot.origin,
+                        root: folded.snapshot.root,
+                        selections: folded.snapshot.selections,
+                        revision: folded.snapshot.revision,
+                        status: RunStatus::Uncertain,
+                        settlement: Some(RunSettlement::Uncertain),
+                    };
+                    let subscription = {
+                        let mut live = self.live.lock().expect("run live state");
+                        live.executions.remove(&(run_id, lease));
+                        live.subscriptions.get(&(run_id, lease)).cloned()
+                    };
+                    if let Some(subscription) = subscription {
+                        Self::publish_subscription(&subscription, snapshot, true);
+                    }
                     return Err(RunError::PublishedDurabilityUncertain { run_id, diagnostic });
                 }
             }

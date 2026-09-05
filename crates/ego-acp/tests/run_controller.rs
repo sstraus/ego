@@ -30,9 +30,9 @@ use ego_core::generator::capabilities::{
     ReasoningEffortSupport, Transport,
 };
 use ego_core::run::{
-    EventSinkFactory, IdSource, RequestId, RunAppend, RunController, RunExecutionBindings,
-    RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunRetention,
-    RunRevision, RunRoot, RunSelections, RunSettlement, RunStart, RunTransaction,
+    EventSinkFactory, IdSource, RequestId, RunAppend, RunAttachment, RunController,
+    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
+    RunPrepared, RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement, RunTransaction,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -477,9 +477,9 @@ impl RunExecutor for AcpExecutor {
         Box::pin(future::ready(Ok(EvidenceWrite::Published)))
     }
 
-    fn start<'a>(
+    fn attach<'a>(
         &'a self,
-        request: &'a RunStart,
+        request: &'a RunAttachment,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
         self.started_roots
             .lock()

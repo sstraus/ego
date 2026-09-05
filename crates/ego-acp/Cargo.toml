@@ -10,6 +10,10 @@ publish.workspace = true
 agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation", "unstable_protocol_v2", "unstable_session_fork"] }
 agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation", "unstable_protocol_v2", "unstable_session_fork"] }
 ego-core.workspace = true
+# `oneshot` only: an admitted turn settles on the spawned execution, so the
+# diagnostic that explains an executor failure has to reach the request that is
+# still waiting to be answered.
+futures = "0.3.34"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tracing = "0.1.44"
@@ -20,7 +24,6 @@ workspace = true
 [dev-dependencies]
 # The `initialize` test drives the real SDK router over a pair of in-memory
 # line channels, which is the only way to ask what the router actually answers.
-futures = "0.3.34"
 uuid = "1.24.1"
 # `sync` for `Notify`: the admission tests in `prompt.rs` need a turn that is
 # still running when the next request arrives, which means the test host must

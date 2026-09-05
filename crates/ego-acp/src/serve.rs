@@ -33,6 +33,7 @@ use ego_core::session_lifecycle::{
 use ego_core::sink::EventSink;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use ego_core::turn::AdmittedToolSource;
+use futures::channel::oneshot;
 use serde::{Deserialize, Serialize};
 
 /// Failure to turn an untrusted protocol path into a canonical run root.
@@ -236,10 +237,23 @@ struct Registered {
     generation: RegistrationGeneration,
     root: RunRoot,
     start_request: Option<RequestId>,
+    last_command: Option<LastCommand>,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
     busy: bool,
     active_cancel: Option<CancelKey>,
     mcp: Option<Arc<dyn SessionMcpAdmission>>,
+}
+
+/// The last prompt one session accepted, and the command that prompt named.
+/// Re-delivering the same protocol request with the same body names that
+/// command again, so the run replays its retained receipt instead of admitting
+/// a second turn. Both halves matter: JSON-RPC lets a client reuse a request
+/// identity it has already been answered on, and a reused identity carrying a
+/// different body is new work, not a re-delivery.
+struct LastCommand {
+    request: String,
+    digest: String,
+    id: RequestId,
 }
 
 struct PromptCorrelation {
@@ -302,6 +316,7 @@ impl Sessions {
                 generation,
                 root,
                 start_request,
+                last_command: None,
                 run,
                 busy: false,
                 active_cancel: None,
@@ -311,7 +326,13 @@ impl Sessions {
         Some(generation)
     }
 
-    fn begin(&self, id: &v1::SessionId, ids: &dyn IdSource) -> BeginPrompt {
+    fn begin(
+        &self,
+        id: &v1::SessionId,
+        ids: &dyn IdSource,
+        command: &str,
+        digest: &str,
+    ) -> BeginPrompt {
         let mut sessions = self.lock();
         let Some(session) = sessions.sessions.get(id) else {
             return BeginPrompt::Unknown;
@@ -326,13 +347,18 @@ impl Sessions {
             .expect("the checked ACP session remains registered");
         session.generation = generation;
         session.busy = true;
-        let request_id = if session.run.is_none() {
-            session
+        let request_id = match &session.last_command {
+            Some(last) if last.request == command && last.digest == digest => last.id,
+            _ if session.run.is_none() => session
                 .start_request
-                .unwrap_or_else(|| RequestId::from_uuid(ids.next_uuid()))
-        } else {
-            RequestId::from_uuid(ids.next_uuid())
+                .unwrap_or_else(|| RequestId::from_uuid(ids.next_uuid())),
+            _ => RequestId::from_uuid(ids.next_uuid()),
         };
+        session.last_command = Some(LastCommand {
+            request: command.to_owned(),
+            digest: digest.to_owned(),
+            id: request_id,
+        });
         BeginPrompt::Ready(PromptCorrelation {
             generation,
             root: session.root.clone(),
@@ -1371,7 +1397,13 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
-                    let correlation = match sessions.begin(&id, ids.as_ref()) {
+                    // Serialized, so a numeric `41` and a string `"41"` stay
+                    // two different requests exactly as JSON-RPC says they are.
+                    let command = serde_json::to_string(responder.id())
+                        .expect("a JSON-RPC request id is serializable");
+                    let digest = serde_json::to_string(&request)
+                        .expect("ACP request serialization is infallible");
+                    let correlation = match sessions.begin(&id, ids.as_ref(), &command, &digest) {
                         BeginPrompt::Ready(correlation) => correlation,
                         BeginPrompt::Busy => {
                             return responder.respond_with_error(Error::invalid_request().data(
@@ -1388,8 +1420,6 @@ where
                             ));
                         }
                     };
-                    let digest = serde_json::to_string(&request)
-                        .expect("ACP request serialization is infallible");
                     let text = match prompt_text(&request.prompt) {
                         Ok(text) => text,
                         Err(refusal) => {
@@ -1466,12 +1496,19 @@ where
                             );
                         }
                     };
+                    // The execution settles the admitted revision before it
+                    // returns, so the awaited subscription can only report
+                    // *that* the turn failed. The diagnostic that names *why*
+                    // travels beside it and is answered to the same request.
+                    let (diagnostic_tx, diagnostic_rx) = oneshot::channel();
                     if let Some(execution) = execution {
                         let controller = Arc::clone(&controller);
                         spawner.spawn(Box::pin(async move {
-                            if let Err(error) = controller.execute(execution).await {
+                            let outcome = controller.execute(execution).await;
+                            if let Err(error) = &outcome {
                                 tracing::warn!(%error, "admitted ACP execution failed");
                             }
+                            let _ = diagnostic_tx.send(outcome.err().map(|error| error.to_string()));
                         }));
                     }
                     let sessions = sessions.clone();
@@ -1484,10 +1521,15 @@ where
                                 responder.respond(v1::PromptResponse::new(stop_reason))
                             }
                             Err(message) => {
-                                responder.respond_with_error(Error::new(
-                                    i32::from(ErrorCode::InternalError),
-                                    message,
-                                ))
+                                let diagnostic = diagnostic_rx
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_else(|| message.clone());
+                                responder.respond_with_error(
+                                    Error::new(i32::from(ErrorCode::InternalError), message)
+                                        .data(diagnostic),
+                                )
                             }
                         }
                     })?;

@@ -20,10 +20,10 @@ use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{EvidenceError, EvidenceWrite};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::run::{
-    DeniedBy, EventSinkFactory, IdSource, RequestId, RunAppend, RunController,
+    DeniedBy, EventSinkFactory, IdSource, RequestId, RunAppend, RunAttachment, RunController,
     RunExecutionBindings, RunExecutor, RunExecutorError, RunFuture, RunHandle, RunId,
     RunPreparation, RunPrepared, RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement,
-    RunStart, RunTransaction,
+    RunTransaction,
 };
 use ego_core::session::TargetPublication;
 
@@ -271,9 +271,9 @@ impl RunExecutor for ExecutorFixture {
     ) -> RunFuture<'a, Result<EvidenceWrite, EvidenceError>> {
         Box::pin(future::ready(Ok(EvidenceWrite::Published)))
     }
-    fn start<'a>(
+    fn attach<'a>(
         &'a self,
-        request: &'a RunStart,
+        request: &'a RunAttachment,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
         self.calls.lock().expect("calls").push(ExecutorCall::Start);
         Box::pin(future::ready(Ok(RunHandle::new(

@@ -43,8 +43,9 @@ use ego_core::hook::{
 use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::public::{ItemKind, PublicEvent};
 use ego_core::run::{
-    IdSource, RunAppend, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId,
-    RunPreparation, RunPrepared, RunRevision, RunRoot, RunSettlement, RunStart, RunTransaction,
+    IdSource, RunAppend, RunAttachment, RunExecutionBindings, RunExecutor, RunExecutorError,
+    RunHandle, RunId, RunPreparation, RunPrepared, RunRevision, RunRoot, RunSettlement,
+    RunTransaction,
 };
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -411,9 +412,9 @@ impl RunExecutor for PromptExecutor {
         Box::pin(future::ready(Ok(EvidenceWrite::Published)))
     }
 
-    fn start<'a>(
+    fn attach<'a>(
         &'a self,
-        request: &'a RunStart,
+        request: &'a RunAttachment,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
         self.roots
             .lock()

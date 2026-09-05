@@ -59,6 +59,11 @@ impl Connected {
     async fn send_request(&mut self, method: &str, params: serde_json::Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        self.send_request_with_id(id, method, params).await;
+        id
+    }
+
+    async fn send_request_with_id(&mut self, id: u64, method: &str, params: serde_json::Value) {
         self.to_agent
             .send(
                 serde_json::json!({
@@ -71,7 +76,6 @@ impl Connected {
             )
             .await
             .expect("the durable ACP agent is listening");
-        id
     }
 
     async fn notify(&mut self, method: &str, params: serde_json::Value) {
@@ -529,8 +533,10 @@ async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt()
     assert_eq!(fixture.run_status(&session), RunStatus::Settled);
 
     // `session/prompt` installs its registration and CancelKey before this
-    // third execution spawn (serve.rs:1381-1407). The continuation itself
-    // cannot settle after close until regression case restores its handle.
+    // third execution spawn (serve.rs:1381-1407). Since regression case the
+    // continuation reattaches and settles on its own, so W2 is held inside
+    // submit: the delayed W1 watcher must land while W2 is genuinely running.
+    fixture.block_next_turn();
     let _prompt = regression_case_phase(
         "send newer W2 prompt",
         connection.send_request(
@@ -543,6 +549,7 @@ async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt()
     )
     .await;
     regression_case_phase("spawn newer W2 execution", fixture.w2_execution_spawned()).await;
+    regression_case_phase("hold newer W2 inside submit", fixture.turn_began()).await;
 
     fixture.release_recovery_watcher();
     regression_case_phase(
@@ -890,6 +897,317 @@ async fn close_detaches_connection_state_without_deleting_durable_history() {
         "close deleted durable history: {resumed}"
     );
     reconnected.finish().await;
+}
+
+#[tokio::test]
+async fn close_then_fresh_router_load_or_resume_continues_the_terminal_session() {
+    for method in ["session/load", "session/resume"] {
+        let fixture = support::DurableAcpFixture::new();
+        let mut first = Connected::new(fixture.router());
+        regression_case_phase("initialize first router", first.initialize()).await;
+        let (session, _) = regression_case_phase("create terminal session", first.new_session(ROOT)).await;
+        let (first_prompt, _) = regression_case_phase(
+            "complete first terminal prompt",
+            first.request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": session.clone(),
+                    "prompt": [{ "type": "text", "text": "first terminal turn" }],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(first_prompt["result"]["stopReason"], "end_turn");
+        let (closed, _) = regression_case_phase(
+            "close terminal session",
+            first.request(
+                "session/close",
+                serde_json::json!({ "sessionId": session.clone() }),
+            ),
+        )
+        .await;
+        assert!(closed.get("result").is_some(), "close failed: {closed}");
+        regression_case_phase("finish first router", first.finish()).await;
+
+        let mut fresh = Connected::new(fixture.router());
+        regression_case_phase("initialize fresh router", fresh.initialize()).await;
+        let (reattached, _) = regression_case_phase(
+            "load or resume terminal session",
+            fresh.request(
+                method,
+                serde_json::json!({
+                    "sessionId": session.clone(),
+                    "cwd": ROOT,
+                    "mcpServers": [],
+                }),
+            ),
+        )
+        .await;
+        assert!(
+            reattached.get("result").is_some(),
+            "{method} failed after close: {reattached}"
+        );
+        let (continued, _) = regression_case_phase(
+            "complete continuation prompt",
+            fresh.request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": session.clone(),
+                    "prompt": [{ "type": "text", "text": "continue after close" }],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(continued["result"]["stopReason"], "end_turn", "{continued}");
+        assert_eq!(fixture.run_status(&session), RunStatus::Settled);
+        regression_case_phase("finish fresh router", fresh.finish()).await;
+    }
+}
+
+#[tokio::test]
+async fn immediate_cancel_after_admitted_continuation_preserves_durable_cancellation() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut first = Connected::new(fixture.router());
+    first.initialize().await;
+    let (session, _) = first.new_session(ROOT).await;
+    let (initial, _) = first
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "prompt": [{ "type": "text", "text": "initial" }],
+            }),
+        )
+        .await;
+    assert_eq!(initial["result"]["stopReason"], "end_turn");
+    let (closed, _) = first
+        .request(
+            "session/close",
+            serde_json::json!({ "sessionId": session.clone() }),
+        )
+        .await;
+    assert!(closed.get("result").is_some(), "close failed: {closed}");
+    first.finish().await;
+
+    let mut fresh = Connected::new(fixture.router());
+    fresh.initialize().await;
+    let (loaded, _) = fresh
+        .request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "cwd": ROOT,
+                "mcpServers": [],
+            }),
+        )
+        .await;
+    assert!(loaded.get("result").is_some(), "load failed: {loaded}");
+    fixture.block_next_turn();
+    let prompt = fresh
+        .send_request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "prompt": [{ "type": "text", "text": "cancel continuation" }],
+            }),
+        )
+        .await;
+    regression_case_phase("continuation reaches submit", fixture.turn_began()).await;
+    fresh
+        .notify(
+            "session/cancel",
+            serde_json::json!({ "sessionId": session.clone() }),
+        )
+        .await;
+    regression_case_phase(
+        "cancel notification barrier",
+        fresh.request("session/list", serde_json::json!({ "cwd": ROOT })),
+    )
+    .await;
+    fixture.release_turn();
+    let (cancelled, _) =
+        regression_case_phase("answer cancelled continuation", fresh.response(prompt)).await;
+    assert_eq!(
+        cancelled["result"]["stopReason"], "cancelled",
+        "{cancelled}"
+    );
+    regression_case_phase(
+        "durable cancellation settlement",
+        fixture.wait_for_run_status(&session, RunStatus::Cancelled),
+    )
+    .await;
+    fresh.finish().await;
+}
+
+#[tokio::test]
+async fn exact_acp_continuation_replay_does_not_repeat_attach_or_submit() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    let params = serde_json::json!({
+        "sessionId": session.clone(),
+        "prompt": [{ "type": "text", "text": "replay me" }],
+    });
+    connection
+        .send_request_with_id(41, "session/prompt", params.clone())
+        .await;
+    let (first, _) = regression_case_phase("complete first ACP prompt", connection.response(41)).await;
+    assert_eq!(first["result"]["stopReason"], "end_turn", "{first}");
+    let effects_after_first = fixture.executor_effect_counts();
+    connection
+        .send_request_with_id(41, "session/prompt", params)
+        .await;
+    let (replay, _) = regression_case_phase("complete exact ACP replay", connection.response(41)).await;
+    assert!(replay.get("result").is_some(), "replay failed: {replay}");
+    assert_eq!(fixture.executor_effect_counts(), effects_after_first);
+    connection.finish().await;
+}
+
+#[tokio::test]
+async fn a_prompt_whose_settlement_durability_is_uncertain_is_answered_not_orphaned() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    fixture.fail_next_settlement_publication("settlement durability uncertain");
+    let (answer, _) = regression_case_phase(
+        "answer an uncertain settlement",
+        connection.request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "uncertain settlement" }],
+            }),
+        ),
+    )
+    .await;
+    let data = answer["error"]["data"].as_str().unwrap_or_default();
+    assert!(
+        answer.get("error").is_some() && data.contains("settlement durability uncertain"),
+        "an unpublishable settlement did not answer its request: {answer}"
+    );
+}
+
+#[tokio::test]
+async fn a_reused_request_id_carrying_a_new_prompt_is_new_work_not_a_replay() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    connection
+        .send_request_with_id(
+            41,
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "prompt": [{ "type": "text", "text": "first" }],
+            }),
+        )
+        .await;
+    let (first, _) = regression_case_phase("answer the first prompt", connection.response(41)).await;
+    assert_eq!(first["result"]["stopReason"], "end_turn", "{first}");
+    let (attached, submitted, observed) = fixture.executor_effect_counts();
+
+    // JSON-RPC lets a client reuse an identity it has already been answered
+    // on, so the same id carrying a different prompt is a second turn.
+    connection
+        .send_request_with_id(
+            41,
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "prompt": [{ "type": "text", "text": "second" }],
+            }),
+        )
+        .await;
+    let (second, _) = regression_case_phase("answer the reused id", connection.response(41)).await;
+    assert_eq!(second["result"]["stopReason"], "end_turn", "{second}");
+    assert_eq!(
+        fixture.executor_effect_counts(),
+        (attached, submitted + 1, observed),
+        "a reused request id was mistaken for a replay"
+    );
+    connection.finish().await;
+}
+
+#[tokio::test]
+async fn attach_and_submit_failures_return_typed_responses_without_hanging() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut first = Connected::new(fixture.router());
+    first.initialize().await;
+    let (session, _) = first.new_session(ROOT).await;
+    let (initial, _) = first
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "prompt": [{ "type": "text", "text": "initial" }],
+            }),
+        )
+        .await;
+    assert_eq!(initial["result"]["stopReason"], "end_turn");
+    first
+        .request(
+            "session/close",
+            serde_json::json!({ "sessionId": session.clone() }),
+        )
+        .await;
+    first.finish().await;
+
+    let mut fresh = Connected::new(fixture.router());
+    fresh.initialize().await;
+    fresh
+        .request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "cwd": ROOT,
+                "mcpServers": [],
+            }),
+        )
+        .await;
+    fixture.fail_next_attach("attach provider failed");
+    let (attach_failure, _) = regression_case_phase(
+        "typed attach failure",
+        fresh.request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session.clone(),
+                "prompt": [{ "type": "text", "text": "attach failure" }],
+            }),
+        ),
+    )
+    .await;
+    let attach_data = attach_failure["error"]["data"].as_str().unwrap_or_default();
+    assert!(
+        attach_failure.get("error").is_some() && attach_data.contains("attach provider failed"),
+        "attach failure was not typed or diagnostic-preserving: {attach_failure}"
+    );
+    fresh.abort().await;
+
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    fixture.fail_next_submit("submit provider failed");
+    let (submit_failure, _) = regression_case_phase(
+        "typed submit failure",
+        connection.request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "submit failure" }],
+            }),
+        ),
+    )
+    .await;
+    let submit_data = submit_failure["error"]["data"].as_str().unwrap_or_default();
+    assert!(
+        submit_failure.get("error").is_some() && submit_data.contains("submit provider failed"),
+        "submit failure was not typed or diagnostic-preserving: {submit_failure}"
+    );
+    connection.abort().await;
 }
 
 #[tokio::test]

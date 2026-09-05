@@ -21,9 +21,9 @@ use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::public::project_public;
 use ego_core::run::{
     EventSinkFactory, IdSource, RecoveryEvidence, RequestDigest, RequestId, RunAppend,
-    RunCommandOutcome, RunController, RunError, RunExecutionBindings, RunExecutor,
+    RunAttachment, RunCommandOutcome, RunController, RunError, RunExecutionBindings, RunExecutor,
     RunExecutorError, RunHandle, RunOrigin, RunPreparation, RunPrepared, RunRetention, RunRoot,
-    RunSettlement, RunStart, RunTransaction, StartRequest,
+    RunSettlement, RunTransaction, StartRequest,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::SessionState;
@@ -240,9 +240,9 @@ mod regression_case {
             Box::pin(future::ready(Ok(EvidenceWrite::Published)))
         }
 
-        fn start<'a>(
+        fn attach<'a>(
             &'a self,
-            request: &'a RunStart,
+            request: &'a RunAttachment,
         ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
             Box::pin(future::ready(Ok(RunHandle::new(request.run_id, ()))))
         }

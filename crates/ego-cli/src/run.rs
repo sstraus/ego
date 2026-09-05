@@ -65,10 +65,10 @@ use ego_core::question::{
     AskQuestionTool, Elicitor, QuestionAnswer, QuestionError, QuestionOutcome, QuestionTarget,
 };
 use ego_core::run::{
-    CancelReason, DeniedBy, IdSource, RecoveryEvidence, RequestId, RunController,
+    CancelReason, DeniedBy, IdSource, RecoveryEvidence, RequestId, RunAttachment, RunController,
     RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
-    RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement, RunSnapshot, RunStart,
-    RunTermination, Signal,
+    RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement, RunSnapshot, RunTermination,
+    Signal,
 };
 use ego_core::session::{ReplaySource, ReplaySourceError};
 use ego_core::session_lifecycle::{LeasedSharedJournal, SessionMetadata};
@@ -4171,9 +4171,9 @@ impl RunExecutor for CliRunExecutor {
         })
     }
 
-    fn start<'a>(
+    fn attach<'a>(
         &'a self,
-        request: &'a RunStart,
+        request: &'a RunAttachment,
     ) -> futures::future::BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
         Box::pin(async move {
             Ok(RunHandle::new(
@@ -7766,9 +7766,9 @@ mod tests {
             Box::pin(std::future::ready(Ok(EvidenceWrite::Published)))
         }
 
-        fn start<'a>(
+        fn attach<'a>(
             &'a self,
-            request: &'a RunStart,
+            request: &'a RunAttachment,
         ) -> futures::future::BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
             Box::pin(std::future::ready(Ok(RunHandle::new(request.run_id, ()))))
         }

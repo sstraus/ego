@@ -31,9 +31,9 @@ use ego_core::hook::{
 };
 use ego_core::permit::{GuardedEffects, GuardedIo, Op, PreparedCall};
 use ego_core::run::{
-    EventSinkFactory, IdSource, RecoveryEvidence, RunController, RunExecutionBindings, RunExecutor,
-    RunExecutorError, RunFuture, RunHandle, RunId, RunPreparation, RunPrepared, RunRetention,
-    RunRoot, RunSelections, RunSettlement, RunStart,
+    EventSinkFactory, IdSource, RecoveryEvidence, RunAttachment, RunController,
+    RunExecutionBindings, RunExecutor, RunExecutorError, RunFuture, RunHandle, RunId,
+    RunPreparation, RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement,
 };
 use ego_core::sink::NullSink;
 use ego_core::skill::{
@@ -934,9 +934,9 @@ impl RunExecutor for ChildExecutor {
         Box::pin(futures::future::ready(Ok(EvidenceWrite::Published)))
     }
 
-    fn start<'a>(
+    fn attach<'a>(
         &'a self,
-        request: &'a RunStart,
+        request: &'a RunAttachment,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
         Box::pin(futures::future::ready(Ok(RunHandle::new(
             request.run_id,

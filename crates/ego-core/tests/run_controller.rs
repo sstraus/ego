@@ -21,10 +21,10 @@ use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::run::{
     CancelKey, CancelRequest, ContinueRequest, EventSinkFactory, IdSource, RequestDigest,
-    RequestId, RunAdmission, RunAppend, RunCommandOutcome, RunController, RunExecution,
-    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
-    RunPrepared, RunRecoveryOutcome, RunRetention, RunRevision, RunRoot, RunSelections,
-    RunSettlement, RunStart, RunStatus, RunTransaction, StartRequest,
+    RequestId, RunAdmission, RunAppend, RunAttachment, RunCommandOutcome, RunController,
+    RunExecution, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId,
+    RunPreparation, RunPrepared, RunRecoveryOutcome, RunRetention, RunRevision, RunRoot,
+    RunSelections, RunSettlement, RunStatus, RunTransaction, StartRequest,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -177,7 +177,7 @@ impl SessionStore for RecordingSessionStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ExecutorCall {
     Prepare,
-    Start(RunId),
+    Attach(RunId),
     Recover(RunId),
     Observe(RunId),
     Submit(RunId),
@@ -186,9 +186,11 @@ enum ExecutorCall {
 
 struct ScriptedRunExecutor {
     calls: Mutex<Vec<ExecutorCall>>,
+    attachments: Mutex<VecDeque<Result<RunHandle, RunExecutorError>>>,
     recoveries: Mutex<VecDeque<Result<ego_core::run::RecoveryEvidence, RunExecutorError>>>,
     observations: Mutex<VecDeque<Result<RunSettlement, RunExecutorError>>>,
     submissions: Mutex<VecDeque<Result<RunSettlement, RunExecutorError>>>,
+    interrupts: Mutex<VecDeque<Result<(), RunExecutorError>>>,
     next_prepared: Mutex<u64>,
     prepared_models: Mutex<VecDeque<ModelRef>>,
     prepared_selections: Mutex<Vec<RunSelections>>,
@@ -198,6 +200,7 @@ struct ScriptedRunExecutor {
     submit_gate_changed: Condvar,
     started_roots: Mutex<Vec<(RunId, RunRoot)>>,
     started_models: Mutex<Vec<(RunId, ModelRef)>>,
+    attached_origins: Mutex<Vec<ego_core::run::RunOrigin>>,
     authorities: Mutex<Vec<Arc<RecordingAuthority>>>,
     start_barrier: Option<Arc<Barrier>>,
     sequence: Arc<Mutex<Vec<&'static str>>>,
@@ -240,9 +243,11 @@ impl ScriptedRunExecutor {
     fn with_sequence(sequence: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            attachments: Mutex::new(VecDeque::new()),
             recoveries: Mutex::new(VecDeque::new()),
             observations: Mutex::new(VecDeque::new()),
             submissions: Mutex::new(VecDeque::new()),
+            interrupts: Mutex::new(VecDeque::new()),
             next_prepared: Mutex::new(0),
             prepared_models: Mutex::new(VecDeque::new()),
             prepared_selections: Mutex::new(Vec::new()),
@@ -252,6 +257,7 @@ impl ScriptedRunExecutor {
             submit_gate_changed: Condvar::new(),
             started_roots: Mutex::new(Vec::new()),
             started_models: Mutex::new(Vec::new()),
+            attached_origins: Mutex::new(Vec::new()),
             authorities: Mutex::new(Vec::new()),
             start_barrier: None,
             sequence,
@@ -279,6 +285,13 @@ impl ScriptedRunExecutor {
             .push_back(result);
     }
 
+    fn attachment_result(&self, result: Result<RunHandle, RunExecutorError>) {
+        self.attachments
+            .lock()
+            .expect("executor attachments")
+            .push_back(result);
+    }
+
     fn observation_result(&self, result: Result<RunSettlement, RunExecutorError>) {
         self.observations
             .lock()
@@ -290,6 +303,13 @@ impl ScriptedRunExecutor {
         self.submissions
             .lock()
             .expect("executor submissions")
+            .push_back(result);
+    }
+
+    fn interrupt_result(&self, result: Result<(), RunExecutorError>) {
+        self.interrupts
+            .lock()
+            .expect("executor interrupts")
             .push_back(result);
     }
 
@@ -348,6 +368,13 @@ impl ScriptedRunExecutor {
 
     fn started_models(&self) -> Vec<(RunId, ModelRef)> {
         self.started_models.lock().expect("started models").clone()
+    }
+
+    fn attached_origins(&self) -> Vec<ego_core::run::RunOrigin> {
+        self.attached_origins
+            .lock()
+            .expect("attached origins")
+            .clone()
     }
 
     fn authority_observations(&self) -> Vec<RunId> {
@@ -415,9 +442,9 @@ impl RunExecutor for ScriptedRunExecutor {
         ))))
     }
 
-    fn start<'a>(
+    fn attach<'a>(
         &'a self,
-        request: &'a RunStart,
+        request: &'a RunAttachment,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
         let run = request.run_id;
         if let Some(barrier) = self.start_barrier.as_ref() {
@@ -431,20 +458,30 @@ impl RunExecutor for ScriptedRunExecutor {
             .lock()
             .expect("started models")
             .push((run, request.model.clone()));
+        self.attached_origins
+            .lock()
+            .expect("attached origins")
+            .push(request.origin.clone());
         self.sequence
             .lock()
             .expect("transaction sequence")
-            .push("start");
+            .push("attach");
         self.calls
             .lock()
             .expect("executor calls")
-            .push(ExecutorCall::Start(run));
+            .push(ExecutorCall::Attach(run));
         let authority = Arc::new(RecordingAuthority::default());
         self.authorities
             .lock()
             .expect("executor authorities")
             .push(Arc::clone(&authority));
-        Box::pin(future::ready(Ok(RunHandle::new(run, authority))))
+        let result = self
+            .attachments
+            .lock()
+            .expect("executor attachments")
+            .pop_front()
+            .unwrap_or_else(|| Ok(RunHandle::new(run, authority)));
+        Box::pin(future::ready(result))
     }
 
     fn recover<'a>(
@@ -567,7 +604,13 @@ impl RunExecutor for ScriptedRunExecutor {
         if let Some(waker) = waker {
             waker.wake();
         }
-        Box::pin(future::ready(Ok(())))
+        let result = self
+            .interrupts
+            .lock()
+            .expect("executor interrupts")
+            .pop_front()
+            .unwrap_or(Ok(()));
+        Box::pin(future::ready(result))
     }
 }
 
@@ -883,7 +926,7 @@ fn revision_one_is_atomically_published_before_any_executor_start() {
     execute(&controller, admission.into_execution());
     assert_eq!(
         sequence.lock().expect("transaction sequence").as_slice(),
-        ["prepare", "commit", "start", "submit", "commit"]
+        ["prepare", "commit", "attach", "submit", "commit"]
     );
     assert_eq!(store.transactions(session).len(), 2);
     assert!(matches!(
@@ -902,7 +945,7 @@ fn revision_one_is_atomically_published_before_any_executor_start() {
         executor.calls(),
         vec![
             ExecutorCall::Prepare,
-            ExecutorCall::Start(run),
+            ExecutorCall::Attach(run),
             ExecutorCall::Submit(run),
         ]
     );
@@ -1056,9 +1099,417 @@ fn submit_error_publishes_uncertain_settlement_and_completes_subscription() {
         executor.calls(),
         vec![
             ExecutorCall::Prepare,
-            ExecutorCall::Start(run),
+            ExecutorCall::Attach(run),
             ExecutorCall::Submit(run),
         ]
+    );
+}
+
+#[test]
+fn a_settlement_whose_durability_is_uncertain_still_completes_its_subscription() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/uncertain-settlement", 8, "settle"));
+    let subscription = admission.subscription();
+    executor.allow_effects();
+    store.fail_next(StoreFault::PublishedUncertain);
+
+    let error = futures::executor::block_on(controller.execute(admission.into_execution()))
+        .expect_err("an uncertain settlement publication must reach the caller");
+    assert!(
+        error
+            .to_string()
+            .contains("publication durability uncertain"),
+        "the settlement diagnostic was lost: {error}"
+    );
+    // The turn is over for anyone waiting on it. A settlement this process
+    // cannot confirm is terminal *and* uncertain, so the observer is released
+    // with that outcome rather than left waiting for a wake that never comes.
+    let settled = futures::executor::block_on(subscription);
+    assert_eq!(settled.status(), RunStatus::Uncertain);
+    assert_eq!(settled.settlement(), Some(&RunSettlement::Uncertain));
+}
+
+#[test]
+fn terminal_continuation_on_a_fresh_controller_attaches_once_and_preserves_identity() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let first_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let first = admitted_start(&first_controller, start("/terminal", 101, "first"));
+    let run = first.run_id();
+    executor.allow_effects();
+    execute(&first_controller, first.into_execution());
+    let settled = futures::executor::block_on(first_controller.status(run)).expect("settled start");
+    let fresh_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let continuation = admitted_continue(
+        &fresh_controller,
+        ContinueRequest::new(
+            run,
+            request(102),
+            digest("terminal-continuation"),
+            settled.revision(),
+            "continue after close",
+        ),
+    );
+    assert_eq!(continuation.run_id(), run);
+    let subscription = continuation.subscription();
+    execute(&fresh_controller, continuation.into_execution());
+    let final_status = futures::executor::block_on(subscription);
+    assert_eq!(final_status.status(), RunStatus::Settled);
+    assert_eq!(final_status.run_id(), run);
+    assert_eq!(final_status.root(), RunRoot::new("/terminal").unwrap());
+    assert_eq!(executor.attached_origins().len(), 2);
+    assert_eq!(
+        executor.attached_origins()[0],
+        executor.attached_origins()[1]
+    );
+    assert_eq!(executor.started_models().len(), 2);
+    assert_eq!(executor.started_models()[0], executor.started_models()[1]);
+    assert_eq!(executor.started_roots().len(), 2);
+    assert_eq!(executor.started_roots()[0], executor.started_roots()[1]);
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Attach(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Submit(_)))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn cancel_and_settle_removes_cached_handle_before_fresh_controller_continuation() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let first_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let first = admitted_start(&first_controller, start("/closed", 112, "first"));
+    let run = first.run_id();
+    executor.allow_effects();
+    execute(&first_controller, first.into_execution());
+    let closed = futures::executor::block_on(
+        ego_core::session_lifecycle::SessionRunLifecycle::cancel_and_settle(
+            &first_controller,
+            run.session_id(),
+        ),
+    )
+    .expect("terminal cancel_and_settle");
+    assert!(!closed.cancelled);
+
+    let settled = futures::executor::block_on(first_controller.status(run)).expect("settled run");
+    let fresh_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let continuation = admitted_continue(
+        &fresh_controller,
+        ContinueRequest::new(
+            run,
+            request(113),
+            digest("after-close"),
+            settled.revision(),
+            "after close",
+        ),
+    );
+    let subscription = continuation.subscription();
+    execute(&fresh_controller, continuation.into_execution());
+    assert_eq!(
+        futures::executor::block_on(subscription).status(),
+        RunStatus::Settled
+    );
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Attach(_)))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn cancellation_between_continuation_admission_and_attach_interrupts_before_cancelled_submit() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let first_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let first = admitted_start(
+        &first_controller,
+        start("/cancel-before-attach", 103, "first"),
+    );
+    let run = first.run_id();
+    executor.allow_effects();
+    execute(&first_controller, first.into_execution());
+    let settled = futures::executor::block_on(first_controller.status(run)).expect("settled start");
+    let fresh_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let continuation = admitted_continue(
+        &fresh_controller,
+        ContinueRequest::new(
+            run,
+            request(104),
+            digest("cancel-before-attach"),
+            settled.revision(),
+            "cancel before attach",
+        ),
+    );
+    let key = continuation.cancel_key().clone();
+    let subscription = continuation.subscription();
+    let cancelling = futures::executor::block_on(fresh_controller.cancel_admitted(&key))
+        .expect("continuation cancellation");
+    assert_eq!(cancelling.status(), RunStatus::Cancelling);
+    execute(&fresh_controller, continuation.into_execution());
+    let cancelled = futures::executor::block_on(subscription);
+    assert_eq!(cancelled.status(), RunStatus::Cancelled);
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Attach(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Interrupt(_)))
+            .count(),
+        1
+    );
+    let calls = executor.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Submit(_)))
+            .count(),
+        2,
+        "cancellation remains latched while the continuation submit is attempted"
+    );
+    let continuation_attach = calls
+        .iter()
+        .rposition(|call| matches!(call, ExecutorCall::Attach(_)))
+        .expect("continuation attachment");
+    let continuation_interrupt = calls
+        .iter()
+        .rposition(|call| matches!(call, ExecutorCall::Interrupt(_)))
+        .expect("continuation interrupt");
+    let continuation_submit = calls
+        .iter()
+        .rposition(|call| matches!(call, ExecutorCall::Submit(_)))
+        .expect("continuation submit");
+    assert!(continuation_attach < continuation_interrupt);
+    assert!(continuation_interrupt < continuation_submit);
+}
+
+#[test]
+fn exact_terminal_continuation_replay_does_not_attach_or_submit_again() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let first_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let first = admitted_start(&first_controller, start("/replay", 105, "first"));
+    let run = first.run_id();
+    executor.allow_effects();
+    execute(&first_controller, first.into_execution());
+    let settled = futures::executor::block_on(first_controller.status(run)).expect("settled start");
+    let fresh_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let continuation_request = ContinueRequest::new(
+        run,
+        request(106),
+        digest("exact-continuation"),
+        settled.revision(),
+        "exact continuation",
+    );
+    let continuation = admitted_continue(&fresh_controller, continuation_request);
+    execute(&fresh_controller, continuation.into_execution());
+    let calls_before_replay = executor.calls();
+    let replay = continue_command(
+        &fresh_controller,
+        ContinueRequest::new(
+            run,
+            request(106),
+            digest("exact-continuation"),
+            settled.revision(),
+            "exact continuation",
+        ),
+    )
+    .expect("exact continuation replay");
+    assert!(matches!(replay, RunCommandOutcome::Replayed(_)));
+    assert_eq!(executor.calls(), calls_before_replay);
+}
+
+#[test]
+fn attach_failure_settles_uncertain_and_completes_the_continuation_subscription() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let first_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let first = admitted_start(&first_controller, start("/attach-error", 107, "first"));
+    let run = first.run_id();
+    executor.allow_effects();
+    execute(&first_controller, first.into_execution());
+    let settled = futures::executor::block_on(first_controller.status(run)).expect("settled start");
+    let fresh_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let continuation = admitted_continue(
+        &fresh_controller,
+        ContinueRequest::new(
+            run,
+            request(108),
+            digest("attach-error"),
+            settled.revision(),
+            "attach failure",
+        ),
+    );
+    let subscription = continuation.subscription();
+    executor.attachment_result(Err(RunExecutorError::new("attachment failed")));
+    let error =
+        futures::executor::block_on(fresh_controller.execute(continuation.into_execution()))
+            .expect_err("attach failure must reach the caller");
+    assert!(matches!(
+        error,
+        ego_core::run::RunError::Executor(error) if error.to_string() == "attachment failed"
+    ));
+    let settled = futures::executor::block_on(subscription);
+    assert_eq!(settled.status(), RunStatus::Uncertain);
+    assert_eq!(settled.settlement(), Some(&RunSettlement::Uncertain));
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Submit(_)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn cancelling_continuation_interrupt_failure_settles_uncertain_without_orphaning() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let first_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let first = admitted_start(&first_controller, start("/interrupt-error", 114, "first"));
+    let run = first.run_id();
+    executor.allow_effects();
+    execute(&first_controller, first.into_execution());
+    let settled = futures::executor::block_on(first_controller.status(run)).expect("settled start");
+    let fresh_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let continuation = admitted_continue(
+        &fresh_controller,
+        ContinueRequest::new(
+            run,
+            request(115),
+            digest("interrupt-error"),
+            settled.revision(),
+            "interrupt failure",
+        ),
+    );
+    let key = continuation.cancel_key().clone();
+    let subscription = continuation.subscription();
+    futures::executor::block_on(fresh_controller.cancel_admitted(&key)).expect("cancel admission");
+    executor.interrupt_result(Err(RunExecutorError::new("interrupt failed")));
+    let error =
+        futures::executor::block_on(fresh_controller.execute(continuation.into_execution()))
+            .expect_err("interrupt failure must reach the caller");
+    assert!(matches!(
+        error,
+        ego_core::run::RunError::Executor(error) if error.to_string() == "interrupt failed"
+    ));
+    let settled = futures::executor::block_on(subscription);
+    assert_eq!(settled.status(), RunStatus::Uncertain);
+}
+
+#[test]
+fn recovered_observe_failure_settles_uncertain_and_completes_subscription() {
+    let (controller, _store, executor, run, _original_cancel_key) = recovery_controller();
+    executor.recovery_result(Ok(ego_core::run::RecoveryEvidence::Running(
+        RunHandle::new(run, Arc::new(RecordingAuthority::default())),
+    )));
+    executor.observation_result(Err(RunExecutorError::new("observe failed")));
+    let recovery =
+        futures::executor::block_on(controller.recover(run, bindings())).expect("running recovery");
+    let reattachment = match recovery {
+        RunRecoveryOutcome::Reattached(reattachment) => reattachment,
+        RunRecoveryOutcome::Observed(_) => panic!("running recovery did not reattach"),
+    };
+    let subscription = reattachment.subscription();
+    let error = futures::executor::block_on(controller.execute(reattachment.into_execution()))
+        .expect_err("observe failure must reach the caller");
+    assert!(matches!(
+        error,
+        ego_core::run::RunError::Executor(error) if error.to_string() == "observe failed"
+    ));
+    assert_eq!(
+        futures::executor::block_on(subscription).status(),
+        RunStatus::Uncertain
+    );
+}
+
+#[test]
+fn wrong_attachment_run_id_is_interrupted_without_submit_or_orphaned_subscription() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let first_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let first = admitted_start(&first_controller, start("/wrong-attach", 109, "first"));
+    let run = first.run_id();
+    executor.allow_effects();
+    execute(&first_controller, first.into_execution());
+    let settled = futures::executor::block_on(first_controller.status(run)).expect("settled start");
+    let fresh_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let continuation = admitted_continue(
+        &fresh_controller,
+        ContinueRequest::new(
+            run,
+            request(110),
+            digest("wrong-attach"),
+            settled.revision(),
+            "wrong attachment",
+        ),
+    );
+    let subscription = continuation.subscription();
+    let wrong_run = RunId::new(run.session_id(), uuid::Uuid::from_u128(999_999));
+    executor.attachment_result(Ok(RunHandle::new(
+        wrong_run,
+        Arc::new(RecordingAuthority::default()),
+    )));
+    let error =
+        futures::executor::block_on(fresh_controller.execute(continuation.into_execution()))
+            .expect_err("wrong attachment identity must fail closed");
+    assert!(matches!(error, ego_core::run::RunError::Integrity { .. }));
+    let settled = futures::executor::block_on(subscription);
+    assert_eq!(settled.status(), RunStatus::Interrupted);
+    assert_eq!(settled.settlement(), Some(&RunSettlement::Interrupted));
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Submit(_)))
+            .count(),
+        1,
+        "wrong attachment identity must prevent a second submit"
+    );
+}
+
+#[test]
+fn settlement_failure_preserves_execution_and_settlement_diagnostics() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    executor.submission_result(Err(RunExecutorError::new("submission failed")));
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/settlement-error", 111, "failure"));
+    store.fail_next(StoreFault::Reject);
+    executor.allow_effects();
+    let error = futures::executor::block_on(controller.execute(admission.into_execution()))
+        .expect_err("execution and settlement failures must both reach the caller");
+    let diagnostic = error.to_string();
+    assert!(
+        diagnostic.contains("submission failed"),
+        "missing execution diagnostic: {error}"
+    );
+    assert!(
+        diagnostic.contains("rejected"),
+        "missing settlement diagnostic: {error}"
     );
 }
 
@@ -1456,8 +1907,8 @@ fn continuation_rejects_a_prepared_model_that_differs_from_persisted_identity() 
     executor.allow_effects();
     execute(&controller, admission.into_execution());
     let status = futures::executor::block_on(controller.status(run)).expect("settled start");
-    let transactions_before = store.transactions(session);
     let calls_before = executor.calls();
+    let transactions_before = store.transactions(session);
     executor.prepare_model(model_ref("model/other"));
 
     let result = continue_command(
@@ -1474,10 +1925,10 @@ fn continuation_rejects_a_prepared_model_that_differs_from_persisted_identity() 
         result,
         Err(ego_core::run::RunError::Integrity { .. })
     ));
-    assert_eq!(store.transactions(session), transactions_before);
     let mut expected_calls = calls_before;
     expected_calls.push(ExecutorCall::Prepare);
     assert_eq!(executor.calls(), expected_calls);
+    assert_eq!(store.transactions(session), transactions_before);
     assert_eq!(
         futures::executor::block_on(controller.status(run))
             .expect("status after model mismatch")
@@ -1542,7 +1993,7 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
     assert_eq!(
         sequence.lock().expect("transaction sequence").as_slice(),
         [
-            "prepare", "commit", "start", "submit", "commit", "prepare", "commit"
+            "prepare", "commit", "attach", "submit", "commit", "prepare", "commit"
         ]
     );
 
@@ -1554,7 +2005,7 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
         executor.calls(),
         vec![
             ExecutorCall::Prepare,
-            ExecutorCall::Start(run),
+            ExecutorCall::Attach(run),
             ExecutorCall::Submit(run),
             ExecutorCall::Prepare,
             ExecutorCall::Submit(run),
@@ -1563,7 +2014,7 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
     assert_eq!(
         sequence.lock().expect("transaction sequence").as_slice(),
         [
-            "prepare", "commit", "start", "submit", "commit", "prepare", "commit", "submit"
+            "prepare", "commit", "attach", "submit", "commit", "prepare", "commit", "submit"
         ]
     );
 
@@ -1575,7 +2026,7 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
         [
             "prepare",
             "commit",
-            "start",
+            "attach",
             "submit",
             "commit",
             "prepare",
@@ -1591,7 +2042,7 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
         [
             "prepare",
             "commit",
-            "start",
+            "attach",
             "submit",
             "commit",
             "prepare",
@@ -1628,7 +2079,7 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
         executor.calls(),
         vec![
             ExecutorCall::Prepare,
-            ExecutorCall::Start(run),
+            ExecutorCall::Attach(run),
             ExecutorCall::Submit(run),
             ExecutorCall::Prepare,
             ExecutorCall::Submit(run),
@@ -1998,7 +2449,7 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
         executor
             .calls()
             .iter()
-            .filter(|call| matches!(call, ExecutorCall::Start(_)))
+            .filter(|call| matches!(call, ExecutorCall::Attach(_)))
             .count(),
         1
     );
@@ -2126,11 +2577,11 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
         executor
             .calls()
             .iter()
-            .filter(|call| matches!(call, ExecutorCall::Start(_) | ExecutorCall::Submit(_)))
+            .filter(|call| matches!(call, ExecutorCall::Attach(_) | ExecutorCall::Submit(_)))
             .count(),
         calls_before_pruned_resubmit
             .iter()
-            .filter(|call| matches!(call, ExecutorCall::Start(_) | ExecutorCall::Submit(_)))
+            .filter(|call| matches!(call, ExecutorCall::Attach(_) | ExecutorCall::Submit(_)))
             .count()
     );
     execute(&controller, pruned_continuation.into_execution());
@@ -2249,7 +2700,7 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
         executor
             .calls()
             .iter()
-            .filter(|call| matches!(call, ExecutorCall::Start(_)))
+            .filter(|call| matches!(call, ExecutorCall::Attach(_)))
             .count(),
         1
     );

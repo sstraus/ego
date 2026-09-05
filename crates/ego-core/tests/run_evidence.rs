@@ -16,10 +16,10 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::public::{InstructionDescriptor, InstructionSource};
 use ego_core::run::{
-    EventSinkFactory, IdSource, RecoveryEvidence, RunAppend, RunCommandOutcome, RunController,
-    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
-    RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement, RunStart, RunTransaction,
-    StartRequest,
+    EventSinkFactory, IdSource, RecoveryEvidence, RunAppend, RunAttachment, RunCommandOutcome,
+    RunController, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId,
+    RunPreparation, RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement,
+    RunTransaction, StartRequest,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -394,9 +394,9 @@ impl RunExecutor for FakeRunExecutor {
         ))
     }
 
-    fn start<'a>(
+    fn attach<'a>(
         &'a self,
-        request: &'a RunStart,
+        request: &'a RunAttachment,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
         self.sequence.lock().unwrap().push("start");
         Box::pin(future::ready(Ok(RunHandle::new(request.run_id, ()))))

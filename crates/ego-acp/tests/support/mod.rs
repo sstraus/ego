@@ -30,9 +30,9 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::{
-    IdSource, RequestId, RunAppend, RunController, RunExecutionBindings, RunExecutor,
-    RunExecutorError, RunFuture, RunHandle, RunPreparation, RunPrepared, RunRetention, RunRevision,
-    RunRoot, RunSelections, RunSettlement, RunStart, RunStatus, RunTransaction, StartRequest,
+    IdSource, RequestId, RunAppend, RunAttachment, RunCommand, RunController, RunExecutionBindings,
+    RunExecutor, RunExecutorError, RunFuture, RunHandle, RunPreparation, RunPrepared, RunRetention,
+    RunRevision, RunRoot, RunSelections, RunSettlement, RunStatus, RunTransaction, StartRequest,
 };
 use ego_core::session::{
     ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
@@ -283,6 +283,14 @@ impl DurableAcpFixture {
         )
     }
 
+    pub fn executor_effect_counts(&self) -> (usize, usize, usize) {
+        (
+            self.executor.attach_calls.load(Ordering::SeqCst),
+            self.executor.submit_calls.load(Ordering::SeqCst),
+            self.executor.observe_calls.load(Ordering::SeqCst),
+        )
+    }
+
     pub fn has_run(&self, session: &str) -> bool {
         let Ok(session) = session.parse::<SessionId>() else {
             return false;
@@ -301,6 +309,26 @@ impl DurableAcpFixture {
 
     pub fn block_next_turn(&self) {
         self.executor.block_next.store(true, Ordering::SeqCst);
+    }
+
+    pub fn fail_next_attach(&self, diagnostic: &str) {
+        *self.executor.attach_error.lock().expect("attach failure") = Some(diagnostic.to_owned());
+    }
+
+    pub fn fail_next_submit(&self, diagnostic: &str) {
+        *self.executor.submit_error.lock().expect("submit failure") = Some(diagnostic.to_owned());
+    }
+
+    pub fn fail_next_settlement_publication(&self, diagnostic: &str) {
+        *self
+            .store
+            .uncertain_settlement
+            .lock()
+            .expect("uncertain settlement") = Some(diagnostic.to_owned());
+    }
+
+    pub fn fail_next_observe(&self, diagnostic: &str) {
+        *self.executor.observe_error.lock().expect("observe failure") = Some(diagnostic.to_owned());
     }
 
     pub async fn turn_began(&self) {
@@ -412,6 +440,7 @@ struct Store {
     entries: Arc<Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>>,
     metadata: Arc<Mutex<BTreeMap<SessionId, SessionMeta>>>,
     effects: Arc<EffectCounts>,
+    uncertain_settlement: Arc<Mutex<Option<String>>>,
 }
 
 impl Store {
@@ -420,6 +449,7 @@ impl Store {
             entries: Arc::default(),
             metadata: Arc::default(),
             effects,
+            uncertain_settlement: Arc::default(),
         }
     }
 }
@@ -482,11 +512,22 @@ impl SessionStore for Store {
             };
         }
         let revision = transaction.revision();
+        let uncertain = matches!(transaction.command(), RunCommand::CommandSettled { .. })
+            .then(|| {
+                self.uncertain_settlement
+                    .lock()
+                    .expect("uncertain settlement")
+                    .take()
+            })
+            .flatten();
         entries
             .entry(*session)
             .or_default()
             .push(SessionEntry::RunTransaction(transaction));
-        Ok(RunAppend::Committed { revision })
+        match uncertain {
+            Some(diagnostic) => Ok(RunAppend::CommittedDurabilityUncertain { diagnostic }),
+            None => Ok(RunAppend::Committed { revision }),
+        }
     }
 }
 
@@ -676,6 +717,12 @@ struct Executor {
     block_next: AtomicBool,
     recover_running: AtomicBool,
     block_observe: AtomicBool,
+    attach_calls: AtomicUsize,
+    submit_calls: AtomicUsize,
+    observe_calls: AtomicUsize,
+    attach_error: Mutex<Option<String>>,
+    submit_error: Mutex<Option<String>>,
+    observe_error: Mutex<Option<String>>,
     started: Notify,
     release: Notify,
     observe_started: Notify,
@@ -723,10 +770,14 @@ impl RunExecutor for Executor {
         Box::pin(future::ready(Ok(EvidenceWrite::Published)))
     }
 
-    fn start<'a>(
+    fn attach<'a>(
         &'a self,
-        request: &'a RunStart,
+        request: &'a RunAttachment,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
+        self.attach_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(diagnostic) = self.attach_error.lock().expect("attach failure").take() {
+            return Box::pin(future::ready(Err(RunExecutorError::new(diagnostic))));
+        }
         Box::pin(future::ready(Ok(RunHandle::new(
             request.run_id,
             Arc::new(AtomicBool::new(false)),
@@ -752,7 +803,11 @@ impl RunExecutor for Executor {
         handle: &'a RunHandle,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        self.observe_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
+            if let Some(diagnostic) = self.observe_error.lock().expect("observe failure").take() {
+                return Err(RunExecutorError::new(diagnostic));
+            }
             if self.block_observe.swap(false, Ordering::SeqCst) {
                 self.observe_started.notify_one();
                 self.observe_release.notified().await;
@@ -780,7 +835,11 @@ impl RunExecutor for Executor {
         _prepared: Self::Prepared,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        self.submit_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
+            if let Some(diagnostic) = self.submit_error.lock().expect("submit failure").take() {
+                return Err(RunExecutorError::new(diagnostic));
+            }
             if self.block_next.swap(false, Ordering::SeqCst) {
                 self.started.notify_one();
                 self.release.notified().await;
