@@ -18,7 +18,7 @@ use ego_core::turn::{CancelToken, ToolEffectPorts, Tools};
 use crate::store::SessionEvidenceStore;
 
 use super::backend::{Backend, MeasuredBackend};
-use super::{ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts};
+use super::{ExecLimits, ExecRunConfig, HttpCallTimeout, ProbeLog, ProbeRecord, RunEffectPorts};
 
 #[cfg(target_os = "linux")]
 use super::landlock::{LandlockBackend, derived_runtime_roots};
@@ -30,6 +30,7 @@ pub(crate) async fn landlock(
     policy: &RunConfinement,
     cancel: CancelToken,
     limits: ExecLimits,
+    log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
     if policy.offline() {
         let missing = policy
@@ -56,20 +57,15 @@ pub(crate) async fn landlock(
     let maximum = backend.maximum_demonstrable_caps();
     let cache_key = cache_key(policy, backend.as_ref(), &runtime_roots)?;
     let cached = cached_capabilities(cache_key);
-    let capabilities = *cached
+    let measurement = cached
         .get_or_try_init(|| async {
-            let evidence_root = tempfile::tempdir().map_err(|error| {
-                ProcessError::Backend(format!("cannot create probe evidence root: {error}"))
-            })?;
-            let evidence =
-                SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), 1024 * 1024)
-                    .map_err(ProcessError::Evidence)?;
+            let evidence = probe_evidence()?;
             let capabilities = measure(
                 backend.clone(),
                 policy,
                 &scratch_path,
                 &runtime_roots,
-                evidence,
+                evidence.clone(),
                 cancel.clone(),
                 limits,
             )
@@ -78,9 +74,14 @@ pub(crate) async fn landlock(
                 return Err(ProcessError::Cancelled);
             }
             clear_scratch(scratch.path())?;
-            Ok(capabilities)
+            Ok(Measurement {
+                capabilities,
+                records: evidence.log.snapshot(),
+            })
         })
         .await?;
+    log.extend(&measurement.records);
+    let capabilities = measurement.capabilities;
     let selected = Arc::new(MeasuredBackend::new(backend, capabilities, Some(scratch))?);
     policy
         .requirements()
@@ -94,6 +95,7 @@ pub(crate) async fn seatbelt(
     policy: &RunConfinement,
     cancel: CancelToken,
     limits: ExecLimits,
+    log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
     let scratch = private_scratch()?;
     let scratch_path = canonical_scratch(&scratch)?;
@@ -107,14 +109,9 @@ pub(crate) async fn seatbelt(
     let maximum = backend.maximum_demonstrable_caps();
     let cache_key = cache_key(policy, backend.as_ref(), &runtime_roots)?;
     let cached = cached_capabilities(cache_key);
-    let capabilities = *cached
+    let measurement = cached
         .get_or_try_init(|| async {
-            let evidence_root = tempfile::tempdir().map_err(|error| {
-                ProcessError::Backend(format!("cannot create probe evidence root: {error}"))
-            })?;
-            let evidence =
-                SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), 1024 * 1024)
-                    .map_err(ProcessError::Evidence)?;
+            let evidence = probe_evidence()?;
             let mut capabilities = measure(
                 backend.clone(),
                 policy,
@@ -141,15 +138,76 @@ pub(crate) async fn seatbelt(
                 return Err(ProcessError::Cancelled);
             }
             clear_scratch(scratch.path())?;
-            Ok(capabilities)
+            Ok(Measurement {
+                capabilities,
+                records: evidence.log.snapshot(),
+            })
         })
         .await?;
+    log.extend(&measurement.records);
+    let capabilities = measurement.capabilities;
     let selected = Arc::new(MeasuredBackend::new(backend, capabilities, Some(scratch))?);
     policy
         .requirements()
         .check(selected.maximum_demonstrable_caps())
         .map_err(ProcessError::MissingCapabilities)?;
     Ok((selected, runtime_roots))
+}
+
+/// The evidence one measurement writes into: the probe children's own output
+/// through a disposable store, and the transcript of what was tried.
+///
+/// The transcript outlives the store on purpose. Probe output is bulk the run
+/// never asked for; the transcript is the part a refusal has to cite.
+#[derive(Clone)]
+struct ProbeEvidence {
+    _root: Arc<tempfile::TempDir>,
+    store: SessionEvidenceStore,
+    log: Arc<ProbeLog>,
+}
+
+fn probe_evidence() -> Result<ProbeEvidence, ProcessError> {
+    let root = tempfile::tempdir().map_err(|error| {
+        ProcessError::Backend(format!("cannot create probe evidence root: {error}"))
+    })?;
+    let store = SessionEvidenceStore::open(root.path(), SessionId::new(), 1024 * 1024)
+        .map_err(ProcessError::Evidence)?;
+    Ok(ProbeEvidence {
+        _root: Arc::new(root),
+        store,
+        log: Arc::new(ProbeLog::default()),
+    })
+}
+
+/// One paired probe group: what it is proving, and where.
+struct ProbeSuite<'a> {
+    name: &'a str,
+    cwd: &'a CanonPath,
+    root: &'a std::path::Path,
+}
+
+impl<'a> ProbeSuite<'a> {
+    /// The unconfined half of a pair. A refusal under the backend proves
+    /// nothing until the same command has been seen to work without it.
+    fn control_name(&self) -> String {
+        format!("{}.control", self.name)
+    }
+
+    fn renamed(&self, name: &'a str) -> ProbeSuite<'a> {
+        ProbeSuite {
+            name,
+            cwd: self.cwd,
+            root: self.root,
+        }
+    }
+}
+
+/// What one measurement established, kept together because a cached
+/// capability without its transcript cannot explain itself.
+#[derive(Clone)]
+struct Measurement {
+    capabilities: ExecCaps,
+    records: Arc<[ProbeRecord]>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -163,7 +221,7 @@ struct CapabilityCacheKey {
     runtime_roots: Vec<CanonPath>,
 }
 
-type CachedCapabilities = tokio::sync::OnceCell<ExecCaps>;
+type CachedCapabilities = tokio::sync::OnceCell<Measurement>;
 
 /// Process-wide measurement facts, never run-owned mechanisms.
 ///
@@ -258,12 +316,17 @@ fn canonical_scratch(scratch: &tempfile::TempDir) -> Result<CanonPath, ProcessEr
 async fn probe_offline(
     backend: Arc<dyn Backend>,
     cwd: &CanonPath,
-    evidence: SessionEvidenceStore,
+    evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
 ) -> bool {
     use std::net::{TcpListener, UdpSocket};
 
+    let network_suite = |name: &'static str| ProbeSuite {
+        name,
+        cwd,
+        root: cwd.as_path(),
+    };
     let Some(nonloopback) = local_nonloopback() else {
         return false;
     };
@@ -287,7 +350,7 @@ async fn probe_offline(
         evidence.clone(),
         cancel.clone(),
         limits,
-        cwd,
+        &network_suite("offline.tcp-loopback"),
     )
     .await
         && paired_udp(
@@ -297,7 +360,7 @@ async fn probe_offline(
             evidence.clone(),
             cancel.clone(),
             limits,
-            cwd,
+            &network_suite("offline.udp-loopback"),
         )
         .await
         && paired_tcp(
@@ -307,7 +370,7 @@ async fn probe_offline(
             evidence.clone(),
             cancel.clone(),
             limits,
-            cwd,
+            &network_suite("offline.tcp-nonloopback"),
         )
         .await
         && paired_udp(
@@ -317,7 +380,7 @@ async fn probe_offline(
             evidence,
             cancel,
             limits,
-            cwd,
+            &network_suite("offline.udp-nonloopback"),
         )
         .await
 }
@@ -335,13 +398,14 @@ async fn paired_tcp(
     listener: &std::net::TcpListener,
     backend: Arc<dyn Backend>,
     baseline: Arc<dyn Backend>,
-    evidence: SessionEvidenceStore,
+    evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
-    cwd: &CanonPath,
+    suite: &ProbeSuite<'_>,
 ) -> bool {
     use std::io::Read as _;
 
+    let control = suite.control_name();
     let Ok(endpoint) = listener.local_addr() else {
         return false;
     };
@@ -354,7 +418,7 @@ async fn paired_tcp(
         evidence.clone(),
         cancel.clone(),
         limits,
-        cwd,
+        &suite.renamed(&control),
         network_probe_argv("tcp", endpoint, &sentinel),
     )
     .await
@@ -390,7 +454,7 @@ async fn paired_tcp(
         evidence,
         cancel,
         limits,
-        cwd,
+        suite,
         network_probe_argv("tcp", endpoint, &sentinel),
     )
     .await
@@ -418,11 +482,12 @@ async fn paired_udp(
     socket: &std::net::UdpSocket,
     backend: Arc<dyn Backend>,
     baseline: Arc<dyn Backend>,
-    evidence: SessionEvidenceStore,
+    evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
-    cwd: &CanonPath,
+    suite: &ProbeSuite<'_>,
 ) -> bool {
+    let control = suite.control_name();
     let Ok(endpoint) = socket.local_addr() else {
         return false;
     };
@@ -432,7 +497,7 @@ async fn paired_udp(
         evidence.clone(),
         cancel.clone(),
         limits,
-        cwd,
+        &suite.renamed(&control),
         network_probe_argv("udp", endpoint, &sentinel),
     )
     .await
@@ -457,7 +522,7 @@ async fn paired_udp(
         evidence,
         cancel,
         limits,
-        cwd,
+        suite,
         network_probe_argv("udp", endpoint, &sentinel),
     )
     .await
@@ -561,7 +626,7 @@ async fn measure(
     policy: &RunConfinement,
     scratch: &CanonPath,
     runtime_roots: &[CanonPath],
-    evidence: SessionEvidenceStore,
+    evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
 ) -> ExecCaps {
@@ -630,12 +695,20 @@ impl ProbeFixture {
             scratch: scratch.as_path().to_path_buf(),
         })
     }
+
+    fn suite<'a>(&'a self, name: &'a str, root: &'a std::path::Path) -> ProbeSuite<'a> {
+        ProbeSuite {
+            name,
+            cwd: &self.cwd,
+            root,
+        }
+    }
 }
 
 async fn probe_reads(
     backend: Arc<dyn Backend>,
     fixture: &ProbeFixture,
-    evidence: SessionEvidenceStore,
+    evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
     runtime_roots: &[CanonPath],
@@ -650,7 +723,7 @@ async fn probe_reads(
         evidence.clone(),
         cancel.clone(),
         limits,
-        &fixture.cwd,
+        &fixture.suite("read.workspace", &fixture.inside),
         vec!["/bin/cat".into(), inside.into_os_string()],
     )
     .await
@@ -659,7 +732,7 @@ async fn probe_reads(
             evidence.clone(),
             cancel.clone(),
             limits,
-            &fixture.cwd,
+            &fixture.suite("read.outside", &fixture.outside),
             vec!["/bin/cat".into(), outside.into_os_string()],
         )
         .await
@@ -672,7 +745,7 @@ async fn probe_reads(
             evidence.clone(),
             cancel.clone(),
             limits,
-            &fixture.cwd,
+            &fixture.suite("read.runtime-root", root.as_path()),
             vec!["/bin/ls".into(), root.as_path().as_os_str().to_owned()],
         )
         .await
@@ -686,7 +759,7 @@ async fn probe_reads(
 async fn probe_denied_mutations(
     backend: Arc<dyn Backend>,
     fixture: &ProbeFixture,
-    evidence: SessionEvidenceStore,
+    evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
 ) -> bool {
@@ -695,8 +768,7 @@ async fn probe_denied_mutations(
         evidence.clone(),
         cancel.clone(),
         limits,
-        &fixture.cwd,
-        &fixture.inside,
+        &fixture.suite("write-denied.workspace", &fixture.inside),
         false,
     )
     .await
@@ -705,8 +777,7 @@ async fn probe_denied_mutations(
             evidence.clone(),
             cancel.clone(),
             limits,
-            &fixture.cwd,
-            &fixture.scratch,
+            &fixture.suite("write-denied.scratch", &fixture.scratch),
             false,
         )
         .await
@@ -715,8 +786,7 @@ async fn probe_denied_mutations(
             evidence,
             cancel,
             limits,
-            &fixture.cwd,
-            &fixture.outside,
+            &fixture.suite("write-denied.outside", &fixture.outside),
             false,
         )
         .await
@@ -725,7 +795,7 @@ async fn probe_denied_mutations(
 async fn probe_scoped_mutations(
     backend: Arc<dyn Backend>,
     fixture: &ProbeFixture,
-    evidence: SessionEvidenceStore,
+    evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
 ) -> bool {
@@ -734,8 +804,7 @@ async fn probe_scoped_mutations(
         evidence.clone(),
         cancel.clone(),
         limits,
-        &fixture.cwd,
-        &fixture.inside,
+        &fixture.suite("write-scoped.workspace", &fixture.inside),
         true,
     )
     .await
@@ -744,8 +813,7 @@ async fn probe_scoped_mutations(
             evidence.clone(),
             cancel.clone(),
             limits,
-            &fixture.cwd,
-            &fixture.scratch,
+            &fixture.suite("write-scoped.scratch", &fixture.scratch),
             true,
         )
         .await
@@ -754,8 +822,7 @@ async fn probe_scoped_mutations(
             evidence,
             cancel,
             limits,
-            &fixture.cwd,
-            &fixture.outside,
+            &fixture.suite("write-scoped.outside", &fixture.outside),
             false,
         )
         .await
@@ -763,20 +830,20 @@ async fn probe_scoped_mutations(
 
 async fn mutation_suite(
     backend: Arc<dyn Backend>,
-    evidence: SessionEvidenceStore,
+    evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
-    cwd: &CanonPath,
-    root: &std::path::Path,
+    suite: &ProbeSuite<'_>,
     allowed: bool,
 ) -> bool {
+    let root = suite.root;
     let create = root.join("create");
     if probe(
         backend.clone(),
         evidence.clone(),
         cancel.clone(),
         limits,
-        cwd,
+        suite,
         vec!["/usr/bin/touch".into(), create.clone().into_os_string()],
     )
     .await
@@ -797,7 +864,7 @@ async fn mutation_suite(
         evidence.clone(),
         cancel.clone(),
         limits,
-        cwd,
+        suite,
         vec![
             "/bin/cp".into(),
             overwrite_source.into_os_string(),
@@ -819,7 +886,7 @@ async fn mutation_suite(
             evidence.clone(),
             cancel.clone(),
             limits,
-            cwd,
+            suite,
             vec![
                 "/usr/bin/truncate".into(),
                 "-s".into(),
@@ -844,7 +911,7 @@ async fn mutation_suite(
             evidence.clone(),
             cancel.clone(),
             limits,
-            cwd,
+            suite,
             vec!["/bin/rm".into(), remove.clone().into_os_string()],
         )
         .await
@@ -862,7 +929,7 @@ async fn mutation_suite(
             evidence.clone(),
             cancel.clone(),
             limits,
-            cwd,
+            suite,
             vec![
                 "/bin/mv".into(),
                 rename_source.clone().into_os_string(),
@@ -885,7 +952,7 @@ async fn mutation_suite(
             evidence,
             cancel,
             limits,
-            cwd,
+            suite,
             vec![
                 "/bin/ln".into(),
                 link_source.into_os_string(),
@@ -901,24 +968,79 @@ async fn mutation_suite(
     true
 }
 
+/// Run one probe command through the production path and keep the outcome.
+///
+/// The boolean is what the paired suites decide on; the record is what a
+/// later refusal is explained with.
 async fn probe(
+    backend: Arc<dyn Backend>,
+    evidence: ProbeEvidence,
+    cancel: CancelToken,
+    limits: ExecLimits,
+    suite: &ProbeSuite<'_>,
+    argv: Vec<OsString>,
+) -> bool {
+    let attempted = argv
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let outcome = attempt(
+        backend,
+        evidence.store.clone(),
+        cancel,
+        limits,
+        suite.cwd,
+        argv,
+    )
+    .await;
+    evidence.log.record(ProbeRecord {
+        suite: suite.name.to_owned(),
+        root: suite.root.to_path_buf(),
+        argv: attempted,
+        outcome: match &outcome {
+            Ok(()) => "ok".to_owned(),
+            Err(reason) => reason.clone(),
+        },
+    });
+    outcome.is_ok()
+}
+
+/// How one probe command ended, in the words the transcript records.
+///
+/// A denied mutation is an ordinary non-zero exit, so the exit status is the
+/// fact that distinguishes "the sandbox refused this" from "the command was
+/// never reached".
+fn probe_outcome(error: &ego_core::permit::ToolError) -> String {
+    match error {
+        ego_core::permit::ToolError::Process(ProcessError::Exit {
+            code: Some(code), ..
+        }) => format!("exit {code}"),
+        ego_core::permit::ToolError::Process(ProcessError::Signal {
+            signal: Some(signal),
+            ..
+        }) => format!("signal {signal}"),
+        other => other.to_string(),
+    }
+}
+
+async fn attempt(
     backend: Arc<dyn Backend>,
     evidence: SessionEvidenceStore,
     cancel: CancelToken,
     limits: ExecLimits,
     cwd: &CanonPath,
     argv: Vec<OsString>,
-) -> bool {
+) -> Result<(), String> {
     let Some(argv) = argv
         .into_iter()
         .map(OsString::into_string)
         .collect::<Result<Vec<_>, _>>()
         .ok()
     else {
-        return false;
+        return Err("not attempted: probe argv is not UTF-8".to_owned());
     };
     let Ok(rule) = ego_core::permit::rule::Rule::load("exec(*)") else {
-        return false;
+        return Err("not attempted: the probe rule did not parse".to_owned());
     };
     let policy = ego_core::permit::PolicyEngine::new(
         cwd.clone(),
@@ -933,7 +1055,7 @@ async fn probe(
         ),
     );
     let Ok(run_policy) = RunConfinement::new(Confinement::Off, false, cwd.clone()) else {
-        return false;
+        return Err("not attempted: the probe workspace is not absolute".to_owned());
     };
     let ports = RunEffectPorts::for_probe(
         ExecRunConfig::new(
@@ -966,18 +1088,19 @@ async fn probe(
         "cwd": cwd.to_string(),
         "timeout_ms": Duration::from_secs(2).as_millis() as u64,
     })) else {
-        return false;
+        return Err("not attempted: probe arguments did not serialise".to_owned());
     };
     let Ok((tool, call)) = tools.prepare("exec", &arguments) else {
-        return false;
+        return Err("not attempted: the probe call was not prepared".to_owned());
     };
     let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
-        return false;
+        return Err("not attempted: the probe call was not authorized".to_owned());
     };
     tools
         .execute(&policy, tool.as_ref(), authorized, None)
         .await
-        .is_ok()
+        .map(|_| ())
+        .map_err(|error| probe_outcome(&error))
 }
 
 #[cfg(test)]
@@ -990,7 +1113,9 @@ mod tests {
 
     use crate::exec::backend::{Backend, LaunchPrefix};
 
-    use super::{CachedCapabilities, CapabilityCacheKey, cache_key, cached_capabilities};
+    use super::{
+        CachedCapabilities, CapabilityCacheKey, Measurement, cache_key, cached_capabilities,
+    };
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -1118,7 +1243,14 @@ mod tests {
     }
 
     fn cached_fact(cell: &CachedCapabilities) -> Option<ExecCaps> {
-        cell.get().copied()
+        cell.get().map(|measurement| measurement.capabilities)
+    }
+
+    fn measured(capabilities: ExecCaps) -> Measurement {
+        Measurement {
+            capabilities,
+            records: Arc::from([]),
+        }
     }
 
     #[test]
@@ -1167,10 +1299,10 @@ mod tests {
                 .get_or_try_init(|| async move {
                     first_initializers.fetch_add(1, Ordering::SeqCst);
                     tokio::task::yield_now().await;
-                    Ok::<ExecCaps, &'static str>(ExecCaps::READ_SCOPED)
+                    Ok::<Measurement, &'static str>(measured(ExecCaps::READ_SCOPED))
                 })
                 .await
-                .copied()
+                .map(|measurement| measurement.capabilities)
         };
         let second_cell = Arc::clone(&cell);
         let second_initializers = Arc::clone(&initializers);
@@ -1178,10 +1310,10 @@ mod tests {
             second_cell
                 .get_or_try_init(|| async move {
                     second_initializers.fetch_add(1, Ordering::SeqCst);
-                    Ok::<ExecCaps, &'static str>(ExecCaps::READ_SCOPED)
+                    Ok::<Measurement, &'static str>(measured(ExecCaps::READ_SCOPED))
                 })
                 .await
-                .copied()
+                .map(|measurement| measurement.capabilities)
         };
 
         let (first, second) = tokio::join!(first, second);
@@ -1201,19 +1333,24 @@ mod tests {
     async fn capability_cache_retry_after_error_stores_only_measurement_facts() {
         let cell = cached_capabilities(cache_test_key("retry"));
 
-        // The private cache value is exactly OnceCell<ExecCaps>; backends and
-        // scratch directories are per-call inputs and cannot be retained here.
+        // The private cache value is exactly the measurement: the capabilities
+        // and the transcript they came out of. Backends and scratch
+        // directories are per-call inputs and cannot be retained here.
         let failed = cell
-            .get_or_try_init(|| async { Err::<ExecCaps, &'static str>("transient probe failure") })
+            .get_or_try_init(|| async {
+                Err::<Measurement, &'static str>("transient probe failure")
+            })
             .await;
         assert!(failed.is_err(), "the first measurement attempt failed");
         assert!(cached_fact(cell.as_ref()).is_none());
 
         let retried = cell
-            .get_or_try_init(|| async { Ok::<ExecCaps, &'static str>(ExecCaps::NO_IP_NETWORK) })
+            .get_or_try_init(|| async {
+                Ok::<Measurement, &'static str>(measured(ExecCaps::NO_IP_NETWORK))
+            })
             .await
             .expect("a failed OnceCell initialization remains retryable");
-        assert_eq!(retried, &ExecCaps::NO_IP_NETWORK);
+        assert_eq!(retried.capabilities, ExecCaps::NO_IP_NETWORK);
         assert_eq!(cached_fact(cell.as_ref()), Some(ExecCaps::NO_IP_NETWORK));
     }
 }

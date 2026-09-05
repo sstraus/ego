@@ -54,9 +54,9 @@ use ego_core::hook::{
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
-    CanonPath, Change, Confinement, Escalation, ExecCaps, ExecObservation, HumanApprover, Op,
-    OpName, PermissionDecision, PermissionRequest, PolicyDigest, PolicyEngine, PreparedCall,
-    RunConfinement,
+    CanonPath, Change, Confinement, Escalation, ExecCaps, ExecObservation, HumanApprover,
+    MissingExecCaps, Op, OpName, PermissionDecision, PermissionRequest, PolicyDigest, PolicyEngine,
+    PreparedCall, RunConfinement,
 };
 use ego_core::public::{
     InstructionDescriptor, PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport, project_public,
@@ -2131,21 +2131,81 @@ async fn effect_scope(
         run_deadline,
     )
     .await
-    .map_err(|error| process_error_termination(error, cancel))
+    .map_err(|error| process_error_termination(error, confinement, cancel))
 }
 
-fn process_error_termination(error: ProcessError, cancel: &CancelToken) -> RunTermination {
+fn process_error_termination(
+    error: ProcessError,
+    confinement: &RunConfinement,
+    cancel: &CancelToken,
+) -> RunTermination {
     match &error {
-        ProcessError::MissingCapabilities(_) | ProcessError::Backend(_) => {
-            RunTermination::UsageError {
-                message: error.to_string(),
-            }
-        }
+        ProcessError::MissingCapabilities(missing) => RunTermination::UsageError {
+            message: unmet_confinement(confinement, missing),
+        },
+        ProcessError::Backend(_) => RunTermination::UsageError {
+            message: error.to_string(),
+        },
         ProcessError::Cancelled => cancelled_termination(cancel),
         _ => RunTermination::Failed {
             message: error.to_string(),
         },
     }
+}
+
+/// The confinement backend for this build, named the way an operator would
+/// look it up.
+const fn confinement_backend() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "the macOS Seatbelt backend (/usr/bin/sandbox-exec)"
+    } else if cfg!(target_os = "linux") {
+        "the Linux Landlock backend"
+    } else {
+        "no confinement backend, because this platform has none"
+    }
+}
+
+/// Explain a refusal the way the person who typed the flag needs it.
+///
+/// `MissingExecCaps` states the measurement; it does not know which flag asked
+/// for the guarantee or what would relax it. The CLI owns the sandbox flags,
+/// so it owns the sentence: which mode asked, which guarantee is absent in
+/// words, which backend failed to demonstrate it, and the two ways out - ask
+/// for less, or fix what the recorded measurement blames.
+fn unmet_confinement(confinement: &RunConfinement, missing: &MissingExecCaps) -> String {
+    let absent = missing.missing();
+    let mut remedies = Vec::new();
+    if [
+        ExecCaps::READ_SCOPED,
+        ExecCaps::WRITE_DENIED,
+        ExecCaps::WRITE_SCOPED,
+    ]
+    .into_iter()
+    .any(|guarantee| absent.contains(guarantee))
+    {
+        remedies.push(match confinement.level() {
+            Confinement::Ro => "`--sandbox off`",
+            _ => "`--sandbox ro` or `--sandbox off`",
+        });
+    }
+    if absent.contains(ExecCaps::NO_IP_NETWORK) {
+        remedies.push("dropping `--offline`");
+    }
+    let transcript = match missing.probe_evidence() {
+        Some(reference) => format!(
+            " The measurement that decided it is stored as run evidence {}.",
+            reference.id
+        ),
+        None => String::new(),
+    };
+    format!(
+        "--sandbox {} could not be demonstrated on this host: {} showed {}, but this run needs {}.{transcript} Ask for less with {}, or fix the cause the measurement names.",
+        confinement.level(),
+        confinement_backend(),
+        missing.available(),
+        absent,
+        remedies.join(", or "),
+    )
 }
 
 async fn acquire_attachments(
@@ -4527,7 +4587,7 @@ async fn execute<S: EventSink>(
     .await
     .map_err(|error| match error {
         crate::provider_http::McpProcessScopeError::Effects(error) => {
-            process_error_termination(error, &cancel)
+            process_error_termination(error, &settings.confinement, &cancel)
         }
         crate::provider_http::McpProcessScopeError::Setup(message) => {
             RunTermination::Failed { message }
@@ -7593,6 +7653,7 @@ mod tests {
         QuestionAnswer, QuestionMode, QuestionOption, QuestionRequest, QuestionTarget,
     };
     use ego_core::run::RunOrigin;
+    use ego_core::store::evidence::{EvidenceId, EvidenceRef};
     use ego_core::store::session_store::{SessionStore, StoreError};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
@@ -8077,6 +8138,67 @@ mod tests {
             workspace(Some(&file_arg)).is_err(),
             "an existing regular file must be rejected as a workspace root: {}",
             regular_file.display()
+        );
+    }
+
+    /// A refusal an operator can act on names four things.
+    ///
+    /// The mode that asked, the guarantee that is missing in words, the
+    /// backend that failed to demonstrate it, and the way out. The bitflag
+    /// `Debug` text named none of them.
+    #[test]
+    fn a_capability_refusal_names_the_mode_the_guarantee_the_backend_and_the_remedies() {
+        let owner = tempdir().expect("refusal fixture owner");
+        let workspace = CanonPath::new(owner.path().to_path_buf());
+        let confinement = RunConfinement::new(Confinement::Workspace, false, workspace)
+            .expect("workspace confinement");
+        let missing = ExecCaps::READ_SCOPED
+            .union(ExecCaps::WRITE_SCOPED)
+            .check(ExecCaps::READ_SCOPED)
+            .expect_err("a backend without scoped writes cannot serve workspace confinement")
+            .with_probe_evidence(Some(EvidenceRef {
+                id: EvidenceId::parse("a".repeat(64)).expect("probe transcript identity"),
+                bytes: 128,
+            }));
+
+        let termination = process_error_termination(
+            ProcessError::MissingCapabilities(missing),
+            &confinement,
+            &CancelToken::new(),
+        );
+        let RunTermination::UsageError { message } = termination else {
+            panic!("a backend that cannot demonstrate the requested sandbox is a usage refusal");
+        };
+
+        assert!(
+            message.contains("--sandbox workspace"),
+            "the refusal names the mode that asked: {message}"
+        );
+        assert!(
+            message.contains("write only inside the workspace and ego's private scratch directory"),
+            "the refusal names the missing guarantee in words: {message}"
+        );
+        assert!(
+            message.contains(if cfg!(target_os = "macos") {
+                "macOS Seatbelt"
+            } else if cfg!(target_os = "linux") {
+                "Linux Landlock"
+            } else {
+                "no confinement backend"
+            }),
+            "the refusal names the platform backend that failed: {message}"
+        );
+        assert!(
+            message.contains("`--sandbox ro`") && message.contains("`--sandbox off`"),
+            "the refusal offers the remedy of asking for less: {message}"
+        );
+        assert!(
+            message.contains(&"a".repeat(64)),
+            "the refusal cites the measurement that diagnosed the cause: {message}"
+        );
+        assert!(
+            !message.contains("ExecCaps("),
+            "the refusal must not fall back on the bitflag debug text: {message}"
         );
     }
 
