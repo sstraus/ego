@@ -684,6 +684,20 @@ impl Ego {
         self
     }
 
+    /// How long the terminal owner waits for the child to say anything more.
+    ///
+    /// This is a liveness bailout, never a pass condition: no branch below
+    /// treats the deadline expiring as the end of the script, so raising it
+    /// cannot make a failing run pass. It only decides how long a genuine
+    /// hang takes to become a legible failure instead of an idle `cargo
+    /// test`. The gap it has to clear is the child's quiet startup — config
+    /// load, provider probe, first reedline draw — measured on a machine
+    /// running the whole workspace's test binaries at once, not on an
+    /// otherwise idle one. Eight seconds was the latter, and
+    /// `compaction_skill` (25s alone) failed at 12s under a
+    /// `--workspace` run while passing on its own.
+    const QUIET_DEADLINE: Duration = Duration::from_secs(60);
+
     /// Run one interactive script through a real pseudo-terminal.
     ///
     /// Interactive typed commands are classified by the terminal owner after
@@ -750,8 +764,26 @@ impl Ego {
         let mut prompt_count_before_submit = 0;
         while !eof_sent {
             let chunk = received
-                .recv_timeout(Duration::from_secs(8))
-                .expect("interactive prompt");
+                .recv_timeout(Self::QUIET_DEADLINE)
+                .unwrap_or_else(|_| {
+                    // The tail rather than the whole transcript: what the child
+                    // was doing when it went quiet is the diagnosis, and the
+                    // escape-heavy redraws before it are noise.
+                    let shown = String::from_utf8_lossy(&output);
+                    let tail: String = shown
+                        .chars()
+                        .rev()
+                        .take(400)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    panic!(
+                        "the child said nothing for {:?}; trust answered: {trust_answered}, \
+                     script submitted: {submitted}. Terminal tail:\n{tail}",
+                        Self::QUIET_DEADLINE
+                    )
+                });
             output.extend_from_slice(&chunk);
             if !trust_answered
                 && output
