@@ -179,6 +179,7 @@ impl DurableAcpFixture {
             kind: EventKind::ContextWindowUpdated {
                 used_tokens: 1_234,
                 provenance: OccupancyProvenance::GenerationBoundary,
+                window: None,
             },
         };
         self.store.append(&session, &context).unwrap();

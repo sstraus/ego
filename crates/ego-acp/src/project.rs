@@ -136,8 +136,11 @@
 //!   call and so diverge from occupancy from the second generation onward;
 //! - its `cost` is the *cumulative session* cost, so even a per-generation
 //!   cost delta has to be summed over everything before it;
-//! - its `size` is the model's context window, which lives in
-//!   `ModelCapabilities`, not in the event at all.
+//! - its `size` is the context window of the generation that reported the
+//!   occupancy, which the reduction learns from the occupancy record itself
+//!   and only falls back to `ModelCapabilities` for. The two are not the same
+//!   window: a turn resolves a fresh profile per fallback candidate, so the
+//!   caller's resolved capabilities describe the model it *intended* to use.
 //!
 //! So [`project_acp_v1`] and [`project_acp_v2`] take the reduced state *after*
 //! the event and the resolved capabilities, and are the complete entry points.
@@ -317,8 +320,17 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
 /// and a `size` guessed from anything but the model's own record would put a
 /// real numerator over an invented denominator, which is worse than silence
 /// because it looks like information.
+///
+/// The window the reduction carries wins over `caps` when it has one, because
+/// it is the window the generation that reported this occupancy actually ran
+/// under. `caps` is what the caller resolved before the turn began, and a turn
+/// that fell back to another model no longer runs under it. `caps` is still the
+/// answer while no generation has stated a window — a fresh session that has
+/// somehow reported occupancy first, and every record written before the
+/// occupancy event carried a denominator at all.
 fn usage_figures(state_after: &SessionState, caps: &ModelCapabilities) -> Option<(u64, u64)> {
-    Some((state_after.context.used_tokens?, caps.max_context_tokens?))
+    let size = state_after.context.window.or(caps.max_context_tokens)?;
+    Some((state_after.context.used_tokens?, size))
 }
 
 /// The cumulative session cost as ACP wants it, when it is known.

@@ -231,6 +231,17 @@ pub struct ContextWindow {
     /// Where `used_tokens` came from. Kept beside the number so a consumer
     /// can tell a provider's authoritative answer from a local estimate.
     pub provenance: Option<OccupancyProvenance>,
+    /// The window `used_tokens` is a fraction of, as the reporting
+    /// generation stated it.
+    ///
+    /// Reduced with replace semantics like the numerator, and for the same
+    /// reason: a session that moves onto a fallback model moves onto that
+    /// model's ceiling, and a reader holding the previous one would render a
+    /// fraction of the wrong whole. `None` while no generation has stated a
+    /// window — either because none has reported yet, or because the model's
+    /// facts carry no `max_context_tokens`.
+    #[serde(default)]
+    pub window: Option<u64>,
 }
 
 /// Per-turn state: whether, and how, it completed.
@@ -1793,12 +1804,18 @@ impl SessionState {
             EventKind::ContextWindowUpdated {
                 used_tokens,
                 provenance,
+                window,
             } => {
                 // Replace, never add: occupancy is a level, and a compaction
-                // makes it go down.
+                // makes it go down. The window replaces too — a session that
+                // moved onto a fallback model moved onto its ceiling — but a
+                // record that states none leaves the last stated one standing,
+                // because "this build wrote no window" is not "the window went
+                // away".
                 self.context = ContextWindow {
                     used_tokens: Some(*used_tokens),
                     provenance: Some(*provenance),
+                    window: window.or(self.context.window),
                 };
             }
             EventKind::TurnCompleted { ok, exit_reason } => {

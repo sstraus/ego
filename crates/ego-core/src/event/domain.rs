@@ -449,6 +449,22 @@ pub enum EventKind {
     ContextWindowUpdated {
         used_tokens: u64,
         provenance: OccupancyProvenance,
+        /// The window the generation that reported this occupancy ran under.
+        ///
+        /// Beside `used_tokens` rather than looked up later, for the reason
+        /// this event exists at all: they are one observation. A turn walks
+        /// its fallback candidates and resolves a fresh profile per candidate,
+        /// so the model that answered is not always the one a caller resolved
+        /// before the loop — and a reader that paired this number with a
+        /// separately held window would divide the fallback's occupancy by the
+        /// primary's ceiling.
+        ///
+        /// `Option` for two reasons that must not be collapsed: a record
+        /// written before this field existed says nothing, and a model whose
+        /// facts state no `max_context_tokens` also says nothing. Both mean
+        /// "ask elsewhere", and neither means zero.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
     },
     /// A turn finished.
     TurnCompleted { ok: bool, exit_reason: ExitReason },

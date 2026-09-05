@@ -287,6 +287,7 @@ mod public_golden {
                 EventKind::ContextWindowUpdated {
                     used_tokens: 1_125,
                     provenance: OccupancyProvenance::GenerationBoundary,
+                    window: None,
                 },
             ),
             ev(
@@ -872,6 +873,7 @@ mod public_golden {
                 EventKind::ContextWindowUpdated {
                     used_tokens: 4_096,
                     provenance,
+                    window: None,
                 },
             );
             assert_eq!(

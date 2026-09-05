@@ -210,6 +210,7 @@ fn unpriced_cost_stays_unknown_and_context_occupancy_is_not_a_billed_total() {
             EventKind::ContextWindowUpdated {
                 used_tokens: 37,
                 provenance: OccupancyProvenance::AuthoritativeQuery,
+                window: None,
             },
         ),
     ];

@@ -326,6 +326,7 @@ mod acp_golden {
                 EventKind::ContextWindowUpdated {
                     used_tokens: 165,
                     provenance: OccupancyProvenance::GenerationBoundary,
+                    window: None,
                 },
             ),
             ev(
@@ -557,6 +558,7 @@ mod acp_golden {
             EventKind::ContextWindowUpdated {
                 used_tokens: 2,
                 provenance: OccupancyProvenance::GenerationBoundary,
+                window: None,
             },
             EventKind::TurnCompleted {
                 ok: true,
@@ -778,6 +780,7 @@ mod acp_golden {
             EventKind::ContextWindowUpdated {
                 used_tokens: 165,
                 provenance: OccupancyProvenance::GenerationBoundary,
+                window: None,
             },
         ] {
             // With an item attached: the most favourable case for a wrong
@@ -1222,6 +1225,7 @@ mod acp_golden {
                 EventKind::ContextWindowUpdated {
                     used_tokens: 165,
                     provenance: OccupancyProvenance::GenerationBoundary,
+                    window: None,
                 },
             ),
         ]
@@ -1255,6 +1259,61 @@ mod acp_golden {
             panic!("expected a v2 UsageUpdate, got {v2_update:?}");
         };
         assert_eq!((v2_usage.used, v2_usage.size), (165, 200_000));
+    }
+
+    /// The window reported is the one the generation that produced the
+    /// occupancy actually ran under, not the one preflight resolved.
+    ///
+    /// A turn can end up on a fallback model: `turn/mod.rs` walks
+    /// `config.fallbacks` and resolves a fresh profile per candidate, while
+    /// the sink captured its `ModelCapabilities` once, before the loop
+    /// (`ego-cli/src/run.rs`, `sink_factory.create`). So a run whose primary
+    /// model failed and whose fallback answered would divide the fallback's
+    /// occupancy by the primary's window — and a host would render a session
+    /// as comfortably inside a limit it is actually over. The occupancy event
+    /// carries the denominator with the numerator for that reason: they are
+    /// one observation, and the caps are only what to say when no generation
+    /// has reported yet.
+    #[test]
+    fn project_acp_reports_the_window_the_generation_ran_under_not_the_one_preflight_resolved() {
+        let mut log = usage_log();
+        let EventKind::ContextWindowUpdated { window, .. } = &mut log[1].kind else {
+            panic!("the fixture's second event is the occupancy report");
+        };
+        *window = Some(32_768);
+        let state = state_after(&log);
+        let last = log.last().unwrap();
+
+        let update =
+            acp_state_v1(last, &state, &caps(Some(200_000))).expect("used and size are both known");
+        let v1::SessionUpdate::UsageUpdate(usage) = update else {
+            panic!("expected a v1 UsageUpdate");
+        };
+        assert_eq!(
+            usage.size, 32_768,
+            "the update divided by the model preflight resolved, not the one that generated"
+        );
+        assert_eq!(usage.used, 165);
+    }
+
+    /// A generation that stated no window leaves the caps in charge.
+    ///
+    /// The complement of the test above, and the reason the state's window is
+    /// an `Option` rather than a number with a zero: a model whose facts carry
+    /// no `max_context_tokens` reports occupancy all the same, and reading its
+    /// silence as a window would divide by nothing.
+    #[test]
+    fn an_occupancy_report_that_names_no_window_falls_back_to_the_resolved_capabilities() {
+        let log = usage_log();
+        let state = state_after(&log);
+        assert_eq!(state.context.window, None, "the fixture states no window");
+
+        let update = acp_state_v1(log.last().unwrap(), &state, &caps(Some(200_000)))
+            .expect("used and size are both known");
+        let v1::SessionUpdate::UsageUpdate(usage) = update else {
+            panic!("expected a v1 UsageUpdate");
+        };
+        assert_eq!(usage.size, 200_000);
     }
 
     /// The RFD is explicit that an agent must not send `UsageUpdate` when
@@ -1313,6 +1372,7 @@ mod acp_golden {
                 EventKind::ContextWindowUpdated {
                     used_tokens: 165,
                     provenance: OccupancyProvenance::GenerationBoundary,
+                    window: None,
                 },
             ),
         ];

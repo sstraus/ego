@@ -219,6 +219,7 @@ mod reducer {
             EventKind::ContextWindowUpdated {
                 used_tokens: 49,
                 provenance: OccupancyProvenance::GenerationBoundary,
+                window: None,
             }
         );
         let hook = hook_descriptor();
@@ -599,6 +600,7 @@ mod reducer {
                 EventKind::ContextWindowUpdated {
                     used_tokens: u64::MAX,
                     provenance: OccupancyProvenance::LocalEstimate,
+                    window: None,
                 },
             ),
             (
@@ -1102,6 +1104,7 @@ mod reducer {
                 EventKind::ContextWindowUpdated {
                     used_tokens: used,
                     provenance,
+                    window: None,
                 },
             ));
         }

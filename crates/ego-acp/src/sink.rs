@@ -49,8 +49,14 @@ use crate::project::project_acp_v1;
 pub struct AcpSink {
     connection: ConnectionTo<Client>,
     session: v1::SessionId,
-    /// The resolved model's limits, for the one field of `UsageUpdate` that
-    /// lives in neither the event nor the reduction.
+    /// The limits the caller resolved before the turn began, used for
+    /// `UsageUpdate.size` only until a generation reports its own window.
+    ///
+    /// It is the weaker of the two answers and deliberately the fallback: the
+    /// turn walks its fallback candidates and resolves a fresh profile per
+    /// candidate, so the model that answers is not always the one resolved
+    /// here, and these limits would then divide one model's occupancy by
+    /// another's ceiling. See `project::usage_figures`.
     caps: ModelCapabilities,
     /// Whether the failure below has already been reported.
     reported: Mutex<bool>,

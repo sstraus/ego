@@ -616,9 +616,17 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             candidate: candidate.clone(),
             decision: decision.clone(),
         }),
+        // `window` is deliberately not projected. It reaches consumers through
+        // the reduction a sink is handed beside the event
+        // (`docs/decisions/2026-08-21-what-a-sink-is-handed.md`), which is
+        // where the only reader of it — the ACP `UsageUpdate` denominator —
+        // already looks. Carrying it here as well would put the same fact on
+        // two versioned surfaces that could then disagree, and would cost a
+        // `PUBLIC_EVENT_VERSION` bump for a field no published consumer reads.
         EventKind::ContextWindowUpdated {
             used_tokens,
             provenance,
+            window: _,
         } => Some(PublicEvent::ContextWindowUpdated {
             turn,
             used_tokens: *used_tokens,

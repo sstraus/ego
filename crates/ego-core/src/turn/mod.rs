@@ -3159,6 +3159,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         EventKind::ContextWindowUpdated {
                             used_tokens: usage.total_tokens(),
                             provenance: OccupancyProvenance::GenerationBoundary,
+                            // This profile and not the one the caller resolved
+                            // before the loop: the candidate walk above can end
+                            // on a fallback, and the occupancy below is that
+                            // model's, so the ceiling it is a fraction of has
+                            // to be that model's too.
+                            window: profile.capabilities.max_context_tokens,
                         },
                     )?;
                 }

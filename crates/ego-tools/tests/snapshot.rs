@@ -223,6 +223,7 @@ mod snapshot {
             EventKind::ContextWindowUpdated {
                 used_tokens: 165,
                 provenance: OccupancyProvenance::GenerationBoundary,
+                window: None,
             },
             None,
             EventId::new(),

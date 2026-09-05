@@ -916,8 +916,18 @@ fn lifecycle_error(error: impl fmt::Display) -> Error {
     Error::invalid_params().data(error.to_string())
 }
 
+/// One session as the host lists and labels it.
+///
+/// `updated_at` is `SessionMeta::updated` — the observation time of the last
+/// event appended to that session — spelled RFC 3339 because that is what the
+/// field is defined to carry. It is not decoration: `session/list` returns
+/// sessions in no protocol-defined order, so recency is the only thing a host
+/// can sort a session picker by, and an agent that omits it hands back a list
+/// nobody can order.
 fn session_info(meta: SessionMeta) -> v1::SessionInfo {
-    v1::SessionInfo::new(meta.id.to_string(), meta.workspace_root).title(meta.title)
+    v1::SessionInfo::new(meta.id.to_string(), meta.workspace_root)
+        .title(meta.title)
+        .updated_at(meta.updated.to_rfc3339())
 }
 
 fn emit_info(
@@ -928,7 +938,9 @@ fn emit_info(
     connection.send_notification(v1::SessionNotification::new(
         id.clone(),
         v1::SessionUpdate::SessionInfoUpdate(
-            v1::SessionInfoUpdate::new().title(meta.title.clone()),
+            v1::SessionInfoUpdate::new()
+                .title(meta.title.clone())
+                .updated_at(meta.updated.to_rfc3339()),
         ),
     ))
 }

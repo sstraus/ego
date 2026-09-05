@@ -232,6 +232,51 @@ async fn new_is_durable_and_emits_current_session_info_before_answering() {
     reconnected.finish().await;
 }
 
+/// A listed session states when it was last active, in the spelling the field
+/// is defined to carry.
+///
+/// `session/list` promises no order, so `updated_at` is the only thing a host
+/// can rank a session picker by. The fixture's clock is pinned to the epoch,
+/// which is what makes this assertion exact: the value is read from the
+/// session's own last observation time and not from the wall clock of whoever
+/// happened to ask.
+#[tokio::test]
+async fn a_listed_session_states_its_last_activity_as_rfc_3339() {
+    const EPOCH: &str = "1970-01-01T00:00:00.000Z";
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (session, notifications) = connection.new_session(ROOT).await;
+
+    let updates = updates(&notifications);
+    let info = updates
+        .iter()
+        .find(|params| params["update"]["sessionUpdate"] == "session_info_update")
+        .unwrap_or_else(|| panic!("no SessionInfoUpdate was emitted: {notifications:?}"));
+    assert_eq!(
+        info["update"]["updatedAt"],
+        serde_json::json!(EPOCH),
+        "the notification dated the session from nowhere: {info}"
+    );
+
+    let (listed, _) = connection
+        .request("session/list", serde_json::json!({ "cwd": ROOT }))
+        .await;
+    let row = listed["result"]["sessions"]
+        .as_array()
+        .expect("session/list returns rows")
+        .iter()
+        .find(|row| row["sessionId"] == session.as_str())
+        .unwrap_or_else(|| panic!("the session it just minted was not listed: {listed}"));
+    assert_eq!(
+        row["updatedAt"],
+        serde_json::json!(EPOCH),
+        "a listed session carried no last-activity time, so no host can order the list: {row}"
+    );
+
+    connection.finish().await;
+}
+
 #[tokio::test]
 async fn reconnecting_a_header_only_session_starts_its_first_run_under_the_same_id() {
     let fixture = support::DurableAcpFixture::new();

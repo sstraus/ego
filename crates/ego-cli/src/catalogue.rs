@@ -11,6 +11,7 @@
 use std::path::Path;
 
 use ego_core::event::id::SessionId;
+use ego_core::event::time::Timestamp;
 use ego_core::session::SessionLineage;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use serde::Serialize;
@@ -231,30 +232,17 @@ pub(crate) fn plain_table(rows: Vec<Vec<String>>) -> Vec<String> {
 
 /// `updated` as a UTC calendar time an operator can read.
 ///
-/// Hand-computed from the epoch rather than pulled from a date crate: the
-/// workspace has no such dependency, this is the only place that needs one,
-/// and the civil-from-days algorithm is short enough to be read.
+/// The calendar arithmetic itself lives on [`Timestamp`], because this is not
+/// the only surface that needs a date out of one — the ACP `SessionInfo` wire
+/// wants the same instant spelled RFC 3339 — and two renderings of one clock
+/// must not be two implementations of one calendar. What stays here is only
+/// the shape `ego ls` prints: minute precision, no seconds, no `T`.
 fn stamp(millis: u64) -> String {
-    let millis = millis as i64;
-    let (days, rest) = (millis.div_euclid(86_400_000), millis.rem_euclid(86_400_000));
-    let (hour, minute) = (rest / 3_600_000, (rest % 3_600_000) / 60_000);
-    let (year, month, day) = civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
-}
-
-/// Howard Hinnant's `civil_from_days`: a day count since the Unix epoch to a
-/// proleptic Gregorian date. Exact for every day this program can be handed.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    let at = Timestamp::from_millis(millis).civil();
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        at.year, at.month, at.day, at.hour, at.minute
+    )
 }
 
 /// What `ego ls` was asked for, listed and ordered.

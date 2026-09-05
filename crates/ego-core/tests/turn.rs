@@ -7110,6 +7110,95 @@ mod turn {
             assert_eq!(committed(&gate), Some(usd("0.06144")));
         }
 
+        /// The occupancy report names the window of the model that produced
+        /// it, not the one the turn started out intending to use.
+        ///
+        /// A caller resolves a profile once before the loop — `ego-cli`'s
+        /// `generation_preflight` does, and hands its `ModelCapabilities` to
+        /// the sink for the lifetime of the turn. The loop then walks its
+        /// fallback candidates and resolves a fresh profile per candidate, so
+        /// the model that answers can have a different ceiling. A consumer
+        /// dividing this occupancy by the caller's window would render a
+        /// session as comfortably inside a limit it is over, which is worse
+        /// than showing nothing.
+        #[test]
+        fn the_occupancy_report_carries_the_window_of_the_model_that_produced_it() {
+            const PRIMARY_WINDOW: u64 = 200_000;
+            const FALLBACK_WINDOW: u64 = 32_768;
+            let primary = "ollama/primary-model";
+            let fallback_slug = "openai/fallback-model";
+            let trace = GenerationTrace::default();
+            let windowed = |slug: &str, script: Vec<AiEvent>, window: u64| {
+                profile_with_settings(
+                    slug,
+                    script,
+                    &trace,
+                    Some(1_024),
+                    Some(window),
+                    ThinkingLevel::Off,
+                    false,
+                )
+            };
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(windowed(
+                        primary,
+                        vec![
+                            AiEvent::Error {
+                                message: "temporary refusal before write".to_owned(),
+                                kind: ErrorKind::Transient,
+                            },
+                            AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                            AiEvent::Stop(StopReason::Error),
+                        ],
+                        PRIMARY_WINDOW,
+                    )),
+                    Ok(windowed(
+                        fallback_slug,
+                        vec![
+                            AiEvent::TextDelta {
+                                text: "fallback answer".to_owned(),
+                            },
+                            AiEvent::Usage(tokens(2, 0, 0, 3)),
+                            AiEvent::Stop(StopReason::Stop),
+                        ],
+                        FALLBACK_WINDOW,
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let (_, ok, state) = run_scripted(
+                &fx,
+                SessionState::default(),
+                "which model answered",
+                source,
+                TurnConfig {
+                    system: None,
+                    token_ceiling: None,
+                    retry: 0,
+                    fallbacks: vec![ModelRef(fallback_slug.to_owned())],
+                },
+            );
+            assert!(ok, "the fallback attempt completed");
+
+            let windows: Vec<_> = fx
+                .store
+                .events()
+                .iter()
+                .filter_map(|event| match event.kind {
+                    EventKind::ContextWindowUpdated { window, .. } => Some(window),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                windows,
+                vec![Some(FALLBACK_WINDOW)],
+                "the occupancy was recorded against the wrong model's ceiling"
+            );
+            assert_eq!(state.context.window, Some(FALLBACK_WINDOW));
+        }
+
         /// regression case: one logical generation owns an ordered, delivery-safe
         /// retry/fallback plan. Every wire journey is fresh, but all four
         /// attempts remain attributable to the same generation.

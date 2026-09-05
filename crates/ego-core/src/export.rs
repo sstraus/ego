@@ -244,6 +244,15 @@ pub enum ExportEvent {
     ContextWindowUpdated {
         used_tokens: u64,
         provenance: OccupancyProvenance,
+        /// The ceiling `used_tokens` is a fraction of, when the reporting
+        /// generation stated one.
+        ///
+        /// Exported because an occupancy without its denominator is not an
+        /// auditable fact: a reader would have to go back to the model
+        /// catalogue as it stood at the time, which for a turn that fell back
+        /// to another model is not recoverable from this file at all.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
     },
     TurnCompleted {
         ok: bool,
@@ -842,9 +851,11 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
         EventKind::ContextWindowUpdated {
             used_tokens,
             provenance,
+            window,
         } => ExportEvent::ContextWindowUpdated {
             used_tokens: *used_tokens,
             provenance: *provenance,
+            window: *window,
         },
         EventKind::TurnCompleted { ok, exit_reason } => ExportEvent::TurnCompleted {
             ok: *ok,
