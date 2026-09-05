@@ -62,7 +62,6 @@ impl McpRuntimeCandidateAdmission {
     ) -> Result<Arc<dyn McpOperationFactory>, McpCandidateError> {
         match config {
             McpServerConfig::Http(_) => McpHttpOperationFactory::runtime(
-                Arc::clone(&self.http_management),
                 Arc::clone(&self.continuations),
                 self.max_sse_event_size,
                 self.timeout,

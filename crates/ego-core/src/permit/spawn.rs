@@ -772,6 +772,19 @@ impl RunConfinement {
         self.offline
     }
 
+    /// Whether this invocation may open an MCP HTTP transport.
+    ///
+    /// HTTP MCP runs in process, so only an online invocation with no
+    /// filesystem sandbox can admit it.
+    pub const fn admits_mcp_http(&self) -> bool {
+        !self.offline && matches!(self.level, Confinement::Off)
+    }
+
+    /// Whether this invocation may spawn an MCP stdio transport.
+    pub const fn admits_mcp_stdio(&self) -> bool {
+        !self.offline
+    }
+
     pub fn workspace(&self) -> &CanonPath {
         &self.workspace
     }

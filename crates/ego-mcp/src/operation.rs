@@ -1,6 +1,6 @@
 //! Fresh per-operation MCP lifecycles bound to guarded transport authority.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -92,10 +92,8 @@ impl OperationLimits {
     }
 }
 
-/// A fresh HTTP lifecycle. Management traffic uses its injected effect port;
-/// the selected operation alone receives the guarded one-shot claim.
+/// An effect-free recipe for a fresh HTTP lifecycle.
 pub struct McpHttpOperationFactory {
-    management: Arc<dyn McpHttpEffects>,
     continuations: Arc<McpContinuationOwner>,
     limits: OperationLimits,
     collapsed: Option<CollapsedSchemaAdmission>,
@@ -648,13 +646,11 @@ fn continuation_id(
 
 impl McpHttpOperationFactory {
     pub fn new(
-        management: Arc<dyn McpHttpEffects>,
         continuations: Arc<McpContinuationOwner>,
         max_sse_event_size: usize,
         timeout: Duration,
     ) -> Result<Self, McpError> {
         Ok(Self {
-            management,
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
             collapsed: None,
@@ -662,7 +658,6 @@ impl McpHttpOperationFactory {
     }
 
     pub(crate) fn runtime(
-        management: Arc<dyn McpHttpEffects>,
         continuations: Arc<McpContinuationOwner>,
         max_sse_event_size: usize,
         timeout: Duration,
@@ -670,7 +665,6 @@ impl McpHttpOperationFactory {
         admission: Arc<dyn McpToolSchemaAdmission>,
     ) -> Result<Self, McpError> {
         Ok(Self {
-            management,
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
             collapsed: bootstrap.map(|bootstrap| CollapsedSchemaAdmission {
@@ -924,7 +918,6 @@ async fn execute_http(
         return Err(authority("guarded MCP HTTP claim changed its envelope"));
     }
     let broker = Arc::new(SplitMcpHttpEffects::new(
-        Arc::clone(&factory.management),
         claim,
         server.clone(),
         profile.fingerprint(),
@@ -1070,7 +1063,6 @@ async fn execute_http_hook(
         return Err(authority("guarded MCP hook claim changed its envelope"));
     }
     let broker = Arc::new(SplitMcpHttpEffects::new(
-        Arc::clone(&factory.management),
         claim,
         server.clone(),
         profile.fingerprint(),
@@ -1527,14 +1519,19 @@ impl McpDuplexEffects for ClaimedDuplexEffects {
 }
 
 struct SelectedHttpState {
-    claim: Option<McpHttpClaim>,
     request_id: Option<McpRequestId>,
+    delivery: DeliveryCertainty,
+    settlement: Option<McpHttpSettlement>,
+    management: HashMap<McpRequestId, ManagedHttpRequest>,
+}
+
+struct ManagedHttpRequest {
     delivery: DeliveryCertainty,
     settlement: Option<McpHttpSettlement>,
 }
 
 struct SplitMcpHttpEffects {
-    management: Arc<dyn McpHttpEffects>,
+    claim: McpHttpClaim,
     state: Arc<Mutex<SelectedHttpState>>,
     server: McpServerName,
     profile_fingerprint: [u8; 32],
@@ -1544,6 +1541,7 @@ struct SplitMcpHttpEffects {
     headers: Arc<[HttpHeader]>,
 }
 
+#[derive(Clone, Copy)]
 enum HttpLane {
     Management,
     Selected,
@@ -1552,7 +1550,6 @@ enum HttpLane {
 impl SplitMcpHttpEffects {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        management: Arc<dyn McpHttpEffects>,
         claim: McpHttpClaim,
         server: McpServerName,
         profile_fingerprint: [u8; 32],
@@ -1562,12 +1559,12 @@ impl SplitMcpHttpEffects {
         headers: Vec<HttpHeader>,
     ) -> Self {
         Self {
-            management,
+            claim,
             state: Arc::new(Mutex::new(SelectedHttpState {
-                claim: Some(claim),
                 request_id: None,
                 delivery: DeliveryCertainty::DefinitelyUnsent,
                 settlement: None,
+                management: HashMap::new(),
             })),
             server,
             profile_fingerprint,
@@ -1613,13 +1610,7 @@ impl SplitMcpHttpEffects {
     }
 
     fn validate_selected(&self, parts: &McpPreparedHttpParts) -> Result<(), McpError> {
-        if parts.server != self.server
-            || parts.purpose != McpHttpPurpose::Protocol
-            || parts.profile_fingerprint != self.profile_fingerprint
-            || parts.route != self.route
-        {
-            return Err(authority("selected MCP HTTP profile changed"));
-        }
+        self.validate_lifecycle(parts)?;
         let body: Value = serde_json::from_slice(parts.request.body())?;
         let params = body.get("params").cloned().unwrap_or(Value::Null);
         if body.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
@@ -1645,6 +1636,17 @@ impl SplitMcpHttpEffects {
         Ok(())
     }
 
+    fn validate_lifecycle(&self, parts: &McpPreparedHttpParts) -> Result<(), McpError> {
+        if parts.server != self.server
+            || parts.purpose != McpHttpPurpose::Protocol
+            || parts.profile_fingerprint != self.profile_fingerprint
+            || parts.route != self.route
+        {
+            return Err(authority("MCP HTTP lifecycle profile changed"));
+        }
+        Ok(())
+    }
+
     fn settle_selected(
         &self,
         request_id: McpRequestId,
@@ -1664,6 +1666,25 @@ impl SplitMcpHttpEffects {
         state.settlement = Some(settlement.clone());
         Ok(settlement)
     }
+
+    fn settle_management(
+        &self,
+        request_id: McpRequestId,
+        end: McpHttpEnd,
+    ) -> Result<McpHttpSettlement, McpError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| protocol("MCP HTTP lifecycle settlement lock poisoned"))?;
+        let request = state
+            .management
+            .remove(&request_id)
+            .ok_or_else(|| authority("MCP HTTP lifecycle request identity changed"))?;
+        match request.settlement {
+            Some(settlement) => Ok(settlement),
+            None => McpHttpSettlement::new(request_id, end, request.delivery),
+        }
+    }
 }
 
 impl McpHttpEffects for SplitMcpHttpEffects {
@@ -1679,14 +1700,16 @@ impl McpHttpEffects for SplitMcpHttpEffects {
             Ok(lane) => lane,
             Err(error) => return Box::pin(future::ready(Err(error))),
         };
-        if matches!(lane, HttpLane::Management) {
-            return self.management.execute(call);
-        }
         let parts = call.into_parts();
-        if let Err(error) = self.validate_selected(&parts) {
+        let validation = match lane {
+            HttpLane::Management => self.validate_lifecycle(&parts),
+            HttpLane::Selected => self.validate_selected(&parts),
+        };
+        if let Err(error) = validation {
             return Box::pin(future::ready(Err(error)));
         }
-        let claim = {
+        let request_id = parts.request_id.clone();
+        {
             let mut state = match self.state.lock() {
                 Ok(state) => state,
                 Err(_) => {
@@ -1695,31 +1718,61 @@ impl McpHttpEffects for SplitMcpHttpEffects {
                     ))));
                 }
             };
-            if state.request_id.is_some() {
-                return Box::pin(future::ready(Err(authority(
-                    "selected MCP HTTP authority was already spent",
-                ))));
-            }
-            state.request_id = Some(parts.request_id.clone());
-            state.delivery = DeliveryCertainty::PossiblySent;
-            match state.claim.take() {
-                Some(claim) => claim,
-                None => {
-                    return Box::pin(future::ready(Err(authority(
-                        "selected MCP HTTP authority was already spent",
-                    ))));
+            match lane {
+                HttpLane::Selected => {
+                    if state.request_id.is_some() {
+                        return Box::pin(future::ready(Err(authority(
+                            "selected MCP HTTP authority was already spent",
+                        ))));
+                    }
+                    state.request_id = Some(request_id.clone());
+                    state.delivery = DeliveryCertainty::PossiblySent;
+                }
+                HttpLane::Management => {
+                    if state
+                        .management
+                        .insert(
+                            request_id.clone(),
+                            ManagedHttpRequest {
+                                delivery: DeliveryCertainty::PossiblySent,
+                                settlement: None,
+                            },
+                        )
+                        .is_some()
+                    {
+                        state.management.remove(&request_id);
+                        return Box::pin(future::ready(Err(authority(
+                            "MCP HTTP lifecycle request identity was reused",
+                        ))));
+                    }
                 }
             }
-        };
+        }
+        let exchange = self.claim.exchange(parts.request, parts.deadline);
         let state = Arc::clone(&self.state);
         Box::pin(async move {
-            let response = claim.exchange(parts.request, parts.deadline).await;
+            let response = exchange.await;
             let delivery = match &response {
                 Ok(response) => response.delivery(),
                 Err(error) => error.delivery(),
             };
-            if let Ok(mut selected) = state.lock() {
-                selected.delivery = delivery;
+            if let Ok(mut state) = state.lock() {
+                match lane {
+                    HttpLane::Selected => state.delivery = delivery,
+                    HttpLane::Management => {
+                        if let Some(request) = state.management.get_mut(&request_id) {
+                            request.delivery = delivery;
+                            if response.is_err() {
+                                request.settlement = McpHttpSettlement::new(
+                                    request_id.clone(),
+                                    McpHttpEnd::Failed,
+                                    delivery,
+                                )
+                                .ok();
+                            }
+                        }
+                    }
+                }
             }
             one_hop_response(response.map_err(McpError::from)?)
         })
@@ -1733,13 +1786,11 @@ impl McpHttpEffects for SplitMcpHttpEffects {
             .state
             .lock()
             .is_ok_and(|state| state.request_id.as_ref() == Some(&request_id));
-        if selected {
-            Box::pin(future::ready(
-                self.settle_selected(request_id, McpHttpEnd::Cancelled),
-            ))
+        Box::pin(future::ready(if selected {
+            self.settle_selected(request_id, McpHttpEnd::Cancelled)
         } else {
-            self.management.cancel(request_id)
-        }
+            self.settle_management(request_id, McpHttpEnd::Cancelled)
+        }))
     }
 
     fn timeout(
@@ -1750,13 +1801,11 @@ impl McpHttpEffects for SplitMcpHttpEffects {
             .state
             .lock()
             .is_ok_and(|state| state.request_id.as_ref() == Some(&request_id));
-        if selected {
-            Box::pin(future::ready(
-                self.settle_selected(request_id, McpHttpEnd::TimedOut),
-            ))
+        Box::pin(future::ready(if selected {
+            self.settle_selected(request_id, McpHttpEnd::TimedOut)
         } else {
-            self.management.timeout(request_id)
-        }
+            self.settle_management(request_id, McpHttpEnd::TimedOut)
+        }))
     }
 
     fn settle(
@@ -1767,13 +1816,11 @@ impl McpHttpEffects for SplitMcpHttpEffects {
             .state
             .lock()
             .is_ok_and(|state| state.request_id.as_ref() == Some(&request_id));
-        if selected {
-            Box::pin(future::ready(
-                self.settle_selected(request_id, McpHttpEnd::Completed),
-            ))
+        Box::pin(future::ready(if selected {
+            self.settle_selected(request_id, McpHttpEnd::Completed)
         } else {
-            self.management.settle(request_id)
-        }
+            self.settle_management(request_id, McpHttpEnd::Completed)
+        }))
     }
 }
 

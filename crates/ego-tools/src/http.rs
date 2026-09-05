@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use ego_core::permit::{
     DnsResolution, HttpHeader, HttpRequest, HttpScheme, NetworkTarget, OneHop, OneHopResponse,
-    ResolvedConnect, Resolver, TransportError, TransportFailure,
+    ResolvedConnect, Resolver, RunConfinement, TransportError, TransportFailure,
 };
 use ego_core::turn::CancelToken;
 use futures::future::BoxFuture;
@@ -69,7 +69,7 @@ pub(crate) struct OneShotHttpTransport {
     cancel: CancelToken,
     timeout: HttpCallTimeout,
     run_deadline: Option<Instant>,
-    offline: bool,
+    confinement: RunConfinement,
 }
 
 impl OneShotHttpTransport {
@@ -78,14 +78,14 @@ impl OneShotHttpTransport {
         cancel: CancelToken,
         timeout: HttpCallTimeout,
         run_deadline: Option<Instant>,
-        offline: bool,
+        confinement: RunConfinement,
     ) -> Self {
         Self {
             resolver,
             cancel,
             timeout,
             run_deadline,
-            offline,
+            confinement,
         }
     }
 }
@@ -96,7 +96,7 @@ impl Resolver for OneShotHttpTransport {
         target: NetworkTarget,
         deadline: Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
-        if self.offline {
+        if self.confinement.offline() {
             return Box::pin(futures::future::ready(offline_resolution(target)));
         }
         if self.cancel.is_cancelled() {
@@ -138,6 +138,18 @@ impl Resolver for OneShotHttpTransport {
 }
 
 impl OneHop for OneShotHttpTransport {
+    fn admit_mcp(&self) -> Result<(), TransportError> {
+        if self.confinement.admits_mcp_http() {
+            return Ok(());
+        }
+        let failure = if self.confinement.offline() {
+            TransportFailure::Offline
+        } else {
+            TransportFailure::AuthorityMismatch
+        };
+        Err(definitely_unsent(failure))
+    }
+
     fn begin_call(&self) -> Instant {
         let now = Instant::now();
         let configured = now.checked_add(self.timeout.duration()).unwrap_or(now);
@@ -152,7 +164,7 @@ impl OneHop for OneShotHttpTransport {
         request: HttpRequest,
         deadline: Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
-        if self.offline && !offline_connect_allowed(&connect) {
+        if self.confinement.offline() && !offline_connect_allowed(&connect) {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
                 TransportFailure::Offline,
             ))));

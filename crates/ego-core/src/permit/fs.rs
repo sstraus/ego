@@ -176,8 +176,9 @@ pub trait GuardedIo<'s>: Send + Sync {
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>>;
 
     /// Claim one selected MCP HTTP operation after policy has authorized its
-    /// semantic call. The returned capability is non-clone and binds exactly
-    /// one rendered request by value.
+    /// semantic call. The returned capability is non-clone and binds one
+    /// protocol lifecycle to the exact admitted route; its protocol owner
+    /// enforces exactly one rendered selected request.
     fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError>;
 
     fn take_mcp_resume(&self) -> Result<GuardedMcpResume<'s>, ContinuationError> {
@@ -193,8 +194,12 @@ pub trait GuardedIo<'s>: Send + Sync {
     fn store_evidence(&self, bytes: &[u8]) -> Result<EvidenceRef, ToolError>;
 }
 
-/// One selected MCP HTTP authority. Management traffic never receives this
-/// value, and exchange consumes it.
+/// One selected MCP HTTP lifecycle authority.
+///
+/// The value is deliberately non-clone. Its protocol owner may borrow it for
+/// the fixed management frames surrounding one selected operation, while that
+/// owner separately enforces that the fingerprinted selected frame is spent
+/// exactly once.
 pub struct McpHttpClaim {
     envelope: super::prepared_call::McpPreparedEnvelope,
     route: super::foreign::HttpRoute,
@@ -207,13 +212,13 @@ impl McpHttpClaim {
     }
 
     pub fn exchange(
-        self,
+        &self,
         request: HttpRequest,
         deadline: std::time::Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         let connect = PreparedConnect::new(self.route.target().clone(), &request);
         self.http
-            .execute_admitted(self.route, connect, request, deadline)
+            .execute_admitted(self.route.clone(), connect, request, deadline)
     }
 }
 
@@ -481,6 +486,7 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
     }
 
     pub fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError> {
+        self.http.admit_mcp()?;
         let envelope = call
             .mcp_envelope()
             .cloned()

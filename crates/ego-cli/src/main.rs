@@ -65,13 +65,7 @@ async fn ordinary_main() -> std::process::ExitCode {
         }
         _ => None,
     };
-    let needs_mcp_runtime = matches!(
-        &invocation,
-        Ok(Invocation::Mcp(_)
-            | Invocation::Interactive(_)
-            | Invocation::Run(_)
-            | Invocation::Resume(_))
-    ) && ci_preflight.as_ref().is_none_or(Result::is_ok);
+    let needs_mcp_runtime = matches!(&invocation, Ok(Invocation::Mcp(_)));
     let mcp = if needs_mcp_runtime {
         Some(ego_cli::provider_http::McpProcessScope::online(cancel.clone()).await)
     } else {
@@ -149,8 +143,9 @@ async fn ordinary_main() -> std::process::ExitCode {
                     mcp_errors: Vec::new(),
                 }
             }
-            // Configuration management has no session, but it reconciles and
-            // projects the same process authority used by runs.
+            // Configuration management has no session and owns its explicitly
+            // online command authority. Runs construct their separate effect
+            // authority only after resolving confinement.
             Ok(Invocation::Mcp(args)) => Ended {
                 termination: ego_cli::mcp::execute(
                     &args,
@@ -264,12 +259,6 @@ async fn ordinary_main() -> std::process::ExitCode {
                     *args,
                     &out,
                     cancel,
-                    std::sync::Arc::clone(
-                        mcp.as_ref()
-                            .and_then(|runtime| runtime.as_ref().ok())
-                            .expect("interactive invocation constructed its MCP runtime")
-                            .runtime(),
-                    ),
                     std::sync::Arc::clone(&evidence),
                 )
                 .await
@@ -289,12 +278,6 @@ async fn ordinary_main() -> std::process::ExitCode {
                             *args,
                             &out,
                             cancel,
-                            std::sync::Arc::clone(
-                                mcp.as_ref()
-                                    .and_then(|runtime| runtime.as_ref().ok())
-                                    .expect("preflighted CI run constructed its MCP runtime")
-                                    .runtime(),
-                            ),
                             std::sync::Arc::clone(&evidence),
                             preflight,
                         )
@@ -305,12 +288,6 @@ async fn ordinary_main() -> std::process::ExitCode {
                             *args,
                             &out,
                             cancel,
-                            std::sync::Arc::clone(
-                                mcp.as_ref()
-                                    .and_then(|runtime| runtime.as_ref().ok())
-                                    .expect("run invocation constructed its MCP runtime")
-                                    .runtime(),
-                            ),
                             std::sync::Arc::clone(&evidence),
                         )
                         .await

@@ -65,10 +65,6 @@ impl RunProcessContext {
         }
     }
 
-    pub(crate) fn offline(&self) -> bool {
-        self.confinement.offline()
-    }
-
     pub(crate) async fn execute(&self, spec: &SpawnSpec) -> Result<ToolResult, ProcessError> {
         self.execute_inner(spec, None).await
     }
@@ -380,6 +376,9 @@ async fn spawn_duplex(
     context: Arc<RunProcessContext>,
     spec: SpawnSpec,
 ) -> Result<Box<dyn DuplexSession>, TransportError> {
+    if !context.confinement.admits_mcp_stdio() {
+        return Err(TransportError::definitely_unsent(TransportFailure::Offline));
+    }
     if let Err(missing) = context
         .confinement
         .requirements()

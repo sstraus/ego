@@ -236,6 +236,7 @@ impl RunEffectPorts {
     }
 
     fn build(config: ExecRunConfig, backend: Arc<dyn Backend>, capabilities: ExecCaps) -> Self {
+        let confinement = config.policy.clone();
         let context = Arc::new(process::RunProcessContext::new(
             backend,
             config.evidence,
@@ -251,7 +252,7 @@ impl RunEffectPorts {
                 config.cancel,
                 config.http_call_timeout,
                 config.run_deadline,
-                context.offline(),
+                confinement,
             )),
             duplex: Arc::new(crate::stdio::GuardedDuplex::new(context)),
         }

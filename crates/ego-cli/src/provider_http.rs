@@ -118,17 +118,30 @@ impl CommandHttpScope {
             .map_err(|error| format!("could not resolve the command workspace: {error}"))?;
         let confinement = RunConfinement::new(Confinement::Off, false, CanonPath::new(&workspace))
             .map_err(|error| error.to_string())?;
-        let evidence_directory = tempfile::tempdir()
-            .map_err(|error| format!("could not create the command evidence store: {error}"))?;
+        Self::confined(confinement, cancel, None)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn confined(
+        confinement: RunConfinement,
+        cancel: CancelToken,
+        run_deadline: Option<Instant>,
+    ) -> Result<Self, McpProcessScopeError> {
+        let evidence_directory = tempfile::tempdir().map_err(|error| {
+            McpProcessScopeError::Setup(format!("could not create the MCP evidence store: {error}"))
+        })?;
         let evidence = SessionEvidenceStore::open(
             evidence_directory.path(),
             SessionId::new(),
             COMMAND_EVIDENCE_CAPACITY,
         )
-        .map_err(|error| format!("could not open the command evidence store: {error}"))?;
-        let (ports, _) = run_effect_ports(confinement, evidence, cancel, None)
+        .map_err(|error| {
+            McpProcessScopeError::Setup(format!("could not open the MCP evidence store: {error}"))
+        })?;
+        let (ports, _) = run_effect_ports(confinement, evidence, cancel, run_deadline)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(McpProcessScopeError::Effects)?;
         let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn Http>;
         Ok(Self {
             _evidence_directory: evidence_directory,
@@ -148,7 +161,21 @@ impl CommandHttpScope {
     }
 }
 
-/// One process-lifetime MCP authority and the OS effects it borrows from.
+pub(crate) enum McpProcessScopeError {
+    Effects(ProcessError),
+    Setup(String),
+}
+
+impl std::fmt::Display for McpProcessScopeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Effects(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Setup(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// One command- or invocation-lifetime MCP authority and its guarded effects.
 /// The effect scope is retained beside the runtime so neither its evidence
 /// directory nor guarded process/network handles can disappear first.
 pub struct McpProcessScope {
@@ -159,6 +186,19 @@ pub struct McpProcessScope {
 impl McpProcessScope {
     pub async fn online(cancel: CancelToken) -> Result<Self, String> {
         let effects = CommandHttpScope::online(cancel).await?;
+        Self::from_effects(effects)
+    }
+
+    pub(crate) async fn for_run(
+        confinement: RunConfinement,
+        cancel: CancelToken,
+        run_deadline: Option<Instant>,
+    ) -> Result<Self, McpProcessScopeError> {
+        let effects = CommandHttpScope::confined(confinement, cancel, run_deadline).await?;
+        Self::from_effects(effects).map_err(McpProcessScopeError::Setup)
+    }
+
+    fn from_effects(effects: CommandHttpScope) -> Result<Self, String> {
         let root = crate::config::ego_home()
             .ok_or_else(|| "MCP needs EGO_HOME or HOME for its machine journals".to_owned())?
             .join("mcp");

@@ -24,10 +24,10 @@ use ego_core::compact::{
 };
 use ego_core::config::rule_management::RuleManagement;
 use ego_core::config::{
-    ConfigLayer, Effective, Limits, McpServerConfig, Mode, ModelRef, PermCfg, Posture,
-    RuleMutation, RuleSnapshot, Ruleset, Selection, Source, Sourced, SystemPrompt, Trust,
-    UserConfigError, UserConfigMutation, UserConfigPublication, UserConfigStore, UserConfigTarget,
-    resolve_selected, system_prompt,
+    ConfigLayer, Effective, Limits, McpConfigProvenance, McpServerConfig, McpServerName, Mode,
+    ModelRef, PermCfg, Posture, RuleMutation, RuleSnapshot, Ruleset, Selection, Source, Sourced,
+    SystemPrompt, Trust, UserConfigError, UserConfigMutation, UserConfigPublication,
+    UserConfigStore, UserConfigTarget, resolve_selected, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
@@ -96,7 +96,7 @@ use ego_core::turn::{
     interactive_control,
 };
 use ego_core::usage::{UsagePeriod, UsageReportService};
-use ego_mcp::{McpRegistryController, McpRegistryRuntime};
+use ego_mcp::McpRegistryController;
 use ego_tools::clock::SystemClock;
 use ego_tools::config::OsUserConfigStore;
 use ego_tools::exec::{ProcessError, RunEffectPorts};
@@ -502,30 +502,27 @@ pub async fn run_with_mcp_registry(
     args: Args,
     out: &Stdout,
     cancel: CancelToken,
-    runtime: Arc<McpRegistryRuntime>,
     evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
-    run_process(args, out, cancel, runtime, evidence, None).await
+    run_process(args, out, cancel, evidence, None).await
 }
 
 /// Run one direct CI invocation from the exact preflight snapshot captured
-/// before any process-wide MCP authority was opened.
+/// before the invocation-confined MCP authority is opened.
 pub async fn run_with_ci_preflight(
     args: Args,
     out: &Stdout,
     cancel: CancelToken,
-    runtime: Arc<McpRegistryRuntime>,
     evidence: Arc<EvidenceAdmissionService>,
     preflight: DirectPreflight,
 ) -> Ended {
-    run_process(args, out, cancel, runtime, evidence, Some(preflight.0)).await
+    run_process(args, out, cancel, evidence, Some(preflight.0)).await
 }
 
 async fn run_process(
     mut args: Args,
     out: &Stdout,
     cancel: CancelToken,
-    mcp_runtime: Arc<McpRegistryRuntime>,
     evidence: Arc<EvidenceAdmissionService>,
     preflight: Option<ExecutionPreflight>,
 ) -> Ended {
@@ -562,7 +559,6 @@ async fn run_process(
             sink
         },
         cancel,
-        mcp_runtime,
         evidence,
         preflight,
     )
@@ -582,17 +578,15 @@ pub async fn interactive_with_mcp_registry(
     args: Args,
     out: &Stdout,
     cancel: CancelToken,
-    runtime: Arc<McpRegistryRuntime>,
     evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
-    interactive_process(args, out, cancel, runtime, evidence).await
+    interactive_process(args, out, cancel, evidence).await
 }
 
 async fn interactive_process(
     mut args: Args,
     out: &Stdout,
     cancel: CancelToken,
-    mcp_runtime: Arc<McpRegistryRuntime>,
     evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
     config::capture_profile(&mut args);
@@ -628,10 +622,7 @@ async fn interactive_process(
         }
     };
     let seat = Arc::new(seat);
-    let services = InteractiveServices {
-        mcp_runtime,
-        evidence,
-    };
+    let services = InteractiveServices { evidence };
 
     if let Some(surface) = surface {
         let output = InteractiveOutput::new(surface);
@@ -665,7 +656,6 @@ async fn interactive_process(
 }
 
 struct InteractiveServices {
-    mcp_runtime: Arc<McpRegistryRuntime>,
     evidence: Arc<EvidenceAdmissionService>,
 }
 
@@ -706,7 +696,6 @@ async fn interactive_through(
             status: Some(status),
             diagnostics: output,
             text_output: Some(output),
-            mcp_runtime: services.mcp_runtime,
             evidence: services.evidence,
         },
     )
@@ -904,7 +893,6 @@ async fn run_with_registry<S: EventSink>(
     args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
-    mcp_runtime: Arc<McpRegistryRuntime>,
     evidence: Arc<EvidenceAdmissionService>,
     preflight: Option<ExecutionPreflight>,
 ) -> Ended {
@@ -919,7 +907,6 @@ async fn run_with_registry<S: EventSink>(
             status: None,
             diagnostics: &Stderr,
             text_output: None,
-            mcp_runtime,
             evidence,
         },
     )
@@ -1786,8 +1773,9 @@ struct Chosen {
 /// error about the command as typed, and it would be true whatever the
 /// provider said. Answering it *after* the model resolved told an operator
 /// standing in the wrong directory that the network was down. Opening stays in
-/// [`execute`], because its writer lease is the authority that durably admits
-/// the run context before model or MCP effects begin.
+/// [`execute`], because foreign continuation recovery needs the replayed state.
+/// The invocation-confined MCP registry reconciles before the writer admits
+/// the run context.
 fn chosen(args: &Args, root: &Path) -> Result<Chosen, UsageError> {
     let store_root = rooted_path(root, session::store_root(args.session_dir.as_ref())?);
     // The same `root` that derives a named session's id below, so "the session
@@ -2143,17 +2131,21 @@ async fn effect_scope(
         run_deadline,
     )
     .await
-    .map_err(|err| match &err {
+    .map_err(|error| process_error_termination(error, cancel))
+}
+
+fn process_error_termination(error: ProcessError, cancel: &CancelToken) -> RunTermination {
+    match &error {
         ProcessError::MissingCapabilities(_) | ProcessError::Backend(_) => {
             RunTermination::UsageError {
-                message: err.to_string(),
+                message: error.to_string(),
             }
         }
         ProcessError::Cancelled => cancelled_termination(cancel),
         _ => RunTermination::Failed {
-            message: err.to_string(),
+            message: error.to_string(),
         },
-    })
+    }
 }
 
 async fn acquire_attachments(
@@ -3161,6 +3153,7 @@ pub struct CliPrepared {
 struct PreparedExecutionRuntime {
     admission: Arc<EvidenceAdmissionService>,
     child_executor: Arc<CliRunExecutor>,
+    child_authority: Option<Arc<ChildAuthorityCeiling>>,
     child: bool,
 }
 
@@ -3177,6 +3170,7 @@ impl CliPrepared {
         let PreparedExecutionRuntime {
             admission,
             child_executor,
+            child_authority,
             child,
         } = runtime;
         let usage = |error: UsageError| RunTermination::UsageError {
@@ -3209,6 +3203,11 @@ impl CliPrepared {
             None => rooted_settings(&args, root, |_| Trust::Untrusted, &Stderr),
         }
         .map_err(usage)?;
+        if let Some(authority) = child_authority.as_deref() {
+            authority
+                .admit(&settings.effective, settings.confinement.offline())
+                .map_err(|message| RunTermination::UsageError { message })?;
+        }
         let Materials {
             system,
             registry,
@@ -4145,6 +4144,7 @@ impl RunExecutor for CliRunExecutor {
                 PreparedExecutionRuntime {
                     admission: Arc::clone(&self.admission),
                     child_executor: Arc::new(self.for_children()),
+                    child_authority: self.child_authority.clone(),
                     child: self.child,
                 },
             )
@@ -4298,6 +4298,7 @@ async fn execution_preflight(
     let ci = ci_invocation(args, &settings, driver).map_err(usage)?;
     let selected_mcp =
         config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
+    admit_mcp_transports(&settings.confinement, &selected_mcp).map_err(usage)?;
     let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
     let refresh = ego_mcp::McpRegistryRefresh::new(
         selected_mcp,
@@ -4373,16 +4374,42 @@ async fn execution_preflight(
     })
 }
 
+fn admit_mcp_transports(
+    confinement: &RunConfinement,
+    selected: &[(McpServerName, McpServerConfig, McpConfigProvenance)],
+) -> Result<(), UsageError> {
+    for (name, config, _) in selected {
+        match config {
+            McpServerConfig::Http(_) if !confinement.admits_mcp_http() && confinement.offline() => {
+                return Err(UsageError(format!(
+                    "MCP HTTP server `{name}` is unavailable under --offline"
+                )));
+            }
+            McpServerConfig::Http(_) if !confinement.admits_mcp_http() => {
+                return Err(UsageError(format!(
+                    "MCP HTTP server `{name}` requires --sandbox off"
+                )));
+            }
+            McpServerConfig::Stdio(_) if !confinement.admits_mcp_stdio() => {
+                return Err(UsageError(format!(
+                    "MCP stdio server `{name}` is unavailable under --offline"
+                )));
+            }
+            McpServerConfig::Http(_) | McpServerConfig::Stdio(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Everything before the first turn.
 ///
 /// What is left here after the four steps above is the *order* they happen in,
 /// which is the part that is genuinely this function's: settings, explicit CI
 /// posture and MCP selection are established before a session is chosen. A
 /// direct CI token without answers already contains material and generation
-/// readiness; every prompt or model resume admits its run context before MCP
-/// reconciliation. A foreign resume restores and pins its durable generation
-/// policy around that reconciliation before admitting the run context or
-/// starting the session.
+/// readiness. Every prompt or resume reconciles the invocation-confined MCP
+/// registry before admitting its run context. A foreign resume additionally
+/// restores and pins its durable generation policy around that reconciliation.
 async fn execute<S: EventSink>(
     mut args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
@@ -4396,10 +4423,8 @@ async fn execute<S: EventSink>(
         mut status,
         diagnostics,
         text_output,
-        mcp_runtime,
         evidence,
     } = host;
-    let mcp_registry = Arc::clone(mcp_runtime.controller());
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
@@ -4425,6 +4450,7 @@ async fn execute<S: EventSink>(
             }
             let selected_mcp =
                 config::selected_mcp(&args, &settings.effective, &settings.cwd).map_err(usage)?;
+            admit_mcp_transports(&settings.confinement, &selected_mcp).map_err(usage)?;
             let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
             let refresh = ego_mcp::McpRegistryRefresh::new(
                 selected_mcp,
@@ -4440,6 +4466,22 @@ async fn execute<S: EventSink>(
             (settings, ci, refresh, None, Some(auto_preflight))
         }
     };
+    let mcp_scope = crate::provider_http::McpProcessScope::for_run(
+        settings.confinement.clone(),
+        cancel.clone(),
+        settings.run_deadline,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::provider_http::McpProcessScopeError::Effects(error) => {
+            process_error_termination(error, &cancel)
+        }
+        crate::provider_http::McpProcessScopeError::Setup(message) => {
+            RunTermination::Failed { message }
+        }
+    })?;
+    let mcp_runtime = Arc::clone(mcp_scope.runtime());
+    let mcp_registry = Arc::clone(mcp_runtime.controller());
     if let Some(ci) = &ci {
         args.session_dir = Some(ci.session_root.clone());
     }
@@ -4626,14 +4668,6 @@ async fn execute<S: EventSink>(
             }),
         }
     };
-    if recovered_capture.is_none() {
-        admit_context(
-            &opened,
-            context
-                .take()
-                .expect("the run context is admitted exactly once"),
-        )?;
-    }
     let (mut resume, foreign_plan) = match resume_plan {
         Some(ResumePlan::Model {
             answer,
@@ -4653,6 +4687,14 @@ async fn execute<S: EventSink>(
             message: error.to_string(),
         })
     })?;
+    if recovered_capture.is_none() {
+        admit_context(
+            &opened,
+            context
+                .take()
+                .expect("the run context is admitted exactly once"),
+        )?;
+    }
     if let Some(ResumePlan::Foreign {
         question,
         continuation_id,
@@ -6495,7 +6537,6 @@ struct RunHost<'a> {
     status: Option<InteractiveStatus>,
     diagnostics: &'a dyn Diagnostics,
     text_output: Option<&'a dyn TextOutput>,
-    mcp_runtime: Arc<McpRegistryRuntime>,
     evidence: Arc<EvidenceAdmissionService>,
 }
 
@@ -8028,6 +8069,7 @@ mod tests {
                 admission,
                 child_executor,
                 child: false,
+                child_authority: None,
             },
         )
         .await;

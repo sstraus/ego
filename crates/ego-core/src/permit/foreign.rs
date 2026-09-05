@@ -1075,6 +1075,12 @@ impl fmt::Debug for OneHopResponse {
 }
 
 pub trait OneHop: Send + Sync {
+    /// Refuse MCP use before DNS, connection, or request delivery.
+    /// Adapters that do not bind an invocation confinement fail closed.
+    fn admit_mcp(&self) -> Result<(), TransportError> {
+        Err(authority_mismatch())
+    }
+
     fn begin_call(&self) -> std::time::Instant;
 
     fn execute(
@@ -1098,6 +1104,10 @@ impl GuardedHttp {
 
     pub fn begin_call(&self) -> std::time::Instant {
         self.one_hop.begin_call()
+    }
+
+    pub fn admit_mcp(&self) -> Result<(), TransportError> {
+        self.one_hop.admit_mcp()
     }
 
     pub fn execute_admitted(
