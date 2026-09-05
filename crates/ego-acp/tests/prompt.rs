@@ -43,9 +43,9 @@ use ego_core::hook::{
 use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::public::{ItemKind, PublicEvent};
 use ego_core::run::{
-    IdSource, RunAppend, RunAttachment, RunExecutionBindings, RunExecutor, RunExecutorError,
-    RunHandle, RunId, RunPreparation, RunPrepared, RunRevision, RunRoot, RunSettlement,
-    RunTransaction,
+    IdSource, RunAppend, RunAttachment, RunCommand, RunExecutionBindings, RunExecutor,
+    RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunRevision, RunRoot,
+    RunSettlement, RunTransaction,
 };
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -599,6 +599,22 @@ impl SessionStore for PromptStore {
     }
 }
 
+impl PromptStore {
+    /// Every run transaction this store was asked to keep, in order.
+    fn transactions(&self) -> Vec<RunTransaction> {
+        self.entries
+            .lock()
+            .expect("prompt entries")
+            .values()
+            .flatten()
+            .filter_map(|entry| match entry {
+                SessionEntry::RunTransaction(transaction) => Some(transaction.clone()),
+                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+            })
+            .collect()
+    }
+}
+
 #[derive(Default)]
 struct PromptClock;
 
@@ -631,6 +647,7 @@ struct Connected {
     from_agent: mpsc::UnboundedReceiver<String>,
     agent: tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>>,
     next_id: u64,
+    store: Arc<PromptStore>,
 }
 
 impl Connected {
@@ -649,7 +666,7 @@ impl Connected {
         let executor = Arc::new(executor);
         let ids = Arc::new(PromptIds::default());
         let agent = support::agent_with_mcp(
-            store,
+            Arc::clone(&store),
             Arc::clone(&executor),
             Arc::new(PromptClock),
             Arc::clone(&ids),
@@ -660,6 +677,7 @@ impl Connected {
             from_agent: from_agent_rx,
             agent: tokio::spawn(agent.connect_to(transport)),
             next_id: 1,
+            store,
         }
     }
 
@@ -979,6 +997,76 @@ async fn an_image_is_refused_by_name_and_no_turn_is_started() {
         recovered["result"]["stopReason"], "end_turn",
         "the next prompt on that session was refused too: {recovered}"
     );
+
+    connection.finish().await;
+}
+
+/// The digest a prompt is admitted under is derived from the request, never a
+/// copy of it.
+///
+/// `RequestDigest` names an identity used to recognise a retry, and it is
+/// written into the durable run transaction (`RunCommand::CommandAdmitted`),
+/// which the session store serialises to its JSONL. `ego-mcp` builds it by
+/// hashing (`run_server.rs` `request_digest`) and `ego-core`'s subagent service
+/// builds a bounded `child:<invocation>:<sha256>`; this connection is the one
+/// that handed the controller the serialized request body itself, so every ACP
+/// prompt was persisted twice — once as `prompt`, once again inside `digest`.
+///
+/// Text made that a size defect. It stops being only that as soon as a block
+/// can carry bytes: `docs/decisions/2026-08-29-images-are-session-blobs-before-
+/// they-are-wire-parts.md` rules that durable prompt records carry a `BlobRef`,
+/// a media type and dimensions and "never carry bytes", and a digest that is a
+/// verbatim copy of the request would write base64 image data straight into the
+/// event stream, outside the blob lifecycle that is supposed to own it. So this
+/// is a prerequisite for accepting images, not a tidy-up beside it.
+///
+/// The assertion is about *derivation*, not about a particular hash: a bounded
+/// value that does not contain the prompt it identifies. Pinning the exact
+/// spelling here would make it a change-detector.
+#[tokio::test]
+async fn a_prompt_is_admitted_under_a_derived_digest_and_not_its_own_body() {
+    const MARKER: &str = "MARKER-THAT-MUST-NOT-BE-COPIED-INTO-THE-DIGEST";
+
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": MARKER }],
+            }),
+        )
+        .await;
+
+    let digests: Vec<String> = connection
+        .store
+        .transactions()
+        .iter()
+        .filter_map(|transaction| match transaction.command() {
+            RunCommand::CommandAdmitted { digest, .. } => Some(digest.as_str().to_owned()),
+            RunCommand::CancelRequested { .. } | RunCommand::CommandSettled { .. } => None,
+        })
+        .collect();
+    assert!(
+        !digests.is_empty(),
+        "the prompt was never admitted, so there is no digest to judge"
+    );
+    for digest in &digests {
+        assert!(
+            !digest.contains(MARKER),
+            "the durable run transaction carries the request body as its digest: {digest}"
+        );
+        // A derived identity is bounded by construction. Without this, a digest
+        // could stop containing the marker and still grow with the request.
+        assert!(
+            digest.len() <= 128,
+            "a derived digest is bounded; this one is {} bytes: {digest}",
+            digest.len()
+        );
+    }
 
     connection.finish().await;
 }

@@ -34,6 +34,7 @@ use std::task::{Context, Poll, Waker};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::Digest;
 use uuid::Uuid;
 
 use crate::budget::SharedBudgetGate;
@@ -360,6 +361,20 @@ impl std::str::FromStr for RequestId {
 }
 
 /// Digest of the complete inbound command body used for idempotency.
+///
+/// **Derived from the body, never a copy of it.** This value is written into
+/// the durable run transaction (`RunCommand::CommandAdmitted`), which the
+/// session store serialises to its JSONL, so a caller that passes the request
+/// body itself persists that body a second time. For a text prompt that is
+/// waste; for a prompt that can carry image blocks it breaks
+/// `docs/decisions/2026-08-29-images-are-session-blobs-before-they-are-wire-
+/// parts.md`, which rules that durable prompt records carry a reference, a
+/// media type and dimensions and "never carry bytes".
+///
+/// [`Self::of`] is how a protocol adapter should build one. [`Self::parse`]
+/// stays for the callers whose identity is already derived and structured —
+/// `subagent.rs`'s `child:<invocation>:<sha256>` names its origin as well as
+/// its content — so the rule is bounded derivation, not one fixed spelling.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RequestDigest(String);
@@ -370,6 +385,18 @@ impl RequestDigest {
             return Err(RunError::InvalidRequestDigest);
         }
         Ok(Self(value.to_owned()))
+    }
+
+    /// The digest of one serializable inbound command body.
+    ///
+    /// One implementation for every protocol adapter, so two of them cannot
+    /// disagree about what makes a retry the same request. Serialization of a
+    /// request this crate's callers own is infallible; a body that somehow
+    /// cannot be serialized has no identity to compare, and is reported as the
+    /// same invalid digest an empty string would be.
+    pub fn of(body: &impl Serialize) -> Result<Self, RunError> {
+        let bytes = serde_json::to_vec(body).map_err(|_| RunError::InvalidRequestDigest)?;
+        Self::parse(&format!("{:x}", sha2::Sha256::digest(bytes)))
     }
 
     pub fn as_str(&self) -> &str {

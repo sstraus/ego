@@ -1479,9 +1479,22 @@ where
                     // two different requests exactly as JSON-RPC says they are.
                     let command = serde_json::to_string(responder.id())
                         .expect("a JSON-RPC request id is serializable");
-                    let digest = serde_json::to_string(&request)
-                        .expect("ACP request serialization is infallible");
-                    let correlation = match sessions.begin(&id, ids.as_ref(), &command, &digest) {
+                    // Derived, not copied: this value is written into the
+                    // durable run transaction, so serializing the request into
+                    // it would persist the prompt a second time -- and, once a
+                    // block can carry image bytes, would write those bytes into
+                    // the event stream that
+                    // `docs/decisions/2026-08-29-images-are-session-blobs-
+                    // before-they-are-wire-parts.md` keeps them out of.
+                    let digest = match RequestDigest::of(&request) {
+                        Ok(digest) => digest,
+                        Err(error) => {
+                            return responder
+                                .respond_with_error(Error::invalid_params().data(error.to_string()));
+                        }
+                    };
+                    let correlation =
+                        match sessions.begin(&id, ids.as_ref(), &command, digest.as_str()) {
                         BeginPrompt::Ready(correlation) => correlation,
                         BeginPrompt::Busy => {
                             return responder.respond_with_error(Error::invalid_request().data(
@@ -1507,8 +1520,6 @@ where
                             );
                         }
                     };
-                    let digest = RequestDigest::parse(&digest)
-                        .expect("a serialized ACP prompt request is non-empty");
                     let capabilities = *client_capabilities
                         .lock()
                         .expect("initialize capability lock poisoned");

@@ -19,7 +19,6 @@ use ego_core::run::{
 use ego_core::store::session_store::SessionStore;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::{
     McpError, McpFailure, McpFuture, McpServerCallOutcome, McpServerPort,
@@ -801,10 +800,13 @@ fn parse_run_id(raw: &str) -> Result<RunId, McpError> {
     raw.parse().map_err(|_| invalid("invalid MCP run id"))
 }
 
+/// The derivation this server used to own privately.
+///
+/// It now lives on `RequestDigest` itself, so this connection and the ACP one
+/// cannot drift into disagreeing about what makes a retry the same request.
+/// What stays here is the mapping onto this protocol's error type.
 fn request_digest(request: &impl serde::Serialize) -> Result<RequestDigest, McpError> {
-    let bytes = serde_json::to_vec(request)?;
-    let digest = format!("{:x}", Sha256::digest(bytes));
-    RequestDigest::parse(&digest).map_err(run_error)
+    RequestDigest::of(request).map_err(run_error)
 }
 
 fn normalize_names(values: impl IntoIterator<Item = String>) -> Result<BTreeSet<String>, McpError> {
