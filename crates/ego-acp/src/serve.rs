@@ -233,6 +233,7 @@ impl From<CompactionReceipt> for AcpCompactResponse {
 }
 
 struct Registered {
+    generation: RegistrationGeneration,
     root: RunRoot,
     start_request: Option<RequestId>,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
@@ -242,6 +243,7 @@ struct Registered {
 }
 
 struct PromptCorrelation {
+    generation: RegistrationGeneration,
     root: RunRoot,
     request_id: RequestId,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
@@ -254,8 +256,27 @@ enum BeginPrompt {
     Unknown,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RegistrationGeneration(u64);
+
+#[derive(Default)]
+struct SessionRegistrations {
+    next_generation: u64,
+    sessions: HashMap<v1::SessionId, Registered>,
+}
+
+impl SessionRegistrations {
+    fn mint_generation(&mut self) -> RegistrationGeneration {
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .expect("an ACP connection exhausted its registration generations");
+        RegistrationGeneration(self.next_generation)
+    }
+}
+
 #[derive(Clone, Default)]
-struct Sessions(Arc<Mutex<HashMap<v1::SessionId, Registered>>>);
+struct Sessions(Arc<Mutex<SessionRegistrations>>);
 
 impl Sessions {
     fn open(
@@ -263,34 +284,47 @@ impl Sessions {
         id: v1::SessionId,
         root: RunRoot,
         start_request: Option<RequestId>,
+        run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
         mcp: Option<Arc<dyn SessionMcpAdmission>>,
-    ) -> bool {
+    ) -> Option<RegistrationGeneration> {
         let mut sessions = self.lock();
-        if sessions.get(&id).is_some_and(|session| session.busy) {
-            return false;
+        if sessions
+            .sessions
+            .get(&id)
+            .is_some_and(|session| session.busy)
+        {
+            return None;
         }
-        sessions.insert(
+        let generation = sessions.mint_generation();
+        sessions.sessions.insert(
             id,
             Registered {
+                generation,
                 root,
                 start_request,
-                run: None,
+                run,
                 busy: false,
                 active_cancel: None,
                 mcp,
             },
         );
-        true
+        Some(generation)
     }
 
     fn begin(&self, id: &v1::SessionId, ids: &dyn IdSource) -> BeginPrompt {
         let mut sessions = self.lock();
-        let Some(session) = sessions.get_mut(id) else {
+        let Some(session) = sessions.sessions.get(id) else {
             return BeginPrompt::Unknown;
         };
         if session.busy {
             return BeginPrompt::Busy;
         }
+        let generation = sessions.mint_generation();
+        let session = sessions
+            .sessions
+            .get_mut(id)
+            .expect("the checked ACP session remains registered");
+        session.generation = generation;
         session.busy = true;
         let request_id = if session.run.is_none() {
             session
@@ -300,6 +334,7 @@ impl Sessions {
             RequestId::from_uuid(ids.next_uuid())
         };
         BeginPrompt::Ready(PromptCorrelation {
+            generation,
             root: session.root.clone(),
             request_id,
             run: session.run,
@@ -310,27 +345,48 @@ impl Sessions {
     fn install_admission(
         &self,
         id: &v1::SessionId,
+        generation: RegistrationGeneration,
         run_id: ego_core::run::RunId,
         revision: ego_core::run::RunRevision,
         key: CancelKey,
     ) {
-        if let Some(session) = self.lock().get_mut(id) {
+        if let Some(session) = self
+            .lock()
+            .sessions
+            .get_mut(id)
+            .filter(|session| session.generation == generation)
+        {
             session.run = Some((run_id, revision));
             session.active_cancel = Some(key);
             session.busy = true;
         }
     }
 
-    fn finish(&self, id: &v1::SessionId, snapshot: &RunSnapshot) {
-        if let Some(session) = self.lock().get_mut(id) {
+    fn finish(
+        &self,
+        id: &v1::SessionId,
+        generation: RegistrationGeneration,
+        snapshot: &RunSnapshot,
+    ) {
+        if let Some(session) = self
+            .lock()
+            .sessions
+            .get_mut(id)
+            .filter(|session| session.generation == generation)
+        {
             session.run = Some((snapshot.run_id(), snapshot.revision()));
             session.active_cancel = None;
             session.busy = false;
         }
     }
 
-    fn refuse(&self, id: &v1::SessionId) {
-        if let Some(session) = self.lock().get_mut(id) {
+    fn refuse(&self, id: &v1::SessionId, generation: RegistrationGeneration) {
+        if let Some(session) = self
+            .lock()
+            .sessions
+            .get_mut(id)
+            .filter(|session| session.generation == generation)
+        {
             session.active_cancel = None;
             session.busy = false;
         }
@@ -338,19 +394,23 @@ impl Sessions {
 
     fn cancel_key(&self, id: &v1::SessionId) -> Option<CancelKey> {
         self.lock()
+            .sessions
             .get(id)
             .and_then(|session| session.active_cancel.clone())
     }
 
     fn is_busy(&self, id: &v1::SessionId) -> bool {
-        self.lock().get(id).is_some_and(|session| session.busy)
+        self.lock()
+            .sessions
+            .get(id)
+            .is_some_and(|session| session.busy)
     }
 
     fn close(&self, id: &v1::SessionId) {
-        self.lock().remove(id);
+        self.lock().sessions.remove(id);
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<v1::SessionId, Registered>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SessionRegistrations> {
         self.0
             .lock()
             .expect("a poisoned lock means an ACP handler panicked mid-session")
@@ -939,7 +999,7 @@ where
                         return responder.respond_with_error(lifecycle_error(error));
                     }
                     let attachment_root = root.clone();
-                    let _ = sessions.open(id.clone(), root, Some(start_request), mcp);
+                    let _ = sessions.open(id.clone(), root, Some(start_request), None, mcp);
                     if let Some(lifecycle) = &lifecycle {
                         match lifecycle.resume(session, attachment_root.as_path()).await {
                             Ok(attachment) => {
@@ -1039,23 +1099,26 @@ where
                         Ok(run) => run,
                         Err(error) => return responder.respond_with_error(lifecycle_error(error)),
                     };
-                    if !sessions.open(
+                    let Some(generation) = sessions.open(
                         request.session_id.clone(),
                         root,
                         recovered.run.is_none().then(|| RequestId::from_uuid(ids.next_uuid())),
+                        recovered.run,
                         mcp,
-                    ) {
+                    ) else {
                         return responder.respond_with_error(Error::invalid_request().data(
                             format!("session {} already has a turn running", request.session_id),
                         ));
-                    }
-                    if let Some((run_id, revision)) = recovered.run {
-                        sessions.lock().get_mut(&request.session_id).expect("just opened").run =
-                            Some((run_id, revision));
-                    }
+                    };
                     if let Some((key, subscription, execution)) = recovered.active {
                         let (run_id, revision) = recovered.run.expect("active recovery has a run");
-                        sessions.install_admission(&request.session_id, run_id, revision, key);
+                        sessions.install_admission(
+                            &request.session_id,
+                            generation,
+                            run_id,
+                            revision,
+                            key,
+                        );
                         let controller = Arc::clone(&controller);
                         spawner.spawn(Box::pin(async move {
                             if let Err(error) = controller.execute(execution).await {
@@ -1066,7 +1129,7 @@ where
                         let watched_id = request.session_id.clone();
                         spawner.spawn(Box::pin(async move {
                             let snapshot = subscription.await;
-                            watched.finish(&watched_id, &snapshot);
+                            watched.finish(&watched_id, generation, &snapshot);
                         }));
                     }
                     if let Err(error) = emit_attachment(&cx, &request.session_id, &attachment) {
@@ -1132,23 +1195,26 @@ where
                         Ok(run) => run,
                         Err(error) => return responder.respond_with_error(lifecycle_error(error)),
                     };
-                    if !sessions.open(
+                    let Some(generation) = sessions.open(
                         request.session_id.clone(),
                         root,
                         recovered.run.is_none().then(|| RequestId::from_uuid(ids.next_uuid())),
+                        recovered.run,
                         mcp,
-                    ) {
+                    ) else {
                         return responder.respond_with_error(Error::invalid_request().data(
                             format!("session {} already has a turn running", request.session_id),
                         ));
-                    }
-                    if let Some((run_id, revision)) = recovered.run {
-                        sessions.lock().get_mut(&request.session_id).expect("just opened").run =
-                            Some((run_id, revision));
-                    }
+                    };
                     if let Some((key, subscription, execution)) = recovered.active {
                         let (run_id, revision) = recovered.run.expect("active recovery has a run");
-                        sessions.install_admission(&request.session_id, run_id, revision, key);
+                        sessions.install_admission(
+                            &request.session_id,
+                            generation,
+                            run_id,
+                            revision,
+                            key,
+                        );
                         let controller = Arc::clone(&controller);
                         spawner.spawn(Box::pin(async move {
                             if let Err(error) = controller.execute(execution).await {
@@ -1159,7 +1225,7 @@ where
                         let watched_id = request.session_id.clone();
                         spawner.spawn(Box::pin(async move {
                             let snapshot = subscription.await;
-                            watched.finish(&watched_id, &snapshot);
+                            watched.finish(&watched_id, generation, &snapshot);
                         }));
                     }
                     if let Err(error) = emit_attachment(&cx, &request.session_id, &attachment) {
@@ -1218,6 +1284,7 @@ where
                         child_id.clone(),
                         root,
                         Some(RequestId::from_uuid(ids.next_uuid())),
+                        None,
                         mcp,
                     );
                     if let Err(error) = emit_info(&cx, &child_id, &attachment.meta) {
@@ -1326,7 +1393,7 @@ where
                     let text = match prompt_text(&request.prompt) {
                         Ok(text) => text,
                         Err(refusal) => {
-                            sessions.refuse(&id);
+                            sessions.refuse(&id, correlation.generation);
                             return responder.respond_with_error(
                                 Error::invalid_params().data(refusal),
                             );
@@ -1382,6 +1449,7 @@ where
                             let subscription = admission.subscription();
                             sessions.install_admission(
                                 &id,
+                                correlation.generation,
                                 admission.run_id(),
                                 admission.revision(),
                                 admission.cancel_key().clone(),
@@ -1392,7 +1460,7 @@ where
                             (observation.subscription(), None)
                         }
                         Err(error) => {
-                            sessions.refuse(&id);
+                            sessions.refuse(&id, correlation.generation);
                             return responder.respond_with_error(
                                 Error::internal_error().data(error.to_string()),
                             );
@@ -1407,9 +1475,10 @@ where
                         }));
                     }
                     let sessions = sessions.clone();
+                    let generation = correlation.generation;
                     cx.spawn(async move {
                         let snapshot = subscription.await;
-                        sessions.finish(&id, &snapshot);
+                        sessions.finish(&id, generation, &snapshot);
                         match prompt_result(&snapshot) {
                             Ok(stop_reason) => {
                                 responder.respond(v1::PromptResponse::new(stop_reason))
