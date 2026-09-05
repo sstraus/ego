@@ -22,6 +22,7 @@ use super::grant::{Escalation, Pending, PermissionRequest};
 use super::path::CanonPath;
 use super::prepared_call::Op;
 use crate::config::Mode;
+use crate::event::id::ItemId;
 
 /// What a party answered about a [`Pending`].
 ///
@@ -100,8 +101,20 @@ pub enum PermissionDecision {
 /// This port cannot replace [`ModeApprover`]. `PolicyEngine::with_human`
 /// always constructs the mode from resolved config and installs this party
 /// after it.
+///
+/// Carries the tool call's [`ItemId`] for the same reason
+/// [`crate::question::Elicitor`] does: a seat that renders the question
+/// somewhere other than a terminal has to say *which* call it is asking
+/// about. The ACP projection turns that item into the tool call id it already
+/// streamed, so the host attaches the prompt to the call the operator can
+/// see. A terminal seat ignores it, which is why this is one argument rather
+/// than a second port.
 pub trait HumanApprover: fmt::Debug + Send + Sync {
-    fn decide<'a>(&'a self, request: &'a PermissionRequest) -> BoxFuture<'a, PermissionDecision>;
+    fn decide<'a>(
+        &'a self,
+        item: ItemId,
+        request: &'a PermissionRequest,
+    ) -> BoxFuture<'a, PermissionDecision>;
 }
 
 /// §6 step 5: the mode ceiling.

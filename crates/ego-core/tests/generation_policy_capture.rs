@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use ego_core::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
 use ego_core::credentials::SecretMaterial;
+use ego_core::event::id::ItemId;
 use ego_core::permit::fake::FakeFs;
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
@@ -185,6 +186,7 @@ struct AlwaysAllow;
 impl HumanApprover for AlwaysAllow {
     fn decide<'a>(
         &'a self,
+        _item: ItemId,
         _request: &'a PermissionRequest,
     ) -> BoxFuture<'a, ego_core::permit::PermissionDecision> {
         Box::pin(std::future::ready(
@@ -570,7 +572,11 @@ fn new_and_restore_couple_policy_semantics_and_live_human_port() {
         CanonPath::new(WORKSPACE),
     );
     assert!(matches!(
-        futures::executor::block_on(tools.decide(restored.policy().as_ref(), pending)),
+        futures::executor::block_on(tools.decide(
+            restored.policy().as_ref(),
+            ItemId::new(),
+            pending
+        )),
         ego_core::permit::Resolution::HumanSettled { .. }
     ));
 
@@ -590,7 +596,11 @@ fn new_and_restore_couple_policy_semantics_and_live_human_port() {
         other => panic!("headless mode settlement must remain open: {other:?}"),
     };
     assert!(matches!(
-        futures::executor::block_on(tools.decide(no_human.policy().as_ref(), pending)),
+        futures::executor::block_on(tools.decide(
+            no_human.policy().as_ref(),
+            ItemId::new(),
+            pending
+        )),
         ego_core::permit::Resolution::Ask(_)
     ));
 }

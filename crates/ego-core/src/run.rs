@@ -19,7 +19,7 @@
 //! the same table.
 
 use crate::event::domain::{CancelCause, ExitReason};
-use crate::permit::Authority;
+use crate::permit::{Authority, HumanApprover};
 use crate::public::QuestionReport;
 
 use std::any::Any;
@@ -951,6 +951,7 @@ pub struct RunExecutionBindings {
     mcp_runtime: Option<Arc<dyn McpRuntimeBinding>>,
     budget_gate: Option<SharedBudgetGate>,
     effect_tools: Option<Arc<BTreeSet<String>>>,
+    human: Option<Arc<dyn HumanApprover>>,
 }
 
 impl RunExecutionBindings {
@@ -966,7 +967,24 @@ impl RunExecutionBindings {
             mcp_runtime: None,
             budget_gate: None,
             effect_tools: None,
+            human: None,
         }
+    }
+
+    /// Attach the human permission seat this execution context owns.
+    ///
+    /// Sits beside `elicitor` for the same reason: both are the connection's
+    /// answer to "who is the person here", and both belong to the execution
+    /// rather than to the process. A headless run leaves it `None`, which is
+    /// what makes an unresolved permission exit 3 instead of silently
+    /// consulting a terminal that no operator is watching.
+    pub fn with_human(mut self, human: Arc<dyn HumanApprover>) -> Self {
+        self.human = Some(human);
+        self
+    }
+
+    pub fn human(&self) -> Option<Arc<dyn HumanApprover>> {
+        self.human.as_ref().map(Arc::clone)
     }
 
     /// Attach the live admitted MCP source owned by this execution context.

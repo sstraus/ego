@@ -6,6 +6,7 @@
 //! the durable run lifecycle.
 
 pub mod negotiate;
+pub mod permission;
 pub mod project;
 pub mod question;
 pub mod serve;

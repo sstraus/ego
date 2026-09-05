@@ -515,6 +515,7 @@ fn map_rule_error(error: RuleApplicationError) -> PolicyControlError {
 mod tests {
     use super::*;
 
+    use ego_core::event::id::ItemId;
     use ego_core::permit::{
         Change, Classification, Op, PermissionDecision, PermissionRequest, Resolution,
     };
@@ -526,6 +527,7 @@ mod tests {
     impl HumanApprover for AllowingHumanApprover {
         fn decide<'a>(
             &'a self,
+            _item: ItemId,
             _request: &'a PermissionRequest,
         ) -> BoxFuture<'a, PermissionDecision> {
             Box::pin(std::future::ready(PermissionDecision::Allow))

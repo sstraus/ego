@@ -257,6 +257,7 @@ mod turn {
     impl HumanApprover for RequestObservingHuman {
         fn decide<'a>(
             &'a self,
+            _item: ItemId,
             _request: &'a PermissionRequest,
         ) -> BoxFuture<'a, PermissionDecision> {
             assert!(
@@ -273,6 +274,7 @@ mod turn {
     impl HumanApprover for PendingHuman {
         fn decide<'a>(
             &'a self,
+            _item: ItemId,
             _request: &'a PermissionRequest,
         ) -> BoxFuture<'a, PermissionDecision> {
             Box::pin(futures::future::pending())
@@ -728,6 +730,7 @@ mod turn {
     impl HumanApprover for ScriptedHuman {
         fn decide<'a>(
             &'a self,
+            _item: ItemId,
             _request: &'a PermissionRequest,
         ) -> BoxFuture<'a, PermissionDecision> {
             let answer = self

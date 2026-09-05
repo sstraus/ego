@@ -3351,9 +3351,17 @@ impl CliPrepared {
         let mode = self.effective.mode.unwrap_or(Mode::Default);
         let policy_selection =
             GenerationPolicySelection::new(mode, self.effective.permissions.clone());
-        let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
-            CliGenerationPolicySource::new(policy_selection, CanonPath::new(&self.root), None),
-        );
+        // The execution context, not this process, says whether a person is
+        // reachable. A terminal run hands in nothing here and an unresolved
+        // permission stays exit 3; an ACP run hands in the connected host, so
+        // an escalation becomes a question the operator can answer instead of
+        // an internal error the host can only render as a failure.
+        let policy_source: Arc<dyn GenerationPolicySource> =
+            Arc::new(CliGenerationPolicySource::new(
+                policy_selection,
+                CanonPath::new(&self.root),
+                bindings.human(),
+            ));
         let config = TurnConfig {
             system: self.system,
             token_ceiling: self.effective.ceilings.tokens,
@@ -6609,6 +6617,7 @@ struct SeatApprover {
 impl HumanApprover for SeatApprover {
     fn decide<'a>(
         &'a self,
+        _item: ItemId,
         request: &'a PermissionRequest,
     ) -> futures::future::BoxFuture<'a, PermissionDecision> {
         self.seat.permission_future(request)

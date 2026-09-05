@@ -4328,7 +4328,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                 &self.cancel,
                                 &mut self.control,
                                 turn,
-                                self.tools.decide(policy, pending),
+                                self.tools.decide(policy, call.item, pending),
                                 InterruptDisposition::Return,
                             )
                             .await;

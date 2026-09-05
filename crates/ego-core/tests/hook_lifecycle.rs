@@ -427,7 +427,11 @@ impl ProcessExecutor for NoProcess {
 struct DenyApprover;
 
 impl HumanApprover for DenyApprover {
-    fn decide<'a>(&'a self, _request: &'a PermissionRequest) -> BoxFuture<'a, PermissionDecision> {
+    fn decide<'a>(
+        &'a self,
+        _item: ItemId,
+        _request: &'a PermissionRequest,
+    ) -> BoxFuture<'a, PermissionDecision> {
         Box::pin(std::future::ready(PermissionDecision::Deny))
     }
 }

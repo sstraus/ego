@@ -8,6 +8,7 @@
 
 use serde_json::Value;
 
+use crate::event::id::ItemId;
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::mcp::ToolExecution;
 use crate::permit::{
@@ -559,8 +560,13 @@ impl<'a> Tools<'a> {
     /// Consult the final human party after the loop has made the request
     /// durable. Keeping this separate from mode settlement is the journal's
     /// crash boundary while a person is deciding.
-    pub async fn decide(&self, policy: &PolicyEngine, pending: Pending) -> Resolution {
-        policy.decide(pending).await
+    pub async fn decide(
+        &self,
+        policy: &PolicyEngine,
+        item: ItemId,
+        pending: Pending,
+    ) -> Resolution {
+        policy.decide(item, pending).await
     }
 
     /// Stage three: run it, under the grant policy issued and through the

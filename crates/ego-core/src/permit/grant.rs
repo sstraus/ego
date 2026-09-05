@@ -27,6 +27,7 @@ use super::rule::RuleId;
 use super::scope::Scope;
 use super::spawn::SpawnSpec;
 use crate::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
+use crate::event::id::ItemId;
 use crate::store::evidence::EvidenceRead;
 
 /// A capability token whose constructor only this module can reach. Its
@@ -887,6 +888,22 @@ pub struct PermissionRequest {
 }
 
 impl PermissionRequest {
+    /// Build the question an adapter has to render.
+    ///
+    /// Public because a host seat outside this crate — the ACP adapter — has
+    /// to be able to construct one to prove it maps every field onto the
+    /// wire. This grants nothing: `tool`, `ops` and `why` are already fully
+    /// readable through the accessors below, and the [`Scope`] the doc
+    /// comment above withholds is still not a field. Producing a request has
+    /// never been authority; only `PolicyEngine::settle` mints a permit.
+    pub fn new(tool: impl Into<String>, ops: Vec<Op>, why: Escalation) -> Self {
+        Self {
+            tool: tool.into(),
+            ops,
+            why,
+        }
+    }
+
     pub fn tool(&self) -> &str {
         &self.tool
     }
@@ -1484,12 +1501,12 @@ impl PolicyEngine {
     ///
     /// Crate-private because only the turn loop owns the durable ordering
     /// boundary. A headless engine preserves the pending question unchanged.
-    pub(crate) async fn decide(&self, pending: Pending) -> Resolution {
+    pub(crate) async fn decide(&self, item: ItemId, pending: Pending) -> Resolution {
         let Some(human) = &self.human else {
             return Resolution::Ask(pending);
         };
         let request = pending.request().clone();
-        match human.decide(&request).await {
+        match human.decide(item, &request).await {
             PermissionDecision::Allow => {
                 let call = pending.call;
                 let permit = self.mint(scope_of(&call));

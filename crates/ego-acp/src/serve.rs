@@ -139,6 +139,12 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
         capabilities: CapabilityCapture,
     ) -> ego_core::run::RunExecutionBindings {
         let elicitor = AcpQuestionAdapter::live(capabilities, connection.clone()).elicitor();
+        // The connected client is this turn's only human. Installing the seat
+        // here, beside the elicitor, is what stops an escalation from ending
+        // as an unanswerable internal error the host cannot act on.
+        let human =
+            crate::permission::AcpPermissionAdapter::live(session.clone(), connection.clone())
+                .approver();
         ego_core::run::RunExecutionBindings::new(
             Arc::new(AcpSinkFactory {
                 connection,
@@ -146,6 +152,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
             }),
             Some(elicitor),
         )
+        .with_human(human)
     }
 }
 
