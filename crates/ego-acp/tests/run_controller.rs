@@ -29,11 +29,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
-use ego_core::run::{
-    EventSinkFactory, IdSource, RequestId, RunAppend, RunAttachment, RunController,
-    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
-    RunPrepared, RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement, RunTransaction,
-};
+use ego_core::run::{EventSinkFactory, IdSource, RequestId, RunAppend, RunAttachment, RunController, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement, RunTransaction};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
@@ -531,7 +527,7 @@ impl RunExecutor for AcpExecutor {
     fn submit<'a>(
         &'a self,
         handle: &'a RunHandle,
-        _prompt: &'a str,
+        _prompt: &'a RunPrompt,
         prepared: Self::Prepared,
         bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<ego_core::run::RunSettlement, RunExecutorError>> {

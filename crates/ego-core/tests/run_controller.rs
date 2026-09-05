@@ -19,13 +19,7 @@ use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::capabilities::ModelCapabilities;
-use ego_core::run::{
-    CancelKey, CancelRequest, ContinueRequest, EventSinkFactory, IdSource, RequestDigest,
-    RequestId, RunAdmission, RunAppend, RunAttachment, RunCommandOutcome, RunController,
-    RunExecution, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId,
-    RunPreparation, RunPrepared, RunRecoveryOutcome, RunRetention, RunRevision, RunRoot,
-    RunSelections, RunSettlement, RunStatus, RunTransaction, StartRequest,
-};
+use ego_core::run::{CancelKey, CancelRequest, ContinueRequest, EventSinkFactory, IdSource, RequestDigest, RequestId, RunAdmission, RunAppend, RunAttachment, RunCommandOutcome, RunController, RunExecution, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRecoveryOutcome, RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement, RunStatus, RunTransaction, StartRequest};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
@@ -531,7 +525,7 @@ impl RunExecutor for ScriptedRunExecutor {
     fn submit<'a>(
         &'a self,
         handle: &'a RunHandle,
-        _prompt: &'a str,
+        _prompt: &'a RunPrompt,
         prepared: Self::Prepared,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<ego_core::run::RunSettlement, RunExecutorError>> {

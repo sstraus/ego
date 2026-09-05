@@ -193,7 +193,11 @@ async fn initialize_advertises_exactly_the_composed_v1_lifecycle_surface() {
             .is_none(),
         "unsupported multi-root authority was advertised: {response}"
     );
-    for absent in ["image", "audio", "embeddedContext"] {
+    assert_eq!(
+        capabilities["promptCapabilities"]["image"], true,
+        "image prompts are served but not advertised: {response}"
+    );
+    for absent in ["audio", "embeddedContext"] {
         assert_ne!(
             capabilities["promptCapabilities"][absent], true,
             "unsupported prompt capability {absent} was advertised"

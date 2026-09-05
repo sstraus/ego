@@ -46,7 +46,7 @@ use ego_core::generation_model_source::{
 };
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::port::RequestExpressibilityError;
-use ego_core::generator::types::{GenRequest, ImageRef, ThinkingLevel, ToolDescriptor};
+use ego_core::generator::types::{GenRequest, Image, ImageRef, ThinkingLevel, ToolDescriptor};
 use ego_core::hook::{
     HookCatalogue, HookCausality, HookEvent, HookInvocationBinding, HookLifecycleDispatcher,
     HookOccurrence, HookRunner, HookStartedEvidence, SessionHookRuntime, SessionHookState,
@@ -67,8 +67,8 @@ use ego_core::question::{
 use ego_core::run::{
     CancelReason, DeniedBy, IdSource, RecoveryEvidence, RequestId, RunAttachment, RunController,
     RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
-    RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement, RunSnapshot, RunTermination,
-    Signal,
+    RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections, RunSettlement, RunSnapshot,
+    RunTermination, Signal,
 };
 use ego_core::session::{ReplaySource, ReplaySourceError};
 use ego_core::session_lifecycle::{LeasedSharedJournal, SessionMetadata};
@@ -2208,8 +2208,27 @@ fn unmet_confinement(confinement: &RunConfinement, missing: &MissingExecCaps) ->
     )
 }
 
+/// The pictures one turn was given, by the two routes they can arrive on.
+///
+/// One value rather than two arguments because they are one question — what
+/// this turn is looking at — answered by two transports: bytes that came inside
+/// the request, and paths this process has yet to read. They are published
+/// together, under one model's limits, or not at all.
+struct Attachments<'a> {
+    /// Images that arrived with the prompt itself, already decoded and bounded.
+    inline: &'a [Image],
+    /// `--attach` values, still to be read from the filesystem or fetched.
+    specs: &'a [String],
+}
+
+impl Attachments<'_> {
+    fn is_empty(&self) -> bool {
+        self.inline.is_empty() && self.specs.is_empty()
+    }
+}
+
 async fn acquire_attachments(
-    specs: &[String],
+    attachments: Attachments<'_>,
     source: &Arc<model::CliGenerationModelSource>,
     ports: &Arc<RunEffectPorts>,
     cancel: &CancelToken,
@@ -2217,28 +2236,45 @@ async fn acquire_attachments(
     cwd: &Path,
     blobs: &dyn ego_core::store::blob::BlobStore,
 ) -> Result<Vec<ImageRef>, RunTermination> {
-    if specs.is_empty() {
+    if attachments.is_empty() {
         return Ok(Vec::new());
     }
+    // Resolving the profile is what makes the refusal truthful rather than
+    // generic: both admission paths need this model's own image limits, and
+    // this is the first point on either where they are known.
     let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(ports))) as Arc<dyn ego_ai::http::Http>;
     let profile = source
         .bind(http, cancel.clone(), run_deadline)
         .resolve(GenerationModelRequest::new(GenerationRole::Main))
         .await
         .map_err(generation_refusal)?;
-    attachment::acquire(
-        specs,
+    let usage = |error: crate::cli::UsageError| RunTermination::UsageError {
+        message: error.to_string(),
+    };
+    // Images that came inside the request come first, because they came with
+    // the prompt itself; `--attach` values follow in the order they were given.
+    let mut images = attachment::publish(
+        attachments.inline,
         &profile.capabilities,
         profile.identity.0.as_str(),
         &profile.request_model,
-        cwd,
-        ports.as_ref(),
         blobs,
     )
-    .await
-    .map_err(|error| RunTermination::UsageError {
-        message: error.to_string(),
-    })
+    .map_err(usage)?;
+    images.extend(
+        attachment::acquire(
+            attachments.specs,
+            &profile.capabilities,
+            profile.identity.0.as_str(),
+            &profile.request_model,
+            cwd,
+            ports.as_ref(),
+            blobs,
+        )
+        .await
+        .map_err(usage)?,
+    );
+    Ok(images)
 }
 
 /// Map the first latched cancellation cause to the CLI termination contract.
@@ -2251,7 +2287,7 @@ pub fn cancelled_termination(cancel: &CancelToken) -> RunTermination {
 }
 
 enum HeadlessInput<'a> {
-    Prompt(&'a str),
+    Prompt(&'a RunPrompt),
     Resumed(ego_core::event::id::TurnId),
     Answered {
         question: ItemId,
@@ -2983,7 +3019,13 @@ async fn drive_headless_turn(
     let (ports, observation) =
         effect_scope(confinement, active.evidence(), cancel, run_deadline).await?;
     let images = acquire_attachments(
-        attachment_specs,
+        Attachments {
+            inline: match &input {
+                HeadlessInput::Prompt(prompt) => prompt.images(),
+                HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => &[],
+            },
+            specs: attachment_specs,
+        },
         &source,
         &ports,
         cancel,
@@ -3129,7 +3171,7 @@ async fn drive_headless_turn(
     let (termination, result) = match input {
         HeadlessInput::Prompt(prompt) => {
             turns
-                .drive_with_images(&mut loop_, prompt, images, cancel, diagnostics)
+                .drive_with_images(&mut loop_, prompt.text(), images, cancel, diagnostics)
                 .await
         }
         HeadlessInput::Resumed(turn) => {
@@ -3335,7 +3377,7 @@ impl CliPrepared {
 
     async fn submit(
         mut self,
-        prompt: &str,
+        prompt: &RunPrompt,
         bindings: RunExecutionBindings,
         cancel: &CancelToken,
     ) -> Result<RunSettlement, RunExecutorError> {
@@ -4314,7 +4356,7 @@ impl RunExecutor for CliRunExecutor {
     fn submit<'a>(
         &'a self,
         handle: &'a RunHandle,
-        prompt: &'a str,
+        prompt: &'a RunPrompt,
         prepared: Self::Prepared,
         bindings: RunExecutionBindings,
     ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
@@ -5189,7 +5231,7 @@ async fn execute<S: EventSink>(
                     answer,
                     policy,
                 },
-                None => HeadlessInput::Prompt(&text),
+                None => HeadlessInput::Prompt(&RunPrompt::from(text.clone())),
             };
             let driven = drive_headless_turn(
                 &mut active,
@@ -6339,7 +6381,13 @@ async fn execute<S: EventSink>(
                                     && !pending_attachments.is_empty()
                                 {
                                     let images = acquire_attachments(
-                                        &pending_attachments,
+                                        Attachments {
+                                            // The interactive surface attaches
+                                            // by spec; a typed prompt carries
+                                            // no inline bytes of its own.
+                                            inline: &[],
+                                            specs: &pending_attachments,
+                                        },
                                         &source,
                                         &ports,
                                         &turn_cancel,
@@ -7938,7 +7986,7 @@ mod tests {
         fn submit<'a>(
             &'a self,
             _handle: &'a RunHandle,
-            _prompt: &'a str,
+            _prompt: &'a RunPrompt,
             _prepared: Self::Prepared,
             _bindings: RunExecutionBindings,
         ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {

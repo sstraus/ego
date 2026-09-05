@@ -46,6 +46,7 @@ use crate::event::id::{ItemId, SessionId, TurnId};
 use crate::event::time::{Clock, Timestamp};
 use crate::evidence::{EvidenceError, EvidenceWrite, RunInvocationId};
 use crate::generator::capabilities::ModelCapabilities;
+use crate::generator::types::Image;
 use crate::mcp::McpRuntimeBinding;
 use crate::question::Elicitor;
 use crate::session_lifecycle::{
@@ -776,6 +777,50 @@ pub enum RunAppend {
     CommittedDurabilityUncertain { diagnostic: String },
 }
 
+/// One prompt as it was submitted: its text, and the images sent beside it.
+///
+/// **Transient, and deliberately not the durable record.** The bytes here are
+/// on their way to the session's content-addressed store; what survives in the
+/// event stream is a `BlobRef`, a media type and dimensions, which is what
+/// `docs/decisions/2026-08-29-images-are-session-blobs-before-they-are-wire-
+/// parts.md` requires. `RunCommand::CommandAdmitted` therefore projects only
+/// [`Self::text`], and this type is intentionally not `Serialize`: a durable
+/// record that could hold it would be a durable record holding bytes.
+///
+/// [`Image`] is used rather than a looser inline type because it is already the
+/// validated one — its constructor bounds the byte length and decodes the
+/// dimensions *from the bytes*, so a declared media type the payload
+/// contradicts fails to construct rather than being admitted and refused later.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunPrompt {
+    text: String,
+    images: Vec<Image>,
+}
+
+impl RunPrompt {
+    pub fn new(text: impl Into<String>, images: Vec<Image>) -> Self {
+        Self {
+            text: text.into(),
+            images,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn images(&self) -> &[Image] {
+        &self.images
+    }
+}
+
+/// A prompt that is only text, which is most of them.
+impl<T: Into<String>> From<T> for RunPrompt {
+    fn from(text: T) -> Self {
+        Self::new(text, Vec::new())
+    }
+}
+
 /// First prompt and immutable selections for a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartRequest {
@@ -784,7 +829,7 @@ pub struct StartRequest {
     request_id: RequestId,
     digest: RequestDigest,
     selections: RunSelections,
-    prompt: String,
+    prompt: RunPrompt,
     origin: RunOrigin,
 }
 
@@ -795,7 +840,7 @@ impl StartRequest {
         request_id: RequestId,
         digest: RequestDigest,
         selections: RunSelections,
-        prompt: impl Into<String>,
+        prompt: impl Into<RunPrompt>,
     ) -> Self {
         Self {
             session_id,
@@ -825,7 +870,7 @@ pub struct ContinueRequest {
     request_id: RequestId,
     digest: RequestDigest,
     expected_revision: RunRevision,
-    prompt: String,
+    prompt: RunPrompt,
 }
 
 impl ContinueRequest {
@@ -834,7 +879,7 @@ impl ContinueRequest {
         request_id: RequestId,
         digest: RequestDigest,
         expected_revision: RunRevision,
-        prompt: impl Into<String>,
+        prompt: impl Into<RunPrompt>,
     ) -> Self {
         Self {
             run_id,
@@ -1139,7 +1184,7 @@ pub trait RunExecutor: Send + Sync {
     fn submit<'a>(
         &'a self,
         handle: &'a RunHandle,
-        prompt: &'a str,
+        prompt: &'a RunPrompt,
         prepared: Self::Prepared,
         bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>>;
@@ -1394,7 +1439,7 @@ enum ExecutionMode {
         root: RunRoot,
         origin: RunOrigin,
         model: ModelRef,
-        prompt: String,
+        prompt: RunPrompt,
         prepared: Box<dyn Any + Send>,
     },
     RecoveredObserve {
@@ -1597,7 +1642,7 @@ where
                 expected_revision: None,
                 lease,
                 executor_id: run_id.nonce,
-                prompt: request.prompt.clone(),
+                prompt: request.prompt.text().to_owned(),
                 model: model.clone(),
                 start: true,
             },
@@ -1711,7 +1756,7 @@ where
                 expected_revision: Some(request.expected_revision),
                 lease,
                 executor_id: request.run_id.nonce,
-                prompt: request.prompt.clone(),
+                prompt: request.prompt.text().to_owned(),
                 model: model.clone(),
                 start: false,
             },

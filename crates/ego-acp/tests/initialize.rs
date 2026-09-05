@@ -118,13 +118,19 @@ async fn a_version_below_ours_is_refused_with_a_sentence_naming_ours() {
 }
 
 /// The capabilities answered are the ones this build has: Streamable HTTP MCP
-/// is supported, while SSE, ACP-over-MCP, and session loading are not.
+/// and image prompts are supported, while SSE, ACP-over-MCP, audio, embedded
+/// context and session loading are not.
 ///
 /// A capability advertised is a request invited, so this pins that every
 /// response field says what the implementation can actually honor rather
 /// than defaulting to something a client would then rely on — `loadSession`
 /// in particular, because a client that believes it can replay a session and
 /// cannot is a client showing an empty transcript for a session that has one.
+///
+/// The converse matters just as much for `image`: this build reads image
+/// blocks, and a client that is not told so has no way to offer the user an
+/// attach button. Silence about a capability held is as wrong as noise about
+/// one that is not.
 #[tokio::test]
 async fn nothing_is_advertised_that_this_build_cannot_do() {
     let response = initialize(1).await;
@@ -133,7 +139,13 @@ async fn nothing_is_advertised_that_this_build_cannot_do() {
         .get("agentCapabilities")
         .expect("an initialize response states the agent's capabilities");
 
-    for claimed in ["loadSession", "image", "audio", "embeddedContext"] {
+    assert_eq!(
+        capabilities["promptCapabilities"]["image"],
+        serde_json::json!(true),
+        "image prompts are served but not advertised: {response}"
+    );
+
+    for claimed in ["loadSession", "audio", "embeddedContext"] {
         let advertised = capabilities
             .get(claimed)
             .or_else(|| capabilities.get("promptCapabilities")?.get(claimed))

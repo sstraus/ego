@@ -19,12 +19,7 @@ use ego_core::event::time::Timestamp;
 use ego_core::evidence::{EvidenceError, EvidenceWrite, RunContextEvidence};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::public::project_public;
-use ego_core::run::{
-    EventSinkFactory, IdSource, RecoveryEvidence, RequestDigest, RequestId, RunAppend,
-    RunAttachment, RunCommandOutcome, RunController, RunError, RunExecutionBindings, RunExecutor,
-    RunExecutorError, RunHandle, RunOrigin, RunPreparation, RunPrepared, RunRetention, RunRoot,
-    RunSettlement, RunTransaction, StartRequest,
-};
+use ego_core::run::{EventSinkFactory, IdSource, RecoveryEvidence, RequestDigest, RequestId, RunAppend, RunAttachment, RunCommandOutcome, RunController, RunError, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunOrigin, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSettlement, RunTransaction, StartRequest};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -265,7 +260,7 @@ mod regression_case {
         fn submit<'a>(
             &'a self,
             _handle: &'a RunHandle,
-            _prompt: &'a str,
+            _prompt: &'a RunPrompt,
             _prepared: Self::Prepared,
             _bindings: RunExecutionBindings,
         ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {

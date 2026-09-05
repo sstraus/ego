@@ -44,7 +44,7 @@ use ego_core::permit::{CanonPath, Confinement, RunConfinement};
 use ego_core::run::{
     EventSinkFactory, IdSource, RecoveryEvidence, RunAppend, RunAttachment, RunController,
     RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunOrigin,
-    RunPreparation, RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement,
+    RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections, RunSettlement,
     RunTransaction,
 };
 use ego_core::sink::{EventSink, NullSink};
@@ -1026,7 +1026,7 @@ impl RunExecutor for Executor {
     fn submit<'a>(
         &'a self,
         _handle: &'a RunHandle,
-        prompt: &'a str,
+        prompt: &'a RunPrompt,
         _prepared: Self::Prepared,
         bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
@@ -1034,14 +1034,14 @@ impl RunExecutor for Executor {
         self.prompts
             .lock()
             .expect("prompts")
-            .push(prompt.to_owned());
+            .push(prompt.text().to_owned());
         let reservation = bindings
             .budget_gate()
             .expect("the execution binding owns the shared live budget gate")
             .reserve(
                 &generation_metering(),
                 Some(&generation_quote()),
-                &generation_request(prompt),
+                &generation_request(prompt.text()),
                 &generation_capabilities(),
             );
         let reservation = match reservation {

@@ -3,7 +3,7 @@
 //! `tests/acp_golden.rs` pins what an event *becomes*, and `tests/initialize.rs`
 //! pins what the router answers. Neither drives a turn, so until this file
 //! existed nothing exercised the path `session/prompt` actually takes:
-//! [`prompt_text`](ego_acp::serve) flattening the blocks, the session registry
+//! [`prompt_content`](ego_acp::serve) reading the blocks, the session registry
 //! handing back what `session/new` recorded, the spawn that keeps the dispatch
 //! loop free, the sink turning a `PublicEvent` into a notification, and the
 //! responder answering from inside the spawned work rather than when it was
@@ -25,6 +25,8 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::{ConnectTo, Lines};
 use agent_client_protocol_schema::{ProtocolVersion, v1};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use ego_acp::project::project_acp_v1;
 use ego_acp::serve::{McpSessionAdmissionError, McpSessionAdmitter, SessionMcpAdmission};
 use ego_core::config::ModelRef;
@@ -37,6 +39,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
+use ego_core::generator::types::ImageMediaType;
 use ego_core::hook::{
     HookCausality, HookFuture, HookInvocationPort, HookInvocationRequest, SessionHookRuntime,
 };
@@ -44,8 +47,8 @@ use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::public::{ItemKind, PublicEvent};
 use ego_core::run::{
     IdSource, RunAppend, RunAttachment, RunCommand, RunExecutionBindings, RunExecutor,
-    RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunRevision, RunRoot,
-    RunSettlement, RunTransaction,
+    RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRevision,
+    RunRoot, RunSettlement, RunTransaction,
 };
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -174,7 +177,7 @@ type SharedMcpSourceLog = Arc<Mutex<Vec<RecordedMcpSource>>>;
 #[derive(Clone)]
 struct PromptExecutor {
     mode: PromptMode,
-    turns: Arc<Mutex<Vec<(String, PathBuf)>>>,
+    turns: Arc<Mutex<Vec<(RunPrompt, PathBuf)>>>,
     roots: Arc<Mutex<HashMap<RunId, RunRoot>>>,
     mcp_sources: SharedMcpSourceLog,
 }
@@ -205,7 +208,7 @@ impl PromptExecutor {
         }
     }
 
-    fn turns(&self) -> Vec<(String, PathBuf)> {
+    fn turns(&self) -> Vec<(RunPrompt, PathBuf)> {
         self.turns.lock().expect("prompt turns").clone()
     }
 
@@ -450,7 +453,7 @@ impl RunExecutor for PromptExecutor {
     fn submit<'a>(
         &'a self,
         handle: &'a RunHandle,
-        prompt: &'a str,
+        prompt: &'a RunPrompt,
         _prepared: Self::Prepared,
         bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
@@ -466,7 +469,7 @@ impl RunExecutor for PromptExecutor {
             .get(&handle.run_id())
             .cloned()
             .expect("started prompt root");
-        let prompt = prompt.to_owned();
+        let prompt = prompt.clone();
         let turns = Arc::clone(&self.turns);
         let mcp_sources = Arc::clone(&self.mcp_sources);
         Box::pin(async move {
@@ -499,7 +502,7 @@ impl RunExecutor for PromptExecutor {
                         .ran
                         .lock()
                         .expect("prompt runs")
-                        .push((prompt, cancelled));
+                        .push((prompt.text().to_owned(), cancelled));
                     if cancelled {
                         Ok(RunSettlement::cancelled(ego_core::run::CancelReason::User))
                     } else {
@@ -847,7 +850,11 @@ async fn a_prompt_produces_the_same_updates_the_cli_would_and_then_its_stop_reas
         "the turn's stop reason did not reach the response: {response}"
     );
     assert_eq!(
-        turns.turns(),
+        turns
+            .turns()
+            .into_iter()
+            .map(|(prompt, root)| (prompt.text().to_owned(), root))
+            .collect::<Vec<_>>(),
         vec![(
             "list the files".to_string(),
             PathBuf::from("/tmp/some-workspace")
@@ -911,8 +918,8 @@ async fn each_session_receives_only_its_own_updates() {
 /// every agent must accept arrive joined in the order sent.
 ///
 /// The alternative — dropping the link — would answer a question about a file
-/// the client believed it had attached, which is `prompt_text`'s stated reason
-/// for keeping it.
+/// the client believed it had attached, which is `prompt_content`'s stated
+/// reason for keeping it.
 #[tokio::test]
 async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
     let turns = PromptExecutor::publishing();
@@ -933,7 +940,7 @@ async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
         .await;
 
     assert_eq!(
-        turns.turns()[0].0,
+        turns.turns()[0].0.text(),
         "summarise\nfile:///tmp/ws/notes.md",
         "a resource link did not reach the turn as its URI"
     );
@@ -943,11 +950,11 @@ async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
 
 /// A block kind this build cannot read is refused by name, and no turn runs.
 ///
-/// Both halves matter. `initialize` advertises no image capability, so a
+/// Both halves matter. `initialize` advertises no audio capability, so a
 /// conforming client never sends one; a client that does must not have its
-/// prompt silently answered without the picture it asked about.
+/// prompt silently answered without the recording it asked about.
 #[tokio::test]
-async fn an_image_is_refused_by_name_and_no_turn_is_started() {
+async fn audio_is_refused_by_name_and_no_turn_is_started() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
     let session = connection.open("/tmp/ws").await;
@@ -957,16 +964,16 @@ async fn an_image_is_refused_by_name_and_no_turn_is_started() {
             "session/prompt",
             serde_json::json!({
                 "sessionId": session,
-                "prompt": [{ "type": "image", "data": "aGk=", "mimeType": "image/png" }],
+                "prompt": [{ "type": "audio", "data": "aGk=", "mimeType": "audio/wav" }],
             }),
         )
         .await;
 
     let data = response["error"]["data"]
         .as_str()
-        .unwrap_or_else(|| panic!("an image prompt was not refused: {response}"));
+        .unwrap_or_else(|| panic!("an audio prompt was not refused: {response}"));
     assert!(
-        data.contains("an image"),
+        data.contains("audio"),
         "the refusal does not name what it refused: {data}"
     );
     assert!(
@@ -997,6 +1004,175 @@ async fn an_image_is_refused_by_name_and_no_turn_is_started() {
         recovered["result"]["stopReason"], "end_turn",
         "the next prompt on that session was refused too: {recovered}"
     );
+
+    connection.finish().await;
+}
+
+/// A one-pixel PNG, as the encoder emits it. Shared with `images.rs`
+/// by value rather than by import, because a test fixture crossing a crate
+/// boundary would need a public constant that production has no use for.
+const PNG_1X1: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0,
+    0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15, 0, 1, 5, 1, 1,
+    39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
+/// An image block reaches the turn decoded, and measured from its own bytes.
+///
+/// The dimensions are the point. A client states a media type and nothing else
+/// about the picture, so the width and height that end up on the durable record
+/// can only come from decoding it here — and a build that trusted a client's
+/// numbers would write a size into the session store that the bytes contradict.
+#[tokio::test]
+async fn an_image_reaches_the_turn_decoded_and_measured() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [
+                    { "type": "text", "text": "what is in this" },
+                    {
+                        "type": "image",
+                        "data": BASE64.encode(PNG_1X1),
+                        "mimeType": "image/png",
+                    },
+                ],
+            }),
+        )
+        .await;
+
+    let prompt = &turns.turns()[0].0;
+    assert_eq!(prompt.text(), "what is in this");
+    let images = prompt.images();
+    assert_eq!(images.len(), 1, "the image did not reach the turn");
+    assert_eq!(images[0].bytes(), PNG_1X1, "the bytes were not decoded");
+    assert_eq!(images[0].media_type(), ImageMediaType::Png);
+    assert_eq!((images[0].width(), images[0].height()), (1, 1));
+
+    connection.finish().await;
+}
+
+/// Bytes that contradict the media type declared over them are refused, and no
+/// turn runs.
+///
+/// This is the whole reason the decode happens at the edge. A PNG announced as
+/// a JPEG that got through here would be committed to the blob store, recorded
+/// in a durable prompt event and only then rejected by a provider — leaving a
+/// session whose transcript claims an image the model never saw.
+#[tokio::test]
+async fn an_image_whose_bytes_contradict_its_declared_type_is_refused() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    let (response, notifications) = connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{
+                    "type": "image",
+                    "data": BASE64.encode(PNG_1X1),
+                    "mimeType": "image/jpeg",
+                }],
+            }),
+        )
+        .await;
+
+    let data = response["error"]["data"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a mislabelled image was not refused: {response}"));
+    assert!(
+        data.contains("image/jpeg"),
+        "the refusal does not say which claim failed: {data}"
+    );
+    assert!(
+        turns.turns().is_empty(),
+        "a turn ran on an image whose type its bytes contradict"
+    );
+    assert!(
+        notifications.is_empty(),
+        "a refused prompt still published updates: {notifications:?}"
+    );
+
+    connection.finish().await;
+}
+
+/// An encoding this build admits from no model at all is refused by name, and
+/// the sentence says which encodings would have been read.
+///
+/// Named rather than generic because the client has to be able to convert: a
+/// refusal that only says "unsupported" leaves it guessing which of its formats
+/// to try next.
+#[tokio::test]
+async fn an_image_encoding_this_build_cannot_read_is_refused_by_name() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    let (response, _) = connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{
+                    "type": "image",
+                    "data": BASE64.encode(b"<svg/>"),
+                    "mimeType": "image/svg+xml",
+                }],
+            }),
+        )
+        .await;
+
+    let data = response["error"]["data"]
+        .as_str()
+        .unwrap_or_else(|| panic!("an unreadable encoding was not refused: {response}"));
+    assert!(
+        data.contains("image/svg+xml") && data.contains("image/png"),
+        "the refusal names neither what was sent nor what would be read: {data}"
+    );
+    assert!(
+        turns.turns().is_empty(),
+        "a turn ran on an unreadable image"
+    );
+
+    connection.finish().await;
+}
+
+/// Data that is not base64 at all is refused rather than decoded to rubbish.
+///
+/// The permissive alternative — dropping the invalid characters and decoding
+/// what is left — would hand the blob store a truncated picture under a valid
+/// media type, which is exactly the corruption the signature check cannot see.
+#[tokio::test]
+async fn image_data_that_is_not_base64_is_refused() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    let (response, _) = connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "image", "data": "not base64!!", "mimeType": "image/png" }],
+            }),
+        )
+        .await;
+
+    let data = response["error"]["data"]
+        .as_str()
+        .unwrap_or_else(|| panic!("invalid base64 was not refused: {response}"));
+    assert!(
+        data.contains("base64"),
+        "the refusal does not say what was wrong with the data: {data}"
+    );
+    assert!(turns.turns().is_empty(), "a turn ran on undecodable data");
 
     connection.finish().await;
 }

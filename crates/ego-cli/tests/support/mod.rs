@@ -910,6 +910,25 @@ impl Ego {
         }
     }
 
+    /// Start the binary with stdin held open, for the protocols whose next
+    /// frame depends on the answer to the last one.
+    ///
+    /// [`spawn`](Self::spawn) nulls stdin, which is right for a run that is
+    /// only watched. An ACP or MCP conversation cannot be written ahead of
+    /// time: every frame after `session/new` names an id the server minted, so
+    /// the test has to read before it can write.
+    pub fn spawn_conversing(self) -> Running {
+        let mut command = self.command();
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let child = command.spawn().expect("the binary was built");
+        Running {
+            child,
+            _keep: self.keep,
+        }
+    }
+
     /// Start the binary and hand back the child, for the tests that have to
     /// observe it while it is still running.
     pub fn spawn(self) -> Running {

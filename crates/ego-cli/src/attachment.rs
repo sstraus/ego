@@ -122,6 +122,88 @@ pub(crate) async fn acquire(
         staged.push(Staged { image, writer });
     }
 
+    commit_staged(staged)
+}
+
+/// Publish an ordered batch of images that arrived already decoded.
+///
+/// The sibling of [`acquire`] for content ego did not have to fetch: an ACP
+/// `session/prompt` carries its images inside the request, so there is no path
+/// to open and no URL to dial, and the two steps that remain are the two that
+/// are actually about admission — proving the selected model accepts each
+/// image, and publishing the exact bytes into the session's store.
+///
+/// Both halves are shared with `acquire` rather than restated, so a limit that
+/// is enforced for `--attach` cannot silently not be enforced here. The order
+/// of the batch is the order it was sent in, and, as in `acquire`, nothing is
+/// committed until every image in it has passed: a prompt that is going to be
+/// refused leaves no blobs behind for the collector to find.
+pub(crate) fn publish(
+    images: &[Image],
+    capabilities: &ModelCapabilities,
+    profile: &str,
+    resolved_model: &str,
+    blobs: &dyn BlobStore,
+) -> Result<Vec<ImageRef>, UsageError> {
+    if images.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let limits = supported_limits(capabilities, profile, resolved_model)?;
+    let max_images = limits.max_images().map_or(MAX_IMAGES_PER_PROMPT, |value| {
+        usize::try_from(value.get()).expect("model image count is product-bounded at 100")
+    });
+    if images.len() > max_images {
+        return Err(UsageError(format!(
+            "model profile `{profile}` resolved to `{resolved_model}` accepts at most \
+             {max_images} images, but {} were sent with the prompt",
+            images.len()
+        )));
+    }
+    let max_per_image = limits
+        .max_bytes_per_image()
+        .map_or(MAX_IMAGE_BYTES, |value| value.get());
+    let max_total = limits
+        .max_total_bytes()
+        .map_or(MAX_TOTAL_IMAGE_BYTES, |value| value.get());
+
+    let mut total = 0_u64;
+    let mut staged = Vec::with_capacity(images.len());
+    for (offset, image) in images.iter().enumerate() {
+        let index = offset + 1;
+        let mut writer = blobs.begin().map_err(|error| {
+            UsageError(format!(
+                "image {index} could not begin its session blob: {error}"
+            ))
+        })?;
+        // `Image` already proved the bytes decode and are within the product
+        // bounds; what is left is this model's ceiling and the running total,
+        // which is the same check `--attach` streams against.
+        stage_bounded(
+            0,
+            writer.as_mut(),
+            image.bytes(),
+            index,
+            max_per_image,
+            max_total,
+            &mut total,
+        )?;
+        validate_model_image(image, index, limits, profile, resolved_model)?;
+        staged.push(Staged {
+            image: image.clone(),
+            writer,
+        });
+    }
+    commit_staged(staged)
+}
+
+/// Commit an ordered staged batch and name each blob durably.
+///
+/// The tail both admission paths end in. Kept as one function because the rule
+/// it encodes — every image passes, *then* anything is committed — is the rule
+/// that keeps a refused prompt from leaving blobs behind, and two copies of it
+/// could drift into disagreeing about that.
+fn commit_staged(staged: Vec<Staged>) -> Result<Vec<ImageRef>, UsageError> {
     let mut references = Vec::with_capacity(staged.len());
     for (offset, staged) in staged.into_iter().enumerate() {
         let index = offset + 1;
@@ -362,8 +444,16 @@ async fn fetch_https(
     unreachable!("the redirect loop returns at its explicit bound")
 }
 
-fn append_bounded(
-    bytes: &mut Vec<u8>,
+/// Stage one chunk against both ceilings, and account for it.
+///
+/// Separate from [`append_bounded`] because the two admission paths differ in
+/// exactly one thing: a fetched attachment is accumulated chunk by chunk as it
+/// arrives, while an image that came inside the request is already whole and
+/// copying it a second time to reuse that accumulation would be the largest
+/// avoidable allocation on the path. What must not differ is the arithmetic,
+/// so that lives here and neither caller restates it.
+fn stage_bounded(
+    staged_len: usize,
     writer: &mut dyn BlobWriter,
     chunk: &[u8],
     index: usize,
@@ -372,7 +462,7 @@ fn append_bounded(
     total: &mut u64,
 ) -> Result<(), UsageError> {
     let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-    let image_len = u64::try_from(bytes.len())
+    let image_len = u64::try_from(staged_len)
         .unwrap_or(u64::MAX)
         .saturating_add(chunk_len);
     if image_len > max_per_image {
@@ -391,8 +481,29 @@ fn append_bounded(
             "attachment {index} could not stage exact bytes in the session blob store: {error}"
         ))
     })?;
-    bytes.extend_from_slice(chunk);
     *total = next_total;
+    Ok(())
+}
+
+fn append_bounded(
+    bytes: &mut Vec<u8>,
+    writer: &mut dyn BlobWriter,
+    chunk: &[u8],
+    index: usize,
+    max_per_image: u64,
+    max_total: u64,
+    total: &mut u64,
+) -> Result<(), UsageError> {
+    stage_bounded(
+        bytes.len(),
+        writer,
+        chunk,
+        index,
+        max_per_image,
+        max_total,
+        total,
+    )?;
+    bytes.extend_from_slice(chunk);
     Ok(())
 }
 

@@ -15,12 +15,7 @@ use ego_core::generator::capabilities::{
     ReasoningEffortSupport, Transport,
 };
 use ego_core::public::{InstructionDescriptor, InstructionSource};
-use ego_core::run::{
-    EventSinkFactory, IdSource, RecoveryEvidence, RunAppend, RunAttachment, RunCommandOutcome,
-    RunController, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId,
-    RunPreparation, RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement,
-    RunTransaction, StartRequest,
-};
+use ego_core::run::{EventSinkFactory, IdSource, RecoveryEvidence, RunAppend, RunAttachment, RunCommandOutcome, RunController, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections, RunSettlement, RunTransaction, StartRequest};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use futures::future::{self, BoxFuture};
@@ -420,7 +415,7 @@ impl RunExecutor for FakeRunExecutor {
     fn submit<'a>(
         &'a self,
         _handle: &'a RunHandle,
-        _prompt: &'a str,
+        _prompt: &'a RunPrompt,
         _prepared: Self::Prepared,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {

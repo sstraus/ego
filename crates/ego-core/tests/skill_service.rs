@@ -30,11 +30,7 @@ use ego_core::hook::{
     SessionHookState,
 };
 use ego_core::permit::{GuardedEffects, GuardedIo, Op, PreparedCall};
-use ego_core::run::{
-    EventSinkFactory, IdSource, RecoveryEvidence, RunAttachment, RunController,
-    RunExecutionBindings, RunExecutor, RunExecutorError, RunFuture, RunHandle, RunId,
-    RunPreparation, RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement,
-};
+use ego_core::run::{EventSinkFactory, IdSource, RecoveryEvidence, RunAttachment, RunController, RunExecutionBindings, RunExecutor, RunExecutorError, RunFuture, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections, RunSettlement};
 use ego_core::sink::NullSink;
 use ego_core::skill::{
     ActiveSkillScope, SkillCatalogue, SkillInvocation, SkillInvocationOutcome, SkillInvocationPort,
@@ -962,7 +958,7 @@ impl RunExecutor for ChildExecutor {
     fn submit<'a>(
         &'a self,
         _handle: &'a RunHandle,
-        _prompt: &'a str,
+        _prompt: &'a RunPrompt,
         _prepared: Self::Prepared,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {

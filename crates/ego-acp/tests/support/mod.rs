@@ -33,8 +33,9 @@ use ego_core::generator::capabilities::{
 use ego_core::public::PublicEvent;
 use ego_core::run::{
     IdSource, RequestId, RunAppend, RunAttachment, RunCommand, RunController, RunExecutionBindings,
-    RunExecutor, RunExecutorError, RunFuture, RunHandle, RunPreparation, RunPrepared, RunRetention,
-    RunRevision, RunRoot, RunSelections, RunSettlement, RunStatus, RunTransaction, StartRequest,
+    RunExecutor, RunExecutorError, RunFuture, RunHandle, RunPreparation, RunPrepared, RunPrompt,
+    RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement, RunStatus, RunTransaction,
+    StartRequest,
 };
 use ego_core::session::{
     ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
@@ -835,7 +836,7 @@ impl RunExecutor for Executor {
     fn submit<'a>(
         &'a self,
         handle: &'a RunHandle,
-        _prompt: &'a str,
+        _prompt: &'a RunPrompt,
         _prepared: Self::Prepared,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {

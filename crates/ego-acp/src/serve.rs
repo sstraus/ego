@@ -15,16 +15,19 @@ use agent_client_protocol::{
     JsonRpcRequest, Responder, UntypedMessage, on_receive_notification, on_receive_request,
 };
 use agent_client_protocol_schema::v1;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use ego_core::compact::{CompactionCommand, CompactionReceipt, CompactionTransitionRequest};
 use ego_core::control::{ControlError, SessionControls};
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ModelCapabilities;
+use ego_core::generator::types::{Image, ImageMediaType};
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::run::{
     CancelKey, ContinueRequest, EventSinkFactory, IdSource, RequestDigest, RequestId,
     RunCommandOutcome, RunController, RunError, RunExecution, RunExecutionBindings, RunExecutor,
-    RunRecoveryOutcome, RunRoot, RunSelections, RunSettlement, RunSnapshot, RunStatus,
+    RunPrompt, RunRecoveryOutcome, RunRoot, RunSelections, RunSettlement, RunSnapshot, RunStatus,
     RunSubscription, StartRequest,
 };
 use ego_core::session_lifecycle::{
@@ -176,6 +179,18 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
 fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
     let capabilities = v1::AgentCapabilities::new()
         .load_session(lifecycle)
+        // `image` is a statement about this protocol surface: an image block
+        // sent here is decoded, bounded and published like an `--attach` would
+        // be. It is deliberately not a promise about the model a session ends
+        // up on, which `initialize` cannot know — no session exists yet, and a
+        // session can change model mid-flight. A model that takes no pictures
+        // still refuses, with its own name in the sentence.
+        .prompt_capabilities(
+            v1::PromptCapabilities::new()
+                .image(true)
+                .audio(false)
+                .embedded_context(false),
+        )
         .mcp_capabilities(v1::McpCapabilities::new().http(true).sse(false));
     let capabilities = if lifecycle {
         capabilities.session_capabilities(
@@ -681,13 +696,27 @@ where
     }
 }
 
-fn prompt_text(blocks: &[v1::ContentBlock]) -> Result<String, String> {
+/// Read one client's blocks into the prompt this build can run.
+///
+/// Text and resource links flatten into one string, and images become the
+/// validated [`Image`] the rest of the system already speaks — the same value
+/// `--attach` produces, so what arrives over ACP and what arrives from a path
+/// are admitted, bounded and published by one set of rules rather than two.
+///
+/// **The blocks are not kept interleaved**, because the conversation model they
+/// are read into is `{ text, images }`: that is the shape of `PromptQueued` and
+/// `UserPrompt`, fixed by `docs/decisions/2026-08-29-images-are-session-blobs-
+/// before-they-are-wire-parts.md`, and it predates this reader. A client that
+/// sandwiches text around a picture gets its text joined in order and its
+/// images in order; it does not get the sandwich back.
+fn prompt_content(blocks: &[v1::ContentBlock]) -> Result<RunPrompt, String> {
     let mut parts = Vec::new();
+    let mut images = Vec::new();
     for block in blocks {
         match block {
             v1::ContentBlock::Text(text) => parts.push(text.text.clone()),
             v1::ContentBlock::ResourceLink(link) => parts.push(link.uri.clone()),
-            v1::ContentBlock::Image(_) => return Err(unsupported_block("an image")),
+            v1::ContentBlock::Image(image) => images.push(admit_image(image, images.len() + 1)?),
             v1::ContentBlock::Audio(_) => return Err(unsupported_block("audio")),
             v1::ContentBlock::Resource(_) => {
                 return Err(unsupported_block("an embedded resource"));
@@ -695,14 +724,53 @@ fn prompt_text(blocks: &[v1::ContentBlock]) -> Result<String, String> {
             _ => return Err(unsupported_block("a content block this build cannot read")),
         }
     }
-    Ok(parts.join("\n"))
+    Ok(RunPrompt::new(parts.join("\n"), images))
+}
+
+/// One image block, decoded and proved against its own declared media type.
+///
+/// Two claims are checked and neither is taken on the client's word. The media
+/// type has to name an encoding this build admits at all, and then
+/// [`Image::new`] decodes the payload *as* that encoding — so a PNG announced
+/// as a JPEG fails here rather than reaching a provider that would reject the
+/// whole turn, and the declared width and height a client might have sent are
+/// never the ones ego records.
+///
+/// The count and the byte ceilings are deliberately not enforced here. They
+/// belong to the selected model as well as the product, and no model is
+/// resolved yet at this point in the request; the executor applies both before
+/// anything is published. What this does is refuse content that could never be
+/// admitted by any model, as early as it can be recognised.
+fn admit_image(image: &v1::ImageContent, index: usize) -> Result<Image, String> {
+    let refuse = |reason: String| format!("image {index} in the prompt {reason}");
+    let media_type = match image.mime_type.as_str() {
+        "image/jpeg" => ImageMediaType::Jpeg,
+        "image/png" => ImageMediaType::Png,
+        "image/gif" => ImageMediaType::Gif,
+        "image/webp" => ImageMediaType::Webp,
+        other => {
+            return Err(refuse(format!(
+                "declares `{other}`, and this build admits only image/jpeg, \
+                 image/png, image/gif and image/webp"
+            )));
+        }
+    };
+    let bytes = BASE64
+        .decode(image.data.as_bytes())
+        .map_err(|error| refuse(format!("is not valid base64: {error}")))?;
+    Image::new(bytes, media_type).map_err(|error| {
+        refuse(format!(
+            "does not decode as the `{}` it declares: {error}",
+            image.mime_type
+        ))
+    })
 }
 
 fn unsupported_block(what: &str) -> String {
     format!(
         "the prompt carries {what}, and this build's conversation model holds \
-         only text, tool calls and tool results — so there is nothing for it to \
-         be sent in. `initialize` advertises no such prompt capability"
+         only text, images, tool calls and tool results — so there is nothing \
+         for it to be sent in. `initialize` advertises no such prompt capability"
     )
 }
 
@@ -1511,8 +1579,8 @@ where
                             ));
                         }
                     };
-                    let text = match prompt_text(&request.prompt) {
-                        Ok(text) => text,
+                    let prompt = match prompt_content(&request.prompt) {
+                        Ok(prompt) => prompt,
                         Err(refusal) => {
                             sessions.refuse(&id, correlation.generation);
                             return responder.respond_with_error(
@@ -1542,7 +1610,7 @@ where
                                         correlation.request_id,
                                         digest,
                                         RunSelections::empty(),
-                                        text,
+                                        prompt,
                                     ),
                                     bindings,
                                 )
@@ -1556,7 +1624,7 @@ where
                                         correlation.request_id,
                                         digest,
                                         revision,
-                                        text,
+                                        prompt,
                                     ),
                                     bindings,
                                 )

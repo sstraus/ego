@@ -307,7 +307,7 @@ impl RunExecutor for ExecutorFixture {
     fn submit<'a>(
         &'a self,
         _handle: &'a RunHandle,
-        _: &'a str,
+        _: &'a ego_core::run::RunPrompt,
         _: Self::Prepared,
         _: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
