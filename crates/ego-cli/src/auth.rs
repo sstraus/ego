@@ -1610,14 +1610,15 @@ fn missing_label(program: &str, reason: impl Into<String>) -> AuthError {
 mod tests {
     use std::future;
 
-    use ego_ai::oauth::{BuiltInFlow, FlowError};
+    use ego_ai::oauth::{BuiltInFlow, FlowError, TokenStatus};
     use ego_ai::provider::ProviderRow;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
     use super::{
         AuthEntry, AuthError, AuthStore, LoginMethod, StoredSecret, apply_refresh_failure,
-        authorization_code, login_methods, request_credentials_at, wait_for_browser_code,
+        authorization_code, login_methods, request_credentials_at, status, token_entry,
+        wait_for_browser_code,
     };
 
     struct UnexpectedHttp;
@@ -1712,6 +1713,50 @@ mod tests {
             }
             other => panic!("unexpected auth entry kind: {}", other.kind()),
         }
+    }
+
+    /// A subscription login still completes wearing ego's own name, and what
+    /// it leaves behind is a token rather than an identity.
+    ///
+    /// The Copilot token exchange is the login step that used to carry the
+    /// Copilot Chat / VS Code disguise; `ego-ai/tests/vendor_client_identity.rs`
+    /// enforces that the disguise is gone. This is the other half: with only
+    /// `accept`, the credential and ego's own `user-agent` on the wire, the
+    /// exchange still builds, GitHub's answer still becomes an entry, and
+    /// `ego auth status` reports that entry as an id, a kind and an expiry.
+    /// **No header reaches the store or the report** — which is why an
+    /// operator's `[auth.<provider>.headers]` overlay is request data and
+    /// never a second thing to log in with.
+    #[test]
+    fn a_subscription_login_completes_on_egos_identity_and_status_reports_only_the_token() {
+        let flow = BuiltInFlow::GitHubCopilot;
+        let request = flow.copilot_exchange_request("gho_github").unwrap();
+        let names: Vec<&str> = request.headers.iter().map(|header| header.name()).collect();
+        assert_eq!(names, ["accept", "authorization", "user-agent"]);
+        assert!(request.headers.iter().any(|header| {
+            header.name() == "user-agent" && header.value().starts_with(b"ego/")
+        }));
+
+        let token = flow
+            .read_token(
+                TokenStatus::new(
+                    200,
+                    br#"{"token":"tid=1;proxy-ep=proxy.individual.githubcopilot.com","expires_at":4102444800}"#,
+                ),
+                0,
+                Some("gho_github"),
+            )
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = AuthStore::new(root.path());
+        store
+            .put("github-copilot", token_entry(flow, token).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            status(&store, None).unwrap(),
+            "github-copilot\toauth\texpires=4102444800000\n"
+        );
     }
 
     #[test]

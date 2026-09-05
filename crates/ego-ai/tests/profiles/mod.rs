@@ -17,10 +17,9 @@ use std::path::PathBuf;
 
 use ego_ai::http::HttpRequest;
 use ego_ai::provider::{
-    ANTHROPIC_BASE, GEMINI_BASE, GITHUB_COPILOT_BASE, MINIMAX_OAUTH_BASE, NOUS_BASE, OLLAMA_BASE,
-    OPENAI_BASE, OPENAI_CODEX_BASE, OPENROUTER_BASE, ProviderRow, XAI_BASE,
+    ANTHROPIC_BASE, Credentials, GEMINI_BASE, GITHUB_COPILOT_BASE, MINIMAX_OAUTH_BASE, NOUS_BASE,
+    OLLAMA_BASE, OPENAI_BASE, OPENAI_CODEX_BASE, OPENROUTER_BASE, ProviderRow, XAI_BASE,
 };
-use ego_ai::wire::WireFormat;
 use ego_ai::wire::anthropic_messages::AnthropicMessages;
 use ego_ai::wire::gemini_interactions::GeminiInteractions;
 use ego_ai::wire::github_copilot_completions::GithubCopilotCompletions;
@@ -29,10 +28,12 @@ use ego_ai::wire::ollama::Ollama;
 use ego_ai::wire::openai_codex_responses::OpenAiCodexResponses;
 use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::xai_responses::XaiResponses;
+use ego_ai::wire::{RequestTarget, WireFormat};
 use ego_core::budget::{Metering, SettlementSource};
 use ego_core::generator::types::{
     Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
 };
+use ego_core::permit::HttpHeader;
 
 /// Where a fixture came from, stated rather than assumed.
 ///
@@ -452,6 +453,74 @@ pub fn request_fixture(request: &HttpRequest) -> String {
     format!(
         "{}\n",
         serde_json::to_string_pretty(&document).expect("a document assembled here")
+    )
+}
+
+// --- the request a row builds ---
+
+/// A credential that is set, whatever the row asks for.
+///
+/// Conformance check 1 asserts the header *name* arrives and its value does not
+/// reach the fixture, so the row has to be resolvable — a row whose variable is
+/// unset would produce a request with no credential header at all and the check
+/// would pass by having nothing to redact.
+pub struct Configured;
+
+impl Credentials for Configured {
+    fn secret(
+        &self,
+        var: &str,
+    ) -> Result<ego_ai::provider::Secret, ego_ai::provider::MissingCredential> {
+        Ok(match var {
+            "oauth:openai-codex" => "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig".into(),
+            "oauth:github-copilot" => "token;proxy-ep=proxy.individual.githubcopilot.com".into(),
+            _ => SECRET.into(),
+        })
+    }
+}
+
+/// The value a fixture must never contain.
+pub const SECRET: &str = "sk-conformance-secret";
+
+/// The request this profile would send for `req`, with its credential on it.
+///
+/// Built through the row's own mapping, so what the provider is asked to accept
+/// is exactly what the product would send — the whole point of check 5, and the
+/// reason it lives beside the table rather than in one suite. The header
+/// assembly is [`WireGenerator::build_request`]'s: the credential's headers
+/// first, then the row's declared identity headers overlaying them by name. A
+/// second spelling of it would let a suite agree with itself about a request the
+/// product never sends.
+pub fn built(
+    row: &ProviderRow,
+    wire: &'static dyn WireFormat,
+    creds: &dyn Credentials,
+    req: &GenRequest,
+) -> HttpRequest {
+    let credential = row
+        .credential
+        .resolve(creds)
+        .unwrap_or_else(|err| panic!("{} was asked for by name: {err}", row.id()));
+    let mut headers = credential.headers();
+    for (name, value) in &row.extra_headers {
+        headers.retain(|existing| !existing.name().eq_ignore_ascii_case(name));
+        headers.push(
+            HttpHeader::new(name, value.as_bytes().to_vec())
+                .expect("row extra headers are validated public profile headers"),
+        );
+    }
+    let target = RequestTarget::new(credential.base_override().unwrap_or(row.base()), &headers);
+    wire.build_request(&target, req)
+        .unwrap_or_else(|refused| panic!("{}: {refused}", row.id()))
+}
+
+/// One profile's canonical request, built offline against [`Configured`].
+pub fn built_canonical(profile: &Profile) -> HttpRequest {
+    built(
+        &(profile.row)(),
+        profile.wire,
+        &Configured,
+        &canonical(profile),
     )
 }
 

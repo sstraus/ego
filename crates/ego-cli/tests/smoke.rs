@@ -47,9 +47,8 @@ use std::mem;
 use std::sync::{Arc, Mutex};
 
 use ego_ai::generator::WireGenerator;
-use ego_ai::http::{Http, HttpCall, HttpRequest, PreparedHttpCall};
+use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::provider::{Credentials, ProviderRow};
-use ego_ai::wire::RequestTarget;
 use ego_cli::provider_http::ProviderHttpAdapter;
 use ego_core::budget::{BudgetGate, Metering, PricingQuote};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
@@ -61,9 +60,7 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{GenRequest, StopReason};
-use ego_core::permit::{
-    CanonPath, Confinement, HttpHeader, OneHopResponse, RunConfinement, TransportError,
-};
+use ego_core::permit::{CanonPath, Confinement, OneHopResponse, RunConfinement, TransportError};
 use ego_core::turn::CancelToken;
 use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts};
 use ego_tools::http::SystemResolver;
@@ -75,7 +72,8 @@ use futures::future::BoxFuture;
 mod profiles;
 use profiles::{
     ANTHROPIC, GEMINI, GITHUB_COPILOT, MINIMAX_OAUTH, NOUS, OLLAMA, OPENAI, OPENAI_CODEX,
-    OPENROUTER, Profile, TOOL_CEILING, XAI_OAUTH, canonical, request_fixture, tool_calling, write,
+    OPENROUTER, Profile, TOOL_CEILING, XAI_OAUTH, built, canonical, request_fixture, tool_calling,
+    write,
 };
 
 /// The variable that turns any of this on, and the only thing it is for.
@@ -157,33 +155,6 @@ fn caps() -> ModelCapabilities {
         transport: Transport::Sse,
         image_input: ImageInputSupport::Unknown,
     }
-}
-
-/// The request this profile would send for `req`, with its credential on it.
-///
-/// Built through the row's own mapping, so what the provider is asked to
-/// accept is exactly what the product would send — the whole point of check 5.
-fn built(
-    row: &ProviderRow,
-    wire: &'static dyn ego_ai::wire::WireFormat,
-    creds: &dyn Credentials,
-    req: &GenRequest,
-) -> HttpRequest {
-    let credential = row
-        .credential
-        .resolve(creds)
-        .unwrap_or_else(|err| panic!("{} was asked for by name: {err}", row.id()));
-    let mut headers = credential.headers();
-    for (name, value) in &row.extra_headers {
-        headers.retain(|existing| !existing.name().eq_ignore_ascii_case(name));
-        headers.push(
-            HttpHeader::new(name, value.as_bytes().to_vec())
-                .expect("row extra headers are validated public profile headers"),
-        );
-    }
-    let target = RequestTarget::new(credential.base_override().unwrap_or(row.base()), &headers);
-    wire.build_request(&target, req)
-        .unwrap_or_else(|refused| panic!("{}: {refused}", row.id()))
 }
 
 /// Prove the spend is bounded *before* anything is sent.

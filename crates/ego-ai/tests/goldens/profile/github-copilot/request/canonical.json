@@ -18,9 +18,6 @@
     "accept",
     "authorization",
     "user-agent",
-    "editor-version",
-    "editor-plugin-version",
-    "copilot-integration-id",
     "x-initiator",
     "openai-intent"
   ],

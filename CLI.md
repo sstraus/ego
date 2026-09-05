@@ -1124,3 +1124,45 @@ widens egress. `ok`, `warning`, `error`, and `not_checked` stay distinct; root
 exit is 1 only when an operational error exists. Until the shared service
 lands, root doctor is unavailable and slash doctor remains MCP-only.
 
+### 7.1 Operator-supplied identity headers
+
+**ego does not ship them.** Every request ego builds says who ego is —
+`User-Agent: ego/<version>`, plus `originator: ego` where the Codex backend
+reads one — and no request claims to be Claude Code, the Copilot Chat
+extension, or VS Code. maintainer ruled it on 2026-09-05
+(`docs/decisions/2026-08-22-subscription-login-is-built-in-plus-two-overrides.md`
+§1 and §3, amended), and a test fails the build that reintroduces one.
+
+Some vendors gate a subscription flow on their own client's identity, so ego's
+honest one can be answered with `401` or `403`. ego relays what the vendor said
+verbatim and names this section. Sending the vendor's identity anyway is the
+operator's decision, and so are the terms it interacts with. `[auth.<provider>.headers]`
+is the whole mechanism — the same table `credential_command` lives beside,
+overlaying the row's declared headers by case-insensitive name, with an empty
+value deleting one:
+
+```toml
+[auth.anthropic.headers]
+user-agent = "claude-cli/2.1.212"
+x-app = "cli"
+anthropic-beta = "claude-code-20250219,oauth-2025-04-20"
+
+[auth.github-copilot.headers]
+user-agent = "GitHubCopilotChat/0.35.0"
+editor-version = "vscode/1.107.0"
+editor-plugin-version = "copilot-chat/0.35.0"
+copilot-integration-id = "vscode-chat"
+```
+
+`docs/16-subscription-login.md` §7.8 carries the same values with their pinned
+client source, the vendor terms each one touches — Anthropic reserves OAuth to
+its own applications; GitHub's four are a VS Code extension version gate — and
+the one place the overlay cannot reach, which is the Copilot token exchange
+during `ego auth login`.
+
+Overlaying `authorization`, `x-api-key`, `content-type`, `accept`,
+`openai-beta` or `chatgpt-account-id` is refused at config load: the first two
+are the credential and config holds no secrets, the rest are wire facts. Nothing
+in this table reaches the credential store — `ego auth status` reports an id, a
+kind and an expiry, never a header.
+

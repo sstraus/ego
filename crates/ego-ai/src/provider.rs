@@ -555,9 +555,15 @@ impl ProviderRow {
             id: "openai-codex".to_string(),
             base,
             http_profile,
+            // The Codex backend reads `originator` and a client name; both
+            // say ego, and the `user-agent` carries the build so a refusal can
+            // be attributed to a version rather than to "some third party".
             extra_headers: vec![
                 ("originator".to_string(), "ego".to_string()),
-                ("user-agent".to_string(), "ego".to_string()),
+                (
+                    "user-agent".to_string(),
+                    crate::oauth::EGO_USER_AGENT.to_string(),
+                ),
             ],
             cost_expectation: CostExpectation::NoCharge,
             resolver: &OPENAI_CODEX_SUBSCRIPTION,
@@ -577,21 +583,17 @@ impl ProviderRow {
             id: "github-copilot".to_string(),
             base,
             http_profile,
-            extra_headers: vec![
-                (
-                    "user-agent".to_string(),
-                    "GitHubCopilotChat/0.35.0".to_string(),
-                ),
-                ("editor-version".to_string(), "vscode/1.107.0".to_string()),
-                (
-                    "editor-plugin-version".to_string(),
-                    "copilot-chat/0.35.0".to_string(),
-                ),
-                (
-                    "copilot-integration-id".to_string(),
-                    "vscode-chat".to_string(),
-                ),
-            ],
+            // Pi's frozen Copilot Chat identity — `GitHubCopilotChat/0.35.0`,
+            // `vscode/1.107.0`, `copilot-chat/0.35.0`, `vscode-chat` — is not
+            // here. It is a version gate on a VS Code extension, and ego is
+            // not that extension. An operator who accepts GitHub's terms puts
+            // those four back with `[auth.github-copilot.headers]`, where the
+            // overlay replaces this row's `user-agent` by name
+            // (`docs/16-subscription-login.md` §7.8).
+            extra_headers: vec![(
+                "user-agent".to_string(),
+                crate::oauth::EGO_USER_AGENT.to_string(),
+            )],
             cost_expectation: CostExpectation::NoCharge,
             resolver: &GITHUB_COPILOT_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
