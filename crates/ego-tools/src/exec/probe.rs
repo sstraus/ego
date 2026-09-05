@@ -546,6 +546,14 @@ fn sentinel(endpoint: std::net::SocketAddr) -> String {
 }
 
 #[cfg(target_os = "macos")]
+/// The one envelope the control child is ever spawned with.
+///
+/// It is shaped so that *both* executables that can host this library dispatch
+/// it: the shipped binary intercepts it before clap, and a libtest binary runs
+/// the `#[ignore]`d test named for the token, which calls the same dispatcher.
+/// One shape, one parser, no test-only parameter — because the alternative is
+/// two definitions of "perform the probe", and the one the tests exercise would
+/// not be the one that measures a real capability.
 fn network_probe_argv(
     protocol: &str,
     endpoint: std::net::SocketAddr,
@@ -555,8 +563,11 @@ fn network_probe_argv(
         std::env::current_exe()
             .map(|path| path.into_os_string())
             .unwrap_or_default(),
+        OsString::from("--ignored"),
         OsString::from("--exact"),
         OsString::from(NETWORK_PROBE_TOKEN),
+        OsString::from("--nocapture"),
+        OsString::from("--"),
         OsString::from(protocol),
         OsString::from(endpoint.to_string()),
         OsString::from(sentinel),
@@ -567,8 +578,14 @@ fn network_probe_argv(
 const NETWORK_PROBE_TOKEN: &str = "__ego_internal_network_probe_v1";
 
 /// Dispatch the fixed controlled network probe before the ordinary CLI starts.
+///
+/// `Some(true)` means the sentinel was delivered, `Some(false)` that it was
+/// not, and `None` that these arguments are not the probe envelope at all.
+/// Reporting the outcome rather than an exit code is what lets the libtest
+/// host run the very same dispatcher and assert on it: choosing a process exit
+/// status is the binary's job, not this library's.
 #[cfg(target_os = "macos")]
-pub fn dispatch_network_probe<I>(arguments: I) -> Option<std::process::ExitCode>
+pub fn dispatch_network_probe<I>(arguments: I) -> Option<bool>
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -577,11 +594,16 @@ where
 
     let mut arguments = arguments.into_iter();
     let _executable = arguments.next()?;
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--exact")) {
-        return None;
-    }
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new(NETWORK_PROBE_TOKEN)) {
-        return None;
+    for expected in [
+        "--ignored",
+        "--exact",
+        NETWORK_PROBE_TOKEN,
+        "--nocapture",
+        "--",
+    ] {
+        if arguments.next().as_deref() != Some(std::ffi::OsStr::new(expected)) {
+            return None;
+        }
     }
     let result = (|| {
         let protocol = arguments.next()?.into_string().ok()?;
@@ -614,11 +636,7 @@ where
             _ => None,
         }
     })();
-    Some(if result.is_some() {
-        std::process::ExitCode::SUCCESS
-    } else {
-        std::process::ExitCode::from(125)
-    })
+    Some(result.is_some())
 }
 
 async fn measure(
@@ -1117,9 +1135,13 @@ mod tests {
         CachedCapabilities, CapabilityCacheKey, Measurement, cache_key, cached_capabilities,
     };
 
+    /// The envelope the probe emits is the envelope the dispatcher accepts, and
+    /// it is spelled so libtest runs the `#[ignore]`d fixture named for the
+    /// token. Every element is load-bearing: drop one and a libtest host either
+    /// skips the fixture or swallows the arguments as a filter.
     #[cfg(target_os = "macos")]
     #[test]
-    fn network_probe_argv_and_dispatch_use_the_exact_libtest_guard() {
+    fn the_probe_envelope_is_the_one_both_hosts_dispatch() {
         use std::ffi::OsString;
 
         let endpoint = "127.0.0.1:1".parse().expect("probe endpoint");
@@ -1132,8 +1154,11 @@ mod tests {
             argv,
             vec![
                 executable,
+                OsString::from("--ignored"),
                 OsString::from("--exact"),
                 OsString::from(super::NETWORK_PROBE_TOKEN),
+                OsString::from("--nocapture"),
+                OsString::from("--"),
                 OsString::from("tcp"),
                 OsString::from(endpoint.to_string()),
                 OsString::from(sentinel),
@@ -1141,12 +1166,17 @@ mod tests {
         );
         assert!(super::dispatch_network_probe(argv.clone()).is_some());
 
-        let mut unguarded = vec![argv[0].clone(), OsString::from(super::NETWORK_PROBE_TOKEN)];
-        unguarded.extend_from_slice(&argv[3..]);
-        assert!(
-            super::dispatch_network_probe(unguarded).is_none(),
-            "the internal probe requires libtest's exact guard"
-        );
+        // Every guard word is required, one at a time. An argv that merely
+        // contains the token is not the envelope, so an ordinary CLI argument
+        // can never be mistaken for a probe.
+        for dropped in 1..6 {
+            let mut partial = argv.clone();
+            partial.remove(dropped);
+            assert!(
+                super::dispatch_network_probe(partial).is_none(),
+                "dropping argv[{dropped}] must stop being the probe envelope"
+            );
+        }
     }
 
     struct CacheBackend {

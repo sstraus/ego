@@ -55,10 +55,12 @@ async fn report_workspace(args: &UsageArgs) -> Result<UsageReport, RunTerminatio
 
 /// The columns of the text table, in order.
 ///
-/// Six facts and no more: the report is the complete record and `--json`
-/// hands it over whole. The text view exists for a person deciding whether a
-/// session cost anything, and every column it does not have is one that was
-/// pushing the answer off the right-hand edge.
+/// Seven facts and no more: the six the story asked for, plus `role`, without
+/// which the hideable rows this table is built around could not be told apart.
+/// The report is the complete record and `--json` hands it over whole. The text
+/// view exists for a person deciding whether a session cost anything, and every
+/// column it does not have is one that was pushing the answer off the
+/// right-hand edge.
 const COLUMNS: [&str; 7] = ["session", "model", "role", "in", "out", "cached", "cost"];
 
 /// Render an already-reconciled report without performing accounting.

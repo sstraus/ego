@@ -540,6 +540,80 @@ fn exec_contract_fixture_connects() {
     }
 }
 
+/// The envelope is not merely accepted by the dispatcher — a real child spawned
+/// with it delivers the sentinel.
+///
+/// This is the test the original defect needed. The probe spawns
+/// `current_exe()`, which inside a test binary is libtest; the old envelope was
+/// parsed there as a test-name filter, so the child ran zero tests, exited 0,
+/// and connected to nothing. Every offline assertion in this file then passed
+/// by taking its "the platform refused to promise it" arm. Asserting the
+/// dispatcher parses an argv proves nothing about that; only watching the bytes
+/// arrive from a separate process does.
+///
+/// Loopback only, deliberately: this proves the envelope reaches its host, not
+/// which address classes this machine can pair on.
+///
+/// The envelope is spelled out here because the production builder is private
+/// to `probe.rs`. That is a two-part contract, not a gap: this test pins "the
+/// shape a libtest host dispatches", and `the_probe_envelope_is_the_one_both_
+/// hosts_dispatch` pins "the shape production emits" to the same words. Change
+/// the builder alone and that unit test fails.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_probe_envelope_delivers_its_sentinel_from_a_real_child() {
+    use std::io::Read as _;
+    use std::process::Command;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("probe control listener");
+    let endpoint = listener.local_addr().expect("probe control endpoint");
+    let sentinel = format!("exec-contract-envelope:{}", endpoint.port());
+    let status = Command::new(std::env::current_exe().expect("the test executable"))
+        .args(["--ignored", "--exact", "__ego_internal_network_probe_v1"])
+        .args(["--nocapture", "--", "tcp"])
+        .args([endpoint.to_string(), sentinel.clone()])
+        .status()
+        .expect("the probe child runs");
+    assert!(
+        status.success(),
+        "the probe child reported failure: {status}"
+    );
+
+    let (mut stream, _) = listener.accept().expect("the probe child never connected");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("read timeout");
+    let mut received = vec![0_u8; sentinel.len()];
+    stream
+        .read_exact(&mut received)
+        .expect("the probe child connected but sent nothing");
+    assert_eq!(received, sentinel.as_bytes());
+}
+
+/// The control child of the macOS offline probe, hosted by libtest.
+///
+/// The probe spawns `current_exe()` with its private envelope. Inside a test
+/// binary that executable is libtest, so without this the envelope was parsed
+/// as a test-name filter: the child ran zero tests, exited 0, and never
+/// connected. The paired control then timed out, `NO_IP_NETWORK` was never
+/// measured, and every offline assertion in this file passed by taking the
+/// "the platform refused to promise it" arm — proving nothing, on a platform
+/// where the shipped binary does deliver the guarantee.
+///
+/// The name is the token itself because `--exact` matches it, and the body
+/// calls the production dispatcher rather than reimplementing the connect, so
+/// what the tests measure cannot drift from what a real run measures.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "hosts the offline probe's control child; not a test of its own"]
+fn __ego_internal_network_probe_v1() {
+    let delivered = ego_tools::exec::dispatch_network_probe(std::env::args_os())
+        .expect("libtest was handed the probe envelope but did not recognise it");
+    // A failing assertion exits non-zero, which is exactly the signal the
+    // confined half of the paired probe is looking for.
+    assert!(delivered, "the probe child could not deliver its sentinel");
+}
+
 #[test]
 fn guarded_exec_runs_the_exact_argv_without_reparse_or_mutation() {
     let workspace = cwd();
@@ -1830,6 +1904,44 @@ fn local_non_loopback() -> Option<std::net::IpAddr> {
     (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
 }
 
+/// Whether a paired control on a non-loopback address can be established here
+/// at all — which is the precondition the offline measurement actually has.
+///
+/// Having an address is not the same as being able to pair on it. macOS gates
+/// local-network traffic behind a per-application permission, and a process
+/// without it sees `connect` report success while the packets never arrive; a
+/// VPN default route can put a tunnel address in the same state. Either way the
+/// probe cannot demonstrate the guarantee and refuses it, which is correct. The
+/// test has to ask the same question the probe does, rather than asking the
+/// weaker one and then reading a refusal as proof.
+fn non_loopback_control_pairs(ip: std::net::IpAddr) -> bool {
+    use std::io::Write as _;
+
+    let Ok(listener) = TcpListener::bind((ip, 0)) else {
+        return false;
+    };
+    let (Ok(endpoint), Ok(())) = (listener.local_addr(), listener.set_nonblocking(true)) else {
+        return false;
+    };
+    let Ok(mut client) = TcpStream::connect_timeout(&endpoint, Duration::from_millis(250)) else {
+        return false;
+    };
+    let _ = client.write_all(b"pair");
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        match listener.accept() {
+            Ok(_) => return true,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
 enum NetworkControl {
     Tcp(TcpListener),
     Udp(UdpSocket),
@@ -1859,10 +1971,17 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
         ("tcp", tcp_control("127.0.0.1".parse().unwrap())),
         ("udp", udp_control("127.0.0.1".parse().unwrap())),
     ];
-    let Some(nonloopback) = local_non_loopback() else {
-        // A host with no non-loopback interface cannot provide the paired
-        // address-class control. It must still refuse the requested offline
-        // guarantee rather than silently treating the missing probe as proof.
+    let Some(nonloopback) = local_non_loopback().filter(|ip| non_loopback_control_pairs(*ip))
+    else {
+        // A host that cannot pair on a non-loopback address cannot provide the
+        // paired address-class control. It must still refuse the requested
+        // offline guarantee rather than silently treating the missing probe as
+        // proof. Said out loud, because a silent skip of the strong path is
+        // indistinguishable from having run it.
+        eprintln!(
+            "note: no pairable non-loopback address on this host; asserting the refusal is \
+             precise rather than the guarantee is demonstrated"
+        );
         let missing = match open_run(Confinement::Off, true, root, 1024 * 1024, 1024) {
             Err(ProcessError::MissingCapabilities(missing)) => missing,
             Err(err) => panic!("offline failed without precise capability refusal: {err:?}"),
@@ -1894,17 +2013,17 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
         );
         execute(&baseline, network_spec.clone()).expect("paired network control must work");
 
-        match open_run(Confinement::Off, true, workspace, 1024 * 1024, 1024) {
-            Err(ProcessError::MissingCapabilities(missing)) => {
-                assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
-            }
-            Err(err) => panic!("offline failed without precise capability refusal: {err:?}"),
-            Ok(offline) => {
-                assert!(
-                    execute(&offline, network_spec).is_err(),
-                    "offline child reached an IP endpoint"
-                );
-            }
+        // Accepting a refusal here as an outcome would make the whole test
+        // vacuous: a regression that stopped offline working anywhere would
+        // still pass. `open_confined_run` refuses that trade — it panics
+        // unless this host has declared it has no backend at all.
+        if let Some(offline) =
+            open_confined_run(Confinement::Off, true, workspace, 1024 * 1024, 1024)
+        {
+            assert!(
+                execute(&offline, network_spec).is_err(),
+                "offline child reached an IP endpoint"
+            );
         }
         match control {
             NetworkControl::Tcp(listener) => drop(listener),

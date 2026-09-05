@@ -19,8 +19,12 @@ fn main() -> std::process::ExitCode {
     // Behavioural network probes are hidden child modes, not CLI commands.
     // Dispatch them before clap or any provider/configuration work.
     #[cfg(target_os = "macos")]
-    if let Some(exit) = ego_tools::exec::dispatch_network_probe(std::env::args_os()) {
-        return exit;
+    if let Some(delivered) = ego_tools::exec::dispatch_network_probe(std::env::args_os()) {
+        return if delivered {
+            std::process::ExitCode::SUCCESS
+        } else {
+            std::process::ExitCode::from(125)
+        };
     }
 
     // Landlock restricts the calling thread. Dispatch before constructing the

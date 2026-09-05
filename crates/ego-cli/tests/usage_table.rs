@@ -42,7 +42,7 @@ fn seeded<const N: usize>(args: [&str; N]) -> support::Finished {
 const IDLE_ROLES: [&str; 4] = ["judge", "compaction", "subagent", "hook"];
 
 #[test]
-fn usage_text_is_a_table_with_the_six_asked_for_columns() {
+fn usage_text_is_a_table_with_the_six_asked_for_columns_plus_role() {
     let listed = seeded([]);
     assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
     let header = listed
