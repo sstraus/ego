@@ -364,19 +364,17 @@ fn anthropic_oat_and_api_keys_have_distinct_presentations() {
     assert!(headers.iter().any(|header| {
         header.name() == "authorization" && header.value() == b"Bearer sk-ant-oat01-secret"
     }));
+    // The presentation is the Bearer and the beta that admits it, and nothing
+    // else: the `claude-cli` user-agent, `x-app: cli` and the
+    // `claude-code-20250219` beta that used to travel with it were Claude
+    // Code's identity, and `tests/vendor_client_identity.rs` is where their
+    // absence is enforced across every request ego builds.
     assert!(
-        headers
-            .iter()
-            .any(|header| header.name() == "user-agent"
-                && header.value().starts_with(b"claude-cli/"))
+        headers.iter().any(
+            |header| header.name() == "anthropic-beta" && header.value() == b"oauth-2025-04-20"
+        )
     );
-    assert!(headers.iter().any(|header| {
-        header.name() == "anthropic-beta"
-            && header
-                .value()
-                .windows(b"oauth-2025-04-20".len())
-                .any(|part| part == b"oauth-2025-04-20")
-    }));
+    assert!(!headers.iter().any(|header| header.name() == "user-agent"));
     assert!(!headers.iter().any(|header| header.name() == "x-api-key"));
 
     let api_headers = provider_auth("anthropic", "sk-ant-api03-secret")
@@ -420,11 +418,13 @@ fn subscription_rows_have_distinct_ids_and_endpoints() {
             .extra_headers
             .contains(&("originator".into(), "ego".into()))
     );
-    assert!(
-        rows[1]
-            .extra_headers
-            .contains(&("copilot-integration-id".into(), "vscode-chat".into()))
-    );
+    // The Copilot row declares one identity header and it is ego's own. The
+    // four Copilot Chat / VS Code values it used to carry are an operator's
+    // `[auth.github-copilot.headers]` overlay now, not a built-in.
+    let copilot = &rows[1].extra_headers;
+    assert_eq!(copilot.len(), 1, "{copilot:?}");
+    assert_eq!(copilot[0].0, "user-agent");
+    assert!(copilot[0].1.starts_with("ego/"), "{}", copilot[0].1);
     for row in &rows {
         let resolver = format!("{:?}", row.resolver);
         if row.id() == "kimi-coding" {

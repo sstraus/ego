@@ -2,7 +2,6 @@
 
 use ego_ai::http::{HttpError, HttpResponse};
 use ego_ai::provider::{CredentialStrategy, ProviderRow};
-use ego_ai::wire::RequestTarget;
 use ego_ai::wire::provider_cost::{OPENROUTER_COST_FIELD, XAI_COST_FIELD};
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
@@ -12,7 +11,9 @@ use ego_core::state::Usage;
 use futures::StreamExt;
 
 mod profiles;
-use profiles::{ALL, Profile, Provenance, SUBSCRIPTION, canonical, read, request_fixture, write};
+use profiles::{
+    ALL, Profile, Provenance, SECRET, SUBSCRIPTION, built_canonical, read, request_fixture, write,
+};
 
 /// Rewrites the request fixtures from what the mappings build.
 ///
@@ -21,30 +22,6 @@ use profiles::{ALL, Profile, Provenance, SUBSCRIPTION, canonical, read, request_
 /// server is not stuck without one. The other three families come off a wire
 /// and only `crates/ego-cli/tests/smoke.rs` can write them.
 const RECORD: &str = "EGO_CONFORMANCE_RECORD";
-
-/// A credential that is set, whatever the row asks for.
-///
-/// Check 1 asserts the header *name* arrives and its value does not reach the
-/// fixture, so the row has to be resolvable — a row whose variable is unset
-/// would produce a request with no credential header at all and the check
-/// would pass by having nothing to redact.
-struct Configured;
-
-impl ego_ai::provider::Credentials for Configured {
-    fn secret(
-        &self,
-        var: &str,
-    ) -> Result<ego_ai::provider::Secret, ego_ai::provider::MissingCredential> {
-        Ok(match var {
-            "oauth:openai-codex" => "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig".into(),
-            "oauth:github-copilot" => "token;proxy-ep=proxy.individual.githubcopilot.com".into(),
-            _ => SECRET.into(),
-        })
-    }
-}
-
-/// The value a fixture must never contain.
-const SECRET: &str = "sk-conformance-secret";
 
 /// The events this profile's mapping produces for one response.
 async fn decode(
@@ -136,25 +113,7 @@ fn stated_usage(document: &serde_json::Value) -> &serde_json::Value {
 async fn check_1_the_request_each_profile_builds_is_the_one_it_committed() {
     for profile in ALL {
         let row = (profile.row)();
-        let req = canonical(profile);
-        let credential = row
-            .credential
-            .resolve(&Configured)
-            .expect("Configured answers every variable");
-        let mut headers = credential.headers();
-        for (name, value) in &row.extra_headers {
-            headers.retain(|present| !present.name().eq_ignore_ascii_case(name));
-            headers.push(
-                HttpHeader::new(name, value.as_bytes().to_vec())
-                    .expect("fixture extra header has a valid name"),
-            );
-        }
-        let target = RequestTarget::new(credential.base_override().unwrap_or(row.base()), &headers);
-        let built = profile
-            .wire
-            .build_request(&target, &req)
-            .unwrap_or_else(|refused| panic!("{}: {refused}", profile.id));
-        let document = request_fixture(&built);
+        let document = request_fixture(&built_canonical(profile));
 
         if std::env::var(RECORD).as_deref() == Ok("1") {
             write(profile, "request", "canonical.json", &document);

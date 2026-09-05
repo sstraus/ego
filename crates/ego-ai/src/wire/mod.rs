@@ -426,6 +426,22 @@ struct ErrorBody {
     message: String,
 }
 
+/// What a `401` or `403` is told to consider, once ego stopped impersonating.
+///
+/// ego sends its own identity and never a vendor client's, so "this client is
+/// not one of ours" is now a refusal an operator can actually receive — and it
+/// arrives as the same status as a wrong key, with a body that rarely says
+/// which. Appending the recipe costs one sentence and saves the operator
+/// guessing; withholding it would leave the amended ADR's opt-in override
+/// discoverable only by reading the source.
+///
+/// **Appended, never substituted.** What the vendor said comes first and whole:
+/// a hint that displaced the body would hide the case where the vendor *did*
+/// explain itself.
+const IDENTITY_HINT: &str = "if this provider gates on a client identity ego \
+     does not ship, `docs/16-subscription-login.md` §7.8 is the \
+     `[auth.<provider>.headers]` recipe";
+
 pub(crate) async fn read_error_body(status: u16, mut body: crate::http::ByteStream) -> String {
     let mut raw = Vec::new();
     while let Some(chunk) = body.next().await {
@@ -443,7 +459,7 @@ pub(crate) async fn read_error_body(status: u16, mut body: crate::http::ByteStre
         }
     }
     let text = String::from_utf8_lossy(&raw);
-    match serde_json::from_str::<ErrorEnvelope>(&text) {
+    let said = match serde_json::from_str::<ErrorEnvelope>(&text) {
         Ok(envelope) => format!(
             "the provider returned HTTP {status}: {}",
             envelope.error.message
@@ -452,5 +468,11 @@ pub(crate) async fn read_error_body(status: u16, mut body: crate::http::ByteStre
             format!("the provider returned HTTP {status} with an empty body")
         }
         Err(_) => format!("the provider returned HTTP {status}: {}", text.trim()),
+    };
+    // `402` is deliberately not here. It is the third member of the `Refused`
+    // class and it means an empty wallet, which no header fixes.
+    match status {
+        401 | 403 => format!("{said} — {IDENTITY_HINT}"),
+        _ => said,
     }
 }

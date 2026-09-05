@@ -134,6 +134,64 @@ fn header_overlay_is_case_insensitive_and_empty_deletes() {
     );
 }
 
+/// The recipes `docs/16-subscription-login.md` §7.8 hands an operator work.
+///
+/// ego ships no vendor client identity
+/// (`crates/ego-ai/tests/vendor_client_identity.rs`), so the documented
+/// override is the *only* way to send one — and a documented recipe nothing
+/// exercises is a recipe that quietly stops parsing. Both halves of the
+/// mechanism are asserted here because the two recipes need different ones:
+/// Anthropic's adds three headers and must replace a beta the credential also
+/// sets, and Copilot's must replace ego's own `user-agent` rather than send two.
+#[test]
+fn the_documented_identity_recipes_load_and_replace_by_name() {
+    let config = AuthConfig::parse(
+        "[auth.anthropic.headers]\n\
+         user-agent = \"claude-cli/2.1.212\"\n\
+         x-app = \"cli\"\n\
+         anthropic-beta = \"claude-code-20250219,oauth-2025-04-20\"\n\
+         [auth.github-copilot.headers]\n\
+         user-agent = \"GitHubCopilotChat/0.35.0\"\n\
+         editor-version = \"vscode/1.107.0\"\n\
+         editor-plugin-version = \"copilot-chat/0.35.0\"\n\
+         copilot-integration-id = \"vscode-chat\"\n",
+    )
+    .unwrap();
+
+    // Anthropic's identity headers are additions: the row declares none, and
+    // the `anthropic-beta` the credential carries is replaced at assembly by
+    // this one, which is why the recipe repeats `oauth-2025-04-20`.
+    let anthropic = overlay_headers(&[], &config.auth["anthropic"].headers).unwrap();
+    assert_eq!(
+        anthropic,
+        vec![
+            (
+                "anthropic-beta".to_string(),
+                "claude-code-20250219,oauth-2025-04-20".to_string()
+            ),
+            ("user-agent".to_string(), "claude-cli/2.1.212".to_string()),
+            ("x-app".to_string(), "cli".to_string()),
+        ]
+    );
+
+    // Copilot's replaces the one identity header the row does declare.
+    let copilot = overlay_headers(
+        &ProviderRow::github_copilot_default().extra_headers,
+        &config.auth["github-copilot"].headers,
+    )
+    .unwrap();
+    let agents: Vec<&String> = copilot
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+        .map(|(_, value)| value)
+        .collect();
+    assert_eq!(agents, ["GitHubCopilotChat/0.35.0"]);
+    assert!(copilot.contains(&(
+        "copilot-integration-id".to_string(),
+        "vscode-chat".to_string()
+    )));
+}
+
 #[test]
 fn credential_and_wire_header_overrides_are_refused_at_load() {
     for name in [

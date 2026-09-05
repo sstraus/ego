@@ -28,6 +28,15 @@ const NOUS_CLIENT: &str = "hermes-cli";
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const USER_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:user_code";
 
+/// The only client identity ego ever sends.
+///
+/// One constant rather than a literal per request, because the rule it carries
+/// is a single rule: ego names ego, on every flow and every provider, and a
+/// vendor's own client string is an operator's `[auth.<provider>.headers]`
+/// decision (`docs/16-subscription-login.md` §7.8). A second spelling here is
+/// how the first exception gets in.
+pub const EGO_USER_AGENT: &str = concat!("ego/", env!("CARGO_PKG_VERSION"));
+
 /// The built-in flow table. The enum is closed deliberately: adding a row is
 /// adding a client identity ego ships, not registering an arbitrary protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,16 +447,19 @@ impl BuiltInFlow {
                 grant: "Copilot token exchange".to_string(),
             });
         }
+        // The four Copilot Chat identity headers Pi freezes here — the
+        // extension's `user-agent`, its editor and plugin versions, and the
+        // `vscode-chat` integration id — are gone: ego is not VS Code and does
+        // not say it is. What replaces them is ego's own name and nothing else.
+        // GitHub may gate this exchange on a client it recognises; that is a
+        // measurement to report, not a reason to send Microsoft's.
         Ok(HttpRequest {
             url: parse("https://api.github.com/copilot_internal/v2/token")?,
             method: Method::Get,
             headers: vec![
                 public_header("accept", b"application/json".to_vec()),
                 bearer_header(github_token.as_bytes()),
-                public_header("user-agent", b"GitHubCopilotChat/0.35.0".to_vec()),
-                public_header("editor-version", b"vscode/1.107.0".to_vec()),
-                public_header("editor-plugin-version", b"copilot-chat/0.35.0".to_vec()),
-                public_header("copilot-integration-id", b"vscode-chat".to_vec()),
+                public_header("user-agent", EGO_USER_AGENT.as_bytes().to_vec()),
             ],
             body: None,
         })
@@ -937,14 +949,17 @@ pub fn provider_auth(provider: &str, credential: &str) -> Result<ProviderAuth, F
     }
     if provider == "anthropic" {
         if credential.starts_with("sk-ant-oat") {
+            // The prefix is the whole dispatch: an oat credential 401s as
+            // `x-api-key` and is presented as a Bearer instead, and
+            // `oauth-2025-04-20` is the beta that makes Messages accept a
+            // Bearer at all. That pair is the wire contract for this token
+            // type. Pi's `user-agent: claude-cli/…`, `x-app: cli` and
+            // `claude-code-20250219` are not: they are Claude Code's identity,
+            // which Anthropic's legal-and-compliance page reserves to its own
+            // clients, and ego does not wear it.
             return Ok(ProviderAuth::Headers(vec![
                 bearer_header(credential.as_bytes()),
-                public_header("user-agent", b"claude-cli/2.1.212".to_vec()),
-                public_header("x-app", b"cli".to_vec()),
-                public_header(
-                    "anthropic-beta",
-                    b"claude-code-20250219,oauth-2025-04-20".to_vec(),
-                ),
+                public_header("anthropic-beta", b"oauth-2025-04-20".to_vec()),
             ]));
         }
         return Ok(ProviderAuth::Headers(vec![
@@ -1015,12 +1030,7 @@ fn form_request(url: &str, fields: &[(&str, &str)]) -> Result<HttpRequest, FlowE
                 "content-type",
                 b"application/x-www-form-urlencoded".to_vec(),
             ),
-            public_header(
-                "user-agent",
-                concat!("ego/", env!("CARGO_PKG_VERSION"))
-                    .as_bytes()
-                    .to_vec(),
-            ),
+            public_header("user-agent", EGO_USER_AGENT.as_bytes().to_vec()),
         ],
         body: Some(serializer.finish().into_bytes()),
     })
@@ -1033,12 +1043,7 @@ fn json_request(url: &str, body: Value) -> Result<HttpRequest, FlowError> {
         headers: vec![
             public_header("accept", b"application/json".to_vec()),
             public_header("content-type", b"application/json".to_vec()),
-            public_header(
-                "user-agent",
-                concat!("ego/", env!("CARGO_PKG_VERSION"))
-                    .as_bytes()
-                    .to_vec(),
-            ),
+            public_header("user-agent", EGO_USER_AGENT.as_bytes().to_vec()),
         ],
         body: Some(serde_json::to_vec(&body).expect("a JSON value serialises")),
     })
