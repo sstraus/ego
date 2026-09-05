@@ -72,6 +72,7 @@ struct StatusBase {
     session: SessionId,
     mode: Mode,
     cwd: PathBuf,
+    trust: Trust,
     git: Option<GitFacts>,
 }
 
@@ -214,8 +215,13 @@ fn rebuild_snapshot(
     let Some(base) = status.status_base.clone() else {
         return;
     };
-    let seat = SeatFacts::new(status.queue, status.drafts, base.cwd.display().to_string())
-        .with_modal(modal);
+    let seat = SeatFacts::new(
+        status.queue,
+        status.drafts,
+        base.cwd.display().to_string(),
+        base.trust,
+    )
+    .with_modal(modal);
     status.snapshot = Some(SurfaceSnapshot::from_state_with_git(
         base.session,
         state,
@@ -391,6 +397,7 @@ pub struct StatusSetup {
     pub selection: GenerationSelectionSnapshot,
     pub mode: Mode,
     pub cwd: PathBuf,
+    pub trust: Trust,
     pub segments: Vec<ego_core::config::StatusSegmentName>,
     pub width: usize,
     pub native: bool,
@@ -922,6 +929,7 @@ impl Seat {
             selection,
             mode,
             cwd,
+            trust,
             segments,
             width,
             native,
@@ -936,6 +944,7 @@ impl Seat {
                 session,
                 mode,
                 cwd,
+                trust,
                 git: None,
             });
             rebuild_snapshot(
@@ -2420,29 +2429,69 @@ enum StatuslineChoice {
     Propagate(Line),
 }
 
+/// The segments each `/statusline` preset writes, and the label that offers it.
+///
+/// One table rather than two, because a preset whose label disagrees with what
+/// it writes is a lie the operator only finds out about after saving.
+const STATUSLINE_PRESETS: [(&str, &str, &[ego_core::config::StatusSegmentName]); 4] = {
+    use ego_core::config::StatusSegmentName as Segment;
+
+    [
+        ("off", "Off", &[]),
+        (
+            "minimal",
+            "Minimal — model, effort, mode",
+            &[Segment::Model, Segment::Effort, Segment::Mode],
+        ),
+        (
+            "default",
+            "Default — model, effort, mode, context, queue, drafts, interrupt, cwd, git, trust",
+            &[
+                Segment::Model,
+                Segment::Effort,
+                Segment::Mode,
+                Segment::Context,
+                Segment::Queue,
+                Segment::Drafts,
+                Segment::Interrupt,
+                Segment::Cwd,
+                Segment::Git,
+                Segment::Trust,
+            ],
+        ),
+        (
+            "full",
+            "Full — model, effort, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
+            &[
+                Segment::Model,
+                Segment::Effort,
+                Segment::Mode,
+                Segment::Context,
+                Segment::Cost,
+                Segment::Queue,
+                Segment::Drafts,
+                Segment::Interrupt,
+                Segment::Cwd,
+                Segment::Git,
+                Segment::Trust,
+            ],
+        ),
+    ]
+};
+
 fn choose_statusline_preset(
     editor: &mut Reedline,
     phase: &SurfacePhase,
     status: &SharedStatus,
     busy: bool,
 ) -> StatuslineChoice {
-    use ego_core::config::StatusSegmentName as Segment;
-
     let request = QuestionRequest::new(
         "Choose status-line setup",
         QuestionMode::Single,
-        vec![
-            QuestionOption::new("off", "Off"),
-            QuestionOption::new("minimal", "Minimal — model, effort, mode"),
-            QuestionOption::new(
-                "default",
-                "Default — model, effort, mode, context, queue, drafts, interrupt, cwd, git",
-            ),
-            QuestionOption::new(
-                "full",
-                "Full — model, effort, mode, context, cost, queue, drafts, interrupt, cwd, git",
-            ),
-        ],
+        STATUSLINE_PRESETS
+            .iter()
+            .map(|(id, label, _)| QuestionOption::new(*id, *label))
+            .collect(),
         false,
     );
     let selector = Arc::new(Mutex::new(Selector::with_options(
@@ -2482,35 +2531,13 @@ fn choose_statusline_preset(
                 let Some(SelectorValue::Single(id)) = selector.result() else {
                     continue;
                 };
-                let segments = match id.as_str() {
-                    "off" => Vec::new(),
-                    "minimal" => vec![Segment::Model, Segment::Effort, Segment::Mode],
-                    "default" => vec![
-                        Segment::Model,
-                        Segment::Effort,
-                        Segment::Mode,
-                        Segment::Context,
-                        Segment::Queue,
-                        Segment::Drafts,
-                        Segment::Interrupt,
-                        Segment::Cwd,
-                        Segment::Git,
-                    ],
-                    "full" => vec![
-                        Segment::Model,
-                        Segment::Effort,
-                        Segment::Mode,
-                        Segment::Context,
-                        Segment::Cost,
-                        Segment::Queue,
-                        Segment::Drafts,
-                        Segment::Interrupt,
-                        Segment::Cwd,
-                        Segment::Git,
-                    ],
-                    _ => continue,
+                let Some((_, _, segments)) = STATUSLINE_PRESETS
+                    .iter()
+                    .find(|(preset, _, _)| *preset == id.as_str())
+                else {
+                    continue;
                 };
-                break StatuslineChoice::Selected(segments);
+                break StatuslineChoice::Selected(segments.to_vec());
             }
             Line::Interrupted | Line::Blank => break StatuslineChoice::Cancelled,
             Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
@@ -3549,6 +3576,34 @@ mod tests {
         }
         for invalid in ["", "maybe", "allow", "1"] {
             assert_eq!(parse_trust(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn every_populated_statusline_preset_states_the_workspace_posture() {
+        use ego_core::config::StatusSegmentName as Segment;
+
+        for (id, label, segments) in STATUSLINE_PRESETS {
+            let named = segments
+                .iter()
+                .map(|segment| segment.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            assert!(
+                label == "Off" || label.ends_with(&named),
+                "the `{id}` label promises something other than what it writes: {label}"
+            );
+        }
+
+        for preset in ["default", "full"] {
+            let (_, _, segments) = STATUSLINE_PRESETS
+                .iter()
+                .find(|(id, _, _)| *id == preset)
+                .expect("a preset the picker offers");
+            assert!(
+                segments.contains(&Segment::Trust),
+                "a session that starts untrusted in silence needs `{preset}` to say so"
+            );
         }
     }
 

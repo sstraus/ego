@@ -43,5 +43,6 @@ pub mod schema;
 pub mod session;
 #[allow(dead_code)] // Connected to the turn service by M4 S6 after admission is green.
 pub(crate) mod skill;
+pub(crate) mod trust;
 pub mod usage;
 pub(crate) mod yaml_envelope;

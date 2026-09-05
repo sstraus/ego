@@ -84,12 +84,25 @@ fn usage_text_and_json_are_deterministic_projections_of_the_same_report() {
     let json = seeded_usage(["--json"]);
     assert_eq!(text.code, Some(0), "stderr: {}", text.stderr);
     let report = json_report(&json);
-    assert!(text.stdout.contains("main"), "{}", text.stdout);
-    assert!(text.stdout.contains("judge"), "{}", text.stdout);
-    assert!(text.stdout.contains("compaction"), "{}", text.stdout);
-    assert!(text.stdout.contains("subagent"), "{}", text.stdout);
-    assert!(text.stdout.contains("hook"), "{}", text.stdout);
-    assert!(text.stdout.contains("total"), "{}", text.stdout);
+    // The table is the report read out loud, not a second report: every role
+    // JSON carries is reachable in text, and JSON keeps all six either way.
+    // regression case hid the silent ones behind `--all-roles`, because a fixture
+    // that only ever ran a main turn should not print five empty rows.
+    let all_roles = seeded_usage(["--all-roles"]);
+    assert_eq!(all_roles.code, Some(0), "stderr: {}", all_roles.stderr);
+    for role in ["main", "judge", "compaction", "subagent", "hook", "total"] {
+        assert!(all_roles.stdout.contains(role), "{}", all_roles.stdout);
+    }
+    for role in ["main", "total"] {
+        assert!(text.stdout.contains(role), "{}", text.stdout);
+    }
+    for silent in ["judge", "compaction", "subagent", "hook"] {
+        assert!(
+            !text.stdout.contains(silent),
+            "a role that did nothing still printed a row: {}",
+            text.stdout
+        );
+    }
     assert!(report["totals"]["main"].is_object(), "{report}");
     assert!(
         text.stderr.is_empty(),

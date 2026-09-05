@@ -593,6 +593,7 @@ pub enum StatusSegmentName {
     Interrupt,
     Cwd,
     Git,
+    Trust,
 }
 
 impl Serialize for StatusSegmentName {
@@ -655,6 +656,7 @@ impl StatusSegmentName {
         "interrupt",
         "cwd",
         "git",
+        "trust",
     ];
 
     /// Parse one persisted built-in name.
@@ -670,6 +672,7 @@ impl StatusSegmentName {
             "interrupt" => Some(Self::Interrupt),
             "cwd" => Some(Self::Cwd),
             "git" => Some(Self::Git),
+            "trust" => Some(Self::Trust),
             _ => None,
         }
     }
@@ -687,6 +690,7 @@ impl StatusSegmentName {
             Self::Interrupt => "interrupt",
             Self::Cwd => "cwd",
             Self::Git => "git",
+            Self::Trust => "trust",
         }
     }
 }

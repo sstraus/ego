@@ -4,7 +4,7 @@ use ego_cli::repl::status::{
     GitFactsSource, SeatFacts, SegmentValue, SelectionFacts, StatusLine, StatusSegmentName,
     SurfaceSnapshot,
 };
-use ego_core::config::{Mode, ModelRef};
+use ego_core::config::{Mode, ModelRef, Trust};
 use ego_core::cost::{CumulativeCost, UnknownCost};
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
@@ -30,7 +30,7 @@ fn snapshot() -> SurfaceSnapshot {
             ThinkingLevel::High,
             Mode::Default,
         ),
-        SeatFacts::new(QueueStatus::default(), 0, "/workspace/ego"),
+        SeatFacts::new(QueueStatus::default(), 0, "/workspace/ego", Trust::Trusted),
         Some("main".into()),
     )
 }
@@ -167,7 +167,7 @@ fn context_and_cost_are_authoritative_session_facts_not_rederived_from_selection
             ThinkingLevel::Off,
             Mode::Plan,
         ),
-        SeatFacts::new(QueueStatus::default(), 0, "/tmp"),
+        SeatFacts::new(QueueStatus::default(), 0, "/tmp", Trust::Trusted),
         None,
     );
     assert_eq!(surface.context(), "99999");

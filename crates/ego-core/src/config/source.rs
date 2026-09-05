@@ -77,7 +77,8 @@ pub struct Sourced<T> {
 /// This is the pure input the trust gate needs to decide
 /// [`Posture`](super::Posture). Persisting trust decisions (the trust store)
 /// involves file I/O and lives outside `ego-core`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Trust {
     Trusted,
     Untrusted,

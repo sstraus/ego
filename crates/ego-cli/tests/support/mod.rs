@@ -691,6 +691,15 @@ impl Ego {
     /// prompt. This keeps process tests on the same public binary seam while
     /// answering the terminal's cursor-position query as the child runs.
     pub fn run_pty(self, input: &str) -> Finished {
+        self.run_pty_trusting("yes", input)
+    }
+
+    /// Run one interactive script, answering the trust question `trust_answer`.
+    ///
+    /// Most callers want [`Self::run_pty`] and its `yes`; a caller that is
+    /// about the refusal needs to say `no` without reimplementing the whole
+    /// terminal owner.
+    pub fn run_pty_trusting(self, trust_answer: &str, input: &str) -> Finished {
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows: 24,
@@ -750,14 +759,21 @@ impl Ego {
                     .any(|window| window == b"Trust project files")
             {
                 let mut writer = writer.lock().expect("pty writer lock");
-                writer.write_all(b"yes\r").expect("trust answer");
+                writer
+                    .write_all(format!("{trust_answer}\r").as_bytes())
+                    .expect("trust answer");
                 writer.flush().expect("trust answer flush");
                 trust_answered = true;
             }
             let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
-            if !submitted && prompt_count > 0 {
-                // If a trust prompt was shown, the first `> ` belongs to the
-                // post-trust idle editor and is safe to submit against.
+            if !submitted && prompt_count > 1 {
+                // Two renders of the idle prompt, not one. Reedline draws
+                // once, *then* reads the cursor-position report this harness
+                // owes it, and redraws. Typing into the gap between those two
+                // is typing into the terminal's answer to that query: the
+                // line is swallowed and the session sits idle for ever. The
+                // second render is the only evidence, from out here, that the
+                // handshake is over and the editor is reading for us.
                 let mut writer = writer.lock().expect("pty writer lock");
                 writer
                     .write_all(input.as_bytes())

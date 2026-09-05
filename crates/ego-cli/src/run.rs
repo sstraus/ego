@@ -4293,8 +4293,13 @@ async fn execution_preflight(
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
-    let settings =
-        settings(args, |root| run_trust(args, driver, root), diagnostics).map_err(usage)?;
+    let home = config::ego_home();
+    let settings = settings(
+        args,
+        |root| run_trust(args, driver, root, home.as_deref(), diagnostics),
+        diagnostics,
+    )
+    .map_err(usage)?;
     let ci = ci_invocation(args, &settings, driver).map_err(usage)?;
     let selected_mcp =
         config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
@@ -4436,8 +4441,13 @@ async fn execute<S: EventSink>(
             ready,
         }) => (settings, ci, refresh, ready, None),
         None => {
-            let settings = settings(&args, |root| run_trust(&args, &driver, root), diagnostics)
-                .map_err(usage)?;
+            let home = config::ego_home();
+            let settings = settings(
+                &args,
+                |root| run_trust(&args, &driver, root, home.as_deref(), diagnostics),
+                diagnostics,
+            )
+            .map_err(usage)?;
             let auto_preflight = Arc::new(CliAutoPreflight::capture(
                 &settings.effective,
                 &settings.confinement,
@@ -4852,6 +4862,7 @@ async fn execute<S: EventSink>(
                 selection: selected,
                 mode,
                 cwd: cwd.clone(),
+                trust: skill_trust,
                 segments: effective
                     .ui
                     .statusline
@@ -6558,10 +6569,23 @@ struct InteractiveStatus {
     model_config_store: Option<Arc<dyn UserConfigStore>>,
 }
 
-fn run_trust(args: &Args, driver: &Driver<'_>, root: &Path) -> Trust {
+/// `home` is where a remembered answer lives; `None` is a process with no ego
+/// home at all, which asks every launch and records nothing.
+///
+/// `--bare` is already an explicit refusal, so it reaches neither the store
+/// nor the seat — it does not read a remembered answer and does not write one.
+fn run_trust(
+    args: &Args,
+    driver: &Driver<'_>,
+    root: &Path,
+    home: Option<&Path>,
+    diagnostics: &dyn Diagnostics,
+) -> Trust {
     match driver {
         Driver::Once => Trust::Untrusted,
-        Driver::Interactive { seat, .. } if !args.bare && seat.has_human() => seat.trust(root),
+        Driver::Interactive { seat, .. } if !args.bare && seat.has_human() => {
+            crate::trust::resolve(root, home, diagnostics, || seat.trust(root))
+        }
         Driver::Interactive { .. } => Trust::Untrusted,
     }
 }
@@ -8223,8 +8247,19 @@ mod tests {
             seat: dyn_seat,
             between: &between,
         };
+        // A workspace with something to trust and a home of its own, so the
+        // routing under test is the only thing that decides whether the seat
+        // is consulted. What the *store* then does with the answer is
+        // `trust.rs`'s contract, not this one's.
+        let workspace = tempfile::tempdir().expect("a temp dir");
+        let home = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(workspace.path().join("AGENTS.md"), "# here\n")
+            .expect("a temp dir is writable");
+        let root = workspace.path();
+        let home = Some(home.path());
+
         assert_eq!(
-            run_trust(&interactive_args(&[]), &interactive, Path::new("/ws")),
+            run_trust(&interactive_args(&[]), &interactive, root, home, &Stderr),
             Trust::Trusted
         );
         assert_eq!(seat.asked.load(Ordering::SeqCst), 1);
@@ -8233,7 +8268,9 @@ mod tests {
             run_trust(
                 &interactive_args(&["--bare"]),
                 &interactive,
-                Path::new("/ws")
+                root,
+                home,
+                &Stderr
             ),
             Trust::Untrusted
         );
@@ -8244,7 +8281,7 @@ mod tests {
         );
 
         assert_eq!(
-            run_trust(&interactive_args(&[]), &Driver::Once, Path::new("/ws")),
+            run_trust(&interactive_args(&[]), &Driver::Once, root, home, &Stderr),
             Trust::Untrusted,
             "headless has no seat to consult"
         );

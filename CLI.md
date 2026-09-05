@@ -920,17 +920,19 @@ The status line is one width-aware row owned by the interactive surface, not a
 shell subprocess and not model output. It renders ordered segments from a
 snapshot; expensive producers such as Git update asynchronously and never
 block input. The built-in segment names are `model`, `effort`, `mode`,
-`context`, `cost`, `queue`, `drafts`, `interrupt`, `cwd`, and `git`. The queue
-snapshot distinguishes pending steers from ordinary queued prompts, and the
-interrupt segment remains visible while expedited or ordinary interruption is
-pending.
+`context`, `cost`, `queue`, `drafts`, `interrupt`, `cwd`, `git`, and `trust`.
+The queue snapshot distinguishes pending steers from ordinary queued prompts,
+and the interrupt segment remains visible while expedited or ordinary
+interruption is pending. `trust` renders `trusted` or `untrusted` and counts as
+inactive while trusted, so width pressure drops it from exactly the sessions
+whose posture is not worth reporting.
 
 Configuration stores one final resolved shape rather than a preset plus a
 second override language:
 
 ```toml
 [ui.statusline]
-segments = ["model", "effort", "mode", "context", "queue", "drafts", "interrupt", "cwd", "git"]
+segments = ["model", "effort", "mode", "context", "queue", "drafts", "interrupt", "cwd", "git", "trust"]
 ```
 
 `/statusline` offers named setup presets but writes that ordered list. An empty
