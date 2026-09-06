@@ -33,7 +33,14 @@ transport = "sse"
 
 const SECRET: &str = "PREflight-SECRET-MUST-NOT-ESCAPE";
 const PREFLIGHT_TIMEOUT: &str = "5s";
-const OBSERVATION_WINDOW: Duration = Duration::from_secs(8);
+/// How long to wait for something that must happen.
+///
+/// It bounds how quickly a genuine failure is reported and nothing else: both
+/// helpers that use it return the moment the condition holds, so a shorter
+/// window makes no passing test stricter — it only decides how often a
+/// full-workspace run, where thousands of tests compete for the same cores,
+/// reports a shell that was merely slow as a shell that never ran.
+const OBSERVATION_WINDOW: Duration = Duration::from_secs(15);
 const DESCENDANT_LIFETIME_SECS: u64 = 15;
 const FOREGROUND_DELAY_SECS: u64 = 10;
 

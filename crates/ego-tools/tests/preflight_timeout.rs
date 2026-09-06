@@ -75,8 +75,17 @@ while :; do sleep 1; done
 "#
 }
 
+/// How long to wait for something that must happen.
+///
+/// It bounds how quickly a genuine failure is reported and nothing else: both
+/// helpers below return the moment the condition holds, so a shorter window
+/// makes no passing test stricter — it only decides how often a full-workspace
+/// run, where thousands of tests compete for the same cores, reports a shell
+/// that was merely slow as a shell that never ran.
+const OBSERVATION_WINDOW: Duration = Duration::from_secs(15);
+
 fn wait_for(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + OBSERVATION_WINDOW;
     while !path.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -85,7 +94,7 @@ fn wait_for(path: &Path) {
 
 fn assert_gone(path: &Path) {
     let pid = std::fs::read_to_string(path).expect("process marker");
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + OBSERVATION_WINDOW;
     while Instant::now() < deadline {
         let alive = Command::new("/bin/kill")
             .args(["-0", pid.trim()])
@@ -160,12 +169,21 @@ fn cancellation_after_spawn_terminates_waits_and_proves_the_complete_tree_absent
 #[test]
 fn independent_child_timeout_is_typed_and_cleans_the_complete_tree() {
     let fixture = fixture(None);
+    // The tree has to exist before its cleanup means anything, and the script
+    // writes its two markers before it starts looping. A timeout short enough
+    // to fire before the shell has recorded itself leaves nothing to assert
+    // about and reads as a missing marker file, so the observer proves the
+    // tree is there and the timeout — which the body never ends on its own —
+    // still fires well inside the window.
+    let descendant = fixture.descendant.clone();
+    let observer = std::thread::spawn(move || wait_for(&descendant));
     let result = runtime().block_on(run_secret_child(spec(
         &fixture,
         tree_body(),
-        Some(Duration::from_millis(100)),
+        Some(Duration::from_secs(2)),
         None,
     )));
+    observer.join().expect("process observer");
 
     assert!(
         matches!(result, Err(SecretChildError::CommandTimeout)),
