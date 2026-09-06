@@ -1063,7 +1063,65 @@ fn parse_session(id: &v1::SessionId) -> Result<SessionId, Error> {
         .map_err(|_| Error::invalid_params().data(format!("invalid ACP session id {id}")))
 }
 
-fn lifecycle_error(error: impl fmt::Display) -> Error {
+/// A session was momentarily owned by another writer and the same request may
+/// be sent again.
+///
+/// ACP names no busy code, and none of the ones it does name is true here:
+/// the params were valid, the method exists, the session exists, nothing was
+/// cancelled, and ego did not fail. `-32010` is inside JSON-RPC's
+/// implementation-defined server range and clear of every code ACP assigns
+/// (`-32000` auth, `-32002` not found). It is part of the `_ego` extension
+/// contract and is documented with it; a host must not have to match on the
+/// wording of `data` to learn a retry is safe.
+const SESSION_BUSY: i32 = -32010;
+
+/// What a lifecycle refusal is, in the only vocabulary a host acts on.
+///
+/// Exhaustive on purpose. The blanket `impl Display` this replaced answered
+/// `invalid_params` to every one of these, which told a host its request was
+/// malformed when the session was missing, when another writer held it for the
+/// length of an append, and when ego itself had failed — three different things
+/// to do, given one answer that is right for none of them. Matching the enum
+/// means a variant added later cannot inherit a verdict nobody chose for it.
+fn lifecycle_error(error: &LifecycleError) -> Error {
+    let code = match error {
+        // The id was well-formed and names nothing, or names something that is
+        // gone. A caller cannot fix either by sending better parameters.
+        LifecycleError::UnknownSession | LifecycleError::Deleted => ErrorCode::ResourceNotFound,
+        // Transient by construction: another writer has the session, or moved
+        // it under this request. Retrying is what these are for, and both
+        // methods are idempotent so retrying is safe.
+        LifecycleError::LeaseHeld
+        | LifecycleError::Active
+        | LifecycleError::Conflict
+        | LifecycleError::EffectUncertain => ErrorCode::Other(SESSION_BUSY),
+        // ego failed. Not the caller's parameters, and not something a retry
+        // is promised to fix.
+        LifecycleError::Store(_)
+        | LifecycleError::Replay(_)
+        | LifecycleError::Ancestry(_)
+        | LifecycleError::Evidence(_)
+        | LifecycleError::Run(_)
+        | LifecycleError::NotPublished(_) => ErrorCode::InternalError,
+        // What the caller asked for, refused on its own terms.
+        LifecycleError::InvalidCursor
+        | LifecycleError::InvalidLimit
+        | LifecycleError::InvalidText
+        | LifecycleError::RootMismatch { .. }
+        | LifecycleError::NotPaused { .. }
+        | LifecycleError::Goal(_)
+        | LifecycleError::Fork(_) => ErrorCode::InvalidParams,
+    };
+    Error::from(code).data(error.to_string())
+}
+
+/// A request refused for what it carried, before any session was reached.
+///
+/// Root resolution and MCP admission both reject something the caller sent, so
+/// `invalid_params` is the truth for them — but they are not lifecycle errors
+/// and must not share a mapper with one, or the next correction to either will
+/// silently move the other.
+fn refused_params(error: impl fmt::Display) -> Error {
     Error::invalid_params().data(error.to_string())
 }
 
@@ -1307,7 +1365,7 @@ where
                     };
                     let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
                         Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
                     let start_request = RequestId::from_uuid(ids.next_uuid());
                     let session = RequestId::session_id(start_request);
@@ -1316,7 +1374,7 @@ where
                         && let Err(error) =
                             lifecycle.create_with_id(session, root.as_path().to_path_buf())
                     {
-                        return responder.respond_with_error(lifecycle_error(error));
+                        return responder.respond_with_error(lifecycle_error(&error));
                     }
                     let attachment_root = root.clone();
                     let _ = sessions.open(id.clone(), root, Some(start_request), None, mcp);
@@ -1327,7 +1385,7 @@ where
                                     return responder.respond_with_error(error);
                                 }
                             }
-                            Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                            Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                         }
                     }
                     responder.respond(
@@ -1348,11 +1406,11 @@ where
                     };
                     let root = match request.cwd.as_deref().map(|cwd| roots.resolve(cwd)).transpose() {
                         Ok(root) => root,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
                     let cursor = match request.cursor.map(SessionCursor::parse).transpose() {
                         Ok(cursor) => cursor,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
                     match lifecycle.list(cursor.as_ref(), root.as_ref().map(RunRoot::as_path)) {
                         Ok(page) => responder.respond(
@@ -1361,7 +1419,7 @@ where
                             )
                             .next_cursor(page.next_cursor.map(|cursor| cursor.to_string())),
                         ),
-                        Err(error) => responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => responder.respond_with_error(lifecycle_error(&error)),
                     }
                 }
             },
@@ -1399,15 +1457,15 @@ where
                     }
                     let root = match roots.resolve(&request.cwd) {
                         Ok(root) => root,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
                     let attachment = match lifecycle.load(id, root.as_path()).await {
                         Ok(attachment) => attachment,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
                     let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
                         Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
                     let capabilities = *client_capabilities
                         .lock()
@@ -1421,7 +1479,7 @@ where
                     );
                     let recovered = match recover_current_run(controller.as_ref(), id, bindings).await {
                         Ok(run) => run,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(Error::internal_error().data(error)),
                     };
                     let Some(generation) = sessions.open(
                         request.session_id.clone(),
@@ -1499,15 +1557,15 @@ where
                     }
                     let root = match roots.resolve(&request.cwd) {
                         Ok(root) => root,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
                     let attachment = match lifecycle.resume(id, root.as_path()).await {
                         Ok(attachment) => attachment,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
                     let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
                         Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
                     let capabilities = *client_capabilities
                         .lock()
@@ -1521,7 +1579,7 @@ where
                     );
                     let recovered = match recover_current_run(controller.as_ref(), id, bindings).await {
                         Ok(run) => run,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(Error::internal_error().data(error)),
                     };
                     let Some(generation) = sessions.open(
                         request.session_id.clone(),
@@ -1590,10 +1648,10 @@ where
                     };
                     let root = match roots.resolve(&request.cwd) {
                         Ok(root) => root,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
                     if let Err(error) = lifecycle.resume(source, root.as_path()).await {
-                        return responder.respond_with_error(lifecycle_error(error));
+                        return responder.respond_with_error(lifecycle_error(&error));
                     }
                     // Admission precedes publication of the child so an MCP
                     // refusal cannot leave an unexplained durable fork. If
@@ -1601,15 +1659,15 @@ where
                     // connection authority is dropped without attachment.
                     let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
                         Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
                     let child = match lifecycle.fork(source).await {
                         Ok(child) => child.id,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
                     let attachment = match lifecycle.resume(child, root.as_path()).await {
                         Ok(attachment) => attachment,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
                     let child_id = v1::SessionId::new(child.to_string());
                     let _ = sessions.open(
@@ -1648,7 +1706,7 @@ where
                             sessions.close(&request.session_id);
                             responder.respond(v1::DeleteSessionResponse::new())
                         }
-                        Err(error) => responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => responder.respond_with_error(lifecycle_error(&error)),
                     }
                 }
             },
@@ -1671,7 +1729,7 @@ where
                             sessions.close(&request.session_id);
                             responder.respond(v1::CloseSessionResponse::new())
                         }
-                        Err(error) => responder.respond_with_error(lifecycle_error(error)),
+                        Err(error) => responder.respond_with_error(lifecycle_error(&error)),
                     }
                 }
             },

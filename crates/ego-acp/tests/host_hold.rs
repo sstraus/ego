@@ -450,6 +450,55 @@ async fn a_malformed_hold_request_is_refused_before_the_lifecycle_is_asked() {
     connection.abort().await;
 }
 
+/// A refusal says whose fault it was, because that is what a host acts on.
+///
+/// `invalid_params` is a permanent verdict on what the caller sent: a host
+/// that reads it correctly stops and shows the operator its request was
+/// malformed. Neither of these is that. A session id that is well-formed but
+/// names nothing is a missing resource, and a lease another writer holds for
+/// the length of one append is a transient the same request can win a moment
+/// later — the method is idempotent precisely so it can be retried. Telling
+/// either one "invalid params" makes a host give up on a request that was
+/// never wrong.
+#[tokio::test]
+async fn a_refusal_names_a_missing_session_and_a_busy_one_as_what_they_are() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = support::Connected::new(fixture.router());
+    connection.initialize().await;
+    let session = connection.new_session(ROOT).await["result"]["sessionId"]
+        .as_str()
+        .expect("session/new returns a session id")
+        .to_owned();
+
+    // Well-formed, parses, is not nil — and names no session.
+    let (missing, _) = connection
+        .request("_ego/pause", hold_params(SECOND_REQUEST, REQUEST))
+        .await;
+    assert_eq!(
+        missing["error"]["code"], -32002,
+        "a session that does not exist is a missing resource: {missing}"
+    );
+
+    // Another writer owns the session for the length of its append.
+    let held = fixture.hold_lease(&session);
+    let (busy, _) = connection
+        .request("_ego/pause", hold_params(&session, REQUEST))
+        .await;
+    assert_eq!(
+        busy["error"]["code"], -32010,
+        "a lease held for one append is transient, not malformed: {busy}"
+    );
+    drop(held);
+
+    // And the retry the code invited succeeds, on the same request id.
+    let (retried, _) = connection
+        .request("_ego/pause", hold_params(&session, REQUEST))
+        .await;
+    assert_eq!(state(&retried), "paused", "the invited retry: {retried}");
+
+    connection.abort().await;
+}
+
 /// Two hosts on one session, holding it at the same moment.
 ///
 /// The hold is a fact about the session and not about the connection that

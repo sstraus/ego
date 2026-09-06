@@ -263,6 +263,34 @@ impl DurableAcpFixture {
         session.to_string()
     }
 
+    /// Hold this session's writer lease for as long as the guard lives.
+    ///
+    /// A lease race decided by a scheduler is not a test. This takes the lease
+    /// the way another writer would, so the request under test loses it every
+    /// run rather than two runs in three.
+    pub fn hold_lease(&self, session: &str) -> impl Drop + use<> {
+        let session = session.parse::<SessionId>().unwrap();
+        assert!(
+            self.store
+                .leases
+                .lock()
+                .expect("support leases")
+                .insert(session),
+            "the fixture takes the lease before the request under test"
+        );
+        struct Held(Arc<Store>, SessionId);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0
+                    .leases
+                    .lock()
+                    .expect("support leases")
+                    .remove(&self.1);
+            }
+        }
+        Held(self.store.clone(), session)
+    }
+
     /// How many holds this session's log actually records.
     ///
     /// The only way to tell a hold that was left alone from one that was
