@@ -3264,6 +3264,36 @@ struct PreparedExecutionRuntime {
     child: bool,
 }
 
+/// Apply what the operator explicitly chose over what configuration resolved.
+///
+/// Only what was chosen: inheriting a configured default is not a decision,
+/// and a run that recorded it as one would claim a person picked a model they
+/// never saw.
+///
+/// A model lands in two places because it is spelled two ways — `slug` is the
+/// resolved name the preflight builds its generation target from, and
+/// `effective.model` is the configuration value the rest of the turn reads.
+/// Moving one without the other answers the host `model: x` and generates with
+/// `y`, which is worse than refusing the pick: the host is told it landed and
+/// only the evidence disagrees. They are set together here so there is one
+/// place that can be got wrong instead of two that can drift.
+fn apply_seat(
+    state: &ego_core::control::SessionControlState,
+    effective: &mut Effective,
+    slug: &mut String,
+) {
+    if let Some(model) = state.model.chosen.clone() {
+        slug.clone_from(&model.0);
+        effective.model = Some(model);
+    }
+    if let Some(effort) = state.effort.chosen {
+        effective.thinking = Some(effort);
+    }
+    if let Some(mode) = state.mode.chosen {
+        effective.mode = Some(mode);
+    }
+}
+
 impl CliPrepared {
     async fn prepare(
         mut args: Args,
@@ -3398,17 +3428,7 @@ impl CliPrepared {
         // inherited configuration default is not a decision to re-record.
         if let Some(controls) = bindings.controls() {
             match controls.state(self.session_id) {
-                Ok(state) => {
-                    if let Some(model) = state.model.chosen {
-                        self.effective.model = Some(model);
-                    }
-                    if let Some(effort) = state.effort.chosen {
-                        self.effective.thinking = Some(effort);
-                    }
-                    if let Some(mode) = state.mode.chosen {
-                        self.effective.mode = Some(mode);
-                    }
-                }
+                Ok(state) => apply_seat(&state, &mut self.effective, &mut self.slug),
                 // An unreadable seat leaves the configured values in force.
                 // Refusing the turn would let a poisoned picker lock a
                 // session out of running at all.
@@ -9368,5 +9388,87 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(output.0.lock().unwrap().is_empty());
+    }
+
+    /// A chosen model has to reach the generation, not just the configuration.
+    ///
+    /// The seat writes into two places that spell the same fact: `slug`, which
+    /// the preflight builds its generation target from, and `effective.model`,
+    /// which the rest of the turn reads. When only the second moved, every
+    /// control test still passed — the host was answered with its pick and the
+    /// session reported it — while every generation ran the model the run
+    /// started with. Nothing on the control surface can see that, so the
+    /// assertion has to be on the value the preflight is handed.
+    #[test]
+    fn a_chosen_model_moves_the_name_the_generation_is_built_from() {
+        use ego_core::config::{Mode, ModelRef, Trust};
+        use ego_core::control::{ControlSelect, SessionControlState};
+
+        let mut effective =
+            ego_core::config::resolve(&[], Trust::Trusted, None).expect("empty config");
+        let mut slug = "started-with".to_owned();
+        let state = SessionControlState {
+            model: ControlSelect {
+                current: ModelRef("started-with".to_owned()),
+                chosen: Some(ModelRef("picked".to_owned())),
+                available: Vec::new(),
+            },
+            effort: ControlSelect {
+                current: ThinkingLevel::High,
+                chosen: Some(ThinkingLevel::High),
+                available: Vec::new(),
+            },
+            mode: ControlSelect {
+                current: Mode::Plan,
+                chosen: Some(Mode::Plan),
+                available: Vec::new(),
+            },
+        };
+
+        apply_seat(&state, &mut effective, &mut slug);
+
+        assert_eq!(slug, "picked", "the name the generation is built from");
+        assert_eq!(effective.model, Some(ModelRef("picked".to_owned())));
+        assert_eq!(effective.thinking, Some(ThinkingLevel::High));
+        assert_eq!(effective.mode, Some(Mode::Plan));
+    }
+
+    /// What was not chosen is left exactly as configuration resolved it.
+    /// Inheriting a default is not a decision, and a run that overwrote the
+    /// resolved name with an unchosen one would claim a pick nobody made.
+    #[test]
+    fn an_unchosen_control_leaves_what_configuration_resolved_alone() {
+        use ego_core::config::{Mode, ModelRef, Trust};
+        use ego_core::control::{ControlSelect, SessionControlState};
+
+        let mut effective =
+            ego_core::config::resolve(&[], Trust::Trusted, None).expect("empty config");
+        effective.model = Some(ego_core::config::ModelRef("configured".to_owned()));
+        let mut slug = "configured".to_owned();
+        let state = SessionControlState {
+            model: ControlSelect {
+                current: ModelRef("configured".to_owned()),
+                chosen: None,
+                available: Vec::new(),
+            },
+            effort: ControlSelect {
+                current: ThinkingLevel::Off,
+                chosen: None,
+                available: Vec::new(),
+            },
+            mode: ControlSelect {
+                current: Mode::Default,
+                chosen: None,
+                available: Vec::new(),
+            },
+        };
+
+        apply_seat(&state, &mut effective, &mut slug);
+
+        assert_eq!(slug, "configured");
+        assert_eq!(
+            effective.model,
+            Some(ego_core::config::ModelRef("configured".to_owned()))
+        );
     }
 }
