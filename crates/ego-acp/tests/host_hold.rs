@@ -17,6 +17,8 @@ mod support;
 const ROOT: &str = "/tmp/regression case-workspace";
 const REQUEST: &str = "00000000-0000-0000-0000-000000000091";
 const SECOND_REQUEST: &str = "00000000-0000-0000-0000-000000000092";
+const THIRD_REQUEST: &str = "00000000-0000-0000-0000-000000000093";
+const FOURTH_REQUEST: &str = "00000000-0000-0000-0000-000000000094";
 
 fn hold_params(session: &str, request: &str) -> serde_json::Value {
     serde_json::json!({"v": 1, "sessionId": session, "requestId": request})
@@ -93,11 +95,12 @@ async fn pausing_an_idle_session_records_the_boundary_and_answers_paused() {
     connection.abort().await;
 }
 
-/// Idempotence through the log, not through a receipt store. A second pause —
-/// under a *different* request id, which is the harder case — finds the hold
-/// already in force and neither displaces it nor establishes a second one.
-/// The single `_ego/resume` at the end is the proof: if the repeat had stacked
-/// a second hold, one release would not have been enough.
+/// The other half of idempotence, and the one a request-id receipt cannot
+/// give: a second pause under a *different* id finds the hold already in force
+/// and neither displaces it nor establishes a second one. Two hosts sharing a
+/// session are the real case. The single `_ego/resume` at the end is the
+/// proof — if the repeat had stacked a second hold, one release would not have
+/// been enough.
 #[tokio::test]
 async fn a_repeated_pause_neither_displaces_the_hold_nor_establishes_a_second() {
     let fixture = support::DurableAcpFixture::new();
@@ -128,6 +131,90 @@ async fn a_repeated_pause_neither_displaces_the_hold_nor_establishes_a_second() 
     connection.abort().await;
 }
 
+/// The lost-response retry. The release committed and the answer never
+/// arrived, so the host asks again with the id it already used — the one case
+/// an idempotency key exists for. Answering "not paused" would tell that host
+/// its request had failed when it had in fact succeeded, and the difference is
+/// visible: it would go on to re-issue the pause it thought it still held.
+///
+/// Idempotence by *current state* cannot do this. The state has moved on; only
+/// the record of what request R was answered with can replay R's answer.
+#[tokio::test]
+async fn a_resume_that_already_released_replays_its_answer_instead_of_refusing() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = support::Connected::new(fixture.router());
+    connection.initialize().await;
+    let session = connection.new_session(ROOT).await["result"]["sessionId"]
+        .as_str()
+        .expect("session/new returns a session id")
+        .to_owned();
+    connection
+        .request("_ego/pause", hold_params(&session, REQUEST))
+        .await;
+
+    let mut answers = Vec::new();
+    for _ in 0..2 {
+        let (response, _) = connection
+            .request("_ego/resume", hold_params(&session, SECOND_REQUEST))
+            .await;
+        answers.push(response);
+    }
+
+    assert_eq!(
+        state(&answers[0]),
+        "running",
+        "first release: {:?}",
+        answers[0]
+    );
+    assert_eq!(
+        state(&answers[1]),
+        "running",
+        "the retry was refused instead of replayed: {:?}",
+        answers[1]
+    );
+
+    connection.abort().await;
+}
+
+/// The delayed retry. A pause was answered, a resume released it, and only
+/// then does the transport re-deliver the original pause. Replaying its
+/// recorded answer is the whole point: acting on it would re-pause a session
+/// the host had deliberately let go, and nothing in the second delivery says
+/// it is not the first.
+#[tokio::test]
+async fn a_pause_redelivered_after_its_release_replays_rather_than_holding_again() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = support::Connected::new(fixture.router());
+    connection.initialize().await;
+    let session = connection.new_session(ROOT).await["result"]["sessionId"]
+        .as_str()
+        .expect("session/new returns a session id")
+        .to_owned();
+    connection
+        .request("_ego/pause", hold_params(&session, REQUEST))
+        .await;
+    connection
+        .request("_ego/resume", hold_params(&session, SECOND_REQUEST))
+        .await;
+
+    let (redelivered, _) = connection
+        .request("_ego/pause", hold_params(&session, REQUEST))
+        .await;
+
+    assert_eq!(
+        state(&redelivered),
+        "paused",
+        "a redelivered request answers what it was answered: {redelivered}"
+    );
+    assert_eq!(
+        fixture.recorded_holds(&session),
+        1,
+        "the redelivered pause held the session a second time"
+    );
+
+    connection.abort().await;
+}
+
 /// `_ego/resume` accepts only a durably paused turn. A session that was never
 /// held has nothing to release, and saying "running" back would let a host
 /// believe it had undone a pause that never happened.
@@ -141,9 +228,16 @@ async fn resume_refuses_a_session_that_is_not_paused() {
         .expect("session/new returns a session id")
         .to_owned();
 
-    for attempt in ["never held", "already released"] {
+    // Every attempt spends a fresh request id. Reusing one would stop
+    // testing refusal and start testing replay, which is a different rule and
+    // has its own test: a request that already released a hold is answered
+    // again rather than refused.
+    for (attempt, request) in [
+        ("never held", REQUEST),
+        ("already released", FOURTH_REQUEST),
+    ] {
         let (response, _) = connection
-            .request("_ego/resume", hold_params(&session, REQUEST))
+            .request("_ego/resume", hold_params(&session, request))
             .await;
         let message = response["error"]["data"]
             .as_str()
@@ -156,10 +250,10 @@ async fn resume_refuses_a_session_that_is_not_paused() {
         // has to survive a session that *was* held once.
         if attempt == "never held" {
             connection
-                .request("_ego/pause", hold_params(&session, REQUEST))
+                .request("_ego/pause", hold_params(&session, SECOND_REQUEST))
                 .await;
             connection
-                .request("_ego/resume", hold_params(&session, REQUEST))
+                .request("_ego/resume", hold_params(&session, THIRD_REQUEST))
                 .await;
         }
     }

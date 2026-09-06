@@ -21,7 +21,7 @@ use crate::session::{
     ForkError, PreparedFork, ReplayContext, ReplayError, ReplaySource, ReplaySourceError,
     SessionBlobSource, TargetPublication, TargetSeed,
 };
-use crate::state::{PauseState, SessionState};
+use crate::state::{HoldReceipts, PauseState, SessionState};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use crate::turn::{Journal, SharedJournal, SharedJournalError};
 
@@ -524,16 +524,30 @@ where
         Ok(hold_state(self.state(id)?.pause))
     }
 
+    /// What this session has already answered each hold request with.
+    ///
+    /// Read at two seams: before a live run is signalled, so a re-delivered
+    /// request never reaches a turn twice, and again under the lease, which is
+    /// the only place the answer is authoritative.
+    pub fn receipts(&self, id: SessionId) -> Result<HoldReceipts, LifecycleError> {
+        self.meta(id)?;
+        Ok(self.state(id)?.holds)
+    }
+
     /// Record a hold on a session with no turn to stop.
     ///
     /// The idle half of `_ego/pause`. When a turn is running the boundary is
     /// written by that turn, which is the one writer holding the lease; when
     /// none is, there is nothing to wait for and the boundary is now.
     ///
-    /// Idempotent through the log and not through a receipt store: a session
-    /// already holding answers with the state it is in, and only a `Running`
-    /// one is moved. A second request therefore neither displaces the hold in
-    /// force nor establishes a second one.
+    /// A request arriving while a hold is already in force finds it and
+    /// answers with it, so a second host asking does not stack a second hold.
+    ///
+    /// This is idempotence by *state*, which is all this seam can offer: it
+    /// sees where the session is, not what any particular request was told.
+    /// Replaying a request the session has moved past is
+    /// [`SessionLifecycle::pause`]'s job, because that answer has to be given
+    /// before the run is signalled and this function runs after.
     pub fn pause(
         &self,
         append: &dyn LeasedLifecycleAppend,
@@ -565,10 +579,13 @@ where
 
     /// Release a hold that is durably in place.
     ///
-    /// Refuses anything but [`HoldState::Paused`]. A `Pending` session has a
-    /// turn still walking to its boundary, and releasing the hold underneath
-    /// it would let that turn carry on as though nobody had asked — the one
-    /// outcome `_ego/pause` exists to prevent.
+    /// Refuses anything but [`HoldState::Paused`]. Replaying a release this
+    /// session already performed belongs to [`SessionLifecycle::release`],
+    /// which answers before taking the lease this function needs.
+    ///
+    /// A `Pending` session has a turn still walking to its boundary, and
+    /// releasing the hold underneath it would let that turn carry on as though
+    /// nobody had asked — the one outcome `_ego/pause` exists to prevent.
     pub fn release(
         &self,
         append: &dyn LeasedLifecycleAppend,
@@ -930,6 +947,12 @@ where
         request: RequestId,
     ) -> Result<HoldState, LifecycleError> {
         self.metadata.meta(id)?;
+        // Before the run is signalled, not after: a request this session has
+        // already paused under has been acted on once, and delivering it to a
+        // turn again would stop a turn nobody asked to stop.
+        if self.metadata.receipts(id)?.paused(request) {
+            return Ok(HoldState::Paused);
+        }
         if self.runs.hold(id, request).await? {
             return Ok(HoldState::Pending);
         }
@@ -955,6 +978,13 @@ where
         request: RequestId,
     ) -> Result<HoldState, LifecycleError> {
         self.metadata.meta(id)?;
+        // Before the lease, so a release whose reply was lost is answered
+        // again even though the session has since been given more work — the
+        // lease would have refused it as active and reported the opposite of
+        // what happened.
+        if self.metadata.receipts(id)?.resumed(request) {
+            return Ok(HoldState::Running);
+        }
         let append = self.require_inactive(id).await?;
         let expected = self.metadata.state(id)?.last_seq;
         self.metadata.release(append.as_ref(), expected, request)

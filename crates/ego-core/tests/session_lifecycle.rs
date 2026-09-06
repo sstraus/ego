@@ -27,7 +27,7 @@ use ego_core::session::{
     TargetSeed,
 };
 use ego_core::session_lifecycle::{
-    ActivityFuture, CloseFuture, ClosedSession, HoldSignalFuture, InactiveSessionLease,
+    ActivityFuture, CloseFuture, ClosedSession, HoldSignalFuture, HoldState, InactiveSessionLease,
     LeasedLifecycleAppend, LifecycleAppendError, LifecycleError, LifecyclePublication,
     SessionActivity, SessionCursor, SessionLifecycle, SessionLifecycleStore, SessionMetadata,
     SessionRunLifecycle,
@@ -300,6 +300,12 @@ struct FakeRunControl {
     leased: Mutex<Vec<SessionId>>,
     active: Mutex<Vec<SessionId>>,
     uncertain: Mutex<Vec<SessionId>>,
+    /// Sessions whose turn is live enough to receive a hold.
+    live: Mutex<Vec<SessionId>>,
+    /// Every hold this double was asked to deliver, in order. The point of
+    /// recording them is that a request already answered must produce no
+    /// entry at all.
+    delivered: Mutex<Vec<(SessionId, RequestId)>>,
 }
 
 impl FakeRunControl {
@@ -311,6 +317,12 @@ impl FakeRunControl {
     }
     fn mark_uncertain(&self, id: SessionId) {
         self.uncertain.lock().unwrap().push(id);
+    }
+    fn mark_live(&self, id: SessionId) {
+        self.live.lock().unwrap().push(id);
+    }
+    fn delivered(&self) -> Vec<(SessionId, RequestId)> {
+        self.delivered.lock().unwrap().clone()
     }
 }
 
@@ -334,10 +346,12 @@ impl SessionRunLifecycle for FakeRunControl {
         })))
     }
 
-    /// `false`: this double reports no live run, so a pause has no turn to
-    /// reach and the caller writes the boundary itself.
-    fn hold(&self, _session: SessionId, _request: RequestId) -> HoldSignalFuture<'_> {
-        Box::pin(std::future::ready(Ok(false)))
+    /// `false` unless the session was marked live: with no live run a pause
+    /// has no turn to reach and the caller writes the boundary itself.
+    fn hold(&self, session: SessionId, request: RequestId) -> HoldSignalFuture<'_> {
+        self.delivered.lock().unwrap().push((session, request));
+        let live = self.live.lock().unwrap().contains(&session);
+        Box::pin(std::future::ready(Ok(live)))
     }
 }
 
@@ -359,6 +373,8 @@ fn service() -> (
         leased: Mutex::new(Vec::new()),
         active: Mutex::new(Vec::new()),
         uncertain: Mutex::new(Vec::new()),
+        live: Mutex::new(Vec::new()),
+        delivered: Mutex::new(Vec::new()),
     });
     let run_port: Arc<dyn SessionRunLifecycle> = runs.clone();
     (
@@ -912,4 +928,73 @@ fn visible_metadata_mutation_returns_prepared_value_without_readback() {
         .expect("visible append returns prepared value");
     assert_eq!(mutation.value.title.as_deref(), Some("named"));
     assert_eq!(control.event_count(id), 1);
+}
+
+/// A re-delivered `_ego/pause` is answered from its receipt and never reaches
+/// the turn a second time.
+///
+/// The dangerous variant of a delayed retry. The idle path's own guard is
+/// enough while the session stays idle, but by the time a duplicate arrives
+/// the session may be running again — and then the request would be delivered
+/// to a live turn and stop work nobody asked to stop, on the strength of one
+/// request the host made once. The receipt is therefore read *before* the run
+/// is signalled, not merely before the log is written.
+#[test]
+fn a_redelivered_pause_is_never_delivered_to_a_live_turn() {
+    let (service, _store, runs) = service();
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let held = RequestId::from_uuid(uuid::Uuid::from_u128(0x91));
+    let released = RequestId::from_uuid(uuid::Uuid::from_u128(0x92));
+
+    assert_eq!(
+        futures::executor::block_on(service.pause(id, held)).unwrap(),
+        HoldState::Paused
+    );
+    assert_eq!(
+        futures::executor::block_on(service.release(id, released)).unwrap(),
+        HoldState::Running
+    );
+    // The session is given work again, so a duplicate now has a turn it could
+    // reach. This is what makes the receipt load-bearing.
+    runs.mark_live(id);
+
+    let replayed = futures::executor::block_on(service.pause(id, held)).unwrap();
+
+    assert_eq!(
+        replayed,
+        HoldState::Paused,
+        "the duplicate was acted on instead of replayed"
+    );
+    assert_eq!(
+        runs.delivered(),
+        vec![(id, held)],
+        "the duplicate reached the live turn: {:?}",
+        runs.delivered()
+    );
+}
+
+/// A re-delivered `_ego/resume` is answered from its receipt even after the
+/// session has been given more work.
+///
+/// The symmetric case, and the one the lease cannot serve. By the time a lost
+/// reply is re-sent the session may be running again, and taking an inactive
+/// lease to answer would refuse with "active work" — telling the host its
+/// release failed when the release is precisely why the session is running.
+#[test]
+fn a_redelivered_resume_is_answered_without_taking_a_lease() {
+    let (service, _store, runs) = service();
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let held = RequestId::from_uuid(uuid::Uuid::from_u128(0x93));
+    let released = RequestId::from_uuid(uuid::Uuid::from_u128(0x94));
+    futures::executor::block_on(service.pause(id, held)).unwrap();
+    futures::executor::block_on(service.release(id, released)).unwrap();
+    runs.mark_active(id);
+
+    let replayed = futures::executor::block_on(service.release(id, released));
+
+    assert_eq!(
+        replayed.unwrap(),
+        HoldState::Running,
+        "the retry was refused as active work instead of replayed"
+    );
 }

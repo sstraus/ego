@@ -4,7 +4,7 @@
 //! log, and compaction and forking are events *in* the log rather than
 //! operations *on* it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -231,12 +231,10 @@ impl Usage {
 /// forbids saying.
 ///
 /// The request id travels with both states so a host retrying over a
-/// reconnected transport learns what *its own* request achieved. Idempotency
-/// is scoped to the current pause episode and no further: ego keeps no global
-/// table of honoured request ids, so an id reused after a resume opens a new
-/// pause rather than replaying an old one. That is the truthful answer — the
-/// host asked to pause and the session pauses — and the alternative is an
-/// unbounded receipt store whose only job is to refuse.
+/// reconnected transport learns what *its own* request achieved. It answers
+/// only "where is this session now"; what a *particular* request was answered
+/// with outlives the episode that answered it and is kept in
+/// [`HoldReceipts`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum PauseState {
@@ -267,6 +265,66 @@ impl PauseState {
             PauseState::Running => None,
             PauseState::Requested { request } | PauseState::Paused { request } => Some(request),
         }
+    }
+}
+
+/// Which hold requests this session has already answered, and with what.
+///
+/// The idempotency key of `_ego/pause` and `_ego/resume`, and the reason
+/// [`PauseState`] alone is not enough: state-based idempotence only holds
+/// while the state has not moved on. Two retries defeat it. A resume whose
+/// answer was lost in transit, re-sent, finds the session already running and
+/// would be told "not paused" — that its request failed, when it succeeded. A
+/// pause re-delivered late, after the host released it, would find the session
+/// running and hold it a second time, on one request the host made once.
+///
+/// So the answer is remembered per request rather than inferred from where the
+/// session ended up. This is not a second store: every entry is folded from
+/// `SessionPaused` and `SessionResumed`, which already carry the request that
+/// asked. The log stays the only authority and this is its index.
+///
+/// The key is `(session, operation, request)`. Session, because the request id
+/// is session-bound at the wire and coupling two logs through a shared id
+/// would let one session refuse work on account of another. Operation,
+/// because a host is entitled to spend one id on a pause and the same id on
+/// the resume that releases it; those are two requests, not one reused. The
+/// ADR's "reuse with different bytes refuses" needs no fingerprint here: the
+/// request body is `v`, `sessionId` and `requestId` and nothing else, so the
+/// key *is* the body. A future field would change that and would have to bring
+/// a fingerprint with it.
+///
+/// It grows and is not pruned, like `generations` below and for the same
+/// reason: an entry that was dropped would be answered as though it had never
+/// arrived, which is the behaviour this type exists to prevent. Holds are
+/// human-paced acts, a handful per session, not per-token records.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoldReceipts {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    paused: BTreeSet<RequestId>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    resumed: BTreeSet<RequestId>,
+}
+
+impl HoldReceipts {
+    /// Whether this request already reached a durable paused boundary.
+    ///
+    /// Deliberately not true for a *pending* pause: nothing durable records
+    /// one, and a host whose pause never landed should be able to ask again
+    /// and have the ask reach the turn rather than be replayed away.
+    pub fn paused(&self, request: RequestId) -> bool {
+        self.paused.contains(&request)
+    }
+
+    /// Whether this request already released a hold.
+    pub fn resumed(&self, request: RequestId) -> bool {
+        self.resumed.contains(&request)
+    }
+
+    /// Whether this session has answered no hold request at all — the state a
+    /// session that was never paused stays in, and the one worth omitting from
+    /// a snapshot.
+    pub fn is_empty(&self) -> bool {
+        self.paused.is_empty() && self.resumed.is_empty()
     }
 }
 
@@ -1021,6 +1079,10 @@ pub struct SessionState {
     /// safe boundary, or has reached one.
     #[serde(default)]
     pub pause: PauseState,
+    /// What each `_ego/pause` and `_ego/resume` was answered with, kept past
+    /// the episode that answered it so a retry is replayed and not re-run.
+    #[serde(default, skip_serializing_if = "HoldReceipts::is_empty")]
+    pub holds: HoldReceipts,
     /// The session's current goal, if one has been set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalRecord>,
@@ -1150,6 +1212,7 @@ impl Default for SessionState {
             title: None,
             deleted: false,
             pause: PauseState::Running,
+            holds: HoldReceipts::default(),
             goal: None,
             turns: HashMap::default(),
             items: HashMap::default(),
@@ -1667,12 +1730,20 @@ impl SessionState {
                 if self.pause == (PauseState::Requested { request: *request }) {
                     self.pause = PauseState::Paused { request: *request };
                 }
+                // Recorded even when the boundary was ignored above. The
+                // receipt answers "was this request already honoured", and a
+                // boundary this reduction declined was still honoured by the
+                // writer that appended it.
+                self.holds.paused.insert(*request);
             }
             // Unconditional, unlike the two above: a resume releases the
             // session whatever stage the pause had reached, including a
             // request whose boundary never arrived. Refusing to release a
             // pending pause would leave a session nothing could free.
-            EventKind::SessionResumed { .. } => self.pause = PauseState::Running,
+            EventKind::SessionResumed { request } => {
+                self.pause = PauseState::Running;
+                self.holds.resumed.insert(*request);
+            }
             EventKind::GoalSet {
                 id,
                 objective,
