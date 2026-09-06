@@ -191,6 +191,13 @@ pub enum ExportEvent {
     SessionPaused {
         request: RequestId,
     },
+    /// A request was told about a hold it did not establish. Exported for the
+    /// same reason as the pair: without it an audit sees a request answered
+    /// `paused` and no record it was ever asked, and later sees that same id
+    /// replayed with nothing to replay from.
+    SessionPauseObserved {
+        request: RequestId,
+    },
     SessionResumed {
         request: RequestId,
     },
@@ -696,6 +703,9 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::SessionPauseRequested { request: *request }
         }
         EventKind::SessionPaused { request } => ExportEvent::SessionPaused { request: *request },
+        EventKind::SessionPauseObserved { request } => {
+            ExportEvent::SessionPauseObserved { request: *request }
+        }
         EventKind::SessionResumed { request } => ExportEvent::SessionResumed { request: *request },
         EventKind::GoalSet { .. } => {
             redactions.opaque_prose += 1;

@@ -1956,6 +1956,7 @@ impl JsonlStore {
                         // pause pair and the release that ends it.
                         | EventKind::SessionPauseRequested { .. }
                         | EventKind::SessionPaused { .. }
+                        | EventKind::SessionPauseObserved { .. }
                         | EventKind::SessionResumed { .. }
                 );
             if !valid_event {

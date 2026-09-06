@@ -1736,6 +1736,11 @@ impl SessionState {
                 // writer that appended it.
                 self.holds.paused.insert(*request);
             }
+            // The hold itself is untouched: this request was told about a
+            // boundary it did not establish, and only the receipt is its own.
+            EventKind::SessionPauseObserved { request } => {
+                self.holds.paused.insert(*request);
+            }
             // Unconditional, unlike the two above: a resume releases the
             // session whatever stage the pause had reached, including a
             // request whose boundary never arrived. Refusing to release a

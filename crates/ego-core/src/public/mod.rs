@@ -465,6 +465,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::SessionDeleted
         | EventKind::SessionPauseRequested { .. }
         | EventKind::SessionPaused { .. }
+        | EventKind::SessionPauseObserved { .. }
         | EventKind::SessionResumed { .. }
         | EventKind::GoalSet { .. }
         | EventKind::GoalTransitioned { .. } => None,

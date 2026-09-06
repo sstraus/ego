@@ -215,6 +215,56 @@ async fn a_pause_redelivered_after_its_release_replays_rather_than_holding_again
     connection.abort().await;
 }
 
+/// A second host told `paused` is owed the same replay as the host that asked
+/// first.
+///
+/// `paused` promises the durable boundary exists, and a host cannot see that
+/// the boundary carries someone else's request id. If only the establishing
+/// request is remembered, the second host's word is worth less than the first
+/// one's: its retry after a release finds no receipt and holds a session
+/// nobody is asking to hold — the same defect as a redelivered pause, reached
+/// by the one path that writes nothing.
+#[tokio::test]
+async fn a_hold_a_second_host_was_told_of_replays_like_the_one_that_asked() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = support::Connected::new(fixture.router());
+    connection.initialize().await;
+    let session = connection.new_session(ROOT).await["result"]["sessionId"]
+        .as_str()
+        .expect("session/new returns a session id")
+        .to_owned();
+    connection
+        .request("_ego/pause", hold_params(&session, REQUEST))
+        .await;
+
+    // The second host asks for a hold that is already in force and is told so.
+    let (observed, _) = connection
+        .request("_ego/pause", hold_params(&session, SECOND_REQUEST))
+        .await;
+    assert_eq!(state(&observed), "paused", "the hold in force: {observed}");
+
+    connection
+        .request("_ego/resume", hold_params(&session, THIRD_REQUEST))
+        .await;
+
+    // Its reply was lost in transit, so it asks again — after the release.
+    let (redelivered, _) = connection
+        .request("_ego/pause", hold_params(&session, SECOND_REQUEST))
+        .await;
+    assert_eq!(
+        state(&redelivered),
+        "paused",
+        "the second host's request replays its own answer: {redelivered}"
+    );
+    assert_eq!(
+        fixture.recorded_holds(&session),
+        1,
+        "the second host's redelivered pause held the session again"
+    );
+
+    connection.abort().await;
+}
+
 /// `_ego/resume` accepts only a durably paused turn. A session that was never
 /// held has nothing to release, and saying "running" back would let a host
 /// believe it had undone a pause that never happened.

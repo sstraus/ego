@@ -557,6 +557,20 @@ where
         let id = append.session_id();
         self.meta(id)?;
         let current = self.state(id)?.pause;
+        if let PauseState::Paused { .. } = current {
+            // Told about a boundary it did not establish, and owed a receipt
+            // for having been told: `paused` promises a durable record, and a
+            // host cannot see that the boundary carries another request's id.
+            // Not for `Requested`, which answers `pending` — a hold still
+            // walking to its boundary has nothing durable to replay.
+            let event = lifecycle_event(
+                expected,
+                self.clock.now(),
+                EventKind::SessionPauseObserved { request },
+            );
+            require_publication(append.compare_and_append_lifecycle(expected, event)?)?;
+            return Ok(HoldState::Paused);
+        }
         if current != PauseState::Running {
             return Ok(hold_state(current));
         }

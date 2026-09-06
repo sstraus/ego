@@ -275,6 +275,20 @@ pub enum EventKind {
     /// reconnected transport is told what its own request achieved rather
     /// than being served a boundary somebody else asked for.
     SessionPaused { request: RequestId },
+    /// A second request was told about a hold it did not establish.
+    ///
+    /// It answers the question [`SessionPaused`](Self::SessionPaused) cannot:
+    /// that boundary names the one request that asked for it, so a host told
+    /// `paused` because the hold was *already* in force leaves no trace, and
+    /// its retry after the release would hold the session again — the defect a
+    /// receipt exists to prevent, reached by the one path that wrote nothing.
+    /// A host cannot see whose request the boundary carries, so the word it is
+    /// given has to be worth the same either way.
+    ///
+    /// Recorded only where the boundary exists. A request that finds a hold
+    /// still walking to its boundary is told `pending`, and `pending` promises
+    /// no durable record to replay.
+    SessionPauseObserved { request: RequestId },
     /// A paused session was released to continue.
     ///
     /// Its own `request` and not the pause's: resume is idempotent by the id
@@ -675,6 +689,7 @@ impl EventKind {
             EventKind::SessionDeleted => "session_deleted",
             EventKind::SessionPauseRequested { .. } => "session_pause_requested",
             EventKind::SessionPaused { .. } => "session_paused",
+            EventKind::SessionPauseObserved { .. } => "session_pause_observed",
             EventKind::SessionResumed { .. } => "session_resumed",
             EventKind::GoalSet { .. } => "goal_set",
             EventKind::GoalTransitioned { .. } => "goal_transitioned",
