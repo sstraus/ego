@@ -169,6 +169,7 @@ pub enum ExportRunCommand {
 pub enum ExportRunSettlement {
     Completed,
     ContextOverflow,
+    Paused,
     Cancelled { reason: CancelReason },
     PermissionRequired,
     Interrupted,
@@ -180,6 +181,19 @@ pub enum ExportRunSettlement {
 pub enum ExportEvent {
     SessionTitleChanged,
     SessionDeleted,
+    /// A pause was asked for. Exported with its request id and no redaction
+    /// count: the id is one the host minted for correlation and carries no
+    /// operator prose, and a session that stopped needs the record of *why*
+    /// it stopped or an audit reads a deliberate hold as a crash.
+    SessionPauseRequested {
+        request: RequestId,
+    },
+    SessionPaused {
+        request: RequestId,
+    },
+    SessionResumed {
+        request: RequestId,
+    },
     GoalSet,
     GoalTransitioned,
     PromptQueued {
@@ -652,6 +666,7 @@ fn project_run_command(command: &RunCommand, redactions: &mut Redactions) -> Exp
             let settlement = match settlement {
                 RunSettlement::Completed => ExportRunSettlement::Completed,
                 RunSettlement::ContextOverflow => ExportRunSettlement::ContextOverflow,
+                RunSettlement::Paused => ExportRunSettlement::Paused,
                 RunSettlement::Cancelled { reason } => {
                     ExportRunSettlement::Cancelled { reason: *reason }
                 }
@@ -677,6 +692,11 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::SessionTitleChanged
         }
         EventKind::SessionDeleted => ExportEvent::SessionDeleted,
+        EventKind::SessionPauseRequested { request } => {
+            ExportEvent::SessionPauseRequested { request: *request }
+        }
+        EventKind::SessionPaused { request } => ExportEvent::SessionPaused { request: *request },
+        EventKind::SessionResumed { request } => ExportEvent::SessionResumed { request: *request },
         EventKind::GoalSet { .. } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalSet

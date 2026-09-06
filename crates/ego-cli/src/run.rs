@@ -91,9 +91,9 @@ use ego_core::subagent::{
 };
 use ego_core::turn::{
     AdmittedToolSource, CancelToken, GenerationPolicySource, GenerationRuntime, InteractiveControl,
-    Journal, JudgeContext, QueueStatus, RegisteredTool, Session, SharedJournal, ToolEffectPorts,
-    ToollessGenerationOwner, Tools, TurnAbandoned, TurnConfig, TurnLoop, TurnOutcome,
-    interactive_control,
+    Journal, JudgeContext, PauseToken, QueueStatus, RegisteredTool, Session, SharedJournal,
+    ToolEffectPorts, ToollessGenerationOwner, Tools, TurnAbandoned, TurnConfig, TurnLoop,
+    TurnOutcome, interactive_control,
 };
 use ego_core::usage::{UsagePeriod, UsageReportService};
 use ego_mcp::McpRegistryController;
@@ -2986,6 +2986,10 @@ async fn drive_headless_turn(
     clock: &SystemClock,
     sink: &dyn EventSink,
     cancel: &CancelToken,
+    // The host-control hold this run is under, if it serves a host that can
+    // ask for one. A default token for every run that does not: nothing can
+    // set it, so `must_stop` never sees a hold that nobody asked for.
+    pause: &PauseToken,
     source: Arc<model::CliGenerationModelSource>,
     admission: Arc<EvidenceAdmissionService>,
     invocation: RunInvocationId,
@@ -3140,7 +3144,8 @@ async fn drive_headless_turn(
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?
-    .with_skill_invocation_port(skill_owner.clone());
+    .with_skill_invocation_port(skill_owner.clone())
+    .with_pause_token(pause.clone());
     let loop_ = match recovered_policy.as_ref() {
         Some(policy) => loop_
             .with_hook_policy(Arc::clone(policy))
@@ -3380,6 +3385,7 @@ impl CliPrepared {
         prompt: &RunPrompt,
         bindings: RunExecutionBindings,
         cancel: &CancelToken,
+        pause: &PauseToken,
     ) -> Result<RunSettlement, RunExecutorError> {
         // The operator seat speaks before anything reads the configuration.
         //
@@ -3522,6 +3528,7 @@ impl CliPrepared {
             &clock,
             sink.as_ref(),
             cancel,
+            pause,
             source,
             admission,
             invocation,
@@ -3612,6 +3619,11 @@ fn settlement(termination: RunTermination) -> Result<RunSettlement, RunExecutorE
         RunTermination::Signalled(Signal::Term) => Ok(RunSettlement::cancelled(CancelReason::Host)),
         RunTermination::BudgetExceeded => Ok(RunSettlement::completed()),
         RunTermination::ContextOverflow { .. } => Ok(RunSettlement::ContextOverflow),
+        // Not the catch-all below: an executor error says the run could not
+        // be carried out, and a paused run was carried out exactly as far as
+        // it was asked to go. It is a settlement, and the one the host that
+        // asked for it is waiting to read.
+        RunTermination::Paused => Ok(RunSettlement::Paused),
         RunTermination::QuestionRequired { question } => Err(RunExecutorError::new(format!(
             "question {} still requires an answer",
             question.as_ref().id
@@ -3629,21 +3641,35 @@ struct CliRunAuthority {
 struct CliRunAuthorityState {
     active: Option<CancelToken>,
     pending_interrupt: bool,
+    /// The hold this run is under, or the one it will start under.
+    ///
+    /// Two fields for one fact, exactly as cancellation has two: `holding`
+    /// is the token a live turn is watching, and `pending_pause` is a
+    /// request that arrived before there was one. Without the second, a
+    /// pause racing the start of a run would be dropped and the host would
+    /// be told a hold was in place that nothing was honouring.
+    holding: Option<PauseToken>,
+    pending_pause: Option<RequestId>,
     settlement: Option<RunSettlement>,
     observers: Vec<Waker>,
 }
 
 impl CliRunAuthority {
-    fn begin(&self) -> CancelToken {
+    fn begin(&self) -> (CancelToken, PauseToken) {
         let mut state = self.state.lock().expect("CLI run authority");
         let cancel = CancelToken::new();
         if state.pending_interrupt {
             state.pending_interrupt = false;
             cancel.cancel(CancelCause::User);
         }
+        let pause = PauseToken::new();
+        if let Some(request) = state.pending_pause.take() {
+            pause.pause(request);
+        }
         state.active = Some(cancel.clone());
+        state.holding = Some(pause.clone());
         state.settlement = None;
-        cancel
+        (cancel, pause)
     }
 
     fn interrupt(&self) {
@@ -3654,10 +3680,24 @@ impl CliRunAuthority {
         }
     }
 
+    fn hold(&self, request: RequestId) {
+        let mut state = self.state.lock().expect("CLI run authority");
+        match state.holding.as_ref() {
+            Some(pause) => pause.pause(request),
+            None => {
+                // First writer wins here too, and for the reason
+                // `PauseToken::pause` gives: the boundary that eventually
+                // happens belongs to whoever asked for it first.
+                state.pending_pause.get_or_insert(request);
+            }
+        }
+    }
+
     fn complete(&self, settlement: RunSettlement) {
         let observers = {
             let mut state = self.state.lock().expect("CLI run authority");
             state.active = None;
+            state.holding = None;
             state.settlement = Some(settlement);
             std::mem::take(&mut state.observers)
         };
@@ -4362,8 +4402,8 @@ impl RunExecutor for CliRunExecutor {
     ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
         Box::pin(async move {
             let authority = Self::authority(handle)?;
-            let cancel = authority.begin();
-            let result = prepared.submit(prompt, bindings, &cancel).await;
+            let (cancel, pause) = authority.begin();
+            let result = prepared.submit(prompt, bindings, &cancel, &pause).await;
             match result.as_ref() {
                 Ok(settlement) => authority.complete(settlement.clone()),
                 Err(_) => authority.complete(RunSettlement::Uncertain),
@@ -4378,6 +4418,17 @@ impl RunExecutor for CliRunExecutor {
     ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
         Box::pin(async move {
             Self::authority(handle)?.interrupt();
+            Ok(())
+        })
+    }
+
+    fn pause<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        request: RequestId,
+    ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(async move {
+            Self::authority(handle)?.hold(request);
             Ok(())
         })
     }
@@ -5239,6 +5290,7 @@ async fn execute<S: EventSink>(
                 &clock,
                 sink,
                 &cancel,
+                &PauseToken::default(),
                 Arc::clone(&source),
                 Arc::clone(&evidence),
                 invocation,
@@ -7706,6 +7758,13 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
             by: DeniedBy::Nobody,
         } => format!("stopped: permission unresolved and nobody could be asked — {action}"),
         RunTermination::BudgetExceeded => "stopped: the budget was reached".to_string(),
+        // Reachable from `ego run` even though nothing here can pause: the
+        // hold is durable, so a session paused over ACP stays paused when the
+        // next turn is asked for from another surface. Saying so is the point
+        // — the alternative is a run that looks like it did nothing.
+        RunTermination::Paused => {
+            "stopped: the session is paused; resume it from the host that paused it".to_string()
+        }
         RunTermination::MaxTurns => "stopped: --max-turns was reached".to_string(),
         RunTermination::TimedOut => "stopped: --timeout expired".to_string(),
         RunTermination::Signalled(Signal::Int) => "interrupted".to_string(),
@@ -7996,6 +8055,16 @@ mod tests {
                     .expect("launch barrier receiver remains alive");
             }
             Box::pin(std::future::ready(Ok(RunSettlement::Completed)))
+        }
+
+        /// A no-op for the same reason `interrupt` is one: this double never
+        /// runs a turn, so there is nothing here that a hold could hold back.
+        fn pause<'a>(
+            &'a self,
+            _handle: &'a RunHandle,
+            _request: RequestId,
+        ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
+            Box::pin(std::future::ready(Ok(())))
         }
 
         fn interrupt<'a>(

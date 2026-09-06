@@ -32,7 +32,7 @@ use crate::permit::{ToolResult, ToolResultProvenance};
 use crate::question::{
     QuestionAnswer, QuestionError, QuestionOutcome, QuestionRequest, QuestionTarget,
 };
-use crate::run::{RunId, RunSelections};
+use crate::run::{RequestId, RunId, RunSelections};
 use crate::session::SessionLineage;
 use crate::store::blob::BlobRef;
 
@@ -215,6 +215,58 @@ impl Usage {
             (Some(total), Some(delta)) => Some(total.saturating_add(delta)),
             _ => None,
         };
+    }
+}
+
+/// Whether a session is running, holding, or held.
+///
+/// Three states and not a `bool`, because the middle one is the whole point.
+/// `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-session.md`
+/// requires that `_ego/pause` report `paused` **only** once the durable
+/// boundary exists and report `pending` before then: an indivisible provider,
+/// permission or tool effect that is already in flight settles truthfully
+/// first, and that gap is observable to a host and can outlive a crash. A
+/// boolean would have to answer "is it paused?" with "yes" during a window
+/// where an effect is still running, which is the one thing the contract
+/// forbids saying.
+///
+/// The request id travels with both states so a host retrying over a
+/// reconnected transport learns what *its own* request achieved. Idempotency
+/// is scoped to the current pause episode and no further: ego keeps no global
+/// table of honoured request ids, so an id reused after a resume opens a new
+/// pause rather than replaying an old one. That is the truthful answer — the
+/// host asked to pause and the session pauses — and the alternative is an
+/// unbounded receipt store whose only job is to refuse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PauseState {
+    /// Nothing has asked this session to stop.
+    #[default]
+    Running,
+    /// A pause was asked for and the boundary does not exist yet. Work
+    /// already in flight is settling; nothing new is admitted.
+    Requested { request: RequestId },
+    /// The boundary exists. Only a resume moves the session out of this.
+    Paused { request: RequestId },
+}
+
+impl PauseState {
+    /// Whether this session may admit a new effect.
+    ///
+    /// `Requested` blocks as firmly as `Paused` does: the request is the
+    /// point at which admission closes, and the boundary is only the record
+    /// that everything already admitted has finished. A gate that let effects
+    /// through until the boundary existed would never reach one.
+    pub fn admits_effects(self) -> bool {
+        matches!(self, PauseState::Running)
+    }
+
+    /// The request that put this session where it is, if anything did.
+    pub fn request(self) -> Option<RequestId> {
+        match self {
+            PauseState::Running => None,
+            PauseState::Requested { request } | PauseState::Paused { request } => Some(request),
+        }
     }
 }
 
@@ -965,6 +1017,10 @@ pub struct SessionState {
     /// A soft-deleted session remains readable only for internal lineage replay.
     #[serde(default)]
     pub deleted: bool,
+    /// Whether this session is running, has been asked to stop at its next
+    /// safe boundary, or has reached one.
+    #[serde(default)]
+    pub pause: PauseState,
     /// The session's current goal, if one has been set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalRecord>,
@@ -1093,6 +1149,7 @@ impl Default for SessionState {
             lineage: None,
             title: None,
             deleted: false,
+            pause: PauseState::Running,
             goal: None,
             turns: HashMap::default(),
             items: HashMap::default(),
@@ -1592,6 +1649,30 @@ impl SessionState {
         match &ev.kind {
             EventKind::SessionTitleChanged { title } => self.title = title.clone(),
             EventKind::SessionDeleted => self.deleted = true,
+            // Total like every other arm, and the transitions it will not make
+            // are as load-bearing as the ones it will. A second request while
+            // one is already outstanding leaves the first standing, because
+            // the first is the one the boundary will answer and overwriting it
+            // would tell a retrying host its own request had been honoured. A
+            // boundary for a request nothing asked for is ignored rather than
+            // trusted: it can only come from a log that lost its request, and
+            // reducing it would manufacture the very boundary the ADR says is
+            // never manufactured.
+            EventKind::SessionPauseRequested { request } => {
+                if self.pause == PauseState::Running {
+                    self.pause = PauseState::Requested { request: *request };
+                }
+            }
+            EventKind::SessionPaused { request } => {
+                if self.pause == (PauseState::Requested { request: *request }) {
+                    self.pause = PauseState::Paused { request: *request };
+                }
+            }
+            // Unconditional, unlike the two above: a resume releases the
+            // session whatever stage the pause had reached, including a
+            // request whose boundary never arrived. Refusing to release a
+            // pending pause would leave a session nothing could free.
+            EventKind::SessionResumed { .. } => self.pause = PauseState::Running,
             EventKind::GoalSet {
                 id,
                 objective,

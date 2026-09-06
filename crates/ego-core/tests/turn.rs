@@ -60,9 +60,9 @@ use ego_core::permit::{
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
-use ego_core::run::{RunAppend, RunRevision, RunTransaction};
+use ego_core::run::{RequestId, RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::{CollectingSink, EventSink};
-use ego_core::state::{ItemKind, SessionState, Usage};
+use ego_core::state::{ItemKind, PauseState, SessionState, Usage};
 use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
@@ -72,8 +72,8 @@ use ego_core::subagent::{ChildWait, ChildWaitResult};
 use ego_core::suspension::ResumeFloor;
 use ego_core::turn::{
     CancelToken, ControlError, GenerationPolicyCapture, GenerationPolicySnapshot,
-    GenerationPolicySource, GenerationRuntime, Journal, JudgeContext, RegisteredTool, Session,
-    SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop as CoreTurnLoop,
+    GenerationPolicySource, GenerationRuntime, Journal, JudgeContext, PauseToken, RegisteredTool,
+    Session, SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop as CoreTurnLoop,
 };
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -234,11 +234,17 @@ mod turn {
     /// cancellation arriving *during* a generation, which is the one case
     /// where settling the attempt is hard, so that case gets a fake of its
     /// own rather than a hook bolted onto the general one.
-    struct CancellingGenerator {
+    /// A generator that fires a caller-supplied signal once the stream has
+    /// yielded `after` events, and only then finishes.
+    ///
+    /// The signal is a closure rather than a token, because the two things a
+    /// turn can be asked mid-stream — stop, and stop-and-hold — are answered
+    /// by two different tokens and one identical piece of scaffolding.
+    struct SignallingGenerator {
         events: Mutex<Vec<AiEvent>>,
-        /// Cancel once the stream has yielded this many events.
+        /// Fire the signal once the stream has yielded this many events.
         after: usize,
-        token: CancelToken,
+        signal: Arc<dyn Fn() + Send + Sync>,
     }
 
     /// A human seat whose answers are explicit and finite. Exhausting the
@@ -743,7 +749,7 @@ mod turn {
         }
     }
 
-    impl Generator for CancellingGenerator {
+    impl Generator for SignallingGenerator {
         fn ensure_expressible(&self, _req: &GenRequest) -> Result<(), RequestExpressibilityError> {
             Ok(())
         }
@@ -751,16 +757,33 @@ mod turn {
         fn generate(&self, _req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
             let events = std::mem::take(&mut *self.events.lock().unwrap());
             let after = self.after;
-            let token = self.token.clone();
+            let signal = Arc::clone(&self.signal);
             let stream =
                 futures::stream::iter(events.into_iter().enumerate()).map(move |(at, event)| {
                     if at + 1 == after {
-                        token.cancel(CancelCause::User);
+                        (signal)();
                     }
                     event
                 });
             AttemptStream::new(attempt, Box::pin(stream))
         }
+    }
+
+    /// A request id a host could have minted, stable per test.
+    fn request_id(n: u128) -> RequestId {
+        RequestId::from_uuid(uuid::Uuid::from_u128(n))
+    }
+
+    /// The mid-stream signal that cancels a turn.
+    fn cancels(token: &CancelToken) -> Arc<dyn Fn() + Send + Sync> {
+        let token = token.clone();
+        Arc::new(move || token.cancel(CancelCause::User))
+    }
+
+    /// The mid-stream signal that asks a turn to hold at its next boundary.
+    fn pauses(token: &PauseToken, request: RequestId) -> Arc<dyn Fn() + Send + Sync> {
+        let token = token.clone();
+        Arc::new(move || token.pause(request))
     }
 
     /// A generator that says something and then never finishes.
@@ -4140,7 +4163,7 @@ mod turn {
     fn a_cancelled_turn_still_settles_its_attempt() {
         let fx = Fixture::new(vec![]);
         let token = CancelToken::new();
-        let generator = Arc::new(CancellingGenerator {
+        let generator = Arc::new(SignallingGenerator {
             events: Mutex::new(vec![
                 AiEvent::TextDelta {
                     text: "I have started".to_string(),
@@ -4151,7 +4174,7 @@ mod turn {
                 AiEvent::Stop(StopReason::Stop),
             ]),
             after: 1,
-            token: token.clone(),
+            signal: cancels(&token),
         });
 
         let mut gate = fx.gate.borrow_mut();
@@ -4255,7 +4278,7 @@ mod turn {
         let fx = Fixture::new(vec![]).with_read_tool();
         fx.fs.file("/ws/note.txt", "hello from the file");
         let token = CancelToken::new();
-        let generator = Arc::new(CancellingGenerator {
+        let generator = Arc::new(SignallingGenerator {
             events: Mutex::new(vec![
                 AiEvent::ToolCall {
                     call_id: "call_abc".to_string(),
@@ -4265,7 +4288,7 @@ mod turn {
                 AiEvent::Stop(StopReason::ToolUse),
             ]),
             after: 2,
-            token: token.clone(),
+            signal: cancels(&token),
         });
 
         let mut gate = fx.gate.borrow_mut();
@@ -4331,6 +4354,214 @@ mod turn {
                 .count(),
             1,
             "the queued call receives exactly one explicit completion"
+        );
+    }
+
+    #[test]
+    fn a_paused_turn_does_not_run_the_tools_it_was_about_to() {
+        // The twin of `a_cancelled_turn_does_not_run_the_tools_it_was_about
+        // _to`, and the reason the batch is gated at its head rather than
+        // only between generations: the pause lands on the stream's last
+        // event, so the attempt settles cleanly as `ToolUse` with the call
+        // already logged. A loop that asked about the hold only at the top
+        // would run every call in this batch first — exactly the effects the
+        // host asked not to happen — and notice on the next iteration, once
+        // there was nothing left to hold back.
+        let fx = Fixture::new(vec![]).with_read_tool();
+        fx.fs.file("/ws/note.txt", "hello from the file");
+        let pause = PauseToken::new();
+        let request = request_id(7);
+        let generator = Arc::new(SignallingGenerator {
+            events: Mutex::new(vec![
+                AiEvent::ToolCall {
+                    call_id: "call_abc".to_string(),
+                    name: "read".to_string(),
+                    args: r#"{"path":"/ws/note.txt"}"#.to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ]),
+            after: 2,
+            signal: pauses(&pause, request),
+        });
+
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&generator, &mut gate),
+            tools,
+        )
+        .with_pause_token(pause.clone());
+
+        let outcome = block_on(turn.run("read note.txt")).expect("the store accepted");
+
+        assert_eq!(outcome.exit_reason, ExitReason::Paused);
+        assert!(!outcome.ok);
+        let state = turn.into_state().expect("unique turn journal state");
+        let call = state
+            .items
+            .values()
+            .find(|item| item.kind == ItemKind::ToolCall)
+            .expect("the call the model asked for was still logged");
+        assert_eq!(
+            call.ok,
+            Some(false),
+            "the held call was not run and was explicitly answered"
+        );
+        assert!(
+            tool_result_text(call).contains("interrupted"),
+            "the unstarted call must say it never ran"
+        );
+        assert!(
+            !tool_result_text(call).contains("hello from the file"),
+            "and no byte of the file reached the conversation"
+        );
+    }
+
+    #[test]
+    fn a_paused_turn_records_the_boundary_and_the_request_that_asked_for_it() {
+        // The durable half. The token stops a turn that is running; only the
+        // log can tell a host that reconnects that the hold is in place, and
+        // only the request id can tell it the hold is *its own* — which is
+        // what makes a repeated `_ego/pause` idempotent rather than a second
+        // pause.
+        let fx = Fixture::new(vec![]);
+        let pause = PauseToken::new();
+        let request = request_id(7);
+        let generator = Arc::new(SignallingGenerator {
+            events: Mutex::new(vec![
+                AiEvent::TextDelta {
+                    text: "answered before the hold".to_string(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ]),
+            after: 1,
+            signal: pauses(&pause, request),
+        });
+
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&generator, &mut gate),
+            tools,
+        )
+        .with_pause_token(pause);
+
+        let outcome = block_on(turn.run("say something")).expect("the store accepted");
+
+        assert_eq!(outcome.exit_reason, ExitReason::Paused);
+        let kinds = fx.store.kinds();
+        let boundary = kinds
+            .iter()
+            .position(|kind| kind == "session_paused")
+            .expect("the turn recorded the boundary it stopped at");
+        let asked = kinds
+            .iter()
+            .position(|kind| kind == "session_pause_requested")
+            .expect("and the request that asked for it");
+        let completed = kinds
+            .iter()
+            .position(|kind| kind == "turn_completed")
+            .expect("the turn still terminates");
+        assert!(
+            asked < boundary,
+            "the request is recorded before the boundary answering it: {kinds:?}"
+        );
+        assert!(
+            completed < asked,
+            "and the hold is a session fact recorded after the turn's own \
+             terminal, not instead of it: {kinds:?}"
+        );
+        let named: Vec<_> = fx
+            .store
+            .events()
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::SessionPauseRequested { request }
+                | EventKind::SessionPaused { request } => Some(request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named, vec![request, request], "both name the same request");
+        let state = turn.into_state().expect("unique turn journal state");
+        assert_eq!(state.pause, PauseState::Paused { request });
+        assert!(!state.pause.admits_effects());
+    }
+
+    #[test]
+    fn a_session_paused_before_this_run_does_not_generate_at_all() {
+        // The hold outlives the turn that established it and the process that
+        // ran it. A run asked for from any surface — including one with no
+        // pause channel of its own, which is every CLI run — reads the same
+        // durable state and refuses before spending a provider request.
+        let request = request_id(7);
+        let mut seq = Seq::ZERO;
+        let mut state = SessionState::default();
+        let turn_id = TurnId::new();
+        for kind in [
+            EventKind::SessionPauseRequested { request },
+            EventKind::SessionPaused { request },
+        ] {
+            state.apply(&DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn: turn_id,
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::from_millis(1_787_000_000_000),
+                    producer: Producer::Main,
+                },
+                kind,
+            });
+        }
+        assert_eq!(state.pause, PauseState::Paused { request });
+
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+
+        let (reason, ok, _) = run(&fx, state, "carry on anyway");
+
+        assert_eq!(reason, ExitReason::Paused);
+        assert!(!ok);
+        assert!(
+            fx.generator.calls().is_empty(),
+            "a paused session spends nothing: {:?}",
+            fx.generator.calls()
         );
     }
 

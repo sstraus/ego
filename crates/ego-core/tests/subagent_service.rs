@@ -42,10 +42,10 @@ use ego_core::hook::{
 };
 use ego_core::permit::{CanonPath, Confinement, RunConfinement};
 use ego_core::run::{
-    EventSinkFactory, IdSource, RecoveryEvidence, RunAppend, RunAttachment, RunController,
-    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunOrigin,
-    RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections, RunSettlement,
-    RunTransaction,
+    EventSinkFactory, IdSource, RecoveryEvidence, RequestId, RunAppend, RunAttachment,
+    RunController, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId,
+    RunOrigin, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections,
+    RunSettlement, RunTransaction,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::SessionState;
@@ -1066,6 +1066,16 @@ impl RunExecutor for Executor {
     fn interrupt<'a>(
         &'a self,
         _handle: &'a RunHandle,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(future::ready(Ok(())))
+    }
+
+    /// A no-op for the same reason `interrupt` is one: this double never
+    /// runs a turn, so there is nothing here that a hold could hold back.
+    fn pause<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+        _request: RequestId,
     ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
         Box::pin(future::ready(Ok(())))
     }

@@ -136,6 +136,7 @@ pub enum ExecutorCall {
     Observe,
     Submit,
     Interrupt,
+    Pause,
 }
 
 pub struct ExecutorFixture {
@@ -353,6 +354,17 @@ impl RunExecutor for ExecutorFixture {
         if let Some(waker) = waker {
             waker.wake();
         }
+        Box::pin(future::ready(Ok(())))
+    }
+
+    /// Recorded and not gated, unlike `interrupt`: a pause does not abandon
+    /// the effect in flight, so there is no submit gate for it to release.
+    fn pause<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+        _request: RequestId,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        self.calls.lock().expect("calls").push(ExecutorCall::Pause);
         Box::pin(future::ready(Ok(())))
     }
 }

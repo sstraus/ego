@@ -50,7 +50,7 @@ use crate::generator::types::Image;
 use crate::mcp::McpRuntimeBinding;
 use crate::question::Elicitor;
 use crate::session_lifecycle::{
-    ActivityFuture, CloseFuture, ClosedSession, LifecycleError, SessionActivity,
+    ActivityFuture, CloseFuture, ClosedSession, HoldSignalFuture, LifecycleError, SessionActivity,
     SessionRunLifecycle,
 };
 use crate::sink::EventSink;
@@ -163,6 +163,14 @@ pub enum RunTermination {
     /// They differ in kind too: a budget ceiling interrupts a turn, and a
     /// turn limit is only ever reached *between* turns.
     MaxTurns,
+    /// A host asked for a safe-boundary pause and the boundary was reached.
+    ///
+    /// Unreachable from a headless invocation and that is not an accident: a
+    /// run with no connected host has nothing to ask for a hold, and nothing
+    /// to later release it. It has an exit code and a word anyway, because a
+    /// termination that cannot say what it is would be reported as our own
+    /// defect the first time an embedding produced one.
+    Paused,
     /// A deadline expired.
     TimedOut,
     /// A signal ended the process.
@@ -194,6 +202,14 @@ impl RunTermination {
             RunTermination::ContextOverflow { .. } => 4,
             RunTermination::BudgetExceeded => 5,
             RunTermination::MaxTurns => 5,
+            // A code of its own and not 3, though both stop for a human. §4.1
+            // ratifies that on exit 3 "exactly one human-input payload is
+            // present" — a `denied`/`denied_by` pair or a `question` object —
+            // and a pause has neither: nothing was refused and nothing is
+            // being asked. A script that reads 3 goes looking for a payload
+            // that is not there. 6 is the first free code in §4.3's table and
+            // no script can be observing it today.
+            RunTermination::Paused => 6,
             RunTermination::TimedOut => 124,
             RunTermination::Signalled(Signal::Int) => 130,
             RunTermination::Signalled(Signal::Term) => 143,
@@ -215,6 +231,7 @@ impl RunTermination {
             RunTermination::TimedOut => "timeout",
             RunTermination::PermissionRequired { .. } => "permission",
             RunTermination::QuestionRequired { .. } => "question",
+            RunTermination::Paused => "paused",
             RunTermination::TaskFailed
             | RunTermination::UsageError { .. }
             | RunTermination::Provider { .. }
@@ -267,6 +284,7 @@ impl RunTermination {
         match reason {
             ExitReason::Completed => None,
             ExitReason::Budget => Some(RunTermination::BudgetExceeded),
+            ExitReason::Paused => Some(RunTermination::Paused),
             ExitReason::PermissionRequired => Some(match denied {
                 Some(Denial { action, by }) => RunTermination::PermissionRequired { action, by },
                 None => RunTermination::Failed {
@@ -632,6 +650,7 @@ pub enum RunStatus {
     Running,
     Cancelling,
     Settled,
+    Paused,
     Cancelled,
     Interrupted,
     Uncertain,
@@ -652,8 +671,23 @@ pub enum CancelReason {
 pub enum RunSettlement {
     Completed,
     ContextOverflow,
-    Cancelled { reason: CancelReason },
-    PermissionRequired { action: String, by: DeniedBy },
+    /// The turn reached a safe boundary because a host asked it to. Settled
+    /// as far as the lease is concerned — nothing is running and the lease is
+    /// free — while the session itself stays held until `_ego/resume`.
+    ///
+    /// The hold lives on `SessionState::pause` and not on this status, so
+    /// there is one authority for "may this session start work" instead of
+    /// two that can disagree. It also leaves the resume able to take an
+    /// ordinary lease rather than needing a bypass for the state it is
+    /// trying to leave.
+    Paused,
+    Cancelled {
+        reason: CancelReason,
+    },
+    PermissionRequired {
+        action: String,
+        by: DeniedBy,
+    },
     Interrupted,
     Uncertain,
 }
@@ -679,6 +713,7 @@ impl RunSettlement {
             Self::Completed | Self::ContextOverflow | Self::PermissionRequired { .. } => {
                 RunStatus::Settled
             }
+            Self::Paused => RunStatus::Paused,
             Self::Cancelled { .. } => RunStatus::Cancelled,
             Self::Interrupted => RunStatus::Interrupted,
             Self::Uncertain => RunStatus::Uncertain,
@@ -1192,6 +1227,27 @@ pub trait RunExecutor: Send + Sync {
     fn interrupt<'a>(
         &'a self,
         handle: &'a RunHandle,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>>;
+
+    /// Ask the running turn to stop at its next boundary and hold there.
+    ///
+    /// Beside [`interrupt`](Self::interrupt) and never folded into it: a
+    /// cancellation ends a run and a pause suspends one, and an executor
+    /// that answered either for the other would discard work the host meant
+    /// to keep or leave running what the host asked to stop.
+    ///
+    /// Carries the host's request id because the boundary event in the
+    /// session log names it. That is what makes a repeated `_ego/pause`
+    /// idempotent rather than a second, later hold.
+    ///
+    /// Returning `Ok` says the request was delivered, not that the boundary
+    /// has been reached — only the log says that, and only once the turn has
+    /// got there. See
+    /// `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-session.md`.
+    fn pause<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        request: RequestId,
     ) -> BoxFuture<'a, Result<(), RunExecutorError>>;
 }
 
@@ -1961,6 +2017,52 @@ where
         self.cancel_inner(&request, None).await
     }
 
+    /// Ask the run serving this session to stop at its next boundary.
+    ///
+    /// Answers with the snapshot as it stands, which is how a caller learns
+    /// which half of the ADR's contract it is in: a run that is no longer
+    /// `Running` has nothing left to hold back, and one that is has been
+    /// asked and has not got there yet.
+    ///
+    /// It appends nothing. The durable record of a pause is the session
+    /// log's `SessionPauseRequested`/`SessionPaused` pair, written by the
+    /// turn that stops — the one writer holding the lease. A second record
+    /// on the run stream would be a second account of the same fact, free to
+    /// disagree with the first.
+    pub async fn pause(
+        &self,
+        session: SessionId,
+        request: RequestId,
+    ) -> Result<RunSnapshot, RunError> {
+        let folded = self.read_folded(session).await?;
+        if !matches!(
+            folded.snapshot.status,
+            RunStatus::Running | RunStatus::Cancelling
+        ) {
+            return Ok(folded.snapshot);
+        }
+        let handle = {
+            self.live
+                .lock()
+                .expect("run live state")
+                .handles
+                .get(&folded.snapshot.run_id)
+                .cloned()
+        };
+        // No handle is not an error here, where it is for a cancellation: a
+        // cancel that cannot reach its run leaves an effect running, and a
+        // pause that cannot reach one leaves a run that will finish the work
+        // it was already given. The caller still gets the status and can see
+        // for itself that no boundary was reached.
+        if let Some(handle) = handle {
+            self.executor
+                .pause(&handle, request)
+                .await
+                .map_err(RunError::Executor)?;
+        }
+        Ok(folded.snapshot)
+    }
+
     pub async fn status(&self, run_id: RunId) -> Result<RunSnapshot, RunError> {
         Ok(self.read_exact(run_id).await?.snapshot)
     }
@@ -2616,10 +2718,30 @@ where
             Ok(match folded.snapshot.status {
                 RunStatus::Running | RunStatus::Cancelling => SessionActivity::Active,
                 RunStatus::Uncertain => SessionActivity::Uncertain,
-                RunStatus::Settled | RunStatus::Cancelled | RunStatus::Interrupted => {
-                    SessionActivity::Inactive
-                }
+                // Paused is inactive: the turn stopped and nothing is
+                // running. Whether the *session* may be given more work is a
+                // different question, answered by `SessionState::pause`.
+                RunStatus::Settled
+                | RunStatus::Paused
+                | RunStatus::Cancelled
+                | RunStatus::Interrupted => SessionActivity::Inactive,
             })
+        })
+    }
+
+    fn hold(&self, session: SessionId, request: RequestId) -> HoldSignalFuture<'_> {
+        Box::pin(async move {
+            let snapshot = match self.pause(session, request).await {
+                Ok(snapshot) => snapshot,
+                // No run stream, read exactly as `activity` reads it: this
+                // session has never run, so there is no turn a hold could
+                // reach. Not `UnknownSession` — the caller established the
+                // session exists before asking, and a session created and
+                // paused before its first prompt is an ordinary thing to do.
+                Err(RunError::Store(StoreError::NotFound)) => return Ok(false),
+                Err(error) => return Err(lifecycle_run_error(error)),
+            };
+            Ok(snapshot.status == RunStatus::Running)
         })
     }
 
@@ -2637,7 +2759,14 @@ where
             };
             match folded.snapshot.status {
                 RunStatus::Uncertain => return Err(LifecycleError::EffectUncertain),
-                RunStatus::Settled | RunStatus::Cancelled | RunStatus::Interrupted => {
+                // Paused belongs with the terminal statuses and not with
+                // `Cancelling`: a paused run has already stopped at a durable
+                // boundary, so there is no in-flight effect to cancel and
+                // nothing for this close to wait on.
+                RunStatus::Settled
+                | RunStatus::Paused
+                | RunStatus::Cancelled
+                | RunStatus::Interrupted => {
                     if let Ok(lease) = folded.last_lease() {
                         self.release_live_attachment(folded.snapshot.run_id, lease);
                     }

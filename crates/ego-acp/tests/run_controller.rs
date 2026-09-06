@@ -29,7 +29,12 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
-use ego_core::run::{EventSinkFactory, IdSource, RequestId, RunAppend, RunAttachment, RunController, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement, RunTransaction};
+use ego_core::run::{
+    EventSinkFactory, IdSource, RequestId, RunAppend, RunAttachment, RunController,
+    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
+    RunPrepared, RunPrompt, RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement,
+    RunTransaction,
+};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
@@ -275,6 +280,7 @@ enum ExecutorCall {
     Observe(RunId),
     Submit(RunId),
     Interrupt(RunId),
+    Pause(RunId),
 }
 
 struct AcpExecutor {
@@ -610,6 +616,24 @@ impl RunExecutor for AcpExecutor {
         if let Some(waker) = waker {
             waker.wake();
         }
+        Box::pin(future::ready(Ok(())))
+    }
+
+    /// Recorded and not gated, unlike `interrupt`: a pause does not abandon
+    /// the effect in flight, so there is no submit gate for it to release.
+    fn pause<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        _request: RequestId,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        self.calls
+            .lock()
+            .expect("ACP executor calls")
+            .push(ExecutorCall::Pause(handle.run_id()));
+        self.sequence
+            .lock()
+            .expect("ACP executor sequence")
+            .push("pause");
         Box::pin(future::ready(Ok(())))
     }
 }

@@ -19,7 +19,12 @@ use ego_core::event::time::Timestamp;
 use ego_core::evidence::{EvidenceError, EvidenceWrite, RunContextEvidence};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::public::project_public;
-use ego_core::run::{EventSinkFactory, IdSource, RecoveryEvidence, RequestDigest, RequestId, RunAppend, RunAttachment, RunCommandOutcome, RunController, RunError, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunOrigin, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSettlement, RunTransaction, StartRequest};
+use ego_core::run::{
+    EventSinkFactory, IdSource, RecoveryEvidence, RequestDigest, RequestId, RunAppend,
+    RunAttachment, RunCommandOutcome, RunController, RunError, RunExecutionBindings, RunExecutor,
+    RunExecutorError, RunHandle, RunOrigin, RunPreparation, RunPrepared, RunPrompt, RunRetention,
+    RunRoot, RunSettlement, RunTransaction, StartRequest,
+};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -270,6 +275,16 @@ mod regression_case {
         fn interrupt<'a>(
             &'a self,
             _handle: &'a RunHandle,
+        ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+            Box::pin(future::ready(Ok(())))
+        }
+
+        /// A no-op for the same reason `interrupt` is one: this double never
+        /// runs a turn, so there is nothing here that a hold could hold back.
+        fn pause<'a>(
+            &'a self,
+            _handle: &'a RunHandle,
+            _request: RequestId,
         ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
             Box::pin(future::ready(Ok(())))
         }

@@ -31,8 +31,8 @@ use ego_core::run::{
     RunSubscription, StartRequest,
 };
 use ego_core::session_lifecycle::{
-    LifecycleError, SessionAttachment, SessionCursor, SessionLifecycle, SessionLifecycleStore,
-    SessionPage,
+    HoldState, LifecycleError, SessionAttachment, SessionCursor, SessionLifecycle,
+    SessionLifecycleStore, SessionPage,
 };
 use ego_core::sink::EventSink;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
@@ -204,14 +204,35 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
     } else {
         capabilities
     };
-    if !compaction {
+    // Built entry by entry rather than as one literal, so an extension is
+    // advertised exactly when the port that serves it exists. A host that
+    // negotiated a build with lifecycle and no compaction is told about
+    // `_ego/pause` and not `_ego/compact`, which is the truth; a single
+    // literal gated on one flag would have made the two stand or fall
+    // together and one of the two claims would always be a lie.
+    let mut ego = serde_json::Map::new();
+    if compaction {
+        ego.insert(
+            "compact".to_owned(),
+            serde_json::json!({"version": 1, "method": "_ego/compact"}),
+        );
+    }
+    if lifecycle {
+        ego.insert(
+            "hold".to_owned(),
+            serde_json::json!({
+                "version": 1,
+                "pause": "_ego/pause",
+                "resume": "_ego/resume",
+            }),
+        );
+    }
+    if ego.is_empty() {
         return capabilities;
     }
     capabilities.meta(serde_json::Map::from_iter([(
         "ego".to_owned(),
-        serde_json::json!({
-            "compact": {"version": 1, "method": "_ego/compact"}
-        }),
+        serde_json::Value::Object(ego),
     )]))
 }
 
@@ -270,6 +291,62 @@ impl From<CompactionReceipt> for AcpCompactResponse {
             successor_start_request_id: receipt.successor_start_request_id,
         }
     }
+}
+
+/// One `_ego/pause` or `_ego/resume`.
+///
+/// One type for both because they carry the same three fields and differ
+/// only in which method names them. [`JsonRpcMessage::matches_method`] is
+/// what separates the two, and a second identical struct would be a second
+/// place to keep the versioning rule in step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AcpHoldRequest<const RELEASE: bool> {
+    v: u32,
+    session_id: String,
+    request_id: String,
+}
+
+const fn hold_method(release: bool) -> &'static str {
+    if release { "_ego/resume" } else { "_ego/pause" }
+}
+
+impl<const RELEASE: bool> JsonRpcMessage for AcpHoldRequest<RELEASE> {
+    fn matches_method(method: &str) -> bool {
+        method == hold_method(RELEASE)
+    }
+
+    fn method(&self) -> &str {
+        hold_method(RELEASE)
+    }
+
+    fn to_untyped_message(&self) -> Result<UntypedMessage, Error> {
+        UntypedMessage::new(self.method(), self)
+    }
+
+    fn parse_message(method: &str, params: &impl Serialize) -> Result<Self, Error> {
+        if !Self::matches_method(method) {
+            return Err(Error::method_not_found());
+        }
+        agent_client_protocol::util::json_cast_params(params)
+    }
+}
+
+impl<const RELEASE: bool> JsonRpcRequest for AcpHoldRequest<RELEASE> {
+    type Response = serde_json::Value;
+}
+
+/// What a hold request found or established.
+///
+/// The `state` is the whole answer and it is deliberately not a boolean: see
+/// [`HoldState`] for why `pending` and `paused` must stay apart on the wire.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpHoldResponse {
+    v: u32,
+    session_id: SessionId,
+    request_id: RequestId,
+    state: HoldState,
 }
 
 struct Registered {
@@ -774,6 +851,67 @@ fn unsupported_block(what: &str) -> String {
     )
 }
 
+/// Serve one `_ego/pause` or `_ego/resume`.
+///
+/// One function for both, because the only thing that differs between them
+/// is which lifecycle call the validated request is handed to. Splitting it
+/// would duplicate the version check, both id parses and the error mapping —
+/// four rules that must not drift apart between the pause path and the
+/// resume path.
+async fn hold<const RELEASE: bool>(
+    lifecycle: Option<&dyn LifecycleOperations>,
+    request: &AcpHoldRequest<RELEASE>,
+    responder: Responder<serde_json::Value>,
+) -> Result<(), Error> {
+    // Absent lifecycle is unavailable, not partially emulated: the same rule
+    // that makes an unadvertised lifecycle method answer `method_not_found`
+    // rather than pretend.
+    let Some(lifecycle) = lifecycle else {
+        return responder.respond_with_error(Error::method_not_found());
+    };
+    let method = hold_method(RELEASE);
+    if request.v != 1 {
+        return responder.respond_with_error(
+            Error::invalid_params().data(format!("unsupported {method} version")),
+        );
+    }
+    let session = match request.session_id.parse::<SessionId>() {
+        Ok(session) if !session.uuid().is_nil() => session,
+        _ => {
+            return responder.respond_with_error(
+                Error::invalid_params().data(format!("invalid {method} sessionId")),
+            );
+        }
+    };
+    let request_id = match request.request_id.parse::<RequestId>() {
+        Ok(request_id) if !request_id.uuid().is_nil() => request_id,
+        _ => {
+            return responder.respond_with_error(
+                Error::invalid_params().data(format!("invalid {method} requestId")),
+            );
+        }
+    };
+    let outcome = if RELEASE {
+        lifecycle.release(session, request_id).await
+    } else {
+        lifecycle.pause(session, request_id).await
+    };
+    let state = match outcome {
+        Ok(state) => state,
+        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+    };
+    let response = AcpHoldResponse {
+        v: 1,
+        session_id: session,
+        request_id,
+        state,
+    };
+    match serde_json::to_value(response) {
+        Ok(response) => responder.respond(response),
+        Err(error) => responder.respond_with_error(Error::internal_error().data(error.to_string())),
+    }
+}
+
 fn prompt_result(snapshot: &RunSnapshot) -> Result<v1::StopReason, String> {
     match snapshot.settlement() {
         Some(RunSettlement::Completed) => stop_reason_v1(&ego_core::run::RunTermination::Done),
@@ -783,6 +921,7 @@ fn prompt_result(snapshot: &RunSnapshot) -> Result<v1::StopReason, String> {
                     .to_string(),
             })
         }
+        Some(RunSettlement::Paused) => stop_reason_v1(&ego_core::run::RunTermination::Paused),
         Some(RunSettlement::Cancelled { .. }) | Some(RunSettlement::Interrupted) => stop_reason_v1(
             &ego_core::run::RunTermination::Signalled(ego_core::run::Signal::Int),
         ),
@@ -824,6 +963,10 @@ trait LifecycleOperations: Send + Sync {
     ) -> LifecycleFuture<'_, ego_core::session_lifecycle::CreatedSession>;
     fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
     fn close(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
+    fn pause(&self, id: SessionId, request: RequestId) -> LifecycleFuture<'_, HoldState>;
+    /// `release` and not `resume`, which this trait already uses for
+    /// `session/resume`. The wire name stays `_ego/resume`.
+    fn release(&self, id: SessionId, request: RequestId) -> LifecycleFuture<'_, HoldState>;
 }
 
 const SESSION_PAGE_SIZE: usize = 50;
@@ -858,6 +1001,14 @@ where
         root: &'a Path,
     ) -> LifecycleFuture<'a, SessionAttachment> {
         Box::pin(SessionLifecycle::resume(self, id, root))
+    }
+
+    fn pause(&self, id: SessionId, request: RequestId) -> LifecycleFuture<'_, HoldState> {
+        Box::pin(SessionLifecycle::pause(self, id, request))
+    }
+
+    fn release(&self, id: SessionId, request: RequestId) -> LifecycleFuture<'_, HoldState> {
+        Box::pin(SessionLifecycle::release(self, id, request))
     }
 
     fn fork(
@@ -1755,6 +1906,30 @@ where
                         ),
                     }
                     }
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let lifecycle = lifecycle.clone();
+                move |request: AcpHoldRequest<false>,
+                      responder: Responder<serde_json::Value>,
+                      _cx| {
+                    let lifecycle = lifecycle.clone();
+                    async move { hold(lifecycle.as_deref(), &request, responder).await }
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let lifecycle = lifecycle.clone();
+                move |request: AcpHoldRequest<true>,
+                      responder: Responder<serde_json::Value>,
+                      _cx| {
+                    let lifecycle = lifecycle.clone();
+                    async move { hold(lifecycle.as_deref(), &request, responder).await }
                 }
             },
             on_receive_request!(),

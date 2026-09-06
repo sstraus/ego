@@ -15,7 +15,12 @@ use ego_core::generator::capabilities::{
     ReasoningEffortSupport, Transport,
 };
 use ego_core::public::{InstructionDescriptor, InstructionSource};
-use ego_core::run::{EventSinkFactory, IdSource, RecoveryEvidence, RunAppend, RunAttachment, RunCommandOutcome, RunController, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections, RunSettlement, RunTransaction, StartRequest};
+use ego_core::run::{
+    EventSinkFactory, IdSource, RecoveryEvidence, RequestId, RunAppend, RunAttachment,
+    RunCommandOutcome, RunController, RunExecutionBindings, RunExecutor, RunExecutorError,
+    RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections,
+    RunSettlement, RunTransaction, StartRequest,
+};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use futures::future::{self, BoxFuture};
@@ -432,6 +437,16 @@ impl RunExecutor for FakeRunExecutor {
     fn interrupt<'a>(
         &'a self,
         _handle: &'a RunHandle,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(future::ready(Ok(())))
+    }
+
+    /// A no-op for the same reason `interrupt` is one: this double never
+    /// runs a turn, so there is nothing here that a hold could hold back.
+    fn pause<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+        _request: RequestId,
     ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
         Box::pin(future::ready(Ok(())))
     }

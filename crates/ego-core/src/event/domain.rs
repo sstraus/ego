@@ -23,7 +23,7 @@ use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
 use crate::goal::{GoalOwner, GoalTransition};
 use crate::permit::{Authority, Escalation, ExecObservation, ToolResult, ToolResultProvenance};
 use crate::question::{QuestionOutcome, QuestionRequest, QuestionTarget};
-use crate::run::{CancelReason, DeniedBy, RunId, RunSelections, RunSettlement};
+use crate::run::{CancelReason, DeniedBy, RequestId, RunId, RunSelections, RunSettlement};
 use crate::state::Usage;
 use crate::store::blob::{BlobId, BlobRef};
 
@@ -146,6 +146,17 @@ pub enum ExitReason {
     Completed,
     /// The turn was stopped before it finished, by whom it says.
     Cancelled(CancelCause),
+    /// The turn stopped at a safe boundary because a host asked it to, and
+    /// can be continued.
+    ///
+    /// Top-level and deliberately not a [`CancelCause`]. `CancelCause`
+    /// answers *who* stopped the turn, and every one of its values maps to
+    /// ACP's `StopReason::Cancelled`; a host told its resumable hold was
+    /// "cancelled" throws away the turn state it was holding open, which is
+    /// the opposite of what it asked for.
+    /// `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-\
+    /// session.md` rejects "pause as cancel plus a later prompt" by name.
+    Paused,
     /// The turn was stopped by a budget limit.
     Budget,
     /// The run was asked for something it cannot do, and no retry will change
@@ -207,7 +218,8 @@ pub enum OccupancyProvenance {
 /// The exhaustive set of internal reducer inputs, per ARCH §1:
 ///
 /// ```text
-/// SessionTitleChanged | SessionDeleted | GoalSet | GoalTransitioned | PromptQueued |
+/// SessionTitleChanged | SessionDeleted | SessionPauseRequested | SessionPaused |
+/// SessionResumed | GoalSet | GoalTransitioned | PromptQueued |
 /// PromptDeliveryExpedited | UserPrompt | AssistantDelta | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ToolCallStarted |
 /// ToolCallDelta | ToolCallCompleted | PermissionRequested |
@@ -243,6 +255,32 @@ pub enum EventKind {
     SessionTitleChanged { title: Option<String> },
     /// Durable soft deletion. Storage remains available to lineage replay.
     SessionDeleted,
+    /// A host asked for this session's work to stop at its next safe
+    /// boundary, in a way it can later continue.
+    ///
+    /// The *intent*, not the boundary: the request is recorded before the
+    /// turn has stopped, because a pause that were only recorded once it had
+    /// taken effect would be lost by a crash in the window between asking and
+    /// stopping, and replay would then say the session is running and admit
+    /// more effects. `docs/decisions/2026-09-03-acp-host-control-is-\
+    /// negotiated-per-session.md` names that window: the response reports
+    /// `pending` until [`SessionPaused`](Self::SessionPaused) exists.
+    SessionPauseRequested { request: RequestId },
+    /// The safe boundary the request asked for was reached: the indivisible
+    /// effect that was in flight settled truthfully, and nothing new was
+    /// admitted after it.
+    ///
+    /// `request` is the [`SessionPauseRequested`](Self::SessionPauseRequested)
+    /// this boundary answers, so a host retrying the same request over a
+    /// reconnected transport is told what its own request achieved rather
+    /// than being served a boundary somebody else asked for.
+    SessionPaused { request: RequestId },
+    /// A paused session was released to continue.
+    ///
+    /// Its own `request` and not the pause's: resume is idempotent by the id
+    /// the host sent for *it*, and pairing them here would make a retried
+    /// resume indistinguishable from a retried pause.
+    SessionResumed { request: RequestId },
     /// A persistent goal became the session's current goal.
     GoalSet {
         id: GoalId,
@@ -635,6 +673,9 @@ impl EventKind {
         match self {
             EventKind::SessionTitleChanged { .. } => "session_title_changed",
             EventKind::SessionDeleted => "session_deleted",
+            EventKind::SessionPauseRequested { .. } => "session_pause_requested",
+            EventKind::SessionPaused { .. } => "session_paused",
+            EventKind::SessionResumed { .. } => "session_resumed",
             EventKind::GoalSet { .. } => "goal_set",
             EventKind::GoalTransitioned { .. } => "goal_transitioned",
             EventKind::PromptQueued { .. } => "prompt_queued",
@@ -736,6 +777,16 @@ mod subagent_failed_settlement {
             RunSettlement::Completed => {
                 return Err(serde::ser::Error::custom(
                     "completed child cannot use the failed terminal",
+                ));
+            }
+            // Pause is a session control and a child run is never its target:
+            // a subagent call is one indivisible effect, and the parent's
+            // boundary lies after that effect has settled on its own. So this
+            // is unreachable for the same reason `Completed` is — a child that
+            // reached here failed, and pausing is not a failure.
+            RunSettlement::Paused => {
+                return Err(serde::ser::Error::custom(
+                    "a child run is never paused; the parent's boundary follows it",
                 ));
             }
             RunSettlement::ContextOverflow => Wire::ContextOverflow,

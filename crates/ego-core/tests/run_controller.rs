@@ -19,7 +19,13 @@ use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::capabilities::ModelCapabilities;
-use ego_core::run::{CancelKey, CancelRequest, ContinueRequest, EventSinkFactory, IdSource, RequestDigest, RequestId, RunAdmission, RunAppend, RunAttachment, RunCommandOutcome, RunController, RunExecution, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRecoveryOutcome, RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement, RunStatus, RunTransaction, StartRequest};
+use ego_core::run::{
+    CancelKey, CancelRequest, ContinueRequest, EventSinkFactory, IdSource, RequestDigest,
+    RequestId, RunAdmission, RunAppend, RunAttachment, RunCommandOutcome, RunController,
+    RunExecution, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId,
+    RunPreparation, RunPrepared, RunPrompt, RunRecoveryOutcome, RunRetention, RunRevision, RunRoot,
+    RunSelections, RunSettlement, RunStatus, RunTransaction, StartRequest,
+};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
@@ -176,6 +182,7 @@ enum ExecutorCall {
     Observe(RunId),
     Submit(RunId),
     Interrupt(RunId),
+    Pause(RunId),
 }
 
 struct ScriptedRunExecutor {
@@ -605,6 +612,24 @@ impl RunExecutor for ScriptedRunExecutor {
             .pop_front()
             .unwrap_or(Ok(()));
         Box::pin(future::ready(result))
+    }
+
+    /// Recorded and not gated, unlike `interrupt`: a pause does not abandon
+    /// the effect in flight, so there is no submit gate for it to release.
+    fn pause<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        _request: RequestId,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        self.calls
+            .lock()
+            .expect("executor calls")
+            .push(ExecutorCall::Pause(handle.run_id()));
+        self.sequence
+            .lock()
+            .expect("transaction sequence")
+            .push("pause");
+        Box::pin(future::ready(Ok(())))
     }
 }
 

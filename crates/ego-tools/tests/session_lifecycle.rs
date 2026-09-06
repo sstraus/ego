@@ -15,10 +15,11 @@ use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Clock;
 use ego_core::event::time::Timestamp;
 use ego_core::goal::{GoalOwner, GoalTransition};
+use ego_core::run::RequestId;
 use ego_core::session_lifecycle::LeasedLifecycleAppend;
 use ego_core::session_lifecycle::{
-    ActivityFuture, CloseFuture, ClosedSession, LifecycleAppendError, SessionActivity,
-    SessionLifecycle, SessionLifecycleStore, SessionMetadata, SessionRunLifecycle,
+    ActivityFuture, CloseFuture, ClosedSession, HoldSignalFuture, LifecycleAppendError,
+    SessionActivity, SessionLifecycle, SessionLifecycleStore, SessionMetadata, SessionRunLifecycle,
 };
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionStore};
@@ -38,6 +39,12 @@ impl SessionRunLifecycle for InactiveRuns {
             id: session,
             cancelled: true,
         })))
+    }
+
+    /// `false`: this double reports no live run, so a pause has no turn to
+    /// reach and the caller writes the boundary itself.
+    fn hold(&self, _session: SessionId, _request: RequestId) -> HoldSignalFuture<'_> {
+        Box::pin(std::future::ready(Ok(false)))
     }
 }
 

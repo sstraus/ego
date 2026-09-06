@@ -30,7 +30,11 @@ use ego_core::hook::{
     SessionHookState,
 };
 use ego_core::permit::{GuardedEffects, GuardedIo, Op, PreparedCall};
-use ego_core::run::{EventSinkFactory, IdSource, RecoveryEvidence, RunAttachment, RunController, RunExecutionBindings, RunExecutor, RunExecutorError, RunFuture, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections, RunSettlement};
+use ego_core::run::{
+    EventSinkFactory, IdSource, RecoveryEvidence, RequestId, RunAttachment, RunController,
+    RunExecutionBindings, RunExecutor, RunExecutorError, RunFuture, RunHandle, RunId,
+    RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections, RunSettlement,
+};
 use ego_core::sink::NullSink;
 use ego_core::skill::{
     ActiveSkillScope, SkillCatalogue, SkillInvocation, SkillInvocationOutcome, SkillInvocationPort,
@@ -968,6 +972,16 @@ impl RunExecutor for ChildExecutor {
     fn interrupt<'a>(
         &'a self,
         _handle: &'a RunHandle,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(futures::future::ready(Ok(())))
+    }
+
+    /// A no-op for the same reason `interrupt` is one: this double never
+    /// runs a turn, so there is nothing here that a hold could hold back.
+    fn pause<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+        _request: RequestId,
     ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
         Box::pin(futures::future::ready(Ok(())))
     }

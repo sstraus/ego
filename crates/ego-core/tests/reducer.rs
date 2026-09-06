@@ -25,8 +25,10 @@ use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use ego_core::generator::types::{ErrorKind, StopReason};
 use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
-use ego_core::run::{RunId, RunSelections};
-use ego_core::state::{PermissionEvent, RefusalReason, SessionState, SubagentEvent, Usage};
+use ego_core::run::{RequestId, RunId, RunSelections};
+use ego_core::state::{
+    PauseState, PermissionEvent, RefusalReason, SessionState, SubagentEvent, Usage,
+};
 use ego_core::store::blob::{BlobId, BlobRef};
 
 // Wrapped in a module named `reducer` so `cargo test -p ego-core reducer`
@@ -1947,5 +1949,148 @@ mod reducer {
                 quoted_at: Timestamp::from_millis(1_000),
             }),
         }
+    }
+
+    /// A pause travels through `Running -> Requested -> Paused` and only a
+    /// resume leaves the last state.
+    ///
+    /// The middle state is the contract, not an implementation detail: the
+    /// ADR requires `_ego/pause` to answer `pending` until the boundary
+    /// exists, and a two-state model has no way to say that.
+    #[test]
+    fn a_pause_reaches_its_boundary_through_a_pending_state() {
+        let turn = TurnId::new();
+        let request = request_id(1);
+        let mut seq = Seq::default();
+        let mut state = SessionState::default();
+        assert_eq!(state.pause, PauseState::Running);
+        assert!(state.pause.admits_effects());
+
+        state.apply(&ev(
+            seq.next(),
+            turn,
+            None,
+            None,
+            EventKind::SessionPauseRequested { request },
+        ));
+        assert_eq!(state.pause, PauseState::Requested { request });
+        assert!(
+            !state.pause.admits_effects(),
+            "admission closes when the pause is asked for, not when it lands"
+        );
+
+        state.apply(&ev(
+            seq.next(),
+            turn,
+            None,
+            None,
+            EventKind::SessionPaused { request },
+        ));
+        assert_eq!(state.pause, PauseState::Paused { request });
+        assert_eq!(state.pause.request(), Some(request));
+
+        state.apply(&ev(
+            seq.next(),
+            turn,
+            None,
+            None,
+            EventKind::SessionResumed {
+                request: request_id(2),
+            },
+        ));
+        assert_eq!(state.pause, PauseState::Running);
+        assert!(state.pause.admits_effects());
+    }
+
+    /// A second pause request leaves the first one standing.
+    ///
+    /// The first request is the one the boundary will answer. Overwriting it
+    /// would make the eventual `SessionPaused` name a request that did not
+    /// start this hold, and tell the first host its own pause never landed.
+    #[test]
+    fn a_second_pause_request_does_not_displace_the_one_in_flight() {
+        let turn = TurnId::new();
+        let (first, second) = (request_id(1), request_id(2));
+        let mut seq = Seq::default();
+        let mut state = SessionState::default();
+        for request in [first, second] {
+            state.apply(&ev(
+                seq.next(),
+                turn,
+                None,
+                None,
+                EventKind::SessionPauseRequested { request },
+            ));
+        }
+        assert_eq!(state.pause, PauseState::Requested { request: first });
+
+        state.apply(&ev(
+            seq.next(),
+            turn,
+            None,
+            None,
+            EventKind::SessionPaused { request: second },
+        ));
+        assert_eq!(
+            state.pause,
+            PauseState::Requested { request: first },
+            "a boundary answered a request that is not the one holding this session"
+        );
+    }
+
+    /// A boundary nothing asked for is ignored.
+    ///
+    /// It can only come from a log that lost its request, and reducing it
+    /// would manufacture the boundary the ADR says is never manufactured.
+    #[test]
+    fn a_boundary_without_a_request_does_not_pause_a_running_session() {
+        let mut state = SessionState::default();
+        state.apply(&ev(
+            Seq::default().next(),
+            TurnId::new(),
+            None,
+            None,
+            EventKind::SessionPaused {
+                request: request_id(1),
+            },
+        ));
+        assert_eq!(state.pause, PauseState::Running);
+    }
+
+    /// A resume releases a pause that never reached its boundary.
+    ///
+    /// Refusing to release a pending pause would leave a session nothing
+    /// could free: the boundary may never arrive if the effect that was in
+    /// flight died with the process.
+    #[test]
+    fn a_resume_releases_a_pause_that_is_still_pending() {
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+        let mut state = SessionState::default();
+        state.apply(&ev(
+            seq.next(),
+            turn,
+            None,
+            None,
+            EventKind::SessionPauseRequested {
+                request: request_id(1),
+            },
+        ));
+        state.apply(&ev(
+            seq.next(),
+            turn,
+            None,
+            None,
+            EventKind::SessionResumed {
+                request: request_id(2),
+            },
+        ));
+        assert_eq!(state.pause, PauseState::Running);
+    }
+
+    /// Distinct, stable request ids, without pulling an id generator into
+    /// tests that are about ordering rather than identity.
+    fn request_id(n: u128) -> RequestId {
+        RequestId::from_uuid(uuid::Uuid::from_u128(n))
     }
 }

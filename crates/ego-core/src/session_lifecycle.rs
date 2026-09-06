@@ -16,11 +16,12 @@ use crate::event::time::{Clock, Timestamp};
 use crate::evidence::{EvidenceLogSource, ManifestEvidence, ManifestEvidenceError};
 use crate::goal::{GoalOwner, GoalRecord, GoalRefusal, GoalState, GoalTransition};
 use crate::public::{PublicEvent, project_public};
+use crate::run::RequestId;
 use crate::session::{
     ForkError, PreparedFork, ReplayContext, ReplayError, ReplaySource, ReplaySourceError,
     SessionBlobSource, TargetPublication, TargetSeed,
 };
-use crate::state::SessionState;
+use crate::state::{PauseState, SessionState};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use crate::turn::{Journal, SharedJournal, SharedJournalError};
 
@@ -177,6 +178,30 @@ impl From<StoreError> for LifecycleAppendError {
     }
 }
 
+/// What a session's hold is, as a host can observe it.
+///
+/// Three values and not a boolean, because the middle one is the whole
+/// reason `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-
+/// session.md` distinguishes a request from a boundary: a host told `Paused`
+/// may assume no further effect will happen, and a host told `Pending` may
+/// not. Collapsing them would let a client act on a hold that has not landed.
+///
+/// Beside [`SessionActivity`] and not folded into it. Activity is about the
+/// run — is a turn in flight — and this is about the session: a session can
+/// be inactive because it finished and inactive because it is being held,
+/// and only one of the two will start work when asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldState {
+    /// Nothing is holding this session.
+    Running,
+    /// A pause is recorded and the turn has not reached a boundary yet.
+    Pending,
+    /// The hold is durable: the session stopped and nothing more runs under
+    /// it until it is released.
+    Paused,
+}
+
 /// Durable activity as observed by the one rooted run controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionActivity {
@@ -190,12 +215,24 @@ pub type CloseFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ClosedSession, LifecycleError>> + Send + 'a>>;
 pub type ActivityFuture<'a> =
     Pin<Box<dyn Future<Output = Result<SessionActivity, LifecycleError>> + Send + 'a>>;
+pub type HoldSignalFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<bool, LifecycleError>> + Send + 'a>>;
 
 /// Narrow live-effect seam. Implementations delegate to `RunController` and
 /// never keep a second durable run state.
 pub trait SessionRunLifecycle: Send + Sync {
     fn activity(&self, session: SessionId) -> ActivityFuture<'_>;
     fn cancel_and_settle(&self, session: SessionId) -> CloseFuture<'_>;
+
+    /// Deliver a pause to the turn this session is running, if it is running
+    /// one. Answers whether there was a turn to deliver it to.
+    ///
+    /// Beside `cancel_and_settle` and deliberately not awaiting the outcome:
+    /// closing a session waits for the effect it interrupted to settle,
+    /// because the caller is about to stop caring about the session. A pause
+    /// waits for nothing — the boundary lands in the log, and the caller
+    /// reads it there.
+    fn hold(&self, session: SessionId, request: RequestId) -> HoldSignalFuture<'_>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,12 +358,19 @@ pub enum LifecycleError {
     Deleted,
     InvalidCursor,
     InvalidLimit,
-    RootMismatch { stored: PathBuf, requested: PathBuf },
+    RootMismatch {
+        stored: PathBuf,
+        requested: PathBuf,
+    },
     Active,
     LeaseHeld,
     EffectUncertain,
     Conflict,
     Goal(GoalRefusal),
+    /// A resume was asked for a session that is not durably paused.
+    NotPaused {
+        state: HoldState,
+    },
     InvalidText,
     Fork(ForkError),
     Ancestry(ReplayError),
@@ -342,6 +386,15 @@ impl fmt::Display for LifecycleError {
         match self {
             Self::UnknownSession => formatter.write_str("session not found"),
             Self::Deleted => formatter.write_str("session was deleted"),
+            Self::NotPaused { state } => write!(
+                formatter,
+                "the session is not paused; it is {}",
+                match state {
+                    HoldState::Running => "running",
+                    HoldState::Pending => "still reaching its boundary",
+                    HoldState::Paused => "paused",
+                }
+            ),
             Self::InvalidCursor => formatter.write_str("invalid session cursor"),
             Self::InvalidLimit => formatter.write_str("session page limit must be non-zero"),
             Self::RootMismatch { stored, requested } => write!(
@@ -463,6 +516,80 @@ where
             value: prepared,
             publication: Some(publication),
         })
+    }
+
+    /// The hold this session is under right now.
+    pub fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError> {
+        self.meta(id)?;
+        Ok(hold_state(self.state(id)?.pause))
+    }
+
+    /// Record a hold on a session with no turn to stop.
+    ///
+    /// The idle half of `_ego/pause`. When a turn is running the boundary is
+    /// written by that turn, which is the one writer holding the lease; when
+    /// none is, there is nothing to wait for and the boundary is now.
+    ///
+    /// Idempotent through the log and not through a receipt store: a session
+    /// already holding answers with the state it is in, and only a `Running`
+    /// one is moved. A second request therefore neither displaces the hold in
+    /// force nor establishes a second one.
+    pub fn pause(
+        &self,
+        append: &dyn LeasedLifecycleAppend,
+        expected: Seq,
+        request: RequestId,
+    ) -> Result<HoldState, LifecycleError> {
+        let id = append.session_id();
+        self.meta(id)?;
+        let current = self.state(id)?.pause;
+        if current != PauseState::Running {
+            return Ok(hold_state(current));
+        }
+        // Two events and not one, for the reason the turn loop writes two: a
+        // hold that recorded only its boundary would say a session stopped
+        // without saying who asked, and the request id is what a reconnecting
+        // host matches its own call against.
+        let mut expected = expected;
+        for kind in [
+            EventKind::SessionPauseRequested { request },
+            EventKind::SessionPaused { request },
+        ] {
+            let event = lifecycle_event(expected, self.clock.now(), kind);
+            let appended = event.env.seq;
+            require_publication(append.compare_and_append_lifecycle(expected, event)?)?;
+            expected = appended;
+        }
+        Ok(HoldState::Paused)
+    }
+
+    /// Release a hold that is durably in place.
+    ///
+    /// Refuses anything but [`HoldState::Paused`]. A `Pending` session has a
+    /// turn still walking to its boundary, and releasing the hold underneath
+    /// it would let that turn carry on as though nobody had asked — the one
+    /// outcome `_ego/pause` exists to prevent.
+    pub fn release(
+        &self,
+        append: &dyn LeasedLifecycleAppend,
+        expected: Seq,
+        request: RequestId,
+    ) -> Result<HoldState, LifecycleError> {
+        let id = append.session_id();
+        self.meta(id)?;
+        let current = self.state(id)?.pause;
+        if !matches!(current, PauseState::Paused { .. }) {
+            return Err(LifecycleError::NotPaused {
+                state: hold_state(current),
+            });
+        }
+        let event = lifecycle_event(
+            expected,
+            self.clock.now(),
+            EventKind::SessionResumed { request },
+        );
+        require_publication(append.compare_and_append_lifecycle(expected, event)?)?;
+        Ok(HoldState::Running)
     }
 
     pub fn goal(&self, id: SessionId) -> Result<Option<GoalRecord>, LifecycleError> {
@@ -785,6 +912,59 @@ where
         Ok(publication)
     }
 
+    /// Ask this session to stop at its next boundary and hold there.
+    ///
+    /// Two paths and one meaning. A session with a turn running is told
+    /// through the run seam and answers `Pending`: the turn owns the writer
+    /// lease, so it is the only party that may record the boundary, and it
+    /// records it when it gets there. A session with nothing running has
+    /// already reached one, so the boundary is written here under an inactive
+    /// lease and the answer is `Paused`.
+    ///
+    /// The order matters. The run seam is asked first, so a turn that starts
+    /// between the two steps sees the hold rather than slipping past a lease
+    /// check that found nothing to stop.
+    pub async fn pause(
+        &self,
+        id: SessionId,
+        request: RequestId,
+    ) -> Result<HoldState, LifecycleError> {
+        self.metadata.meta(id)?;
+        if self.runs.hold(id, request).await? {
+            return Ok(HoldState::Pending);
+        }
+        let append = self.require_inactive(id).await?;
+        let expected = self.metadata.state(id)?.last_seq;
+        self.metadata.pause(append.as_ref(), expected, request)
+    }
+
+    /// Release a hold that is durably in place.
+    ///
+    /// `release` and not `resume`, which this type already uses for
+    /// `session/resume` — reattaching a client to a session. The two are
+    /// unrelated: one gives a connection a view, the other lets a stopped
+    /// session run again. The wire name stays `_ego/resume` because the ADR
+    /// ratified it; the collision is only in Rust.
+    ///
+    /// Only ever the idle path: [`SessionMetadata::release`] refuses anything
+    /// but a session that is durably paused, and a durably paused session by
+    /// definition has no turn left to hold the lease.
+    pub async fn release(
+        &self,
+        id: SessionId,
+        request: RequestId,
+    ) -> Result<HoldState, LifecycleError> {
+        self.metadata.meta(id)?;
+        let append = self.require_inactive(id).await?;
+        let expected = self.metadata.state(id)?.last_seq;
+        self.metadata.release(append.as_ref(), expected, request)
+    }
+
+    /// The hold this session is under right now.
+    pub fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError> {
+        self.metadata.hold(id)
+    }
+
     async fn require_inactive(
         &self,
         id: SessionId,
@@ -805,6 +985,15 @@ where
             return Err(LifecycleError::EffectUncertain);
         }
         self.runs.cancel_and_settle(id).await
+    }
+}
+
+/// The reduction's hold, in the vocabulary a host is answered in.
+fn hold_state(pause: PauseState) -> HoldState {
+    match pause {
+        PauseState::Running => HoldState::Running,
+        PauseState::Requested { .. } => HoldState::Pending,
+        PauseState::Paused { .. } => HoldState::Paused,
     }
 }
 

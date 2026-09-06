@@ -419,7 +419,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
   "v": 10,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
-  "exit_reason": "done|budget|max_turns|timeout|permission|error",
+  "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
   "turns": 4,
   "usage": { "uncached_input_tokens": 8110, "cache_read_tokens": 40100,
              "cache_write_tokens": 1200, "output_tokens": 3120 },
@@ -453,6 +453,13 @@ whether free text is accepted. A script answers it with
 `ego resume ID --answer QUESTION_ID=JSON`; a mismatched ID or value is exit 2,
 not an answer guessed against a different question.
 
+`paused` is the one reason that carries **no** payload and asks nothing. The
+session stopped because a host called `_ego/pause` (§ `docs/06-acp.md`), and
+the only thing that moves it again is that host calling `_ego/resume`. It is
+exit 6 and deliberately not exit 3 for exactly that reason: a script that reads
+3 goes looking for a `denied`/`denied_by` pair or a `question` object, and a
+pause has neither.
+
 ### 4.2 `--output jsonl` (one event per line, live)
 
 
@@ -475,13 +482,14 @@ not an answer guessed against a different question.
 ```
 0 done        1 task failed (agent reports failure / schema never validated)
 2 usage error 3 human input needed in non-interactive mode
-4 provider/network error   5 budget or turn limit   124 timeout
+4 provider/network error   5 budget or turn limit
+6 paused at a host-requested boundary   124 timeout
 130 SIGINT    143 SIGTERM
 ```
 
 Only Gemini ever documented an exit-code table; Codex and Claude collapse
 almost everything into 0/1. Scripting needs the distinctions (retry on 4,
-escalate on 3, alert on 5). The shutdown contract is explicit (Claude's, which
+escalate on 3, alert on 5, resume on 6). The shutdown contract is explicit (Claude's, which
 is right): on SIGTERM abort the turn, kill the tool process tree, run
 session-end hooks, flush the session file, exit 143. Flags are never removed
 silently: a retired flag errors **by name** with its replacement.

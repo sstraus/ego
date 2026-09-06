@@ -21,15 +21,16 @@ use ego_core::generator::capabilities::{
     ReasoningEffortSupport, Transport,
 };
 use ego_core::goal::{GoalOwner, GoalRefusal, GoalState, GoalTransition};
-use ego_core::run::{RunAppend, RunRevision, RunTransaction};
+use ego_core::run::{RequestId, RunAppend, RunRevision, RunTransaction};
 use ego_core::session::{
     ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
     TargetSeed,
 };
 use ego_core::session_lifecycle::{
-    ActivityFuture, CloseFuture, ClosedSession, InactiveSessionLease, LeasedLifecycleAppend,
-    LifecycleAppendError, LifecycleError, LifecyclePublication, SessionActivity, SessionCursor,
-    SessionLifecycle, SessionLifecycleStore, SessionMetadata, SessionRunLifecycle,
+    ActivityFuture, CloseFuture, ClosedSession, HoldSignalFuture, InactiveSessionLease,
+    LeasedLifecycleAppend, LifecycleAppendError, LifecycleError, LifecyclePublication,
+    SessionActivity, SessionCursor, SessionLifecycle, SessionLifecycleStore, SessionMetadata,
+    SessionRunLifecycle,
 };
 use ego_core::store::blob::{BlobError, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -331,6 +332,12 @@ impl SessionRunLifecycle for FakeRunControl {
             id: session,
             cancelled: true,
         })))
+    }
+
+    /// `false`: this double reports no live run, so a pause has no turn to
+    /// reach and the caller writes the boundary itself.
+    fn hold(&self, _session: SessionId, _request: RequestId) -> HoldSignalFuture<'_> {
+        Box::pin(std::future::ready(Ok(false)))
     }
 }
 

@@ -238,6 +238,12 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         // durable log and in the CLI's exit code; flattening it here is a
         // projection, which is what this module is.
         ExitReason::Cancelled(_) => v2::StopReason::Cancelled,
+        // Deliberately *not* folded into `Cancelled` with the causes above: a
+        // cancelled turn is over and a paused one is waiting, and a host that
+        // read them as the same word would either offer no way to resume or
+        // offer one that cannot work. See
+        // `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-session.md`.
+        ExitReason::Paused => v2::StopReason::Other("_paused".to_string()),
         ExitReason::Provider => v2::StopReason::Other("_provider".to_string()),
         ExitReason::ContextOverflow => v2::StopReason::Other("_context_overflow".to_string()),
         ExitReason::Internal => v2::StopReason::Other("_internal".to_string()),
@@ -279,6 +285,12 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         RunTermination::TimedOut | RunTermination::Signalled(_) => Ok(v1::StopReason::Cancelled),
         RunTermination::BudgetExceeded => {
             Err("the turn stopped because a budget ceiling was reached".to_string())
+        }
+        // An error and not `Cancelled`, for the reason `stop_reason_v2` gives:
+        // v1 has no word that distinguishes "over" from "waiting", and the
+        // only useful thing to say is the one call that continues it.
+        RunTermination::Paused => {
+            Err("the turn stopped at a pause boundary; continue it with `_ego/resume`".to_string())
         }
         RunTermination::QuestionRequired { question } => Err(format!(
             "question {} still requires an answer; resume it with `ego resume --answer {}=JSON`",

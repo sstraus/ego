@@ -42,9 +42,9 @@ use ego_core::session::{
     TargetSeed,
 };
 use ego_core::session_lifecycle::{
-    ActivityFuture, CloseFuture, ClosedSession, InactiveSessionLease, LeasedLifecycleAppend,
-    LifecycleAppendError, LifecyclePublication, SessionActivity, SessionLifecycle,
-    SessionLifecycleStore, SessionRunLifecycle,
+    ActivityFuture, CloseFuture, ClosedSession, HoldSignalFuture, InactiveSessionLease,
+    LeasedLifecycleAppend, LifecycleAppendError, LifecyclePublication, SessionActivity,
+    SessionLifecycle, SessionLifecycleStore, SessionRunLifecycle,
 };
 use ego_core::sink::EventSink;
 use ego_core::state::SessionState;
@@ -92,6 +92,12 @@ impl SessionRunLifecycle for InactiveRuns {
                 cancelled: false,
             })
         })
+    }
+
+    /// `false`, matching the name: `InactiveRuns` reports no live run, so a
+    /// pause has no turn to reach and the caller writes the boundary itself.
+    fn hold(&self, _session: SessionId, _request: RequestId) -> HoldSignalFuture<'_> {
+        Box::pin(std::future::ready(Ok(false)))
     }
 }
 
@@ -255,6 +261,32 @@ impl DurableAcpFixture {
                 .unwrap();
         }
         session.to_string()
+    }
+
+    /// How many holds this session's log actually records.
+    ///
+    /// The only way to tell a hold that was left alone from one that was
+    /// re-established: both leave the session paused, and only the event count
+    /// says whether the second request wrote anything.
+    pub fn recorded_holds(&self, session: &str) -> usize {
+        let session = session.parse::<SessionId>().unwrap();
+        self.store
+            .entries
+            .lock()
+            .expect("support entries")
+            .get(&session)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| match entry {
+                        SessionEntry::Event(event) => {
+                            matches!(event.kind, EventKind::SessionPauseRequested { .. })
+                        }
+                        _ => false,
+                    })
+                    .count()
+            })
+            .unwrap_or_default()
     }
 
     pub fn run_status(&self, session: &str) -> RunStatus {
@@ -871,6 +903,21 @@ impl RunExecutor for Executor {
             .expect("support cancel authority")
             .store(true, Ordering::SeqCst);
         Box::pin(future::ready(Ok(())))
+    }
+
+    /// Refused rather than answered `Ok`. This double's authority is a single
+    /// cancel flag and it runs no turn, so it has nothing that could reach a
+    /// boundary; answering `Ok` would tell a caller a hold is in force that
+    /// nothing in this harness is honouring. A test that needs a real pause
+    /// gives this executor an authority that can hold one.
+    fn pause<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+        _request: RequestId,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(future::ready(Err(RunExecutorError::new(
+            "this test executor cannot hold a run at a boundary",
+        ))))
     }
 }
 

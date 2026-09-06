@@ -46,17 +46,17 @@ use ego_core::hook::{
 use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::public::{ItemKind, PublicEvent};
 use ego_core::run::{
-    IdSource, RunAppend, RunAttachment, RunCommand, RunExecutionBindings, RunExecutor,
+    IdSource, RequestId, RunAppend, RunAttachment, RunCommand, RunExecutionBindings, RunExecutor,
     RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunPrompt, RunRevision,
     RunRoot, RunSettlement, RunTransaction,
 };
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::suspension::ResumeFloor;
-use ego_core::turn::CancelToken;
 use ego_core::turn::{
     AdmittedToolSource, CapturedToolCatalogue, ToolCatalogueError, ToolEffectPorts,
 };
+use ego_core::turn::{CancelToken, PauseToken};
 use futures::channel::mpsc;
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
@@ -184,6 +184,7 @@ struct PromptExecutor {
 
 struct PromptAuthority {
     cancel: CancelToken,
+    pause: PauseToken,
     mode: PromptMode,
 }
 
@@ -425,6 +426,7 @@ impl RunExecutor for PromptExecutor {
             .insert(request.run_id, request.root.clone());
         let authority = PromptAuthority {
             cancel: CancelToken::new(),
+            pause: PauseToken::new(),
             mode: self.mode.clone(),
         };
         Box::pin(future::ready(Ok(RunHandle::new(
@@ -521,6 +523,18 @@ impl RunExecutor for PromptExecutor {
             .authority::<Arc<PromptAuthority>>()
             .expect("prompt authority");
         authority.cancel.cancel(CancelCause::User);
+        Box::pin(future::ready(Ok(())))
+    }
+
+    fn pause<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        request: RequestId,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        let authority = handle
+            .authority::<Arc<PromptAuthority>>()
+            .expect("prompt authority");
+        authority.pause.pause(request);
         Box::pin(future::ready(Ok(())))
     }
 }

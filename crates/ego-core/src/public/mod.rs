@@ -452,8 +452,20 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
     let item = ev.env.item;
 
     match &ev.kind {
+        // The three pause records join them, and for a reason worth stating
+        // rather than inheriting. A pause is answered on the channel the host
+        // asked on: `_ego/pause` is idempotent by request id, so a host that
+        // was told `pending` learns the boundary by asking again, and a host
+        // that did not ask learns the turn stopped from its stop reason. A
+        // `PublicEvent` variant would put one fact on a second versioned
+        // surface — costing a `PUBLIC_EVENT_VERSION` bump — to tell nobody
+        // anything they cannot already read. It is exported, because an audit
+        // that cannot see a deliberate hold reads it as a crash.
         EventKind::SessionTitleChanged { .. }
         | EventKind::SessionDeleted
+        | EventKind::SessionPauseRequested { .. }
+        | EventKind::SessionPaused { .. }
+        | EventKind::SessionResumed { .. }
         | EventKind::GoalSet { .. }
         | EventKind::GoalTransitioned { .. } => None,
         EventKind::CompactionSeeded { checkpoint, .. } => Some(PublicEvent::ItemCompleted {

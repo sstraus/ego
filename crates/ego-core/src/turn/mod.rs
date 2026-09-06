@@ -19,8 +19,8 @@ mod tools;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use futures::StreamExt;
 use futures::future::{Either, select};
@@ -73,7 +73,7 @@ use crate::permit::{
 };
 use crate::public::PublicEvent;
 use crate::question::{Elicitor, QuestionAnswer, QuestionOutcome, QuestionTarget};
-use crate::run::{Denial, DeniedBy};
+use crate::run::{Denial, DeniedBy, RequestId};
 use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
 use crate::store::evidence::EvidenceRef;
@@ -259,6 +259,47 @@ impl CancelToken {
             BY_HOST => Some(CancelCause::Host),
             _ => None,
         }
+    }
+}
+
+/// A request that a running turn stop at its next boundary and stay stopped.
+///
+/// The in-memory half of a pause and the exact counterpart of
+/// [`CancelToken`]. The durable half is `EventKind::SessionPauseRequested`
+/// followed by `EventKind::SessionPaused`, which is what survives a
+/// reconnect and what refuses the *next* turn; this is only what a turn
+/// already in flight notices without re-reading its log at every step.
+///
+/// It carries the host's request id rather than a bare flag, for two
+/// reasons that are really one: the boundary event has to name the request
+/// it answers or `_ego/pause` cannot be idempotent, and a turn that stopped
+/// has to be able to write that name without asking anyone.
+///
+/// No cause, where cancellation carries three. Cancellation has genuinely
+/// different endings — 124 for a deadline, 130 for a `SIGINT` — and pause
+/// has one: a host asked. A second reason to pause would be a second
+/// control, not a second value here.
+#[derive(Debug, Clone, Default)]
+pub struct PauseToken(Arc<OnceLock<RequestId>>);
+
+impl PauseToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the turn to stop at its next boundary, saying which request asks.
+    ///
+    /// **The first request wins**, for [`CancelToken::cancel`]'s reason: the
+    /// boundary that eventually happens belongs to whoever asked for it
+    /// first, and a later request that took credit for the stop would tell
+    /// its caller a hold it never established is in place.
+    pub fn pause(&self, request: RequestId) {
+        let _ = self.0.set(request);
+    }
+
+    /// The request that asked this turn to stop, if one did.
+    pub fn requested(&self) -> Option<RequestId> {
+        self.0.get().copied()
     }
 }
 
@@ -847,6 +888,7 @@ pub struct TurnLoop<'session, 'turn> {
     tools: Tools<'turn>,
     ancestor: Option<Conversation>,
     cancel: CancelToken,
+    pause: PauseToken,
     control: Option<&'turn mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
     foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>>,
@@ -969,6 +1011,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             tools,
             ancestor: None,
             cancel,
+            pause: PauseToken::default(),
             control: None,
             elicitor: None,
             foreign_question_port: None,
@@ -1004,6 +1047,17 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         control.refresh(self.state().queue_status());
         control.open();
         self.control = Some(control);
+        self
+    }
+
+    /// Attach the host-control channel that can ask this turn to pause.
+    ///
+    /// Optional where [`Session::cancel`] is a field, and the asymmetry is
+    /// the truth: every run can be cancelled, and only a run serving a host
+    /// that negotiated `_ego/pause` can be paused. A run with no such host
+    /// holds the default token, which nobody can set.
+    pub fn with_pause_token(mut self, pause: PauseToken) -> Self {
+        self.pause = pause;
         self
     }
 
@@ -1901,6 +1955,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if let Err(cause) = self.close_and_drain_controls(turn).await {
             return Err(self.abandon(turn, cause));
         }
+        if let Err(cause) = self.record_pause_boundary(turn, exit_reason) {
+            return Err(self.abandon(turn, cause));
+        }
         self.refresh_control_status();
         Ok(TurnOutcome {
             turn,
@@ -2288,6 +2345,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         )?;
         self.deactivate_skill_hooks(turn)?;
         self.close_and_drain_controls(turn).await?;
+        self.record_pause_boundary(turn, exit_reason)?;
         self.refresh_control_status();
         Ok(TurnOutcome {
             turn,
@@ -2296,6 +2354,36 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             denied,
             skill: None,
         })
+    }
+
+    /// Write the durable half of a pause, once the turn can do nothing else.
+    ///
+    /// Called after the controls are closed and drained, so the record means
+    /// what it says: nothing else in this turn will happen. Both events and
+    /// not only the boundary, because the request is what makes `_ego/pause`
+    /// idempotent — a host that reconnects reads its own request id back out
+    /// of the log rather than learning only that *a* pause happened.
+    ///
+    /// Nothing to write when the token is unset: the hold was inherited
+    /// rather than established here, so its boundary is already in the log.
+    fn record_pause_boundary(
+        &mut self,
+        turn: TurnId,
+        exit_reason: ExitReason,
+    ) -> Result<(), StoreError> {
+        if exit_reason != ExitReason::Paused {
+            return Ok(());
+        }
+        let Some(request) = self.pause.requested() else {
+            return Ok(());
+        };
+        for kind in [
+            EventKind::SessionPauseRequested { request },
+            EventKind::SessionPaused { request },
+        ] {
+            self.journal.append(turn, None, None, kind)?;
+        }
+        Ok(())
     }
 
     fn admit_skill_catalogue(&mut self, turn: TurnId) -> Result<(), StoreError> {
@@ -2396,10 +2484,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         }
 
         loop {
-            if let Some(cause) = self.cancel.cause() {
-                return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
+            if let Some(reason) = self.must_stop() {
+                return Ok(DriveOutcome::Ended(reason, None));
             }
-            // Beside the cancel check and for the same reason: this is the
+            // Beside the stop check and for the same reason: this is the
             // boundary between generations, the only place a turn can be
             // stopped without abandoning an attempt that is already paid for.
             //
@@ -2476,6 +2564,17 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         _ => ExitReason::Provider,
                     },
                 };
+                // Where a pause is normally observed. Cancellation aborts the
+                // stream from inside `generate`; a pause deliberately does
+                // not — the generation is one indivisible effect and it
+                // settles truthfully — so the hold surfaces here, with the
+                // answer already logged and nothing yet spent on the next
+                // one. Only when the generation itself ended cleanly: a
+                // provider failure or a budget stop is the true reason this
+                // turn ended, and a hold does not get to overwrite it.
+                if exit == ExitReason::Completed && self.pause_request().is_some() {
+                    return Ok(DriveOutcome::Ended(ExitReason::Paused, None));
+                }
                 if exit == ExitReason::Completed && self.deliver_pending(turn)? {
                     continue;
                 }
@@ -2533,6 +2632,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
             let mut pending = pending;
             for index in 0..pending.len() {
+                // A batch is not one effect, and this is the only place that
+                // says so. A control that arrived while the generation was
+                // streaming reaches the loop with the calls already logged
+                // and none of them run; asking here — before `run_tool` and
+                // not after it — is what keeps the first call in the batch
+                // from being the one effect nobody could stop.
+                if let Some(reason) = self.must_stop() {
+                    self.close_unstarted_siblings(turn, &pending[index..])?;
+                    return Ok(DriveOutcome::Ended(reason, None));
+                }
                 // `CLI.md` §4.4: a run with nobody to ask does not answer a
                 // permission question on the model's behalf. The denial is
                 // still logged against the call — the model's audience
@@ -2559,10 +2668,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             Some(call.started),
                             EventKind::ToolCallCompleted { ok, result },
                         )?;
-                        if let Some(cause) = self.cancel.cause() {
-                            self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                            return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
-                        }
                         continue;
                     }
                     ToolOutcome::Executed {
@@ -2592,17 +2697,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                 ),
                             )
                             .await;
-                        if let Some(cause) = self.cancel.cause() {
-                            self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                            return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
-                        }
                         continue;
                     }
                     ToolOutcome::Recorded => {
-                        if let Some(cause) = self.cancel.cause() {
-                            self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                            return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
-                        }
                         continue;
                     }
                     ToolOutcome::QuestionRequired => {
@@ -2640,6 +2737,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     ExitReason::PermissionRequired,
                     Some(denial),
                 ));
+            }
+            // The counterpart of the check at the head of the batch, for the
+            // last call in it: a control that arrived while that call ran has
+            // no later iteration to be seen in, and the two effects below —
+            // the batch hook and the delivery of queued input — are effects.
+            if let Some(reason) = self.must_stop() {
+                return Ok(DriveOutcome::Ended(reason, None));
             }
             if !self
                 .dispatch_hook(
@@ -2751,6 +2855,43 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             self.refresh_control_status();
         }
         Ok(!pending.is_empty())
+    }
+
+    /// Why this turn must stop before admitting another effect, if it must.
+    ///
+    /// Cancellation and pause are asked together at every admission point
+    /// because they answer one question — may the next effect happen? — and
+    /// a site that consulted only one of them would honour whichever control
+    /// arrived first and run straight through the other.
+    ///
+    /// **Cancellation wins the tie.** A cancelled turn is over and a paused
+    /// one is waiting; reporting a cancellation as a pause would offer a host
+    /// a `_ego/resume` with nothing left to continue.
+    fn must_stop(&self) -> Option<ExitReason> {
+        if let Some(cause) = self.cancel.cause() {
+            return Some(ExitReason::Cancelled(cause));
+        }
+        self.pause_request().map(|_| ExitReason::Paused)
+    }
+
+    /// The request whose hold this turn owes, from either half of a pause.
+    ///
+    /// The durable state is read first and is not the same question as the
+    /// token: the token is a hold asked of *this* turn, and the state is a
+    /// hold already established — by an earlier turn, in an earlier process,
+    /// possibly through a surface this run has no channel to. A run that
+    /// consulted only its token would let `ego run` walk through a hold a
+    /// host put in place.
+    ///
+    /// Through `inspect` and not `state()`, which clones the whole reduction:
+    /// this is asked once per tool, not once per turn.
+    fn pause_request(&self) -> Option<RequestId> {
+        let durable = self
+            .journal
+            .inspect(|state| state.pause.request())
+            .ok()
+            .flatten();
+        durable.or_else(|| self.pause.requested())
     }
 
     fn close_unstarted_siblings(
