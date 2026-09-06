@@ -998,3 +998,50 @@ fn a_redelivered_resume_is_answered_without_taking_a_lease() {
         "the retry was refused as active work instead of replayed"
     );
 }
+
+/// A hold whose boundary never arrived can still be released.
+///
+/// The two pause events are two appends, not one record, so a process that
+/// dies between them leaves `SessionPauseRequested` standing alone. That state
+/// refuses new work — which is right, the operator asked for a stop — but the
+/// writer that would have finished the pair is gone, so the boundary will
+/// never arrive. Refusing to release it would wedge the session permanently:
+/// too paused to run, not paused enough to resume.
+///
+/// A live turn is a different matter and is refused earlier, by the inactive
+/// lease this path takes before it looks at the hold at all.
+#[test]
+fn a_hold_whose_boundary_never_arrived_is_still_releasable() {
+    let (service, store, _runs) = service();
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let interrupted = RequestId::from_uuid(uuid::Uuid::from_u128(0x95));
+    store.append_event(
+        id,
+        DomainEvent {
+            env: Envelope {
+                seq: serde_json::from_value(serde_json::json!(1)).unwrap(),
+                id: EventId::new(),
+                turn: TurnId::new(),
+                item: None,
+                parent: None,
+                ts: Timestamp::from_millis(1),
+                producer: Producer::Main,
+            },
+            kind: EventKind::SessionPauseRequested {
+                request: interrupted,
+            },
+        },
+    );
+    assert_eq!(service.hold(id).unwrap(), HoldState::Pending);
+
+    let released = futures::executor::block_on(
+        service.release(id, RequestId::from_uuid(uuid::Uuid::from_u128(0x96))),
+    );
+
+    assert_eq!(
+        released.unwrap(),
+        HoldState::Running,
+        "an interrupted pause left the session with no way out"
+    );
+    assert_eq!(service.hold(id).unwrap(), HoldState::Running);
+}

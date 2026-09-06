@@ -579,13 +579,22 @@ where
 
     /// Release a hold that is durably in place.
     ///
-    /// Refuses anything but [`HoldState::Paused`]. Replaying a release this
-    /// session already performed belongs to [`SessionLifecycle::release`],
+    /// Refuses only a session no hold was ever placed on. Replaying a release
+    /// this session already performed belongs to [`SessionLifecycle::release`],
     /// which answers before taking the lease this function needs.
     ///
-    /// A `Pending` session has a turn still walking to its boundary, and
-    /// releasing the hold underneath it would let that turn carry on as though
-    /// nobody had asked — the one outcome `_ego/pause` exists to prevent.
+    /// A hold whose boundary never arrived is released like any other. The
+    /// pair is two appends, not one record, so a process that died between
+    /// them leaves `Requested` standing alone — and the writer that would have
+    /// finished it is gone, so the boundary will never come. Refusing would
+    /// wedge that session for good: too paused to run, not paused enough to
+    /// resume. It is what the reducer's `SessionResumed` arm already assumes.
+    ///
+    /// A turn still walking to its boundary is a different thing and is
+    /// refused earlier, by the inactive lease [`SessionLifecycle::release`]
+    /// takes before calling this — releasing the hold underneath a live turn
+    /// would let it carry on as though nobody had asked, the one outcome
+    /// `_ego/pause` exists to prevent.
     pub fn release(
         &self,
         append: &dyn LeasedLifecycleAppend,
@@ -595,9 +604,9 @@ where
         let id = append.session_id();
         self.meta(id)?;
         let current = self.state(id)?.pause;
-        if !matches!(current, PauseState::Paused { .. }) {
+        if current == PauseState::Running {
             return Err(LifecycleError::NotPaused {
-                state: hold_state(current),
+                state: HoldState::Running,
             });
         }
         let event = lifecycle_event(
