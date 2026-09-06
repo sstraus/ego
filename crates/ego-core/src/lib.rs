@@ -22,6 +22,7 @@ pub mod export;
 pub mod generation_model_source;
 pub mod generator;
 pub mod goal;
+pub mod health;
 pub mod hook;
 pub mod mcp;
 pub mod permit;
