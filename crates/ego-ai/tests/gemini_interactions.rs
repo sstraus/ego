@@ -834,3 +834,31 @@ async fn a_refused_request_relays_the_sentence_the_provider_wrote() {
     );
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
 }
+
+/// Gemini is not a selectable provider, and that is a decision with a
+/// condition attached rather than an oversight.
+///
+/// regression case promotes it only after the conformance rule includes an opt-in
+/// sanitized live recording on a current entitled model. No such recording
+/// exists, so `--model gemini/…` must not resolve — the mapping being complete
+/// and its fixtures deterministic is exactly the state that makes promoting it
+/// look harmless.
+///
+/// `FINAL_PROFILE_COUNT` alone does not hold this: it is a constant, so adding
+/// the row and bumping the number keeps every existing assertion green. This
+/// names the row, so opening the gate has to be deliberate.
+#[test]
+fn gemini_is_not_among_the_providers_a_model_can_be_selected_from() {
+    let rows = ego_ai::conformance::final_provider_rows(
+        ego_ai::provider::ProviderRow::ollama_default(),
+        ego_ai::provider::ProviderRow::openai_at(
+            Url::parse("https://api.openai.com").expect("a constant this test controls"),
+        ),
+    );
+    let ids: Vec<_> = rows.iter().map(ego_ai::provider::ProviderRow::id).collect();
+    assert!(
+        !ids.contains(&"gemini"),
+        "gemini was promoted to selectable without the entitled live recording \
+         regression case gates it on: {ids:?}"
+    );
+}
