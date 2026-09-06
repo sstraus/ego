@@ -11,8 +11,8 @@ use agent_client_protocol_schema::v1::{
     BooleanPropertySchema, ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse,
     ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities, ElicitationContentValue,
     ElicitationFormCapabilities, ElicitationFormMode, ElicitationMode, ElicitationPropertySchema,
-    ElicitationRequestScope, ElicitationSchema, IntegerPropertySchema, MultiSelectPropertySchema,
-    NumberPropertySchema, RequestId, StringPropertySchema,
+    ElicitationScope, IntegerPropertySchema, MultiSelectPropertySchema, NumberPropertySchema,
+    SessionId, StringPropertySchema,
 };
 use ego_acp::question::{
     AcpQuestionAdapter, CapabilityCapture, QuestionMappingError, QuestionRequest,
@@ -90,13 +90,14 @@ fn form_request() -> QuestionRequest {
     )
 }
 
-fn scope() -> ElicitationRequestScope {
-    ElicitationRequestScope::new(RequestId::Number(7))
+fn session() -> SessionId {
+    SessionId::new("01932d5e-0000-7000-8000-0000000000aa")
 }
 
 #[test]
 fn single_maps_to_a_v1_form_string_enum() {
-    let request = AcpQuestionAdapter::form_request(ItemId::new(), &single_request()).unwrap();
+    let request =
+        AcpQuestionAdapter::form_request(&session(), ItemId::new(), &single_request()).unwrap();
     let CreateElicitationRequest {
         mode:
             ElicitationMode::Form(ElicitationFormMode {
@@ -117,7 +118,8 @@ fn single_maps_to_a_v1_form_string_enum() {
 
 #[test]
 fn multiple_maps_to_a_v1_form_multi_select_array() {
-    let request = AcpQuestionAdapter::form_request(ItemId::new(), &multiple_request()).unwrap();
+    let request =
+        AcpQuestionAdapter::form_request(&session(), ItemId::new(), &multiple_request()).unwrap();
     let ElicitationMode::Form(form) = request.mode else {
         panic!("multiple questions use v1 form mode");
     };
@@ -131,7 +133,8 @@ fn multiple_maps_to_a_v1_form_multi_select_array() {
 
 #[test]
 fn free_text_maps_to_a_v1_form_string_property_without_options() {
-    let request = AcpQuestionAdapter::form_request(ItemId::new(), &free_text_request()).unwrap();
+    let request =
+        AcpQuestionAdapter::form_request(&session(), ItemId::new(), &free_text_request()).unwrap();
     let ElicitationMode::Form(form) = request.mode else {
         panic!("free text questions use v1 form mode");
     };
@@ -147,7 +150,8 @@ fn free_text_maps_to_a_v1_form_string_property_without_options() {
 
 #[test]
 fn form_maps_the_primitive_object_schema_without_wrapping_or_renaming() {
-    let request = AcpQuestionAdapter::form_request(ItemId::new(), &form_request()).unwrap();
+    let request =
+        AcpQuestionAdapter::form_request(&session(), ItemId::new(), &form_request()).unwrap();
     let CreateElicitationRequest {
         mode:
             ElicitationMode::Form(ElicitationFormMode {
@@ -198,7 +202,8 @@ fn form_maps_the_primitive_object_schema_without_wrapping_or_renaming() {
 
     // Keep the public property variants explicit so a projection cannot pass
     // by serializing a differently typed or renamed field.
-    let request = AcpQuestionAdapter::form_request(ItemId::new(), &form_request()).unwrap();
+    let request =
+        AcpQuestionAdapter::form_request(&session(), ItemId::new(), &form_request()).unwrap();
     let ElicitationMode::Form(form) = request.mode else {
         panic!("form questions use v1 form mode");
     };
@@ -315,12 +320,17 @@ fn adapter_captures_initialize_form_capability_and_uses_the_real_scope_shape() {
     capabilities.capture_initialize(&initialize);
     assert!(capabilities.form_available());
 
-    let request = CreateElicitationRequest::new(
-        ElicitationFormMode::new(scope(), ElicitationSchema::new().string("answer", true)),
-        "Choose",
-    );
+    // Built through the adapter and not by hand: what is under test is the
+    // shape ego actually puts on the wire. The previous assertion here read
+    // `matches!(request.scope(), _)`, which every possible value satisfies,
+    // and it sat under a name claiming the real scope shape was checked.
+    let request = AcpQuestionAdapter::form_request(&session(), ItemId::new(), &single_request())
+        .expect("a valid single question maps");
     assert!(matches!(request.mode, ElicitationMode::Form(_)));
-    assert!(matches!(request.scope(), _));
+    let ElicitationScope::Session(scope) = request.scope() else {
+        panic!("a question asked inside a session is session-scoped: {request:?}");
+    };
+    assert_eq!(scope.session_id, session());
 }
 
 #[test]
@@ -369,7 +379,7 @@ fn multiple_response_uses_string_array_and_wrong_content_type_stays_invalid() {
 #[test]
 fn missing_form_capability_returns_stable_id_and_resume_guidance_without_settling() {
     let question = ItemId::new();
-    let adapter = AcpQuestionAdapter::new(CapabilityCapture::default());
+    let adapter = AcpQuestionAdapter::new(session(), CapabilityCapture::default());
     let outcome = block_on(adapter.elicitor().elicit(question, single_request()))
         .expect("missing capability is an unavailable question outcome");
     assert_eq!(outcome, QuestionOutcome::Unavailable);

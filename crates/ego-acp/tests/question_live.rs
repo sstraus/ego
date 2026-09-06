@@ -3,6 +3,7 @@
 use futures::executor::block_on;
 use std::sync::Arc;
 
+use agent_client_protocol_schema::v1;
 use ego_acp::question::{AcpQuestionAdapter, CapabilityCapture};
 use ego_core::event::id::ItemId;
 use ego_core::question::{Elicitor, QuestionMode, QuestionOption, QuestionRequest};
@@ -16,17 +17,56 @@ fn request() -> QuestionRequest {
     )
 }
 
+/// A question names the session that asked it.
+///
+/// This replaces an assertion that the outgoing request carried the durable
+/// question item as its scope. That was request scope, which ACP defines for
+/// what happens *outside* a session — before one is started — and it left a
+/// host with no way to tell which of the sessions it has attached is asking.
+/// The durable item is not lost by this: it never leaves ego, and it does not
+/// need to, because the answer arrives as the response to this very request.
 #[test]
-fn outgoing_live_request_uses_the_durable_question_item_as_its_scope() {
-    let id = ItemId::new();
-    let outgoing = AcpQuestionAdapter::form_request(id, &request()).unwrap();
-    let rendered = format!("{outgoing:?}");
-    assert!(rendered.contains(&id.to_string()));
+fn outgoing_live_request_is_scoped_to_the_session_that_asked() {
+    let session = v1::SessionId::new("01932d5e-0000-7000-8000-0000000000aa");
+    let outgoing = AcpQuestionAdapter::form_request(&session, ItemId::new(), &request()).unwrap();
+
+    let v1::ElicitationScope::Session(scope) = outgoing.scope() else {
+        panic!("a question asked inside a session is session-scoped: {outgoing:?}");
+    };
+    assert_eq!(scope.session_id, session);
+    // Not a tool call, and the optional field says so rather than being filled
+    // with the nearest id to hand.
+    assert!(scope.tool_call_id.is_none());
+}
+
+/// Two sessions asking at once stay apart.
+///
+/// One connection can have several sessions attached, and each question has to
+/// name its own. This is the case an unattributed scope cannot serve at all.
+#[test]
+fn two_sessions_asking_at_once_are_told_apart_by_their_scope() {
+    let first = v1::SessionId::new("01932d5e-0000-7000-8000-0000000000aa");
+    let second = v1::SessionId::new("01932d5e-0000-7000-8000-0000000000bb");
+
+    let scope_of = |session: &v1::SessionId| {
+        let outgoing =
+            AcpQuestionAdapter::form_request(session, ItemId::new(), &request()).unwrap();
+        match outgoing.scope() {
+            v1::ElicitationScope::Session(scope) => scope.session_id.clone(),
+            other => panic!("session scope expected: {other:?}"),
+        }
+    };
+
+    assert_eq!(scope_of(&first), first);
+    assert_eq!(scope_of(&second), second);
 }
 
 #[test]
 fn capability_absence_becomes_an_unavailable_question_outcome() {
-    let adapter = AcpQuestionAdapter::new(CapabilityCapture::default());
+    let adapter = AcpQuestionAdapter::new(
+        v1::SessionId::new("01932d5e-0000-7000-8000-0000000000aa"),
+        CapabilityCapture::default(),
+    );
     let id = ItemId::new();
     let outcome = block_on(adapter.elicitor().elicit(id, request()))
         .expect("missing capability is represented as unavailable");

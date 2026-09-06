@@ -168,8 +168,10 @@
 //!   `session/request_permission`, a request/response RPC pair the agent sends
 //!   the client, not a `session/update` notification.
 //! - **Question items** — questions travel over unstable form elicitation, a
-//!   request/response RPC pair with the stable question item as its scope, not
-//!   as transcript chunks or tool-call updates.
+//!   request/response RPC pair scoped to the session that asked, not as
+//!   transcript chunks or tool-call updates. The durable question item stays
+//!   inside ego: the answer arrives as the response to the very request that
+//!   asked, so nothing is correlated by an id a host would have to hold.
 //! - **Context checkpoints** — ACP has no checkpoint-author role or standard
 //!   session-transition update. Omitting one preserves its low-authority
 //!   context semantics instead of misreporting it as human or agent speech.

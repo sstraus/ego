@@ -5,11 +5,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use agent_client_protocol::{Client, ConnectionTo};
+use agent_client_protocol_schema::v1;
 use agent_client_protocol_schema::v1::{
     ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
-    ElicitationContentValue, ElicitationFormMode, ElicitationPropertySchema,
-    ElicitationRequestScope, ElicitationSchema, MultiSelectPropertySchema, RequestId,
-    StringPropertySchema,
+    ElicitationContentValue, ElicitationFormMode, ElicitationPropertySchema, ElicitationSchema,
+    ElicitationSessionScope, MultiSelectPropertySchema, StringPropertySchema,
 };
 use ego_core::event::id::ItemId;
 use ego_core::question::{
@@ -63,10 +63,17 @@ impl std::fmt::Display for QuestionMappingError {
 
 impl std::error::Error for QuestionMappingError {}
 
-/// One connection's ACP elicitation boundary. Durable pending state and
+/// One session's ACP elicitation boundary. Durable pending state and
 /// cancellation remain core-owned.
+///
+/// Per session and not per connection, for the same reason
+/// [`AcpPermissionAdapter`](crate::permission::AcpPermissionAdapter) is: one
+/// connection can have several sessions attached, and a question that does not
+/// name the session that asked it is one a host cannot route, cancel with its
+/// session, or attribute at all.
 #[derive(Clone)]
 pub struct AcpQuestionAdapter {
+    session: v1::SessionId,
     capabilities: CapabilityCapture,
     connection: Option<ConnectionTo<Client>>,
 }
@@ -74,6 +81,7 @@ pub struct AcpQuestionAdapter {
 impl std::fmt::Debug for AcpQuestionAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AcpQuestionAdapter")
+            .field("session", &self.session)
             .field("capabilities", &self.capabilities)
             .field("connected", &self.connection.is_some())
             .finish()
@@ -81,15 +89,21 @@ impl std::fmt::Debug for AcpQuestionAdapter {
 }
 
 impl AcpQuestionAdapter {
-    pub fn new(capabilities: CapabilityCapture) -> Self {
+    pub fn new(session: v1::SessionId, capabilities: CapabilityCapture) -> Self {
         Self {
+            session,
             capabilities,
             connection: None,
         }
     }
 
-    pub fn live(capabilities: CapabilityCapture, connection: ConnectionTo<Client>) -> Self {
+    pub fn live(
+        session: v1::SessionId,
+        capabilities: CapabilityCapture,
+        connection: ConnectionTo<Client>,
+    ) -> Self {
         Self {
+            session,
             capabilities,
             connection: Some(connection),
         }
@@ -99,7 +113,19 @@ impl AcpQuestionAdapter {
         Arc::new(self.clone())
     }
 
+    /// Build the request that asks one question of the connected host.
+    ///
+    /// The session is passed rather than read from `self` so the mapping can
+    /// be exercised without a connection, and so a caller cannot build a
+    /// request that names no session at all.
+    ///
+    /// `question` stays in the signature because it names the durable item
+    /// every mapping error and every settlement reports against. It is
+    /// deliberately not the ACP scope: the answer comes back as the response
+    /// to this request, so ego correlates without the host ever holding an
+    /// internal id.
     pub fn form_request(
+        session: &v1::SessionId,
         question: ItemId,
         request: &QuestionRequest,
     ) -> Result<CreateElicitationRequest, QuestionMappingError> {
@@ -132,7 +158,7 @@ impl AcpQuestionAdapter {
             QuestionMode::FreeText => ElicitationSchema::new().string("answer", true),
             QuestionMode::Form { schema } => map_form_schema(question, schema)?,
         };
-        let scope = ElicitationRequestScope::new(RequestId::Str(question.to_string()));
+        let scope = ElicitationSessionScope::new(session.clone());
         Ok(CreateElicitationRequest::new(
             ElicitationFormMode::new(scope, schema),
             request.prompt.clone(),
@@ -247,7 +273,7 @@ impl AcpQuestionAdapter {
                 "question {question} advertised ACP form elicitation without a live connection"
             ))
         })?;
-        let wire = Self::form_request(question, &request)
+        let wire = Self::form_request(&self.session, question, &request)
             .map_err(|error| ElicitorError::new(error.to_string()))?;
         let response = connection
             .send_request(wire)

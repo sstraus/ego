@@ -136,7 +136,8 @@ impl RunBindingsBuilder for RecordingRunBindingsBuilder {
             .lock()
             .expect("bindings builds")
             .push((session.clone(), capabilities));
-        let elicitor = AcpQuestionAdapter::live(capabilities, connection.clone()).elicitor();
+        let elicitor =
+            AcpQuestionAdapter::live(session.clone(), capabilities, connection.clone()).elicitor();
         RunExecutionBindings::new(
             Arc::new(RecordingSinkFactory {
                 creations: Arc::clone(&self.creations),
