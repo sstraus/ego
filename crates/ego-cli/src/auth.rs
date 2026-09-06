@@ -412,6 +412,32 @@ impl AuthStore {
             })
     }
 
+    /// Read the store without bringing any of it into existence.
+    ///
+    /// [`read`](Self::read) creates the home directory and the lock file in
+    /// order to take a write lock, which is right for a command about to log
+    /// in and wrong for `ego doctor`, whose whole contract is that observing
+    /// changes nothing. So: no store, no entries — an installation nobody has
+    /// authenticated has none, and saying so is a fact rather than a failure.
+    ///
+    /// The lock is taken shared, and only if it already exists. A store with
+    /// no lock beside it is one no writer has ever held, so reading it
+    /// unguarded races with nothing.
+    pub fn read_observed(&self) -> Result<BTreeMap<String, AuthEntry>, AuthError> {
+        if !self.path().exists() {
+            return Ok(BTreeMap::new());
+        }
+        let path = self.lock_path();
+        let Ok(file) = OpenOptions::new().read(true).open(&path) else {
+            return self.read_unlocked();
+        };
+        let lock = RwLock::new(file);
+        let _guard = lock
+            .read()
+            .map_err(|source| AuthError::Io { path, source })?;
+        self.read_unlocked()
+    }
+
     pub fn read(&self) -> Result<BTreeMap<String, AuthEntry>, AuthError> {
         let mut lock = self.open_lock()?;
         let _guard = lock.write().map_err(|source| AuthError::Io {

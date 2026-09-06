@@ -36,7 +36,8 @@ The working binary provides interactive sessions, headless runs, durable
 resume/listing, session forks and compaction, local and structurally sanitized
 exports, a shared current-model catalogue, subscription login, MCP configuration
 management, atomic user-config and permission-rule management, read-only hook
-catalogue inspection, an inbound MCP run server, and an ACP server. Ollama and
+catalogue inspection, a read-only redacted health diagnosis, an inbound MCP run
+server, and an ACP server. Ollama and
 OpenAI remain selectable directly; current subscription profiles use `ego auth`.
 Commands whose subsystem has not landed are refused by name instead of being
 advertised as working.
@@ -45,11 +46,18 @@ advertised as working.
 
 Available entry points are `ego [PROMPT]`, `ego run`, `ego resume`, `ego ls`,
 `ego fork`, `ego compact`, `ego export`, `ego usage`, `ego models`, `ego mcp`,
-`ego config`, `ego rules`, `ego hooks`, `ego mcp-server`, and `ego acp`, plus
-`ego auth` for subscription credentials. Promptless `ego resume [ID]` re-enters
+`ego config`, `ego rules`, `ego hooks`, `ego doctor`, `ego mcp-server`, and
+`ego acp`, plus `ego auth` for subscription credentials. Promptless `ego resume [ID]` re-enters
 the interactive driver; a resume carrying a prompt or `-` stays headless.
 `ego hooks ls` inspects the admitted system and user hook catalogue without
-reading project configuration.
+reading project configuration. `ego doctor [--json]` reports one ordered,
+redacted health snapshot and changes nothing it looks at; `/doctor` renders the
+same snapshot inside a session.
+
+`docs/reference/cli.md` and the scripts in `completions/` are generated from the
+parser and checked in. Regenerate them with
+`EGO_UPDATE_ARTIFACTS=1 cargo test -p ego-cli --test reference` after changing
+the grammar; the same test fails the build if you forget.
 
 For a subscription profile, log in before selecting its model:
 

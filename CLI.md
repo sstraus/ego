@@ -127,7 +127,7 @@ omitted when empty: two states, identical bytes.
 | `ego rules` | **yes** | `ls`, `allow`, `deny`, `revoke`, `remember`, and `explain` share the canonical rule grammar, atomic user store, and effective policy service; management ignores ambient `EGO_PROFILE` and never executes the explained call |
 | `ego usage` | **yes** | reports the versioned main/judge/compaction/total accounting DTO for this workspace; `--period` accepts `all` or a positive `s`/`m`/`h` duration and `--json` emits the same DTO. The text view is a compact `session model role in out cached cost` table that hides role rows with no activity unless `--all-roles` is given; the flag is presentation only and never reaches the JSON report |
 | `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
-| `ego doctor` | no | a unified diagnostic contract and actionable probes. Authentication, model resolution, sandbox execution, and MCP now exist, but no health projection composes their sanitized status and actionable remediation |
+| `ego doctor` | **yes** | one ordered, versioned, redacted `HealthSnapshot` over nine sections, rendered as text or `--json`. It reads existing facts only: it never logs in, refreshes a credential or a catalogue, reloads an extension, edits config, or calls a hosted provider. `/doctor` renders the same snapshot, and a fact ego cannot observe without mutating something is reported `not_checked` with its reason rather than omitted |
 
 All four M0b demonstrations now have an entry point (`ARCHITECTURE.md` §8): an
 interactive session, `ego run … | jq`, `kill → ego resume`, and the same
@@ -791,10 +791,8 @@ records one blocker observation; only the third consecutive observation of the
 same condition makes the goal terminal, and progress or a changed condition
 resets that audit.
 
-Current availability remains narrower for doctor: `/doctor` dispatches only
-the admitted MCP health projection, and root `ego doctor` is refused. M5
-replaces that partial handler and enables the root command together over one
-redacted, versioned, non-mutating health snapshot.
+`/doctor` renders the whole health snapshot §7 describes, not the MCP slice it
+once dispatched, and it is the same snapshot root `ego doctor` prints.
 
 The permission prompt has a plain representation that works in every terminal
 and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
@@ -1126,13 +1124,19 @@ candidate retention for every editor result.
 
 `ego doctor [--json]` and `/doctor` are two renderings of one ordered,
 versioned `HealthSnapshot`: config, credential status, session store,
-sandbox/backend, provider/model catalogue, MCP, skills, and hooks. Doctor is
+sandbox/backend, provider/model catalogue, MCP, skills, hooks, and the ACP
+surface this build advertises — the protocol version it serves and each `_ego`
+extension with its version, which is the one fact about ego that only a second
+implementation could previously discover. Doctor is
 non-mutating and redacted. It may read existing facts and perform bounded local
 or loopback checks; it never logs in, refreshes credentials or catalogues,
 reloads extensions, edits config, probes a hosted provider, uploads logs, or
 widens egress. `ok`, `warning`, `error`, and `not_checked` stay distinct; root
-exit is 1 only when an operational error exists. Until the shared service
-lands, root doctor is unavailable and slash doctor remains MCP-only.
+exit is 1 only when an operational error exists. Two facts ego cannot read
+without mutating something are reported `not_checked` with the reason and the
+command that would establish them: sandbox capability, which is measured by
+spawning probe children, and the provider catalogue, whose refresh may reach
+the network.
 
 ### 7.1 Operator-supplied identity headers
 

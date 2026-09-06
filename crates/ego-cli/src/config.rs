@@ -35,6 +35,12 @@ use crate::output::{self, Diagnostics, Stdout, empty_listing};
 /// The system layer: an administrator's fleet defaults and the only source of
 /// non-relaxable ceilings.
 const SYSTEM_CONFIG: &str = "/etc/ego/config.toml";
+/// The directory [`SYSTEM_CONFIG`] lives in.
+///
+/// Shared with `doctor`, which may name a path inside it: an administrator put
+/// that file there deliberately, so saying which one is broken is the help,
+/// not a leak.
+pub(crate) const SYSTEM_CONFIG_DIR: &str = "/etc/ego";
 /// Overrides `~/.ego` for the user layer (`CLI.md` §7).
 const EGO_HOME: &str = "EGO_HOME";
 /// Environment overrides, between the flags and the project layers.

@@ -53,6 +53,7 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
         Invocation::Config(_) => panic!("`config` takes no Args: use the config tests for it"),
         Invocation::Rules(_) => panic!("`rules` takes no Args: use the rules tests for it"),
         Invocation::SessionMetadata(_) => panic!("metadata is covered by metadata grammar tests"),
+        Invocation::Doctor(_) => panic!("`doctor` takes no Args: use the doctor tests for it"),
     }
 }
 
@@ -79,6 +80,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         Invocation::Config(_) => panic!("`config` takes no Args: use the config tests for it"),
         Invocation::Rules(_) => panic!("`rules` takes no Args: use the rules tests for it"),
         Invocation::SessionMetadata(_) => panic!("metadata is covered by metadata grammar tests"),
+        Invocation::Doctor(_) => panic!("`doctor` takes no Args: use the doctor tests for it"),
     }
 }
 
@@ -1101,5 +1103,50 @@ fn every_command_the_document_offers_is_in_exactly_one_table() {
         seen,
         cli::BUILT.len() + cli::UNBUILT.len(),
         "every table entry must be a command §2 actually offers"
+    );
+}
+
+/// The two by-name refusal rules, exercised without their tables.
+///
+/// `UNBUILT` and `RETIRED` are both empty: everything `CLI.md` §2 documents is
+/// built, and nothing has been retired. Every other test about them therefore
+/// loops over nothing and passes, which is the shape a rule has right before
+/// somebody deletes it as dead code and reinvents it badly under deadline.
+/// These two hold the rules themselves against a fixture table.
+#[test]
+fn a_documented_but_unbuilt_command_is_refused_by_name_with_what_it_waits_on() {
+    let table = [("teleport", "a transporter")];
+
+    let refusal = cli::unbuilt_refusal("ego", "teleport", &table)
+        .expect("a name in the table is refused")
+        .to_string();
+    assert!(
+        refusal.contains("ego teleport") && refusal.contains("a transporter"),
+        "the refusal must name the command and the subsystem: {refusal}"
+    );
+
+    // The other half, and the more important one: an unrecognised first token
+    // is a *prompt*, not a typo, so refusing it by name would break `ego what
+    // does this do`.
+    assert!(
+        cli::unbuilt_refusal("ego", "explain", &table).is_none(),
+        "a word that is not in the table is a prompt"
+    );
+}
+
+#[test]
+fn a_retired_flag_is_refused_by_name_with_its_replacement() {
+    let table = [("--warp", "--fold")];
+
+    let refusal = cli::retired_refusal("--warp", &table)
+        .expect("a retired flag is refused")
+        .to_string();
+    assert!(
+        refusal.contains("--warp") && refusal.contains("--fold"),
+        "the refusal must name both spellings: {refusal}"
+    );
+    assert!(
+        cli::retired_refusal("--budget", &table).is_none(),
+        "a live flag is not refused"
     );
 }

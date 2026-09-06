@@ -254,10 +254,11 @@ afterthought — the CLI's `--budget` and ACP's `UsageUpdate` both feed off them
 LM Studio, vLLM and llama.cpp-server are all rows in the provider table on the
 openai-completions shape, working from M0 with `auth: None`. Beyond the table:
 `ego models` queries the local daemon's catalogue live (`/v1/models`,
-`/api/tags`) instead of a generated file. The final M5 `ego doctor` observes a
-redacted health snapshot that may include bounded loopback liveness; the
-current root command is unavailable and the current slash handler reports MCP
-health only. `--offline` (pi's flag) asserts no non-loopback egress — enforced at
+`/api/tags`) instead of a generated file. `ego doctor` and `/doctor` observe one
+redacted health snapshot that may include bounded loopback liveness. It reports
+what is *configured* rather than what is admitted, because admission starts
+servers, and it reports the model catalogue as `not_checked` rather than
+enumerate a provider. `--offline` (pi's flag) asserts no non-loopback egress — enforced at
 the `Http` seam, not by convention — which is also the air-gapped posture for
 the server deployment (`docs/09-server-companion.md`). Cost accounting reports
 zero-cost usage rather than pretending local tokens are billable.

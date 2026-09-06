@@ -482,8 +482,14 @@ fn linux_landlock_hidden_current_exe_helper_runs_before_clap_and_provider() {
                 finished.stderr
             );
             let all_output = format!("{}\n{}", finished.stdout, finished.stderr);
+            // Not the word "missing": `unmet_confinement` never writes it.
+            // What the refusal promises is the flag that asked for the
+            // guarantee and the backend that could not demonstrate it, and a
+            // host where the backend *does* work never reaches this branch —
+            // so an assertion on a word nobody emits reads as passing
+            // everywhere except the one place it is meant to hold.
             assert!(
-                all_output.contains("missing"),
+                all_output.contains("could not be demonstrated on this host"),
                 "refusal lacked capability evidence: {all_output}"
             );
             assert!(
@@ -542,7 +548,7 @@ fn cli_offline_refuses_even_when_filesystem_sandbox_is_off() {
             );
             let all_output = format!("{}\n{}", finished.stdout, finished.stderr);
             assert!(
-                all_output.contains("missing"),
+                all_output.contains("--sandbox off could not be demonstrated"),
                 "startup refusal was not surfaced: {all_output}"
             );
             assert!(

@@ -85,6 +85,7 @@ struct Actions {
 #[derive(Debug, Clone, Copy)]
 enum SurfaceActionEffect {
     Mode,
+    Export,
     Plan,
     Yolo,
     Permissions,
@@ -125,6 +126,7 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Yolo => SurfaceActionEffect::Yolo,
             ActionId::Permissions => SurfaceActionEffect::Permissions,
             ActionId::Compact => SurfaceActionEffect::Compact,
+            ActionId::Export => SurfaceActionEffect::Export,
             ActionId::Fork => SurfaceActionEffect::Fork,
             ActionId::Sessions => SurfaceActionEffect::Sessions,
             ActionId::Usage => SurfaceActionEffect::Usage,
@@ -808,6 +810,7 @@ impl Seat {
             ActionId::Yolo,
             ActionId::Permissions,
             ActionId::Compact,
+            ActionId::Export,
             ActionId::Fork,
             ActionId::Sessions,
             ActionId::Usage,
@@ -1712,6 +1715,14 @@ fn apply_surface_effect(
         SurfaceActionEffect::New => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::New)));
         }
+        SurfaceActionEffect::Export => {
+            if busy {
+                status.lock().expect("surface status lock").notice =
+                    Some("export is unavailable while a turn is running".to_owned());
+            } else {
+                return Some(Line::HostCommand(HostCommand::Action(ActionId::Export)));
+            }
+        }
         SurfaceActionEffect::Name => {
             return route_session_metadata(
                 status,
@@ -1859,19 +1870,11 @@ fn apply_surface_effect(
             }
         }
         SurfaceActionEffect::Doctor => {
-            let actions = status
-                .lock()
-                .expect("surface status lock")
-                .mcp_actions
-                .clone()
-                .expect("the enabled doctor action has an installed handler");
-            let registry_status = actions.registry.status();
-            let diagnostics = registry_status.mcp_errors();
-            status.lock().expect("surface status lock").notice = Some(if diagnostics.is_empty() {
-                "doctor: MCP healthy".to_string()
-            } else {
-                format!("doctor: {}", diagnostics.join(" | "))
-            });
+            // The whole snapshot, not the MCP corner of one. `/doctor` and
+            // `ego doctor` render the same value now, so an operator cannot be
+            // told two different things about the same installation depending
+            // on which surface they happened to ask from.
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Doctor)));
         }
         SurfaceActionEffect::Quit => {
             let (drafts, queue) = {
@@ -1902,8 +1905,7 @@ fn apply_surface_effect(
             return Some(Line::Ended);
         }
         SurfaceActionEffect::Version => {
-            status.lock().expect("surface status lock").notice =
-                Some(format!("ego {}", env!("CARGO_PKG_VERSION")));
+            status.lock().expect("surface status lock").notice = Some(crate::build_info::summary());
         }
     }
     repaint_status(status);

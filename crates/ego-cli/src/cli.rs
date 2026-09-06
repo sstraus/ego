@@ -52,6 +52,8 @@ pub enum Invocation {
     Mcp(Box<McpArgs>),
     /// `ego hooks ls [--json]` — the admitted system/user hook catalogue.
     Hooks(HooksArgs),
+    /// `ego doctor [--json]` — the read-only redacted health snapshot.
+    Doctor(DoctorArgs),
     /// `ego run [PROMPT]` — the headless one-shot of `CLI.md` §2.
     Run(Box<Args>),
     /// `ego resume [ID] [PROMPT]` — the same run against a session that
@@ -162,6 +164,7 @@ pub const BUILT: &[&str] = &[
     "usage",
     "models",
     "hooks",
+    "doctor",
     "acp",
     "auth",
     "mcp",
@@ -173,14 +176,18 @@ pub const BUILT: &[&str] = &[
 /// A command `CLI.md` §2 documents that this build does not implement, and the
 /// subsystem it is waiting on.
 ///
-/// The subcommand twin of [`UNAVAILABLE`], and it exists for the same reason.
-/// In the first availability table, `run` was the only implemented named
-/// command, so every other documented command fell through to the *interactive*
-/// refusal below — which
+/// Empty, because `ego doctor` was the last one and story `regression_case` built it.
+/// Every command `CLI.md` §2 documents is now in [`BUILT`].
+///
+/// It ships empty rather than being deleted, for the reason [`RETIRED`] ships
+/// empty. The subcommand twin of [`UNAVAILABLE`]: in the first availability
+/// table `run` was the only implemented named command, so every other
+/// documented command fell through to the *interactive* refusal below — which
 /// told someone who typed `ego resume` that the permission dialog was missing.
 /// True, and about a surface they had not asked for. `CLI.md` §3.1 states the
 /// standard for flags ("refused **by name**, with the subsystem it waits on")
-/// and nothing had applied it one level up.
+/// and nothing had applied it one level up. The next command documented before
+/// it is written wants that refusal already there, not invented under deadline.
 ///
 /// A tuple rather than a struct, matching [`RETIRED`], because both halves are
 /// needed by the test that binds this table to the document.
@@ -188,12 +195,7 @@ pub const BUILT: &[&str] = &[
 /// `waiting_on` is sourced from `ARCHITECTURE.md` §8's milestone table where it
 /// places the work, and from the code where it does not — a subsystem that
 /// table does not place still gets a reason, never a milestone invented for it.
-pub const UNBUILT: &[(&str, &str)] = &[(
-    "doctor",
-    "a unified diagnostic contract and actionable probes. Authentication, \
-         model resolution, sandbox execution, and MCP now exist, but no health \
-         projection composes their sanitized status and actionable remediation",
-)];
+pub const UNBUILT: &[(&str, &str)] = &[];
 
 /// A flag that was removed, and what replaced it.
 ///
@@ -202,6 +204,52 @@ pub const UNBUILT: &[(&str, &str)] = &[(
 /// replacement, and the moment that rule is easiest to forget is the first
 /// retirement — when there is no mechanism, only a note in a changelog.
 pub const RETIRED: &[(&str, &str)] = &[];
+
+/// Every `CLI.md` §2 command as one clap tree.
+///
+/// Argv is not parsed through this. The top level is a hand-written dispatch
+/// because `ego PROMPT` has to mean a prompt and not an unknown subcommand,
+/// and clap has no shape for that. What this exists for is everything
+/// *derived* from the grammar — the reference and the shell completions — so
+/// they come from the same definitions the parser uses instead of being a
+/// second description of it that can quietly stop being true.
+///
+/// The pairing with [`BUILT`] is the invariant, and a test holds it: a command
+/// this build offers and this tree omits would be missing from the reference
+/// and uncompletable, while the reverse would document one that does not exist.
+pub fn root_command() -> clap::Command {
+    use clap::CommandFactory;
+    // Each subcommand names itself `ego X` for its own `--help`; under a root
+    // it is just `X`. The bin name is deliberately *not* set here — clap
+    // derives `ego X` for every subcommand when the tree is built, and an
+    // explicit one blocks that derivation and takes `clap_complete` with it.
+    fn named(name: &'static str, command: clap::Command) -> clap::Command {
+        command.name(name)
+    }
+    clap::Command::new("ego")
+        .about("Run an agent, from one command line.")
+        // `ego help` is not one of the 17 commands `CLI.md` §2 documents, and
+        // building the tree would otherwise invent it — putting a subcommand in
+        // the reference and the completions that the real parser answers by
+        // treating "help" as a prompt.
+        .disable_help_subcommand(true)
+        .subcommand(named("run", RunCommand::command()))
+        .subcommand(named("resume", ResumeCommand::command()))
+        .subcommand(named("fork", ForkCommand::command()))
+        .subcommand(named("compact", CompactCommand::command()))
+        .subcommand(named("export", ExportCommand::command()))
+        .subcommand(named("ls", LsCommand::command()))
+        .subcommand(named("usage", UsageCommand::command()))
+        .subcommand(named("models", ModelsCommand::command()))
+        .subcommand(named("hooks", HooksCommand::command()))
+        .subcommand(named("doctor", DoctorCommand::command()))
+        .subcommand(named("acp", AcpCommand::command()))
+        .subcommand(named("auth", AuthCommand::command()))
+        .subcommand(named("mcp", McpCommand::command()))
+        .subcommand(named("config", ConfigCommand::command()))
+        .subcommand(named("rules", RulesCommand::command()))
+        .subcommand(named("mcp-server", McpServerCommand::command()))
+}
 
 /// The flag name in `token`, if it is one. `--budget=2.5$` is `--budget`.
 fn flag_name(token: &str) -> Option<&str> {
@@ -214,16 +262,41 @@ fn flag_name(token: &str) -> Option<&str> {
     })
 }
 
+/// The refusal a retired flag earns, if `name` names one in `table`.
+///
+/// The table is an argument and not [`RETIRED`] read directly, because
+/// `RETIRED` is empty. A rule whose only exercise is a loop over an empty
+/// slice is a rule that has never run, and the first retirement is exactly
+/// when nobody can afford to discover that. Same for [`unbuilt_refusal`], and
+/// for the same reason those two tables ship empty rather than being deleted.
+pub fn retired_refusal(name: &str, table: &[(&str, &str)]) -> Option<UsageError> {
+    table
+        .iter()
+        .find(|(retired, _)| *retired == name)
+        .map(|(_, replacement)| UsageError(format!("{name} has been retired; use {replacement}")))
+}
+
+/// The refusal a documented-but-unbuilt command earns, if `first` names one.
+pub fn unbuilt_refusal(program: &str, first: &str, table: &[(&str, &str)]) -> Option<UsageError> {
+    table
+        .iter()
+        .find(|(name, _)| *name == first)
+        .map(|(name, waiting_on)| {
+            UsageError(format!(
+                "`{program} {name}` is documented in CLI.md §2 and is not available \
+                 in this build: it is waiting on {waiting_on}"
+            ))
+        })
+}
+
 /// Refuse a documented-but-unavailable or retired flag, by name.
 fn check_matrix(tokens: &[String]) -> Result<(), UsageError> {
     for token in tokens {
         let Some(name) = flag_name(token) else {
             continue;
         };
-        if let Some((_, replacement)) = RETIRED.iter().find(|(retired, _)| *retired == name) {
-            return Err(UsageError(format!(
-                "{name} has been retired; use {replacement}"
-            )));
+        if let Some(refusal) = retired_refusal(name, RETIRED) {
+            return Err(refusal);
         }
         if let Some(entry) = UNAVAILABLE.iter().find(|entry| entry.flags.contains(&name)) {
             return Err(UsageError(format!(
@@ -414,6 +487,15 @@ pub struct ModelsArgs {
 /// The exact `ego hooks ls [--json]` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HooksArgs {
+    pub json: bool,
+}
+
+/// The exact `ego doctor [--json]` request.
+///
+/// One field, because doctor takes no subject: it reports on this
+/// installation, and there is only one of those.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorArgs {
     pub json: bool,
 }
 
@@ -798,6 +880,18 @@ struct ModelsCommand {
 struct HooksCommand {
     #[command(subcommand)]
     action: HooksSubcommand,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego doctor",
+    about = "Report a read-only redacted health snapshot of this installation.",
+    disable_help_subcommand = true
+)]
+struct DoctorCommand {
+    /// Emit the exact versioned health snapshot.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1255,9 +1349,11 @@ struct Flags {
     #[arg(long)]
     profile: Option<String>,
 
+    /// Suppress progress and diagnostics on stderr; stdout is unaffected.
     #[arg(short = 'q', long)]
     quiet: bool,
 
+    /// Never emit ANSI colour, whatever the terminal claims to support.
     #[arg(long)]
     no_color: bool,
 }
@@ -1608,12 +1704,9 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
     // `ego [PROMPT]`, so a word that is not on this list is a prompt, and
     // refusing every unrecognised token would turn a prompt into a typo.
     if let Some(first) = head.first()
-        && let Some((name, waiting_on)) = UNBUILT.iter().find(|(name, _)| name == first)
+        && let Some(refusal) = unbuilt_refusal(&program, first, UNBUILT)
     {
-        return Err(UsageError(format!(
-            "`{program} {name}` is documented in CLI.md §2 and is not available \
-             in this build: it is waiting on {waiting_on}"
-        )));
+        return Err(refusal);
     }
 
     // `ego --help` on its own, which reached the interactive refusal below and
@@ -1821,6 +1914,10 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Command(parsed) => match parsed.action {
                 HooksSubcommand::Ls { json } => Ok(Invocation::Hooks(HooksArgs { json })),
             },
+        },
+        Some("doctor") => match clap_or_answer::<DoctorCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Doctor(DoctorArgs { json: parsed.json })),
         },
         Some("auth") => match clap_or_answer::<AuthCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),

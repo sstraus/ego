@@ -33,13 +33,23 @@ const STALE_AFTER: Duration = Duration::from_secs(60);
 /// workspace" means.
 const NAMESPACE: uuid::Uuid = uuid::uuid!("8b8f5ec6-0e4b-4b6e-9a5f-2f6b2c8e6a10");
 
+/// Where sessions live under a given home.
+///
+/// Its own function because `ego doctor` is handed a home rather than reading
+/// the environment for one, and two spellings of "sessions" is one too many:
+/// a diagnosis that looked in a different directory than every run writes to
+/// would be worse than no diagnosis.
+pub fn sessions_in(home: &std::path::Path) -> PathBuf {
+    home.join("sessions")
+}
+
 /// Where sessions live: `--session-dir`, else `$EGO_HOME/sessions`.
 pub fn store_root(explicit: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
     if let Some(dir) = explicit {
         return Ok(dir.clone());
     }
     crate::config::ego_home()
-        .map(|home| home.join("sessions"))
+        .map(|home| sessions_in(&home))
         .ok_or_else(|| {
             UsageError(
                 "no home directory to keep sessions in: set EGO_HOME or pass --session-dir"

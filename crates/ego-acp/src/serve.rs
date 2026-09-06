@@ -177,6 +177,23 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
     }
 }
 
+/// What `durable_agent_with_compaction` puts in its `initialize` answer.
+///
+/// Exposed so a local surface can say what this build advertises without
+/// connecting to it. regression case is why: TUICommander read the pause extension
+/// as two separately versioned entries while this crate publishes one `hold`
+/// naming both methods, and because nothing local could report the shape, the
+/// only way to find the mismatch was to run a second implementation and watch
+/// it fail.
+///
+/// `true, true` is a fact of the signature it mirrors and not a guess:
+/// [`durable_agent_with_compaction`] takes `compaction` and `lifecycle` as
+/// plain `Arc`s rather than `Option`s, so it passes `Some` for both on every
+/// path there is.
+pub fn durable_advertisement() -> v1::AgentCapabilities {
+    capabilities(true, true)
+}
+
 fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
     let capabilities = v1::AgentCapabilities::new()
         .load_session(lifecycle)

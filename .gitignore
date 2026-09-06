@@ -8,3 +8,7 @@
 # different flags, so alternating between them rebuilds the whole workspace
 # every time. `CARGO_TARGET_DIR=target-clippy` keeps the two caches apart.
 /target-clippy
+
+# cargo-mutants scratch output: a run leaves a full copy of the tree behind.
+mutants.out/
+mutants.out.old/

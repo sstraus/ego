@@ -5970,6 +5970,44 @@ async fn execute<S: EventSink>(
                                         }
                                         continue;
                                     }
+                                    // The same snapshot `ego doctor` prints,
+                                    // built by the same probes. Two renderings
+                                    // of one value is the whole contract; two
+                                    // implementations would be two diagnoses.
+                                    repl::Line::HostCommand(repl::HostCommand::Action(
+                                        repl::actions::ActionId::Doctor,
+                                    )) => {
+                                        diagnostics.note(&crate::doctor::observed(root.clone()));
+                                        continue;
+                                    }
+                                    // Sanitized, and to the transcript rather
+                                    // than to a file this action would have had
+                                    // to invent a name for. `ego export ID` is
+                                    // where a file is asked for by name.
+                                    repl::Line::HostCommand(repl::HostCommand::Action(
+                                        repl::actions::ActionId::Export,
+                                    )) => {
+                                        // The same workspace and store the
+                                        // session was opened against, so
+                                        // `ego --directory X` exports X and not
+                                        // whatever the process happens to sit in.
+                                        let args = crate::cli::ExportArgs {
+                                            source: active.id(),
+                                            sanitize: true,
+                                            format: crate::cli::ExportFormat::Md,
+                                            file: None,
+                                            session_dir: args.session_dir.clone(),
+                                            directory: args.directory.clone(),
+                                        };
+                                        match exported(&args) {
+                                            Ok(rendered) => diagnostics.note(&rendered),
+                                            Err(termination) => diagnostics.note(&format!(
+                                                "the session could not be exported: {}",
+                                                termination.exit_reason()
+                                            )),
+                                        }
+                                        continue;
+                                    }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Sessions,
                                     )) => {

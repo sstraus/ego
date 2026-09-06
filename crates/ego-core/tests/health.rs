@@ -259,3 +259,63 @@ fn an_item_names_its_probe_its_subject_and_when_the_fact_was_true() {
         Some("ego auth login anthropic"),
     );
 }
+
+#[test]
+fn a_section_label_is_the_key_a_json_reader_looks_for() {
+    // The label is wire vocabulary, not a caption: a rendering prints it and a
+    // reader keys on it, so it has to be the snake_case spelling serde derives
+    // for the same variant. Anything that agrees with itself but not with the
+    // serialization splits the two readers apart.
+    for section in HealthSection::ORDER {
+        let serialized = serde_json::to_value(section).expect("a section serializes");
+        assert_eq!(
+            serde_json::Value::String(section.label().to_owned()),
+            serialized,
+            "{section:?} labels itself differently from how it serializes",
+        );
+    }
+
+    assert_eq!(HealthSection::SessionStore.label(), "session_store");
+    assert_eq!(HealthSection::Acp.label(), "acp");
+}
+
+#[test]
+fn every_section_has_its_own_label() {
+    // A duplicated or empty label makes two subsystems indistinguishable in the
+    // one output an operator reads to tell them apart.
+    let mut labels: Vec<&str> = HealthSection::ORDER.iter().map(|s| s.label()).collect();
+    labels.sort_unstable();
+    let count = labels.len();
+    labels.dedup();
+    assert_eq!(labels.len(), count, "two sections share a label");
+    assert!(
+        labels.iter().all(|label| !label.is_empty()),
+        "a section labels itself with nothing",
+    );
+}
+
+#[test]
+fn a_detail_prints_the_text_it_was_checked_with() {
+    // Display is how a detail reaches a terminal. Printing anything other than
+    // the accepted text would put a diagnosis on screen that no redaction check
+    // ever saw.
+    let fixed = HealthDetail::fixed("the catalogue holds no providers");
+    assert_eq!(fixed.to_string(), "the catalogue holds no providers");
+    assert_eq!(fixed.to_string(), fixed.as_str());
+
+    let checked = HealthDetail::sanitized(
+        "config.load",
+        "/home/op/.ego/config.toml is unreadable",
+        &roots(),
+    )
+    .expect("a path inside a visible root is publishable");
+    assert_eq!(
+        checked.to_string(),
+        "/home/op/.ego/config.toml is unreadable"
+    );
+    assert_eq!(
+        format!("detail: {checked}"),
+        "detail: /home/op/.ego/config.toml is unreadable",
+        "a detail interpolated into a sentence carries its whole text",
+    );
+}

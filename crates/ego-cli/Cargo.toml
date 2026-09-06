@@ -21,6 +21,11 @@ ego-tools = { path = "../ego-tools" }
 agent-client-protocol = { version = "2.0.0", features = ["unstable_protocol_v2"] }
 agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_protocol_v2", "unstable_session_fork"] }
 clap = { version = "4.6.6", features = ["derive"] }
+# The reference and the completions are generated from the same clap
+# definitions argv is parsed with, so a documented flag that no longer parses
+# cannot survive: it disappears from both at once. Without this they were a
+# second, hand-maintained description of the grammar.
+clap_complete = "4.5"
 # Only to name `Event` in the one `EditMode` that intercepts a key before the
 # editor's keymap sees it. reedline re-exports `KeyCode` and `KeyModifiers`
 # but not `Event`, so this cannot be avoided by re-export. The version must
