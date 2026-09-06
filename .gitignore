@@ -4,3 +4,7 @@
 .claude/**
 .wiz/**
 /target
+# Clippy and test runs must not share one target directory: they compile with
+# different flags, so alternating between them rebuilds the whole workspace
+# every time. `CARGO_TARGET_DIR=target-clippy` keeps the two caches apart.
+/target-clippy

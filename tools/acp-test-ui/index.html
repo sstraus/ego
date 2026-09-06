@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ego ACP test UI</title>
+    <style>
+      :root {
+        --bg: #12141a;
+        --panel: #191c24;
+        --line: #2a2f3b;
+        --text: #d8dde8;
+        --dim: #8b93a7;
+        --out: #7aa2f7;
+        --in: #9ece6a;
+        --note: #e0af68;
+        --err: #f7768e;
+        --ask: #bb9af7;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: var(--bg);
+        color: var(--text);
+        height: 100vh;
+        display: grid;
+        grid-template-columns: 340px 1fr;
+      }
+      aside {
+        border-right: 1px solid var(--line);
+        overflow-y: auto;
+        padding: 12px;
+        background: var(--panel);
+      }
+      main { display: grid; grid-template-rows: auto 1fr; min-width: 0; }
+      h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 16px 0 6px; }
+      h2:first-child { margin-top: 0; }
+      label { display: block; font-size: 11px; color: var(--dim); margin-top: 8px; }
+      input, select, textarea, button {
+        font: inherit; width: 100%; background: #0e1016; color: var(--text);
+        border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px;
+      }
+      textarea { resize: vertical; }
+      button { cursor: pointer; background: #222735; }
+      button:hover { background: #2c3243; }
+      button.primary { background: #24405c; border-color: #35577a; }
+      button.danger { background: #4a2530; border-color: #6d3543; }
+      .row { display: flex; gap: 6px; margin-top: 8px; }
+      .methods { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+      .methods button { text-align: left; font-size: 11px; padding: 4px 6px; }
+      nav { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); align-items: center; }
+      nav button { width: auto; padding: 3px 10px; }
+      nav .spacer { flex: 1; }
+      .pane { overflow-y: auto; padding: 12px; }
+      .pane[hidden] { display: none; }
+      .entry { border-left: 3px solid var(--line); padding: 2px 0 2px 8px; margin-bottom: 6px; white-space: pre-wrap; word-break: break-word; }
+      .entry .head { color: var(--dim); font-size: 11px; }
+      .out { border-color: var(--out); }
+      .in { border-color: var(--in); }
+      .note { border-color: var(--note); }
+      .err { border-color: var(--err); color: #ffb3bf; }
+      .ask { border-color: var(--ask); }
+      .bubble { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+      .bubble .who { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
+      .bubble.user { border-color: #35577a; }
+      .bubble.agent { border-color: #3d5a3a; }
+      .bubble.thought { border-color: #5a4a7a; color: var(--dim); font-style: italic; }
+      .bubble.tool { border-color: #6a5a2a; }
+      .bubble.other { border-color: var(--line); color: var(--dim); }
+      .status { display: inline-block; font-size: 11px; padding: 0 5px; border-radius: 3px; background: #2a2f3b; margin-left: 6px; }
+      .pending { border: 1px solid var(--ask); border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+      .pill { font-size: 11px; color: var(--dim); }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #555; margin-right: 6px; }
+      .dot.live { background: #9ece6a; }
+      pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; color: var(--dim); font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h2>Agent process</h2>
+      <label>binary<input id="bin" /></label>
+      <label>workspace (also the <code>cwd</code> sent to session/new)<input id="workspace" /></label>
+      <label>model (EGO_MODEL)<input id="model" value="ollama/gemma4:e4b-mlx" /></label>
+      <label>sandbox
+        <select id="sandbox">
+          <option value="off">off</option>
+          <option value="ro">ro</option>
+          <option value="workspace">workspace</option>
+          <option value="">(leave to config)</option>
+        </select>
+      </label>
+      <label>permission mode
+        <select id="mode">
+          <option value="default">default</option>
+          <option value="auto">auto</option>
+          <option value="edits">edits</option>
+          <option value="yolo">yolo</option>
+          <option value="plan">plan</option>
+          <option value="">(leave to config)</option>
+        </select>
+      </label>
+      <div class="row">
+        <button class="primary" id="start">start</button>
+        <button class="danger" id="stop">stop</button>
+      </div>
+      <div class="row"><span class="pill"><span class="dot" id="dot"></span><span id="pid">not running</span></span></div>
+
+      <h2>Session</h2>
+      <label>sessionId<input id="session" placeholder="filled by session/new" /></label>
+
+      <h2>Calls</h2>
+      <div class="methods" id="methods"></div>
+
+      <h2>Params</h2>
+      <label>method<input id="method" value="initialize" /></label>
+      <textarea id="params" rows="9"></textarea>
+      <div class="row">
+        <button class="primary" id="send">send request</button>
+        <button id="notify">notify</button>
+      </div>
+    </aside>
+
+    <main>
+      <nav>
+        <button id="tab-chat" class="primary">conversation</button>
+        <button id="tab-wire">wire</button>
+        <div class="spacer"></div>
+        <button id="clear">clear</button>
+      </nav>
+      <div class="pane" id="chat"></div>
+      <div class="pane" id="wire" hidden></div>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const chat = $('chat');
+      const wire = $('wire');
+      let autoScroll = true;
+
+      // ---- method palette -------------------------------------------------
+      // Exactly the surface `ego acp` answers, plus the two it must refuse, so
+      // the refusals are one click away too.
+      const sid = () => $('session').value;
+      const cwd = () => $('workspace').value;
+      const CALLS = {
+        initialize: () => ({
+          protocolVersion: 1,
+          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, elicitation: { form: {} } },
+          clientInfo: { name: 'acp-test-ui', version: '1' },
+        }),
+        'session/new': () => ({ cwd: cwd(), mcpServers: [] }),
+        'session/list': () => ({ cwd: cwd() }),
+        'session/load': () => ({ sessionId: sid(), cwd: cwd(), mcpServers: [] }),
+        'session/resume': () => ({ sessionId: sid(), cwd: cwd(), mcpServers: [] }),
+        'session/fork': () => ({ sessionId: sid(), cwd: cwd(), mcpServers: [] }),
+        'session/prompt': () => ({ sessionId: sid(), prompt: [{ type: 'text', text: 'say hi in three words' }] }),
+        'session/cancel': () => ({ sessionId: sid() }),
+        'session/close': () => ({ sessionId: sid() }),
+        'session/delete': () => ({ sessionId: sid() }),
+        '_ego/compact': () => ({ v: 1, sessionId: sid(), requestId: crypto.randomUUID() }),
+        'session/set_mode': () => ({ sessionId: sid(), modeId: 'default' }),
+        authenticate: () => ({ methodId: 'none' }),
+      };
+      const NOTIFICATIONS = new Set(['session/cancel']);
+
+      const palette = $('methods');
+      for (const name of Object.keys(CALLS)) {
+        const button = document.createElement('button');
+        button.textContent = name;
+        button.onclick = () => {
+          $('method').value = name;
+          $('params').value = JSON.stringify(CALLS[name](), null, 2);
+        };
+        palette.appendChild(button);
+      }
+
+      // ---- transport ------------------------------------------------------
+      async function post(route, payload) {
+        const response = await fetch(route, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload ?? {}),
+        });
+        const answer = await response.json();
+        if (!response.ok) log('err', 'harness', answer.error ?? JSON.stringify(answer));
+        return answer;
+      }
+
+      $('start').onclick = async () => {
+        const answer = await post('/start', {
+          bin: $('bin').value,
+          workspace: $('workspace').value,
+          model: $('model').value,
+          sandbox: $('sandbox').value,
+          mode: $('mode').value,
+        });
+        if (answer.pid) log('note', 'harness', `agent pid ${answer.pid}`);
+      };
+      $('stop').onclick = () => post('/stop');
+      $('send').onclick = () => dispatch(false);
+      $('notify').onclick = () => dispatch(true);
+
+      function dispatch(forceNotification) {
+        const method = $('method').value.trim();
+        let params;
+        try {
+          params = JSON.parse($('params').value || '{}');
+        } catch (error) {
+          log('err', 'params', String(error));
+          return;
+        }
+        const asNotification = forceNotification || NOTIFICATIONS.has(method);
+        post(asNotification ? '/notify' : '/request', { method, params });
+      }
+
+      // ---- rendering ------------------------------------------------------
+      function scroll(pane) {
+        if (autoScroll) pane.scrollTop = pane.scrollHeight;
+      }
+
+      function log(kind, head, text) {
+        const entry = document.createElement('div');
+        entry.className = `entry ${kind}`;
+        const title = document.createElement('div');
+        title.className = 'head';
+        title.textContent = `${new Date().toLocaleTimeString()}  ${head}`;
+        const pre = document.createElement('pre');
+        pre.textContent = text;
+        entry.append(title, pre);
+        wire.appendChild(entry);
+        scroll(wire);
+      }
+
+      /** Message bubbles, keyed so chunks of one message coalesce. */
+      const bubbles = new Map();
+      /** Accumulated tool-call state, keyed by `toolCallId`. */
+      const calls = new Map();
+      function bubble(key, kind, who) {
+        let node = bubbles.get(key);
+        if (!node) {
+          node = document.createElement('div');
+          node.className = `bubble ${kind}`;
+          const label = document.createElement('div');
+          label.className = 'who';
+          label.textContent = who;
+          const text = document.createElement('div');
+          text.className = 'text';
+          node.append(label, text);
+          chat.appendChild(node);
+          bubbles.set(key, node);
+        }
+        scroll(chat);
+        return node;
+      }
+
+      function renderUpdate(sessionId, update) {
+        const kind = update.sessionUpdate;
+        const text = update.content?.text ?? '';
+        if (kind === 'user_message_chunk') {
+          bubble(`u:${update.messageId}`, 'user', 'user').querySelector('.text').textContent += text;
+        } else if (kind === 'agent_message_chunk') {
+          bubble(`a:${update.messageId}`, 'agent', 'agent').querySelector('.text').textContent += text;
+        } else if (kind === 'agent_thought_chunk') {
+          bubble(`t:${update.messageId}`, 'thought', 'thinking').querySelector('.text').textContent += text;
+        } else if (kind === 'tool_call' || kind === 'tool_call_update') {
+          // `tool_call_update` carries only what changed, so the call is
+          // accumulated rather than replaced: a re-render off the last update
+          // alone would drop the title and the input that opened it.
+          const state = { ...(calls.get(update.toolCallId) ?? {}), ...update };
+          calls.set(update.toolCallId, state);
+          const node = bubble(`c:${update.toolCallId}`, 'tool', `tool ${state.title ?? ''}`);
+          node.querySelector('.who').textContent = `tool ${state.title ?? ''}`;
+          const status = state.status ? `<span class="status">${state.status}</span>` : '';
+          node.querySelector('.text').innerHTML =
+            `<div>${escapeHtml(JSON.stringify(state.rawInput ?? {}))}${status}</div>` +
+            (state.content ?? [])
+              .map((piece) => `<pre>${escapeHtml(piece.content?.text ?? JSON.stringify(piece))}</pre>`)
+              .join('');
+        } else if (kind === 'usage_update') {
+          const cost = update.cost ? ` · ${update.cost.amount} ${update.cost.currency}` : '';
+          bubble('usage', 'other', 'usage').querySelector('.text').textContent =
+            `${update.used} / ${update.size} tokens${cost}`;
+        } else {
+          const node = bubble(`o:${kind}:${chat.children.length}`, 'other', kind);
+          node.querySelector('.text').textContent = JSON.stringify(update, null, 2);
+        }
+      }
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+      }
+
+      /** An agent-to-client request: rendered as a form, answered by hand. */
+      function renderAsk(message) {
+        const card = document.createElement('div');
+        card.className = 'pending';
+        const title = document.createElement('div');
+        title.className = 'who';
+        title.textContent = `agent asks: ${message.method} (id ${message.id})`;
+        const detail = document.createElement('pre');
+        detail.textContent = JSON.stringify(message.params, null, 2);
+        const answer = document.createElement('textarea');
+        answer.rows = 4;
+        answer.value = JSON.stringify(defaultAnswer(message), null, 2);
+        const row = document.createElement('div');
+        row.className = 'row';
+        const accept = document.createElement('button');
+        accept.className = 'primary';
+        accept.textContent = 'respond';
+        accept.onclick = async () => {
+          try {
+            await post('/respond', { id: message.id, result: JSON.parse(answer.value) });
+            card.remove();
+          } catch (error) {
+            log('err', 'respond', String(error));
+          }
+        };
+        const refuse = document.createElement('button');
+        refuse.className = 'danger';
+        refuse.textContent = 'error -32601';
+        refuse.onclick = async () => {
+          await post('/respond', { id: message.id, error: { code: -32601, message: 'Method not found' } });
+          card.remove();
+        };
+        row.append(accept, refuse);
+        card.append(title, detail, answer, row);
+        chat.appendChild(card);
+        scroll(chat);
+      }
+
+      function defaultAnswer(message) {
+        if (message.method === 'elicitation/create') {
+          const schema = message.params?.mode?.form?.schema ?? message.params?.form?.schema ?? {};
+          const properties = schema.properties ?? {};
+          const content = {};
+          for (const [name, property] of Object.entries(properties)) {
+            if (Array.isArray(property.enum)) content[name] = property.enum[0];
+            else if (Array.isArray(property.options)) content[name] = [property.options[0]];
+            else content[name] = '';
+          }
+          return { action: 'accept', content };
+        }
+        if (message.method === 'session/request_permission') {
+          const option = message.params?.options?.[0]?.optionId ?? 'allow';
+          return { outcome: { outcome: 'selected', optionId: option } };
+        }
+        return {};
+      }
+
+      // ---- event stream ---------------------------------------------------
+      const stream = new EventSource('/events');
+      stream.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        switch (data.kind) {
+          case 'started':
+            live(true, `pid ${data.pid}`);
+            log('note', 'started', [`${data.bin} ${data.args.join(' ')}`, ...data.notes].join('\n'));
+            break;
+          case 'exit':
+            live(false, `exited (code ${data.code}, signal ${data.signal})`);
+            log('note', 'exit', `code ${data.code} signal ${data.signal}`);
+            break;
+          case 'error':
+            live(false, 'failed');
+            log('err', 'spawn', data.message);
+            break;
+          case 'stderr':
+            log('err', 'stderr', data.line);
+            break;
+          case 'unparsable':
+            log('err', 'not JSON', `${data.message}\n${data.line}`);
+            break;
+          case 'client_out':
+            log('out', `→ ${data.message.method ?? 'response'} ${data.message.id ?? ''}`, JSON.stringify(data.message, null, 2));
+            break;
+          case 'agent_notification':
+            log('in', `← ${data.message.method}`, JSON.stringify(data.message.params, null, 2));
+            if (data.message.method === 'session/update') {
+              renderUpdate(data.message.params.sessionId, data.message.params.update);
+            }
+            break;
+          case 'agent_request':
+            log('ask', `← ${data.message.method} (needs an answer)`, JSON.stringify(data.message.params, null, 2));
+            renderAsk(data.message);
+            break;
+          case 'agent_response': {
+            const failed = data.message.error !== undefined;
+            log(failed ? 'err' : 'in', `← response ${data.message.id}`, JSON.stringify(failed ? data.message.error : data.message.result, null, 2));
+            const session = data.message.result?.sessionId;
+            if (session) $('session').value = session;
+            const stop = data.message.result?.stopReason;
+            if (stop) bubble(`s:${data.message.id}`, 'other', 'stopReason').querySelector('.text').textContent = stop;
+            if (failed) bubble(`e:${data.message.id}`, 'other', `error ${data.message.error.code}`).querySelector('.text').textContent =
+              `${data.message.error.message}\n${data.message.error.data ?? ''}`;
+            break;
+          }
+        }
+      };
+
+      function live(running, text) {
+        $('dot').className = running ? 'dot live' : 'dot';
+        $('pid').textContent = text;
+      }
+
+      // ---- chrome ---------------------------------------------------------
+      $('tab-chat').onclick = () => showTab('chat');
+      $('tab-wire').onclick = () => showTab('wire');
+      function showTab(which) {
+        chat.hidden = which !== 'chat';
+        wire.hidden = which !== 'wire';
+        $('tab-chat').className = which === 'chat' ? 'primary' : '';
+        $('tab-wire').className = which === 'wire' ? 'primary' : '';
+      }
+      $('clear').onclick = () => {
+        chat.innerHTML = '';
+        wire.innerHTML = '';
+        bubbles.clear();
+        calls.clear();
+      };
+      for (const pane of [chat, wire]) {
+        pane.addEventListener('scroll', () => {
+          autoScroll = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 40;
+        });
+      }
+
+      fetch('/state')
+        .then((response) => response.json())
+        .then((state) => {
+          $('bin').value = state.defaults.bin;
+          $('workspace').value = state.defaults.workspace;
+          live(state.running, state.running ? `pid ${state.pid}` : 'not running');
+          $('method').value = 'initialize';
+          $('params').value = JSON.stringify(CALLS.initialize(), null, 2);
+        });
+    </script>
+  </body>
+</html>
