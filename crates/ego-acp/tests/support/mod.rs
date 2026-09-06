@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -478,6 +478,14 @@ pub struct Store {
     entries: Arc<Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>>,
     metadata: Arc<Mutex<BTreeMap<SessionId, SessionMeta>>>,
     effects: Arc<EffectCounts>,
+    /// Sessions whose inactive writer lease is currently held.
+    ///
+    /// The real store's lease is an fd lock on a per-session file, so a second
+    /// acquisition while the first is alive fails. A double that hands one out
+    /// unconditionally makes every concurrency test on this surface vacuous:
+    /// two writers both pass their read-decide step and both append, and the
+    /// test blames the code for what the double allowed.
+    leases: Arc<Mutex<BTreeSet<SessionId>>>,
     uncertain_settlement: Arc<Mutex<Option<String>>>,
 }
 
@@ -487,8 +495,26 @@ impl Store {
             entries: Arc::default(),
             metadata: Arc::default(),
             effects,
+            leases: Arc::default(),
             uncertain_settlement: Arc::default(),
         }
+    }
+
+    /// The semantic sequence a lifecycle append must expect, as the real store
+    /// recomputes it from the log before every compare-and-append.
+    fn semantic_seq(&self, id: &SessionId) -> Seq {
+        self.entries
+            .lock()
+            .expect("support entries")
+            .get(id)
+            .into_iter()
+            .flatten()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionEntry::Event(event) => Some(event.env.seq),
+                SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
+            })
+            .unwrap_or(Seq::ZERO)
     }
 }
 
@@ -629,9 +655,12 @@ impl LeasedLifecycleAppend for SupportLease {
 
     fn compare_and_append_lifecycle(
         &self,
-        _expected: Seq,
+        expected: Seq,
         event: DomainEvent,
     ) -> Result<LifecyclePublication, LifecycleAppendError> {
+        if self.store.semantic_seq(&self.session) != expected {
+            return Err(LifecycleAppendError::Conflict);
+        }
         if let EventKind::SessionTitleChanged { title } = &event.kind
             && let Some(meta) = self
                 .store
@@ -647,6 +676,16 @@ impl LeasedLifecycleAppend for SupportLease {
             .append(&self.session, &event)
             .map_err(LifecycleAppendError::Store)?;
         Ok(LifecyclePublication::Published)
+    }
+}
+
+impl Drop for SupportLease {
+    fn drop(&mut self) {
+        self.store
+            .leases
+            .lock()
+            .expect("support leases")
+            .remove(&self.session);
     }
 }
 
@@ -692,6 +731,9 @@ impl SessionLifecycleStore for Store {
         &self,
         id: SessionId,
     ) -> Result<Box<dyn InactiveSessionLease + '_>, LifecycleAppendError> {
+        if !self.leases.lock().expect("support leases").insert(id) {
+            return Err(LifecycleAppendError::LeaseHeld);
+        }
         Ok(Box::new(SupportLease {
             session: id,
             store: self.clone(),

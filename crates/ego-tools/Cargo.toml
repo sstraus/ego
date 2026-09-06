@@ -65,3 +65,4 @@ workspace = true
 
 [dev-dependencies]
 ego-tools = { path = ".", features = ["test-support"] }
+uuid = { version = "1.24.1", features = ["v7"] }

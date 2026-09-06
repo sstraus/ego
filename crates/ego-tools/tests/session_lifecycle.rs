@@ -18,7 +18,7 @@ use ego_core::goal::{GoalOwner, GoalTransition};
 use ego_core::run::RequestId;
 use ego_core::session_lifecycle::LeasedLifecycleAppend;
 use ego_core::session_lifecycle::{
-    ActivityFuture, CloseFuture, ClosedSession, HoldSignalFuture, LifecycleAppendError,
+    ActivityFuture, CloseFuture, ClosedSession, HoldSignalFuture, HoldState, LifecycleAppendError,
     SessionActivity, SessionLifecycle, SessionLifecycleStore, SessionMetadata, SessionRunLifecycle,
 };
 use ego_core::state::SessionState;
@@ -803,6 +803,69 @@ fn reopened_fork_seed_accepts_active_goal_with_and_without_title() {
         assert_eq!(inherited.owner, source_goal.value.owner);
         assert_eq!(inherited.ceilings, source_goal.value.ceilings);
     }
+}
+
+/// The hold events must survive the real store, not just a permissive double.
+///
+/// `compare_and_append_lifecycle_leased` whitelists the event kinds it will
+/// admit, and a kind missing from that list is refused as an invalid lifecycle
+/// append. The ACP fixture accepts every kind, so the whole `_ego/pause`
+/// surface can be green against the double while no pause can be written to a
+/// session on disk. This test is the one that would have said so.
+#[test]
+fn a_hold_and_its_release_survive_the_real_session_log() {
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let sessions = dir.path().join("sessions");
+    let service = || {
+        SessionLifecycle::new(
+            Arc::new(JsonlStore::new(
+                sessions.clone(),
+                workspace.clone(),
+                Box::new(OsIo),
+            )),
+            Arc::new(InactiveRuns),
+            Arc::new(FixedClock),
+        )
+    };
+    let held = RequestId::from_uuid(uuid::Uuid::from_u128(0x96));
+    let released = RequestId::from_uuid(uuid::Uuid::from_u128(0x97));
+
+    let id = service().create(workspace.clone()).unwrap().id;
+    assert_eq!(
+        futures::executor::block_on(service().pause(id, held)).unwrap(),
+        HoldState::Paused,
+        "pausing an idle session on the real store"
+    );
+
+    // A fresh service over the same directory: the boundary has to be read
+    // back from the log, not remembered in the process that wrote it.
+    let reopened = service();
+    let entries = session_entries(
+        &JsonlStore::new(sessions.clone(), workspace.clone(), Box::new(OsIo)),
+        &id,
+    );
+    let kinds: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionEntry::Event(event) => Some(&event.kind),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(kinds.as_slice(), [
+            EventKind::SessionPauseRequested { request: asked },
+            EventKind::SessionPaused { request: reached },
+        ] if *asked == held && *reached == held),
+        "the log holds the request/boundary pair naming the request that asked: {kinds:?}"
+    );
+
+    assert_eq!(
+        futures::executor::block_on(reopened.release(id, released)).unwrap(),
+        HoldState::Running,
+        "releasing a hold the log alone proves"
+    );
 }
 
 #[test]

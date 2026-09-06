@@ -1951,6 +1951,12 @@ impl JsonlStore {
                         | EventKind::SessionDeleted
                         | EventKind::GoalSet { .. }
                         | EventKind::GoalTransitioned { .. }
+                        // A hold is written by whoever holds the writer lease,
+                        // which is exactly this path: the two appends of the
+                        // pause pair and the release that ends it.
+                        | EventKind::SessionPauseRequested { .. }
+                        | EventKind::SessionPaused { .. }
+                        | EventKind::SessionResumed { .. }
                 );
             if !valid_event {
                 return Err(invalid_log("invalid lifecycle event append"));

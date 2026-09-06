@@ -399,3 +399,67 @@ async fn a_malformed_hold_request_is_refused_before_the_lifecycle_is_asked() {
 
     connection.abort().await;
 }
+
+/// Two hosts on one session, holding it at the same moment.
+///
+/// The hold is a fact about the session and not about the connection that
+/// asked, so the log records one hold and not two. A per-connection hold would
+/// have let each host believe it owned a separate one, and the first release
+/// would have freed a session the other still thought it was holding.
+///
+/// What is *not* asserted is that both hosts are answered `paused`. The loser
+/// of the writer-lease race is refused, and whether a given run produces a
+/// loser at all depends on the scheduler; asserting both answers would be
+/// asserting a linearization the lease does not provide and would make this
+/// test flaky rather than strict. One hold between them is the contract, and
+/// it holds on every interleaving.
+// A real thread race and not cooperative interleaving: on the single-threaded
+// runtime the two round trips would take turns at their first await and prove
+// only that the second request sees the first one's result. The lease is what
+// has to hold here, and only two threads can lean on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_connections_holding_at_once_establish_one_hold_between_them() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut opener = support::Connected::new(fixture.router());
+    opener.initialize().await;
+    let session = opener.new_session(ROOT).await["result"]["sessionId"]
+        .as_str()
+        .expect("session/new returns a session id")
+        .to_owned();
+
+    let mut first = support::Connected::new(fixture.router());
+    let mut second = support::Connected::new(fixture.router());
+    first.initialize().await;
+    second.initialize().await;
+    let (left, right) = futures::join!(
+        first.request("_ego/pause", hold_params(&session, REQUEST)),
+        second.request("_ego/pause", hold_params(&session, SECOND_REQUEST)),
+    );
+
+    let answered: Vec<_> = [&left.0, &right.0]
+        .into_iter()
+        .filter(|response| response["result"]["state"] == "paused")
+        .collect();
+    assert!(
+        !answered.is_empty(),
+        "neither host was told the session is paused: {:?} / {:?}",
+        left.0,
+        right.0
+    );
+    assert_eq!(
+        fixture.recorded_holds(&session),
+        1,
+        "two hosts established two holds on one session"
+    );
+
+    // And one release frees it, because there was only ever one hold. The
+    // host that releases need not be the host that asked.
+    let (released, _) = second
+        .request("_ego/resume", hold_params(&session, THIRD_REQUEST))
+        .await;
+    assert_eq!(state(&released), "running", "one release: {released}");
+
+    first.abort().await;
+    second.abort().await;
+    opener.abort().await;
+}

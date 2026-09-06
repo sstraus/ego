@@ -164,3 +164,42 @@ fn compaction_response_names_source_sequence_target_and_successor() {
         assert!(response.get(field).is_some(), "missing {field}");
     }
 }
+
+/// The other half of the advertisement, and the one that was missing: a build
+/// composed without the compaction port says so twice.
+///
+/// `durable_agent` is exactly that build — it passes no compaction command —
+/// so the claim is not hypothetical. Section 3's rule is that an unadvertised
+/// operation is unavailable rather than partially emulated, and an agent that
+/// advertised nothing but answered anyway would break the half of it a host
+/// cannot see.
+#[tokio::test]
+async fn an_agent_without_the_compaction_port_neither_advertises_nor_serves_compact() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = support::Connected::new(fixture.router());
+    let response = connection.initialize().await;
+
+    assert!(
+        response["result"]["agentCapabilities"]["_meta"]["ego"]
+            .get("compact")
+            .is_none(),
+        "compaction was advertised without a port to serve it: {response}"
+    );
+
+    let (refused, _) = connection
+        .request(
+            "_ego/compact",
+            serde_json::json!({
+                "v": 1,
+                "sessionId": "00000000-0000-0000-0000-000000000068",
+                "requestId": "00000000-0000-0000-0000-000000000069"
+            }),
+        )
+        .await;
+    assert_eq!(
+        refused["error"]["code"], -32601,
+        "_ego/compact answered without a port: {refused}"
+    );
+
+    connection.abort().await;
+}
