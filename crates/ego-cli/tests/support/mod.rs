@@ -99,6 +99,14 @@ pub struct Plan {
     /// list runs out, so a test that does not care how many turns happen does
     /// not have to count them.
     pub completions: Vec<Reply>,
+    /// A status and body for `/api/tags` in place of the installed list.
+    ///
+    /// The control plane otherwise always succeeds, so the only provider
+    /// failure observable from outside is a *generation* one — and story
+    /// `regression_case` is about the *pre-turn* half, where the catalogue request
+    /// carries the operator's credential and the answer's bytes must not be
+    /// relayed into what a terminal or an ACP host is shown.
+    pub tags_refusal: Option<(u16, String)>,
 }
 
 impl Default for Plan {
@@ -107,6 +115,7 @@ impl Default for Plan {
             installed: vec![MODEL.to_string()],
             context_length: Some(32_768),
             completions: vec![Reply::Sse(text("It is done."))],
+            tags_refusal: None,
         }
     }
 }
@@ -342,6 +351,15 @@ fn serve(
     }
 
     match path.as_str() {
+        "/api/tags" if plan.tags_refusal.is_some() => {
+            let (status, body) = plan.tags_refusal.as_ref().expect("just matched");
+            write!(
+                stream,
+                "HTTP/1.1 {status} Stub\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            stream.flush()
+        }
         "/api/tags" => {
             let models: Vec<serde_json::Value> = plan
                 .installed
@@ -1121,5 +1139,85 @@ impl Running {
             stderr,
             _keep: self._keep,
         }
+    }
+}
+
+/// A running `ego acp`, spoken to one JSON-RPC frame at a time.
+///
+/// The framing loop below — write a request, then read past the session
+/// updates that arrive first until *this* id comes back — is the only way to
+/// observe what a host actually receives, and two suites now need it. It lives
+/// here rather than in either of them so the next one does not write a third
+/// copy that skips updates slightly differently.
+pub struct AcpHost {
+    running: Running,
+    inbox: BufReader<std::process::ChildStdout>,
+    outbox: std::process::ChildStdin,
+    next_id: u64,
+}
+
+impl AcpHost {
+    /// Adopt a process already spawned with `.subcommand("acp")` and
+    /// `spawn_conversing()`, taking both of its pipes.
+    pub fn adopt(mut running: Running) -> Self {
+        let inbox = BufReader::new(running.child.stdout.take().expect("stdout was piped"));
+        let outbox = running.child.stdin.take().expect("stdin was piped");
+        Self {
+            running,
+            inbox,
+            outbox,
+            next_id: 1,
+        }
+    }
+
+    /// Write one request and read until *its* answer, skipping the session
+    /// updates that arrive first.
+    pub fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": params,
+        });
+        writeln!(self.outbox, "{frame}").expect("the agent is reading");
+        self.outbox.flush().expect("the agent is reading");
+        loop {
+            let mut line = String::new();
+            let read = self
+                .inbox
+                .read_line(&mut line)
+                .expect("the agent is writing");
+            assert!(read > 0, "the agent closed without answering {method}");
+            let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if message.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+                return message;
+            }
+        }
+    }
+
+    pub fn initialize(&mut self) -> serde_json::Value {
+        self.request(
+            "initialize",
+            serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        )
+    }
+
+    /// `session/new` for `cwd`, returning the session id minted.
+    pub fn new_session(&mut self, cwd: &str) -> String {
+        let opened = self.request(
+            "session/new",
+            serde_json::json!({"cwd": cwd, "mcpServers": []}),
+        );
+        opened["result"]["sessionId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("session/new answered without a session id: {opened}"))
+            .to_owned()
+    }
+
+    /// Close stdin and collect the process's stderr.
+    pub fn finish(self) -> String {
+        drop(self.outbox);
+        self.running.finish().stderr
     }
 }

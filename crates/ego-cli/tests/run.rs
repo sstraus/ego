@@ -798,6 +798,52 @@ fn a_schema_mismatch_is_re_prompted_and_the_validated_document_is_the_result() {
     assert_eq!(stub.generations().len(), 2);
 }
 
+/// regression case: a pre-turn catalogue refusal reaches the terminal scrubbed.
+///
+/// The mid-turn half has been collapsed to a fixed string by
+/// `RunTermination::after_turn` since it was written; the pre-turn half relayed
+/// `String::from_utf8_lossy` of the endpoint's answer all the way out to
+/// stderr. A catalogue request carries the operator's credential, so a provider
+/// that echoes it into its error document — or a proxy that reflects request
+/// headers into an interception page — put that material on the terminal.
+///
+/// What must survive is what an operator acts on: which endpoint, and the
+/// status. Reintroducing the body fails this on the marker.
+#[test]
+fn a_refused_catalogue_answer_reaches_stderr_with_its_status_and_none_of_its_body() {
+    let stub = Stub::start(Plan {
+        tags_refusal: Some((
+            503,
+            r#"{"error":"upstream: authorization Bearer catalogue-terminal-secret"}"#.to_string(),
+        )),
+        ..Plan::default()
+    });
+    let finished = Ego::against(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
+        .run();
+
+    assert_ne!(finished.code, Some(0), "a refused catalogue ran the turn");
+    let stderr = &finished.stderr;
+    assert!(
+        stderr.contains("api/tags"),
+        "stderr does not name the endpoint that refused: {stderr}"
+    );
+    assert!(
+        stderr.contains("503"),
+        "stderr does not carry the status: {stderr}"
+    );
+    assert!(
+        !stderr.contains("catalogue-terminal-secret"),
+        "stderr relayed the endpoint's body: {stderr}"
+    );
+}
+
 /// Exit 2: the command line was wrong. Several spellings of wrong, each named.
 #[test]
 fn a_command_line_that_cannot_be_honoured_exits_two_saying_why() {

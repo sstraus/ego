@@ -4,8 +4,8 @@ mod support;
 
 use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::oauth::{
-    BuiltInFlow, FlowError, LoginGrant, OAuthToken, ProviderAuth, TokenStatus, built_in,
-    codex_account_id, provider_auth, provider_base,
+    BuiltInFlow, FlowError, LoginGrant, OAuthToken, ProviderAuth, TokenRefusal, TokenStatus,
+    built_in, codex_account_id, provider_auth, provider_base,
 };
 use ego_ai::provider::ProviderRow;
 use ego_core::permit::{OneHopResponse, TransportError};
@@ -208,6 +208,266 @@ fn rfc_device_flows_name_the_provider_endpoints_and_clients() {
             "{id}"
         );
     }
+}
+
+/// A body no honest classification would ever need to quote.
+///
+/// It carries three things a real identity provider has been seen to echo: the
+/// refresh token it was sent, the client secret, and a reflected
+/// `Authorization` header. If any of them appears in a rendered `FlowError`,
+/// it appears on an operator's terminal and in the ACP host's `error.data`.
+const ECHOED_SECRETS: &str = r#"{"error":"invalid_grant","error_description":"refresh_token oauth-refresh-secret was already used","client_secret":"oauth-client-secret","request_headers":{"authorization":"Bearer oauth-access-secret"}}"#;
+
+fn leaks(rendered: &str) -> Option<&'static str> {
+    [
+        "oauth-refresh-secret",
+        "oauth-client-secret",
+        "oauth-access-secret",
+        "error_description",
+        "request_headers",
+    ]
+    .into_iter()
+    .find(|secret| rendered.contains(secret))
+}
+
+/// regression case: no token-endpoint body reaches a rendered `FlowError`.
+///
+/// Every non-2xx classification is driven, including the two that were never
+/// covered — `Temporary` and `Protocol` — against a body built to be
+/// recognisable if it is relayed. Reintroducing `String::from_utf8_lossy` into
+/// any of the three variants fails this test on the exact substring it leaked.
+#[test]
+fn no_token_refusal_renders_the_endpoint_body_yet_all_keep_provider_and_status() {
+    /// A status, the classification it must be typed as, and the sentence the
+    /// operator is left with in place of the bytes.
+    type Case = (u16, fn(&FlowError) -> bool, &'static str);
+
+    let cases: [Case; 4] = [
+        (
+            429,
+            |error| {
+                matches!(
+                    error,
+                    FlowError::Temporary {
+                        status: 429,
+                        cause: TokenRefusal::RateLimited,
+                        ..
+                    }
+                )
+            },
+            "rate-limited",
+        ),
+        (
+            401,
+            |error| {
+                matches!(
+                    error,
+                    FlowError::ReloginRequired {
+                        cause: TokenRefusal::CredentialRejected,
+                        ..
+                    }
+                )
+            },
+            "rejected the credential",
+        ),
+        (
+            400,
+            |error| {
+                matches!(
+                    error,
+                    FlowError::ReloginRequired {
+                        cause: TokenRefusal::GrantInvalidated,
+                        ..
+                    }
+                )
+            },
+            "grant no longer valid",
+        ),
+        (
+            503,
+            |error| {
+                matches!(
+                    error,
+                    FlowError::Protocol {
+                        status: 503,
+                        cause: TokenRefusal::Unanticipated,
+                        ..
+                    }
+                )
+            },
+            "does not classify",
+        ),
+    ];
+
+    for flow in BuiltInFlow::all() {
+        for (status, typed, sentence) in &cases {
+            // 503 must reach `Protocol`, so it cannot carry the invalidation
+            // marker that would make it a relogin; the other three are driven
+            // against the full echoing body.
+            let body = if *status == 503 {
+                br#"{"error":"upstream_unavailable","upstream":"oauth-access-secret"}"#.to_vec()
+            } else {
+                ECHOED_SECRETS.as_bytes().to_vec()
+            };
+
+            for (path, error) in [
+                (
+                    "read_token",
+                    flow.read_token(TokenStatus::new(*status, &body), NOW_MS, Some("refresh"))
+                        .expect_err("a refused token answer was accepted"),
+                ),
+                (
+                    "read_device_authorization",
+                    flow.read_device_authorization(TokenStatus::new(*status, &body))
+                        .expect_err("a refused device answer was accepted"),
+                ),
+            ] {
+                assert!(
+                    typed(&error),
+                    "{}/{path}/{status}: not the expected classification: {error:?}",
+                    flow.id()
+                );
+                let rendered = error.to_string();
+                assert!(
+                    rendered.contains(flow.id()),
+                    "{}/{path}/{status} does not name the provider: {rendered}",
+                    flow.id()
+                );
+                assert!(
+                    rendered.contains(sentence),
+                    "{}/{path}/{status} does not say what happened: {rendered}",
+                    flow.id()
+                );
+                if let Some(secret) = leaks(&rendered) {
+                    panic!("{}/{path}/{status} leaked {secret}: {rendered}", flow.id());
+                }
+                // The debug form travels too: `tracing::warn!(%error)` and
+                // `{error:?}` in a panic are both operator-visible.
+                if let Some(secret) = leaks(&format!("{error:?}")) {
+                    panic!(
+                        "{}/{path}/{status} leaked {secret} in Debug: {error:?}",
+                        flow.id()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The body is scrubbed from the error and *kept* in the log.
+///
+/// Criterion three of regression case: dropping the bytes from the rendered failure
+/// must not blind an operator debugging a real outage, so the whole answer goes
+/// to `tracing` — as a field of its own, so a structured subscriber can drop it
+/// without losing the classification beside it.
+///
+/// The subscriber is hand-written rather than pulled in from
+/// `tracing-subscriber`, which is not a dependency of this workspace. Note what
+/// that means and what this test therefore does *not* claim: no ego binary
+/// installs a subscriber today, so nothing consumes this event yet. What is
+/// proven here is that `ego-ai` emits it — the library half — which is the same
+/// contract `ego-acp`'s existing `tracing::warn!` sites rely on.
+#[test]
+fn the_endpoint_body_is_absent_from_the_error_and_present_in_the_log() {
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+
+    #[derive(Default)]
+    struct Captured {
+        bodies: Vec<String>,
+        statuses: Vec<String>,
+    }
+
+    struct Recorder(Arc<Mutex<Captured>>);
+
+    impl Visit for Recorder {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            let mut captured = self.0.lock().expect("no writer panics");
+            match field.name() {
+                "body" => captured.bodies.push(format!("{value:?}")),
+                "status" => captured.statuses.push(format!("{value:?}")),
+                _ => {}
+            }
+        }
+    }
+
+    struct Collector(Arc<Mutex<Captured>>);
+
+    impl tracing::Subscriber for Collector {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            event.record(&mut Recorder(Arc::clone(&self.0)));
+        }
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
+    }
+
+    let captured = Arc::new(Mutex::new(Captured::default()));
+    let error = {
+        let _guard = tracing::subscriber::set_default(Collector(Arc::clone(&captured)));
+        built_in("anthropic")
+            .unwrap()
+            .read_token(
+                TokenStatus::new(400, ECHOED_SECRETS.as_bytes()),
+                NOW_MS,
+                Some("refresh"),
+            )
+            .unwrap_err()
+    };
+
+    assert!(leaks(&error.to_string()).is_none(), "{error}");
+    let captured = captured.lock().expect("no writer panics");
+    assert!(
+        captured
+            .bodies
+            .iter()
+            .any(|body| body.contains("oauth-refresh-secret")),
+        "the endpoint's answer was dropped rather than logged: {:?}",
+        captured.bodies
+    );
+    assert!(
+        captured
+            .statuses
+            .iter()
+            .any(|status| status.contains("400")),
+        "the log does not carry the status beside the body: {:?}",
+        captured.statuses
+    );
+}
+
+/// The status is kept even where the classification is the same sentence.
+///
+/// `Temporary` and `Protocol` are the two variants an operator triages by
+/// number — 429 means wait, 503 means the vendor is down — so dropping the
+/// body must not drop that with it.
+#[test]
+fn a_scrubbed_refusal_still_carries_the_number_an_operator_triages_on() {
+    let flow = built_in("anthropic").unwrap();
+    let limited = flow
+        .read_token(
+            TokenStatus::new(429, br#"{"error":"slow down, oauth-access-secret"}"#),
+            NOW_MS,
+            Some("refresh"),
+        )
+        .unwrap_err();
+    assert!(limited.to_string().contains("429"));
+    let down = flow
+        .read_token(
+            TokenStatus::new(503, br#"{"error":"down, oauth-access-secret"}"#),
+            NOW_MS,
+            Some("refresh"),
+        )
+        .unwrap_err();
+    assert!(down.to_string().contains("503"));
+    assert!(leaks(&limited.to_string()).is_none());
+    assert!(leaks(&down.to_string()).is_none());
 }
 
 #[test]

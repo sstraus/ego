@@ -49,6 +49,7 @@ fn fixture_plan() -> Plan {
             Reply::Sse(support::text(&checkpoint())),
             Reply::Sse(support::text("target complete")),
         ],
+        ..Plan::default()
     }
 }
 

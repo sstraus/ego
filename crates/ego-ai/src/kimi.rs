@@ -202,11 +202,7 @@ async fn current_models(
     if !(200..300).contains(&answer.status) {
         return Err(ResolveError::EndpointUnreachable {
             endpoint: format!("{} {}", row.id(), url),
-            message: format!(
-                "it answered {}: {}",
-                answer.status,
-                String::from_utf8_lossy(&answer.bytes)
-            ),
+            message: crate::http::refusal(&answer),
         });
     }
     let envelope: ModelsEnvelope = serde_json::from_slice(&answer.bytes).map_err(|error| {

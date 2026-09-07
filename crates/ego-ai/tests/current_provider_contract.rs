@@ -643,6 +643,57 @@ fn rejected_kimi_credentials_are_typed_and_render_relogin_without_secret_materia
     }
 }
 
+/// regression case: the statuses *outside* the 401/402/403 carve-out are scrubbed too.
+///
+/// `rejected_kimi_credentials_are_typed_and_render_relogin_without_secret_material`
+/// above proves the credential-rejection branch, which was the only body-free
+/// one. Every other non-2xx fell through to `EndpointUnreachable` carrying
+/// `String::from_utf8_lossy` of whatever the endpoint answered — and a
+/// catalogue request carries the operator's key, so an endpoint that echoes it,
+/// or a proxy that reflects the request headers into an interception page, put
+/// that material on a terminal and into the ACP host's `error.data`.
+#[test]
+fn catalogue_refusals_outside_the_credential_carve_out_are_scrubbed_but_keep_the_status() {
+    const ECHOED: &str = r#"{"error":"upstream said: authorization Bearer test-key","upstream_body_marker":"catalogue-body-secret"}"#;
+    for status in [400, 404, 429, 500, 503] {
+        let catalogue = Catalogue::new([ProviderRow::kimi_coding_default()]);
+        let (http, _) = server([(status, ECHOED)]);
+        let error = block_on(catalogue.resolve(
+            &ModelSlug::parse("kimi-coding/kimi-default").unwrap(),
+            &http,
+            &credential(),
+        ))
+        .expect_err("a refused catalogue answer was accepted");
+        match &error {
+            ego_ai::catalogue::ResolveError::EndpointUnreachable { endpoint, message } => {
+                assert!(
+                    endpoint.contains("kimi-coding"),
+                    "{status}: the endpoint does not name the provider: {endpoint}"
+                );
+                assert!(
+                    message.contains(&status.to_string()),
+                    "{status}: the message drops the status: {message}"
+                );
+            }
+            other => panic!("status {status} was not an endpoint refusal: {other:?}"),
+        }
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(
+                !rendered.contains("catalogue-body-secret"),
+                "{status} leaked the body: {rendered}"
+            );
+            assert!(
+                !rendered.contains("test-key"),
+                "{status} leaked the credential: {rendered}"
+            );
+            assert!(
+                !rendered.contains("upstream_body_marker"),
+                "{status} leaked the body: {rendered}"
+            );
+        }
+    }
+}
+
 #[test]
 fn kimi_streams_have_one_terminal_stop_exact_usage_and_complete_tool_calls() {
     let (result, _, _) = resolve("kimi-coding/kimi-default", KIMI_MODELS);

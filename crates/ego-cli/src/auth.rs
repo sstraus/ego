@@ -195,12 +195,12 @@ pub enum AuthError {
     },
     ReloginRequired {
         provider: String,
-        reason: String,
+        cause: oauth::TokenRefusal,
     },
     Temporary {
         provider: String,
         status: u16,
-        reason: String,
+        cause: oauth::TokenRefusal,
     },
 }
 
@@ -222,17 +222,17 @@ impl fmt::Display for AuthError {
             Self::CredentialCommand { program, failure } => {
                 write!(f, "no credential from {program}: {failure}")
             }
-            Self::ReloginRequired { provider, reason } => write!(
+            Self::ReloginRequired { provider, cause } => write!(
                 f,
-                "{provider} login expired; run `ego auth login {provider}`: {reason}"
+                "{provider} login expired; run `ego auth login {provider}`: {cause}"
             ),
             Self::Temporary {
                 provider,
                 status,
-                reason,
+                cause,
             } => write!(
                 f,
-                "{provider} token endpoint temporarily failed ({status}): {reason}"
+                "{provider} token endpoint temporarily failed ({status}): {cause}"
             ),
         }
     }
@@ -1111,18 +1111,17 @@ fn authorization_code(input: &str) -> Option<(String, Option<String>)> {
 
 fn flow_error(error: oauth::FlowError) -> AuthError {
     match error {
-        oauth::FlowError::ReloginRequired { provider, message } => AuthError::ReloginRequired {
-            provider,
-            reason: message,
-        },
+        oauth::FlowError::ReloginRequired { provider, cause } => {
+            AuthError::ReloginRequired { provider, cause }
+        }
         oauth::FlowError::Temporary {
             provider,
             status,
-            message,
+            cause,
         } => AuthError::Temporary {
             provider,
             status,
-            reason: message,
+            cause,
         },
         error => AuthError::MissingCredential {
             program: "built-in OAuth".to_string(),
@@ -1670,7 +1669,7 @@ fn missing_label(program: &str, reason: impl Into<String>) -> AuthError {
 mod tests {
     use std::future;
 
-    use ego_ai::oauth::{BuiltInFlow, FlowError, TokenStatus};
+    use ego_ai::oauth::{BuiltInFlow, FlowError, TokenRefusal, TokenStatus};
     use ego_ai::provider::ProviderRow;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -1934,7 +1933,7 @@ mod tests {
 
         let invalid = FlowError::ReloginRequired {
             provider: "openai-codex".to_string(),
-            message: "invalid_grant".to_string(),
+            cause: TokenRefusal::GrantInvalidated,
         };
         let err = apply_refresh_failure(&store, "openai-codex", invalid).unwrap_err();
         assert!(matches!(err, AuthError::ReloginRequired { .. }));
@@ -1953,7 +1952,7 @@ mod tests {
         let limited = FlowError::Temporary {
             provider: "openai-codex".to_string(),
             status: 429,
-            message: "rate_limited".to_string(),
+            cause: TokenRefusal::RateLimited,
         };
         let err = apply_refresh_failure(&store, "openai-codex", limited).unwrap_err();
         assert!(matches!(err, AuthError::Temporary { status: 429, .. }));

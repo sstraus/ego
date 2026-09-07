@@ -12,12 +12,9 @@
 //! having gone through the same capability check, the same blob commit and the
 //! same durable prompt record a `--attach` would.
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{ChildStdin, ChildStdout};
-
 mod support;
 
-use support::{Ego, Plan, Running, Stub, text};
+use support::{Ego, Plan, Stub, text};
 
 /// The 1×1 PNG the attachment tests use, so both paths are measured on one
 /// fixture rather than on two pictures that could differ in what they prove.
@@ -76,13 +73,12 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// One `ego acp` process, spoken to a frame at a time.
-struct Host {
-    running: Running,
-    inbox: BufReader<ChildStdout>,
-    outbox: ChildStdin,
-    next_id: u64,
-}
+/// One `ego acp` process pointed at the vision fixture.
+///
+/// The JSON-RPC framing lives in `support::AcpHost`; what is here is the
+/// picture-specific setup and the one capability assertion this suite makes
+/// before it opens a session.
+struct Host(support::AcpHost);
 
 impl Host {
     fn start(stub: &Stub, image_input: &str) -> (Self, Ego) {
@@ -90,72 +86,29 @@ impl Host {
         ego.home_file("models.toml", &facts(image_input));
         ego.home_file("config.toml", "model = \"anthropic/fixture-vision\"\n");
         let workspace = ego.workspace_path().to_owned();
-        let mut running = Ego::at(ego.home_path(), &workspace, Some(stub))
+        let running = Ego::at(ego.home_path(), &workspace, Some(stub))
             .subcommand("acp")
             .env("ANTHROPIC_API_KEY", "test-key")
             .spawn_conversing();
-        let inbox = BufReader::new(running.child.stdout.take().expect("stdout was piped"));
-        let outbox = running.child.stdin.take().expect("stdin was piped");
-        (
-            Self {
-                running,
-                inbox,
-                outbox,
-                next_id: 1,
-            },
-            ego,
-        )
+        (Self(support::AcpHost::adopt(running)), ego)
     }
 
-    /// Write one request and read until *its* answer, skipping the session
-    /// updates that arrive first.
     fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        let id = self.next_id;
-        self.next_id += 1;
-        let frame = serde_json::json!({
-            "jsonrpc": "2.0", "id": id, "method": method, "params": params,
-        });
-        writeln!(self.outbox, "{frame}").expect("the agent is reading");
-        self.outbox.flush().expect("the agent is reading");
-        loop {
-            let mut line = String::new();
-            let read = self
-                .inbox
-                .read_line(&mut line)
-                .expect("the agent is writing");
-            assert!(read > 0, "the agent closed without answering {method}");
-            let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            if message.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
-                return message;
-            }
-        }
+        self.0.request(method, params)
     }
 
     /// `initialize` then `session/new`, returning the session id minted.
     fn open(&mut self, cwd: &str) -> String {
-        let initialized = self.request(
-            "initialize",
-            serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
-        );
+        let initialized = self.0.initialize();
         assert!(
             initialized["result"]["agentCapabilities"]["promptCapabilities"]["image"] == true,
             "the binary does not advertise image prompts: {initialized}"
         );
-        let opened = self.request(
-            "session/new",
-            serde_json::json!({"cwd": cwd, "mcpServers": []}),
-        );
-        opened["result"]["sessionId"]
-            .as_str()
-            .unwrap_or_else(|| panic!("session/new answered without a session id: {opened}"))
-            .to_owned()
+        self.0.new_session(cwd)
     }
 
     fn finish(self) -> String {
-        drop(self.outbox);
-        self.running.finish().stderr
+        self.0.finish()
     }
 }
 

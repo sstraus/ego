@@ -473,35 +473,8 @@ impl BuiltInFlow {
         now_ms: u64,
         previous_refresh: Option<&str>,
     ) -> Result<OAuthToken, FlowError> {
-        let body_text = String::from_utf8_lossy(&response.body);
-        if response.status == 429 {
-            return Err(FlowError::Temporary {
-                provider: self.id().to_string(),
-                status: response.status,
-                message: body_text.into_owned(),
-            });
-        }
-        if response.status == 401
-            || [
-                "invalid_grant",
-                "invalid_token",
-                "refresh_token_reused",
-                "invalid_refresh_token",
-            ]
-            .iter()
-            .any(|marker| body_text.contains(marker))
-        {
-            return Err(FlowError::ReloginRequired {
-                provider: self.id().to_string(),
-                message: body_text.into_owned(),
-            });
-        }
-        if !(200..300).contains(&response.status) {
-            return Err(FlowError::Protocol {
-                provider: self.id().to_string(),
-                status: response.status,
-                message: body_text.into_owned(),
-            });
+        if let Some(refusal) = self.classify(&response) {
+            return Err(refusal);
         }
         let body: Value =
             serde_json::from_slice(&response.body).map_err(|err| FlowError::InvalidResponse {
@@ -641,26 +614,73 @@ impl BuiltInFlow {
             .map(PollOutcome::Token)
     }
 
-    fn response_error<T>(self, response: TokenStatus) -> Result<T, FlowError> {
-        let text = String::from_utf8_lossy(&response.body).into_owned();
-        if response.status == 429 {
-            Err(FlowError::Temporary {
+    /// The one place a token-endpoint body is read, and the only place it may
+    /// be looked at at all.
+    ///
+    /// `read_token` and `read_device_authorization` used to classify
+    /// separately and to disagree — the first recognised four
+    /// grant-invalidation markers and the second only `invalid_grant`, so the
+    /// same rotated refresh token was a relogin on one path and a protocol
+    /// failure on the other. One door removes that, and it is also what makes
+    /// the scrub enforceable: the bytes exist in this function and nowhere
+    /// else, going to the log rather than into the returned error.
+    ///
+    /// `None` means the answer is a 2xx that carries no invalidation marker,
+    /// which is the only case a caller may go on to parse.
+    fn classify(self, response: &TokenStatus) -> Option<FlowError> {
+        let body_text = String::from_utf8_lossy(&response.body);
+        let invalidated = [
+            "invalid_grant",
+            "invalid_token",
+            "refresh_token_reused",
+            "invalid_refresh_token",
+        ]
+        .iter()
+        .any(|marker| body_text.contains(marker));
+        let refusal = if response.status == 429 {
+            FlowError::Temporary {
                 provider: self.id().to_string(),
                 status: response.status,
-                message: text,
-            })
-        } else if response.status == 401 || text.contains("invalid_grant") {
-            Err(FlowError::ReloginRequired {
+                cause: TokenRefusal::RateLimited,
+            }
+        } else if response.status == 401 {
+            FlowError::ReloginRequired {
                 provider: self.id().to_string(),
-                message: text,
-            })
+                cause: TokenRefusal::CredentialRejected,
+            }
+        } else if invalidated {
+            FlowError::ReloginRequired {
+                provider: self.id().to_string(),
+                cause: TokenRefusal::GrantInvalidated,
+            }
+        } else if !(200..300).contains(&response.status) {
+            FlowError::Protocol {
+                provider: self.id().to_string(),
+                status: response.status,
+                cause: TokenRefusal::Unanticipated,
+            }
         } else {
-            Err(FlowError::Protocol {
-                provider: self.id().to_string(),
-                status: response.status,
-                message: text,
-            })
-        }
+            return None;
+        };
+        // The whole answer, for the operator debugging a real outage. `warn`
+        // rather than `error` because a rate limit is routine, and the body is
+        // a field rather than part of the message so a structured subscriber
+        // can drop it without losing the classification beside it.
+        tracing::warn!(
+            provider = self.id(),
+            status = response.status,
+            body = %body_text,
+            "a login request was refused"
+        );
+        Some(refusal)
+    }
+
+    fn response_error<T>(self, response: TokenStatus) -> Result<T, FlowError> {
+        Err(self.classify(&response).unwrap_or(FlowError::Protocol {
+            provider: self.id().to_string(),
+            status: response.status,
+            cause: TokenRefusal::Unanticipated,
+        }))
     }
 }
 
@@ -815,7 +835,7 @@ pub async fn execute(
         .map_err(|err| FlowError::Temporary {
             provider: "OAuth transport".to_string(),
             status: 0,
-            message: err.to_string(),
+            cause: TokenRefusal::Transport(err.to_string()),
         })?;
     let status = response.status;
     let chunks: Vec<_> = response.body.collect().await;
@@ -824,7 +844,7 @@ pub async fn execute(
         body.extend_from_slice(&chunk.map_err(|err| FlowError::Temporary {
             provider: "OAuth transport".to_string(),
             status,
-            message: err.to_string(),
+            cause: TokenRefusal::Transport(err.to_string()),
         })?);
     }
     Ok(TokenStatus { status, body })
@@ -911,17 +931,17 @@ pub enum FlowError {
     },
     ReloginRequired {
         provider: String,
-        message: String,
+        cause: TokenRefusal,
     },
     Temporary {
         provider: String,
         status: u16,
-        message: String,
+        cause: TokenRefusal,
     },
     Protocol {
         provider: String,
         status: u16,
-        message: String,
+        cause: TokenRefusal,
     },
     InvalidResponse {
         provider: String,
@@ -930,29 +950,80 @@ pub enum FlowError {
     MissingAccountId,
 }
 
+/// Why a login request failed, said in ego's vocabulary rather than the
+/// endpoint's.
+///
+/// These variants carry no upstream bytes on purpose. A token request carries
+/// the operator's refresh token and client credentials, and an identity
+/// provider is free to echo them back in its own diagnostic — `invalid_grant:
+/// refresh_token <token> was already used` is a real shape — while a proxy in
+/// front of it may reflect request headers instead. Relaying that body into
+/// `FlowError` put it on a terminal, in `AuthError`, in `RunTermination` and,
+/// since the ACP surface landed, in `error.data` on a host's wire.
+///
+/// `RunTermination::after_turn` already collapses the *mid*-turn provider
+/// failure to a fixed string for the same reason; this is that rule applied to
+/// the pre-turn half. The body is not discarded — `BuiltInFlow::classify`
+/// logs it at `warn` before returning, which is the destination this
+/// repository already documents for upstream diagnostics.
+///
+/// The classification is a type rather than a sentence because callers branch
+/// on it: `ego-cli`'s store deletes the entry for a relogin and keeps it for a
+/// rate limit, and it must not have to match on prose to tell them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenRefusal {
+    /// No answer arrived. The text is ego's own `TransportError`, not
+    /// anything an endpoint said, so it is safe to render.
+    Transport(String),
+    /// HTTP 429.
+    RateLimited,
+    /// HTTP 401: the endpoint rejected the credential presented.
+    CredentialRejected,
+    /// The body carried one of the OAuth grant-invalidation markers
+    /// (`invalid_grant`, `invalid_token`, `refresh_token_reused`,
+    /// `invalid_refresh_token`), which is a relogin whatever the status was.
+    GrantInvalidated,
+    /// A non-2xx answer matching none of the above.
+    Unanticipated,
+}
+
+impl fmt::Display for TokenRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(detail) => write!(f, "the transport failed: {detail}"),
+            Self::RateLimited => f.write_str("it rate-limited the request"),
+            Self::CredentialRejected => f.write_str("it rejected the credential presented"),
+            Self::GrantInvalidated => f.write_str("it reported the grant no longer valid"),
+            Self::Unanticipated => f.write_str(
+                "it refused, in terms ego does not classify; see the log for its answer",
+            ),
+        }
+    }
+}
+
 impl fmt::Display for FlowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedGrant { provider, grant } => {
                 write!(f, "{provider} does not support {grant}")
             }
-            Self::ReloginRequired { provider, message } => write!(
+            Self::ReloginRequired { provider, cause } => write!(
                 f,
-                "{provider} login expired; run `ego auth login {provider}`: {message}"
+                "{provider} login expired; run `ego auth login {provider}`: {cause}"
             ),
             Self::Temporary {
                 provider,
                 status,
-                message,
+                cause,
             } => write!(
                 f,
-                "{provider} token endpoint temporarily failed ({status}): {message}"
+                "{provider} token endpoint temporarily failed ({status}): {cause}"
             ),
             Self::Protocol {
                 provider,
                 status,
-                message,
-            } => write!(f, "{provider} token endpoint failed ({status}): {message}"),
+                cause,
+            } => write!(f, "{provider} token endpoint failed ({status}): {cause}"),
             Self::InvalidResponse { provider, message } => write!(
                 f,
                 "{provider} returned an invalid token response: {message}"

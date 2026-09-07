@@ -579,13 +579,30 @@ pub(crate) async fn fetch(
 ) -> Result<Vec<u8>, String> {
     let answer = exchange(http, profile, request).await?;
     if !(200..300).contains(&answer.status) {
-        return Err(format!(
-            "it answered {}: {}",
-            answer.status,
-            String::from_utf8_lossy(&answer.bytes)
-        ));
+        return Err(refusal(&answer));
     }
     Ok(answer.bytes)
+}
+
+/// What a non-2xx catalogue answer is allowed to say: its status, and no bytes.
+///
+/// A catalogue request carries the operator's credential, and a failing
+/// endpoint may echo it back inside its own error document — as may a proxy
+/// that reflects request headers into an interception page. That string is
+/// rendered onto a terminal, and since the ACP surface landed it also travels
+/// to a host in `error.data`, so the body cannot be part of it.
+///
+/// The body is not lost: it is logged here at `warn`, in a field of its own so
+/// a structured subscriber can drop it without losing the status beside it.
+/// This is the same rule `oauth::BuiltInFlow::classify` applies to the login
+/// half and `RunTermination::after_turn` applies to the mid-turn half.
+pub(crate) fn refusal(answer: &Exchange) -> String {
+    tracing::warn!(
+        status = answer.status,
+        body = %String::from_utf8_lossy(&answer.bytes),
+        "an upstream endpoint refused a pre-turn request"
+    );
+    format!("it answered {}", answer.status)
 }
 
 pub(crate) async fn exchange(
