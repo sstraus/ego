@@ -689,8 +689,19 @@ fn project_run_command(command: &RunCommand, redactions: &mut Redactions) -> Exp
                     ExportRunSettlement::PermissionRequired
                 }
                 RunSettlement::CancelledBeforeStart => ExportRunSettlement::CancelledBeforeStart,
-                RunSettlement::Interrupted => ExportRunSettlement::Interrupted,
-                RunSettlement::Uncertain => ExportRunSettlement::Uncertain,
+                // The diagnostic is sanitized for the host that asked, not for
+                // an export that leaves this machine: a `RunError` display can
+                // still name a path or an executor's own words. The failure
+                // kind survives; the sentence explaining it is redacted like
+                // any other raw error.
+                RunSettlement::Interrupted { diagnostic } => {
+                    redactions.raw_error += u64::from(diagnostic.is_some());
+                    ExportRunSettlement::Interrupted
+                }
+                RunSettlement::Uncertain { diagnostic } => {
+                    redactions.raw_error += u64::from(diagnostic.is_some());
+                    ExportRunSettlement::Uncertain
+                }
             };
             ExportRunCommand::CommandSettled {
                 lease: *lease,

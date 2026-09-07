@@ -1,8 +1,9 @@
 //! The inbound ACP adapter over core's rooted run controller.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -371,20 +372,20 @@ struct Registered {
     generation: RegistrationGeneration,
     root: RunRoot,
     start_request: Option<RequestId>,
-    last_command: Option<LastCommand>,
+    answered: VecDeque<AnsweredCommand>,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
     busy: bool,
     active_cancel: Option<CancelKey>,
     mcp: Option<Arc<dyn SessionMcpAdmission>>,
 }
 
-/// The last prompt one session accepted, and the command that prompt named.
+/// A prompt one session accepted, and the command that prompt named.
 /// Re-delivering the same protocol request with the same body names that
 /// command again, so the run replays its retained receipt instead of admitting
 /// a second turn. Both halves matter: JSON-RPC lets a client reuse a request
 /// identity it has already been answered on, and a reused identity carrying a
 /// different body is new work, not a re-delivery.
-struct LastCommand {
+struct AnsweredCommand {
     request: String,
     digest: String,
     id: RequestId,
@@ -407,10 +408,14 @@ enum BeginPrompt {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct RegistrationGeneration(u64);
 
-#[derive(Default)]
 struct SessionRegistrations {
     next_generation: u64,
     sessions: HashMap<v1::SessionId, Registered>,
+    /// How many answered commands one session remembers. Read from the
+    /// controller's retention so this window never outruns it: remembering a
+    /// command whose receipt the run has already pruned would turn a
+    /// re-delivery into a refusal, which is worse than admitting it as new.
+    remembered: NonZeroUsize,
 }
 
 impl SessionRegistrations {
@@ -423,10 +428,18 @@ impl SessionRegistrations {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Sessions(Arc<Mutex<SessionRegistrations>>);
 
 impl Sessions {
+    fn new(remembered: NonZeroUsize) -> Self {
+        Self(Arc::new(Mutex::new(SessionRegistrations {
+            next_generation: 0,
+            sessions: HashMap::new(),
+            remembered,
+        })))
+    }
+
     fn open(
         &self,
         id: v1::SessionId,
@@ -450,7 +463,7 @@ impl Sessions {
                 generation,
                 root,
                 start_request,
-                last_command: None,
+                answered: VecDeque::new(),
                 run,
                 busy: false,
                 active_cancel: None,
@@ -475,24 +488,39 @@ impl Sessions {
             return BeginPrompt::Busy;
         }
         let generation = sessions.mint_generation();
+        let remembered = sessions.remembered;
         let session = sessions
             .sessions
             .get_mut(id)
             .expect("the checked ACP session remains registered");
         session.generation = generation;
         session.busy = true;
-        let request_id = match &session.last_command {
-            Some(last) if last.request == command && last.digest == digest => last.id,
-            _ if session.run.is_none() => session
+        let replayed = session
+            .answered
+            .iter()
+            .find(|answered| answered.request == command && answered.digest == digest)
+            .map(|answered| answered.id);
+        let request_id = match replayed {
+            Some(id) => id,
+            None if session.run.is_none() => session
                 .start_request
                 .unwrap_or_else(|| RequestId::from_uuid(ids.next_uuid())),
-            _ => RequestId::from_uuid(ids.next_uuid()),
+            None => RequestId::from_uuid(ids.next_uuid()),
         };
-        session.last_command = Some(LastCommand {
-            request: command.to_owned(),
-            digest: digest.to_owned(),
-            id: request_id,
-        });
+        if replayed.is_none() {
+            // A re-delivery keeps its place in the queue rather than moving to
+            // the back: it produces no new admission, so the run's own pruning
+            // order — oldest admission first — is unchanged, and this window
+            // has to age the same way or it will outlive the receipt it names.
+            session.answered.push_back(AnsweredCommand {
+                request: command.to_owned(),
+                digest: digest.to_owned(),
+                id: request_id,
+            });
+            while session.answered.len() > remembered.get() {
+                session.answered.pop_front();
+            }
+        }
         BeginPrompt::Ready(PromptCorrelation {
             generation,
             root: session.root.clone(),
@@ -951,19 +979,36 @@ fn prompt_result(snapshot: &RunSnapshot) -> Result<v1::StopReason, String> {
         // alongside the line above, which told a host its own cancellation
         // had succeeded when in fact this agent had broken. It is an error,
         // for the same reason `Uncertain` below is one.
-        Some(RunSettlement::Interrupted) => {
-            Err("the turn was interrupted by an internal failure and did not run".to_string())
-        }
+        Some(settlement @ RunSettlement::Interrupted { .. }) => Err(failure_message(
+            "the turn was interrupted by an internal failure and did not run",
+            settlement,
+        )),
         Some(RunSettlement::PermissionRequired { action, by }) => {
             stop_reason_v1(&ego_core::run::RunTermination::PermissionRequired {
                 action: action.clone(),
                 by: by.clone(),
             })
         }
-        Some(RunSettlement::Uncertain) => {
-            Err("the run outcome is uncertain and requires explicit recovery".to_string())
-        }
+        Some(settlement @ RunSettlement::Uncertain { .. }) => Err(failure_message(
+            "the run outcome is uncertain and requires explicit recovery",
+            settlement,
+        )),
         None => Err("the admitted turn ended without a settlement".to_string()),
+    }
+}
+
+/// The sentence a failed turn answers with: what kind of failure it was, and —
+/// when the settlement kept one — why.
+///
+/// The kind is stated first and unconditionally so the answer is the same
+/// shape whether or not a diagnostic survived. That matters most on a replay:
+/// a retry of a request answered before this build ran finds no diagnostic on
+/// the receipt, and must still say something a host can act on rather than
+/// answering a bare cause with no category.
+fn failure_message(kind: &str, settlement: &RunSettlement) -> String {
+    match settlement.diagnostic() {
+        Some(diagnostic) => format!("{kind}: {diagnostic}"),
+        None => kind.to_owned(),
     }
 }
 
@@ -1332,7 +1377,7 @@ where
     C: Clock + 'static,
     I: IdSource + 'static,
 {
-    let sessions = Sessions::default();
+    let sessions = Sessions::new(controller.retention().completed_receipts());
     let client_capabilities = Arc::new(Mutex::new(CapabilityCapture::default()));
     let advertises_compaction = compaction.is_some();
     let advertises_lifecycle = lifecycle.is_some();

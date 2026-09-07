@@ -1105,15 +1105,27 @@ fn submit_error_publishes_uncertain_settlement_and_completes_subscription() {
     ));
     let settled = futures::executor::block_on(subscription);
     assert_eq!(settled.status(), RunStatus::Uncertain);
-    assert_eq!(settled.settlement(), Some(&RunSettlement::Uncertain));
+    // The settlement keeps the reason, not just the kind: the caller above was
+    // handed "submission failed" and a retry that replays this receipt has no
+    // execution to ask, so this record is the only place that sentence lives.
+    assert_eq!(
+        settled.settlement(),
+        Some(&RunSettlement::Uncertain {
+            diagnostic: Some("submission failed".to_owned()),
+        })
+    );
     assert_eq!(store.transactions(session).len(), 2);
-    assert!(matches!(
-        store.transactions(session)[1].command(),
-        ego_core::run::RunCommand::CommandSettled {
-            settlement: RunSettlement::Uncertain,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            store.transactions(session)[1].command(),
+            ego_core::run::RunCommand::CommandSettled {
+                settlement: RunSettlement::Uncertain { diagnostic: Some(diagnostic) },
+                ..
+            } if diagnostic == "submission failed"
+        ),
+        "the durable transaction dropped the diagnostic: {:?}",
+        store.transactions(session)[1].command()
+    );
     assert_eq!(
         executor.calls(),
         vec![
@@ -1147,7 +1159,15 @@ fn a_settlement_whose_durability_is_uncertain_still_completes_its_subscription()
     // with that outcome rather than left waiting for a wake that never comes.
     let settled = futures::executor::block_on(subscription);
     assert_eq!(settled.status(), RunStatus::Uncertain);
-    assert_eq!(settled.settlement(), Some(&RunSettlement::Uncertain));
+    let diagnostic = settled
+        .settlement()
+        .and_then(RunSettlement::diagnostic)
+        .unwrap_or_else(|| panic!("released without saying why: {:?}", settled.settlement()));
+    assert!(
+        diagnostic.contains("publication durability uncertain"),
+        "the observer was released with an uncertainty that does not name the \
+         durability failure that caused it: {diagnostic}"
+    );
 }
 
 #[test]
@@ -1431,6 +1451,80 @@ fn replaying_an_older_receipt_reports_its_own_outcome_and_not_a_later_turn() {
     );
 }
 
+/// A failed turn, retried after the process that ran it is gone, answers the
+/// sentence the original caller got — not a generic one.
+///
+/// The two halves are one test on purpose. A retry is only interesting once
+/// the controller that produced the failure no longer exists: the diagnostic
+/// was returned up the original call stack and nothing in memory survives, so
+/// a fresh controller reading the same store either finds the reason on the
+/// durable receipt or invents a generic answer to a request it already
+/// answered specifically. That is the defect — the same request, two different
+/// answers, decided by whether the agent had been restarted in between.
+#[test]
+fn retrying_an_uncertain_turn_after_a_reload_answers_the_original_diagnostic() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let first_controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let first = admitted_start(&first_controller, start("/replay-diagnostic", 210, "first"));
+    let run = first.run_id();
+    executor.allow_effects();
+    execute(&first_controller, first.into_execution());
+    let after_start =
+        futures::executor::block_on(first_controller.status(run)).expect("settled start");
+
+    executor.submission_result(Err(RunExecutorError::new(
+        "the provider connection dropped",
+    )));
+    let failing = ContinueRequest::new(
+        run,
+        request(211),
+        digest("uncertain-turn"),
+        after_start.revision(),
+        "ask something",
+    );
+    let admitted = admitted_continue(&first_controller, failing);
+    let error = futures::executor::block_on(first_controller.execute(admitted.into_execution()))
+        .expect_err("the staged submit failure must reach the caller");
+    assert_eq!(
+        error.to_string(),
+        "the provider connection dropped",
+        "the original caller was told something other than the staged failure"
+    );
+
+    // The process that knew why is gone; only the store remains.
+    let reloaded = controller(Arc::clone(&store), Arc::clone(&executor));
+    drop(first_controller);
+    let calls_before_replay = executor.calls();
+    let replay = continue_command(
+        &reloaded,
+        ContinueRequest::new(
+            run,
+            request(211),
+            digest("uncertain-turn"),
+            after_start.revision(),
+            "ask something",
+        ),
+    )
+    .expect("the retained receipt replays rather than being refused");
+    let RunCommandOutcome::Replayed(observation) = replay else {
+        panic!("retrying a settled receipt admitted a second execution after a reload");
+    };
+    assert_eq!(
+        executor.calls(),
+        calls_before_replay,
+        "the replay reached the executor instead of answering from the receipt"
+    );
+    assert_eq!(
+        observation.snapshot().settlement(),
+        Some(&RunSettlement::Uncertain {
+            diagnostic: Some("the provider connection dropped".to_owned()),
+        }),
+        "the retry answered a generic uncertainty instead of the reason the \
+         original request was given"
+    );
+}
+
 #[test]
 fn attach_failure_settles_uncertain_and_completes_the_continuation_subscription() {
     let store = Arc::new(RecordingSessionStore::default());
@@ -1463,7 +1557,12 @@ fn attach_failure_settles_uncertain_and_completes_the_continuation_subscription(
     ));
     let settled = futures::executor::block_on(subscription);
     assert_eq!(settled.status(), RunStatus::Uncertain);
-    assert_eq!(settled.settlement(), Some(&RunSettlement::Uncertain));
+    assert_eq!(
+        settled.settlement(),
+        Some(&RunSettlement::Uncertain {
+            diagnostic: Some("attachment failed".to_owned()),
+        })
+    );
     assert_eq!(
         executor
             .calls()
@@ -1569,7 +1668,12 @@ fn wrong_attachment_run_id_is_interrupted_without_submit_or_orphaned_subscriptio
     assert!(matches!(error, ego_core::run::RunError::Integrity { .. }));
     let settled = futures::executor::block_on(subscription);
     assert_eq!(settled.status(), RunStatus::Interrupted);
-    assert_eq!(settled.settlement(), Some(&RunSettlement::Interrupted));
+    assert_eq!(
+        settled.settlement(),
+        Some(&RunSettlement::Interrupted {
+            diagnostic: Some("executor returned a handle for another run".to_owned()),
+        })
+    );
     assert_eq!(
         executor
             .calls()
@@ -2425,7 +2529,9 @@ fn recovery_ambiguous_external_effect_is_uncertain_and_not_retried() {
     };
     assert_eq!(
         observation.snapshot().settlement(),
-        Some(&RunSettlement::Uncertain)
+        Some(&RunSettlement::Uncertain {
+            diagnostic: Some("the executor could not say whether this turn ran".to_owned()),
+        })
     );
     assert_eq!(
         futures::executor::block_on(controller.status(run))
@@ -2461,9 +2567,13 @@ fn recovery_not_recoverable_is_observed_as_uncertain() {
         RunRecoveryOutcome::Reattached(_) => panic!("not recoverable recovery reattached"),
     };
     assert_eq!(observation.snapshot().status(), RunStatus::Uncertain);
+    // Distinct from the ambiguous case above: two causes that used to settle
+    // as one indistinguishable `Uncertain` now say which happened.
     assert_eq!(
         observation.snapshot().settlement(),
-        Some(&RunSettlement::Uncertain)
+        Some(&RunSettlement::Uncertain {
+            diagnostic: Some("the executor cannot recover this turn after a restart".to_owned()),
+        })
     );
     assert_eq!(executor.calls(), vec![ExecutorCall::Recover(run)]);
     assert_eq!(store.transactions(run.session_id()).len(), 2);

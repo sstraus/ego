@@ -4426,7 +4426,12 @@ impl RunExecutor for CliRunExecutor {
             let result = prepared.submit(prompt, bindings, &cancel, &pause).await;
             match result.as_ref() {
                 Ok(settlement) => authority.complete(settlement.clone()),
-                Err(_) => authority.complete(RunSettlement::Uncertain),
+                // The same sentence the controller would have settled this
+                // turn with, so the authority's record of how it ended and the
+                // durable receipt do not disagree about why.
+                Err(error) => authority.complete(RunSettlement::Uncertain {
+                    diagnostic: Some(error.to_string()),
+                }),
             }
             result
         })

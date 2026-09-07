@@ -21,6 +21,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::{ConnectTo, Lines};
@@ -180,6 +181,15 @@ struct PromptExecutor {
     turns: Arc<Mutex<Vec<(RunPrompt, PathBuf)>>>,
     roots: Arc<Mutex<HashMap<RunId, RunRoot>>>,
     mcp_sources: SharedMcpSourceLog,
+    /// Hand back a handle for a run nobody asked about.
+    ///
+    /// The one way to stage an *integrity* failure — as opposed to an executor
+    /// error — from outside `ego-core`: the controller checks the identity of
+    /// what it attached to, and an executor that answers about another run is
+    /// this agent being broken, not a provider being unavailable.
+    misattach: Arc<AtomicBool>,
+    /// Answer every submit with an executor error, settling the turn uncertain.
+    failing_submit: Arc<AtomicBool>,
 }
 
 struct PromptAuthority {
@@ -197,6 +207,8 @@ impl PromptExecutor {
             turns: Arc::new(Mutex::new(Vec::new())),
             roots: Arc::new(Mutex::new(HashMap::new())),
             mcp_sources: Arc::new(Mutex::new(Vec::new())),
+            misattach: Arc::new(AtomicBool::new(false)),
+            failing_submit: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -206,6 +218,8 @@ impl PromptExecutor {
             turns: Arc::new(Mutex::new(Vec::new())),
             roots: Arc::new(Mutex::new(HashMap::new())),
             mcp_sources: Arc::new(Mutex::new(Vec::new())),
+            misattach: Arc::new(AtomicBool::new(false)),
+            failing_submit: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -229,6 +243,21 @@ impl PromptExecutor {
             PromptMode::Block(blocking) => blocking.release.notify_one(),
             PromptMode::Publish => panic!("publishing executor has no blocking turn"),
         }
+    }
+
+    /// Break the next attach, so the turn after this call fails an internal
+    /// invariant rather than an executor call.
+    fn misattach_next(&self) {
+        self.misattach.store(true, Ordering::SeqCst);
+    }
+
+    /// Fail every submit from here on, so the turn settles uncertain.
+    ///
+    /// The counterpart of [`misattach_next`](Self::misattach_next): an
+    /// executor that cannot complete a turn is not this agent breaking, and
+    /// the two settle differently on purpose.
+    fn fail_submits(&self) {
+        self.failing_submit.store(true, Ordering::SeqCst);
     }
 
     fn ran(&self) -> Vec<(String, bool)> {
@@ -429,8 +458,13 @@ impl RunExecutor for PromptExecutor {
             pause: PauseToken::new(),
             mode: self.mode.clone(),
         };
+        let run_id = if self.misattach.load(Ordering::SeqCst) {
+            RunId::new(request.run_id.session_id(), uuid::Uuid::from_u128(0xdead))
+        } else {
+            request.run_id
+        };
         Box::pin(future::ready(Ok(RunHandle::new(
-            request.run_id,
+            run_id,
             Arc::new(authority),
         ))))
     }
@@ -474,7 +508,11 @@ impl RunExecutor for PromptExecutor {
         let prompt = prompt.clone();
         let turns = Arc::clone(&self.turns);
         let mcp_sources = Arc::clone(&self.mcp_sources);
+        let failing = self.failing_submit.load(Ordering::SeqCst);
         Box::pin(async move {
+            if failing {
+                return Err(RunExecutorError::new("the provider connection dropped"));
+            }
             match mode {
                 PromptMode::Publish => {
                     mcp_sources.lock().expect("prompt MCP sources").push(
@@ -706,6 +744,18 @@ impl Connected {
     async fn send(&mut self, method: &str, params: serde_json::Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        self.send_as(id, method, params).await;
+        id
+    }
+
+    /// Write one request under an id the caller chooses, so a test can re-send
+    /// a request the agent has already answered.
+    ///
+    /// That is what a re-delivery *is* on the wire — JSON-RPC identifies a
+    /// request by its id, and a reconnecting client replaying its unacknowledged
+    /// writes sends the same id again. A helper that always minted a fresh id
+    /// could only ever express new work.
+    async fn send_as(&mut self, id: u64, method: &str, params: serde_json::Value) {
         self.to_agent
             .send(
                 serde_json::json!({
@@ -718,7 +768,6 @@ impl Connected {
             )
             .await
             .expect("the agent is listening");
-        id
     }
 
     /// Write one notification. No id, and so no response to wait for — which
@@ -1355,6 +1404,178 @@ async fn a_second_prompt_while_a_turn_is_running_is_refused_and_starts_nothing()
             .collect::<Vec<_>>(),
         vec!["the running turn"],
         "a second turn ran for a session that already had one"
+    );
+
+    connection.finish().await;
+}
+
+/// An internal invariant failure answers an error that says what broke — and
+/// says the same thing again when the request is re-delivered.
+///
+/// Two rules meet here and neither was covered through the real router.
+/// `Interrupted` used to share a match arm with `Cancelled`, so a host was
+/// told its own cancellation had succeeded at the moment this agent broke.
+/// And the sentence explaining the break reached the host only because the
+/// handler holds the live execution's error in a channel beside the
+/// subscription — a replay has no execution, so that channel is dropped and
+/// the retry could only answer a generic sentence. Same request, two different
+/// answers, decided by whether it was the first delivery.
+///
+/// The failure is staged as a misattach because that is what an integrity
+/// failure is: the executor answers about a run nobody asked about. An
+/// executor *error* would settle uncertain instead and prove the wrong arm.
+#[tokio::test]
+async fn an_integrity_failure_answers_an_error_and_not_a_cancelled_stop() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open("/tmp/ws").await;
+    turns.misattach_next();
+
+    let (answer, _) = connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "go" }],
+            }),
+        )
+        .await;
+
+    assert!(
+        answer.get("result").is_none(),
+        "an internal failure answered as a successful stop: {answer}"
+    );
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("interrupted by an internal failure")),
+        "the error does not say the agent broke: {answer}"
+    );
+    assert!(
+        answer["error"]["data"]
+            .as_str()
+            .is_some_and(|data| data.contains("another run")),
+        "the failure named no cause: {answer}"
+    );
+
+    connection.finish().await;
+}
+
+/// A re-delivered failed prompt answers what the first delivery answered.
+///
+/// The handler holds the live execution's error in a channel beside the
+/// subscription, so the first delivery can say why the turn failed. A replay
+/// has no execution and that channel is gone, so before the settlement carried
+/// its own diagnostic the retry could only answer a generic sentence: the same
+/// request, two different answers, decided by whether it was the first
+/// delivery.
+///
+/// A continuation and not a start, because a *start* whose receipt failed is
+/// refused outright rather than replayed — replay through `prompt_result` is
+/// only reachable on a continuation, and that is the path under test.
+#[tokio::test]
+async fn a_retried_failed_prompt_answers_the_diagnostic_the_first_delivery_gave() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "the good turn" }],
+            }),
+        )
+        .await;
+
+    turns.fail_submits();
+    let body = serde_json::json!({
+        "sessionId": session,
+        "prompt": [{ "type": "text", "text": "the failing turn" }],
+    });
+    let failing = connection.send("session/prompt", body.clone()).await;
+    let (answer, _) = connection.response_to(failing).await;
+    assert_eq!(
+        answer["error"]["data"].as_str(),
+        Some("the provider connection dropped"),
+        "the first delivery did not carry the cause: {answer}"
+    );
+
+    connection.send_as(failing, "session/prompt", body).await;
+    let (retried, _) = connection.response_to(failing).await;
+    assert!(
+        retried.get("result").is_none(),
+        "re-delivering a failed request answered as a successful stop: {retried}"
+    );
+    let message = retried["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the retry carried no explanation: {retried}"));
+    assert!(
+        message.contains("uncertain"),
+        "the retry does not say the outcome is uncertain: {message}"
+    );
+    assert!(
+        message.contains("the provider connection dropped"),
+        "the retry answered a generic failure: the reason the first delivery \
+         gave this host did not survive on the receipt: {message}"
+    );
+
+    connection.finish().await;
+}
+
+/// A prompt re-delivered after a later turn replays, and does not run twice.
+///
+/// The connection recognises a re-delivery by remembering which command each
+/// answered prompt named. While it remembered only the most recent one, a
+/// client that re-sent a prompt from two turns ago — a reconnect replaying its
+/// unacknowledged writes is the ordinary way this happens — was handed a fresh
+/// `RequestId`, and the run admitted the same work a second time. That is a
+/// paid turn the client never asked for and a second answer to one request.
+///
+/// The window is sized from `RunRetention::completed_receipts`, which this
+/// harness sets to two, so the prompt two turns back is exactly the boundary
+/// case: the oldest request the run can still replay. The assertion is that
+/// the host ran two turns, not three — a build that answered the re-delivery
+/// correctly but ran the turn anyway would still have spent the money.
+#[tokio::test]
+async fn a_prompt_redelivered_after_a_later_turn_replays_instead_of_running_again() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    let body = serde_json::json!({
+        "sessionId": session,
+        "prompt": [{ "type": "text", "text": "the older turn" }],
+    });
+    let older = connection.send("session/prompt", body.clone()).await;
+    connection.response_to(older).await;
+    connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "the newer turn" }],
+            }),
+        )
+        .await;
+
+    connection.send_as(older, "session/prompt", body).await;
+    let (replayed, _) = connection.response_to(older).await;
+    assert_eq!(
+        replayed["result"]["stopReason"], "end_turn",
+        "the re-delivered prompt was not answered like the turn it repeats: {replayed}"
+    );
+
+    assert_eq!(
+        turns
+            .turns()
+            .into_iter()
+            .map(|(prompt, _)| prompt.text().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["the older turn".to_string(), "the newer turn".to_string()],
+        "the re-delivered prompt ran a third turn instead of replaying the \
+         receipt the run still retains for it"
     );
 
     connection.finish().await;

@@ -705,8 +705,28 @@ pub enum RunSettlement {
     CancelledBeforeStart,
     /// An internal invariant failed and the turn could not proceed. Never a
     /// user's doing, and never reported as a successful stop.
-    Interrupted,
-    Uncertain,
+    ///
+    /// The `diagnostic` is why. It is the sanitized [`RunError`] display the
+    /// *original* caller was handed, kept here because that caller is the only
+    /// one who ever saw it: the error was returned up the call stack and
+    /// nothing durable recorded it. A retry of the same request replays this
+    /// receipt and carries no execution, so without the diagnostic on the
+    /// settlement itself the replay can only answer a generic sentence about a
+    /// failure it cannot describe — a different answer to the same request.
+    ///
+    /// `Option` rather than `String` because a run settled by an older build
+    /// wrote no diagnostic, and a record that omits it deserializes to `None`
+    /// and answers exactly as it did before rather than failing to load.
+    Interrupted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<String>,
+    },
+    /// This process cannot say whether the turn ran. Carries the same
+    /// sanitized diagnostic, for the same reason, as [`Self::Interrupted`].
+    Uncertain {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<String>,
+    },
 }
 
 impl RunSettlement {
@@ -735,8 +755,51 @@ impl RunSettlement {
             // status has to say so, or `session/list` shows an internal
             // failure where a host cancelled its own turn.
             Self::Cancelled { .. } | Self::CancelledBeforeStart => RunStatus::Cancelled,
-            Self::Interrupted => RunStatus::Interrupted,
-            Self::Uncertain => RunStatus::Uncertain,
+            Self::Interrupted { .. } => RunStatus::Interrupted,
+            Self::Uncertain { .. } => RunStatus::Uncertain,
+        }
+    }
+
+    /// The sanitized reason this turn failed, if it failed and one was kept.
+    ///
+    /// Public because the inbound surfaces are what the diagnostic exists for:
+    /// they answer a replayed request, and this is the only place the original
+    /// answer survives.
+    pub fn diagnostic(&self) -> Option<&str> {
+        match self {
+            Self::Interrupted { diagnostic } | Self::Uncertain { diagnostic } => {
+                diagnostic.as_deref()
+            }
+            Self::Completed
+            | Self::ContextOverflow
+            | Self::Paused
+            | Self::Cancelled { .. }
+            | Self::PermissionRequired { .. }
+            | Self::CancelledBeforeStart => None,
+        }
+    }
+}
+
+/// Which of the two failure settlements a failed execution records.
+///
+/// A separate type from [`RunSettlement`] so that a call site choosing how a
+/// turn failed cannot pass a settlement that is not a failure, and so that the
+/// diagnostic is built in one place — from the [`RunError`] itself — rather
+/// than at each of the eight sites that settle one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionFailure {
+    /// An internal invariant failed. Nothing ran.
+    Interrupted,
+    /// This process cannot say whether the turn ran.
+    Uncertain,
+}
+
+impl ExecutionFailure {
+    fn settlement(self, source: &RunError) -> RunSettlement {
+        let diagnostic = Some(source.to_string());
+        match self {
+            Self::Interrupted => RunSettlement::Interrupted { diagnostic },
+            Self::Uncertain => RunSettlement::Uncertain { diagnostic },
         }
     }
 }
@@ -1290,6 +1353,18 @@ impl RunRetention {
     pub const fn new(completed_receipts: NonZeroUsize) -> Result<Self, RunError> {
         Ok(Self { completed_receipts })
     }
+
+    /// How many settled receipts a run keeps, and therefore how far back a
+    /// replay can still be answered.
+    ///
+    /// Public because an inbound adapter that remembers which requests it has
+    /// already answered must not remember further back than this. A remembered
+    /// request whose receipt has been pruned would name a command the run can
+    /// no longer replay, and the retry would be refused instead of re-answered
+    /// — a worse outcome than not remembering it at all.
+    pub const fn completed_receipts(&self) -> NonZeroUsize {
+        self.completed_receipts
+    }
 }
 
 #[derive(Debug)]
@@ -1697,6 +1772,15 @@ where
         }
     }
 
+    /// The retention this controller was built with.
+    ///
+    /// An inbound adapter reads it to size its own memory of answered
+    /// requests: remembering more than the run retains would offer a replay
+    /// the controller can no longer honour.
+    pub const fn retention(&self) -> RunRetention {
+        self.retention
+    }
+
     pub async fn start(
         &self,
         request: StartRequest,
@@ -1940,7 +2024,12 @@ where
                         message: "submitted execution carries another run identity".to_owned(),
                     };
                     return Err(self
-                        .settle_execution_failure(run_id, lease, error, RunSettlement::Interrupted)
+                        .settle_execution_failure(
+                            run_id,
+                            lease,
+                            error,
+                            ExecutionFailure::Interrupted,
+                        )
                         .await);
                 }
                 let prepared = match prepared.downcast::<E::Prepared>() {
@@ -1955,7 +2044,7 @@ where
                                 run_id,
                                 lease,
                                 error,
-                                RunSettlement::Interrupted,
+                                ExecutionFailure::Interrupted,
                             )
                             .await);
                     }
@@ -1984,7 +2073,7 @@ where
                                         run_id,
                                         lease,
                                         error.into(),
-                                        RunSettlement::Uncertain,
+                                        ExecutionFailure::Uncertain,
                                     )
                                     .await);
                             }
@@ -1995,7 +2084,7 @@ where
                                     run_id,
                                     lease,
                                     error,
-                                    RunSettlement::Interrupted,
+                                    ExecutionFailure::Interrupted,
                                 )
                                 .await);
                         }
@@ -2003,13 +2092,13 @@ where
                     }
                 };
                 if let Err(error) = self.interrupt_if_cancelling(run_id, lease, &handle).await {
-                    let settlement = if matches!(&error, RunError::Executor(_)) {
-                        RunSettlement::Uncertain
+                    let failure = if matches!(&error, RunError::Executor(_)) {
+                        ExecutionFailure::Uncertain
                     } else {
-                        RunSettlement::Interrupted
+                        ExecutionFailure::Interrupted
                     };
                     return Err(self
-                        .settle_execution_failure(run_id, lease, error, settlement)
+                        .settle_execution_failure(run_id, lease, error, failure)
                         .await);
                 }
                 self.executor
@@ -2019,17 +2108,22 @@ where
             ExecutionMode::RecoveredObserve { handle } => {
                 if let Err(error) = self.bind_handle(run_id, &handle) {
                     return Err(self
-                        .settle_execution_failure(run_id, lease, error, RunSettlement::Interrupted)
+                        .settle_execution_failure(
+                            run_id,
+                            lease,
+                            error,
+                            ExecutionFailure::Interrupted,
+                        )
                         .await);
                 }
                 if let Err(error) = self.interrupt_if_cancelling(run_id, lease, &handle).await {
-                    let settlement = if matches!(&error, RunError::Executor(_)) {
-                        RunSettlement::Uncertain
+                    let failure = if matches!(&error, RunError::Executor(_)) {
+                        ExecutionFailure::Uncertain
                     } else {
-                        RunSettlement::Interrupted
+                        ExecutionFailure::Interrupted
                     };
                     return Err(self
-                        .settle_execution_failure(run_id, lease, error, settlement)
+                        .settle_execution_failure(run_id, lease, error, failure)
                         .await);
                 }
                 self.executor.observe(&handle, bindings).await
@@ -2039,7 +2133,12 @@ where
             Ok(settlement) => settlement,
             Err(error) => {
                 return Err(self
-                    .settle_execution_failure(run_id, lease, error.into(), RunSettlement::Uncertain)
+                    .settle_execution_failure(
+                        run_id,
+                        lease,
+                        error.into(),
+                        ExecutionFailure::Uncertain,
+                    )
                     .await);
             }
         };
@@ -2163,9 +2262,33 @@ where
                 self.settle_and_observe(run_id, lease, RunSettlement::CancelledBeforeStart)
                     .await
             }
-            RecoveryEvidence::Ambiguous | RecoveryEvidence::NotRecoverable => {
-                self.settle_and_observe(run_id, lease, RunSettlement::Uncertain)
-                    .await
+            // Both settle uncertain, and they are not the same thing: one
+            // executor could not tell us, the other told us it cannot. Split
+            // so the receipt records which, since a replay of this turn has
+            // nothing else left to say.
+            RecoveryEvidence::Ambiguous => {
+                self.settle_and_observe(
+                    run_id,
+                    lease,
+                    RunSettlement::Uncertain {
+                        diagnostic: Some(
+                            "the executor could not say whether this turn ran".to_owned(),
+                        ),
+                    },
+                )
+                .await
+            }
+            RecoveryEvidence::NotRecoverable => {
+                self.settle_and_observe(
+                    run_id,
+                    lease,
+                    RunSettlement::Uncertain {
+                        diagnostic: Some(
+                            "the executor cannot recover this turn after a restart".to_owned(),
+                        ),
+                    },
+                )
+                .await
             }
         }
     }
@@ -2305,8 +2428,9 @@ where
         run_id: RunId,
         lease: TurnLease,
         source: RunError,
-        settlement: RunSettlement,
+        failure: ExecutionFailure,
     ) -> RunError {
+        let settlement = failure.settlement(&source);
         match self.settle(run_id, lease, settlement).await {
             Ok(_) => source,
             Err(settlement_error) => RunError::ExecutionSettlement {
@@ -2423,9 +2547,9 @@ where
         if matches!(
             receipt.settlement,
             Some(
-                RunSettlement::Interrupted
+                RunSettlement::Interrupted { .. }
                     | RunSettlement::CancelledBeforeStart
-                    | RunSettlement::Uncertain
+                    | RunSettlement::Uncertain { .. }
             )
         ) {
             return Err(RunError::Integrity {
@@ -2655,7 +2779,9 @@ where
                         selections: folded.snapshot.selections,
                         revision: folded.snapshot.revision,
                         status: RunStatus::Uncertain,
-                        settlement: Some(RunSettlement::Uncertain),
+                        settlement: Some(RunSettlement::Uncertain {
+                            diagnostic: Some(diagnostic.clone()),
+                        }),
                     };
                     let subscription = {
                         let mut live = self.live.lock().expect("run live state");
@@ -2677,10 +2803,11 @@ where
         lease: TurnLease,
         source: EvidenceError,
     ) -> RunError {
+        let diagnostic = Some(source.to_string());
         let settlement = if matches!(source, EvidenceError::DurabilityUncertain { .. }) {
-            RunSettlement::Uncertain
+            RunSettlement::Uncertain { diagnostic }
         } else {
-            RunSettlement::Interrupted
+            RunSettlement::Interrupted { diagnostic }
         };
         let settlement_diagnostic = self
             .settle(run_id, lease, settlement)

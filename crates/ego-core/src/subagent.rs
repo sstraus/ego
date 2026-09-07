@@ -1190,11 +1190,17 @@ async fn prepare_result(
     };
     let settlement = match source {
         ResultSource::Observed(settlement) => settlement,
-        ResultSource::Wait(subscription) => subscription
-            .await
-            .settlement()
-            .cloned()
-            .unwrap_or(RunSettlement::Uncertain),
+        ResultSource::Wait(subscription) => {
+            subscription
+                .await
+                .settlement()
+                .cloned()
+                .unwrap_or(RunSettlement::Uncertain {
+                    diagnostic: Some(
+                        "the child run ended without recording how it settled".to_owned(),
+                    ),
+                })
+        }
     };
     match settlement {
         RunSettlement::Completed => {

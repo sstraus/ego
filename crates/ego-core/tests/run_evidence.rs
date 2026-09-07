@@ -838,17 +838,20 @@ fn bindings() -> RunExecutionBindings {
     RunExecutionBindings::new(Arc::new(NullSinkFactory), None)
 }
 
-fn settled_with(entries: &[SessionEntry], expected: RunSettlement) -> bool {
-    entries.iter().any(|entry| {
-        matches!(
-            entry,
-            SessionEntry::RunTransaction(transaction)
-                if matches!(
-                    transaction.command(),
-                    ego_core::run::RunCommand::CommandSettled { settlement, .. }
-                        if settlement == &expected
-                )
-        )
+/// The settlement this run was durably closed with, if it was closed at all.
+///
+/// Returns the settlement rather than comparing against an expected one so a
+/// caller can assert both halves — which failure it was, and the diagnostic
+/// naming why — and so a mismatch prints what was actually written.
+fn settled_settlement(entries: &[SessionEntry]) -> Option<RunSettlement> {
+    entries.iter().find_map(|entry| match entry {
+        SessionEntry::RunTransaction(transaction) => match transaction.command() {
+            ego_core::run::RunCommand::CommandSettled { settlement, .. } => {
+                Some(settlement.clone())
+            }
+            _ => None,
+        },
+        _ => None,
     })
 }
 
@@ -905,7 +908,19 @@ fn definite_evidence_failure_settles_interrupted_without_effect_authority() {
             "command_settled"
         ]
     );
-    assert!(settled_with(&store.entries(), RunSettlement::Interrupted));
+    let settlement = settled_settlement(&store.entries()).expect("the run was settled");
+    assert!(
+        matches!(settlement, RunSettlement::Interrupted { .. }),
+        "a store failure writing evidence settled as something other than an \
+         internal failure: {settlement:?}"
+    );
+    assert!(
+        settlement
+            .diagnostic()
+            .is_some_and(|diagnostic| diagnostic.contains("evidence")),
+        "the settlement does not name the evidence failure that caused it: \
+         {settlement:?}"
+    );
     assert!(!sequence.lock().unwrap().contains(&"start"));
     assert!(!sequence.lock().unwrap().contains(&"submit"));
 }
@@ -921,7 +936,19 @@ fn visible_evidence_uncertainty_settles_uncertain_and_does_not_retry_same_reques
     let controller = test_controller(Arc::clone(&store), Arc::clone(&executor));
 
     assert!(futures::executor::block_on(controller.start(start_request(), bindings())).is_err());
-    assert!(settled_with(&store.entries(), RunSettlement::Uncertain));
+    let settlement = settled_settlement(&store.entries()).expect("the run was settled");
+    assert!(
+        matches!(settlement, RunSettlement::Uncertain { .. }),
+        "visible evidence uncertainty settled as something other than \
+         uncertain: {settlement:?}"
+    );
+    assert!(
+        settlement
+            .diagnostic()
+            .is_some_and(|diagnostic| diagnostic.contains("evidence")),
+        "the settlement does not name the evidence failure that caused it: \
+         {settlement:?}"
+    );
     let before_retry = sequence.lock().unwrap().clone();
     assert!(futures::executor::block_on(controller.start(start_request(), bindings())).is_err());
     assert_eq!(sequence.lock().unwrap().as_slice(), before_retry.as_slice());

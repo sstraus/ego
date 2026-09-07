@@ -778,11 +778,22 @@ mod subagent_failed_settlement {
     #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
     enum Wire {
         ContextOverflow,
-        Cancelled { reason: CancelReason },
-        PermissionRequired { action: String, by: DeniedBy },
+        Cancelled {
+            reason: CancelReason,
+        },
+        PermissionRequired {
+            action: String,
+            by: DeniedBy,
+        },
         CancelledBeforeStart,
-        Interrupted,
-        Uncertain,
+        Interrupted {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            diagnostic: Option<String>,
+        },
+        Uncertain {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            diagnostic: Option<String>,
+        },
     }
 
     pub fn serialize<S>(value: &RunSettlement, serializer: S) -> Result<S::Ok, S::Error>
@@ -812,8 +823,12 @@ mod subagent_failed_settlement {
                 by: by.clone(),
             },
             RunSettlement::CancelledBeforeStart => Wire::CancelledBeforeStart,
-            RunSettlement::Interrupted => Wire::Interrupted,
-            RunSettlement::Uncertain => Wire::Uncertain,
+            RunSettlement::Interrupted { diagnostic } => Wire::Interrupted {
+                diagnostic: diagnostic.clone(),
+            },
+            RunSettlement::Uncertain { diagnostic } => Wire::Uncertain {
+                diagnostic: diagnostic.clone(),
+            },
         };
         wire.serialize(serializer)
     }
@@ -829,8 +844,8 @@ mod subagent_failed_settlement {
                 RunSettlement::PermissionRequired { action, by }
             }
             Wire::CancelledBeforeStart => RunSettlement::CancelledBeforeStart,
-            Wire::Interrupted => RunSettlement::Interrupted,
-            Wire::Uncertain => RunSettlement::Uncertain,
+            Wire::Interrupted { diagnostic } => RunSettlement::Interrupted { diagnostic },
+            Wire::Uncertain { diagnostic } => RunSettlement::Uncertain { diagnostic },
         })
     }
 }

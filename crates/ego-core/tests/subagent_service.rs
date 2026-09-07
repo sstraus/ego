@@ -2327,8 +2327,12 @@ fn after_spawn_recovery_delegates_uncertainty_without_reexecution_or_result_io()
     assert_eq!(
         collected,
         ChildWaitResult::Failed {
-            settlement: RunSettlement::Uncertain
-        }
+            settlement: RunSettlement::Uncertain {
+                diagnostic: Some("the executor could not say whether this turn ran".to_owned()),
+            }
+        },
+        "an ambiguous recovery settled without saying what was ambiguous, so a \
+         retry of this child can only answer a generic failure"
     );
     let calls_after_recovery = harness
         .executor
@@ -2385,8 +2389,14 @@ fn child_execution_carries_prompt_and_preserves_each_typed_terminal() {
         RunSettlement::Cancelled {
             reason: ego_core::run::CancelReason::User,
         },
-        RunSettlement::Interrupted,
-        RunSettlement::Uncertain,
+        // Both carry a diagnostic, so this loop also proves the child wire
+        // codec round-trips it rather than dropping it on the way to durable.
+        RunSettlement::Interrupted {
+            diagnostic: Some("an invariant failed inside the child".to_owned()),
+        },
+        RunSettlement::Uncertain {
+            diagnostic: Some("the child executor could not be reached".to_owned()),
+        },
     ] {
         let harness = Harness::new(settlement.clone());
         let service = harness.service(BudgetGate::unlimited(
