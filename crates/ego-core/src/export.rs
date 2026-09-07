@@ -10,7 +10,7 @@ use crate::ceiling::Ceilings;
 use crate::config::ModelRef;
 use crate::cost::{CostDelta, PricingRevision};
 use crate::event::domain::{
-    EventKind, ExitReason, FallbackDecision, GenerationRole, OccupancyProvenance,
+    EventKind, ExitReason, FallbackDecision, GenerationRole, OccupancyProvenance, SubagentTerminal,
 };
 use crate::event::hook::{
     HookActivation, HookContentDigest, HookDecision, HookFailureKind, HookId, HookInvocationId,
@@ -684,7 +684,7 @@ fn project_run_command(command: &RunCommand, redactions: &mut Redactions) -> Exp
                 RunSettlement::Cancelled { reason } => {
                     ExportRunSettlement::Cancelled { reason: *reason }
                 }
-                RunSettlement::PermissionRequired { .. } => {
+                RunSettlement::PermissionRequired { action: _, by: _ } => {
                     redactions.permission_material += 1;
                     ExportRunSettlement::PermissionRequired
                 }
@@ -726,11 +726,20 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::SessionPauseObserved { request: *request }
         }
         EventKind::SessionResumed { request } => ExportEvent::SessionResumed { request: *request },
-        EventKind::GoalSet { .. } => {
+        EventKind::GoalSet {
+            id: _,
+            objective: _,
+            owner: _,
+            ceilings: _,
+            derived_from: _,
+        } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalSet
         }
-        EventKind::GoalTransitioned { .. } => {
+        EventKind::GoalTransitioned {
+            id: _,
+            transition: _,
+        } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalTransitioned
         }
@@ -759,19 +768,19 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 queued_prompt: *queued_prompt,
             }
         }
-        EventKind::AssistantDelta { .. } => {
+        EventKind::AssistantDelta { text: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::AssistantDelta
         }
-        EventKind::AssistantMessage { .. } => {
+        EventKind::AssistantMessage { text: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::AssistantMessage
         }
-        EventKind::ReasoningDelta { .. } => {
+        EventKind::ReasoningDelta { text: _ } => {
             redactions.hidden_reasoning += 1;
             ExportEvent::ReasoningDelta
         }
-        EventKind::ReasoningState { .. } => {
+        EventKind::ReasoningState { state: _ } => {
             redactions.hidden_reasoning += 1;
             ExportEvent::ReasoningState
         }
@@ -783,11 +792,11 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.tool_material += 2 + call_id.is_some() as u64;
             ExportEvent::ToolCallStarted
         }
-        EventKind::ToolCallDelta { .. } => {
+        EventKind::ToolCallDelta { text: _ } => {
             redactions.tool_material += 1;
             ExportEvent::ToolCallDelta
         }
-        EventKind::ToolCallCompleted { ok, .. } => {
+        EventKind::ToolCallCompleted { ok, result: _ } => {
             redactions.tool_material += 1;
             ExportEvent::ToolCallCompleted { ok: *ok }
         }
@@ -817,17 +826,32 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             };
             ExportEvent::QuestionSettled { outcome }
         }
-        EventKind::PermissionRequested { escalation, .. } => {
+        EventKind::PermissionRequested {
+            tool: _,
+            escalation,
+        } => {
             redactions.permission_material += 1;
-            if matches!(
-                escalation,
-                Escalation::NoRuleCovers { .. } | Escalation::ModeAsks { .. }
-            ) {
-                redactions.path += 1;
+            // Exhaustive, not a `matches!` probe: a fifth escalation kind
+            // that carries a path would otherwise be redacted without being
+            // counted, and the ledger would under-report the one class of
+            // material an operator most wants accounted for.
+            match escalation {
+                Escalation::NoRuleCovers { op: _, path: _ }
+                | Escalation::ModeAsks {
+                    mode: _,
+                    op: _,
+                    path: _,
+                } => redactions.path += 1,
+                Escalation::NoRuleCoversSubject { op: _, subject: _ }
+                | Escalation::ModeAsksSubject {
+                    mode: _,
+                    op: _,
+                    subject: _,
+                } => {}
             }
             ExportEvent::PermissionRequested
         }
-        EventKind::PermissionAmended { .. } => {
+        EventKind::PermissionAmended { tool: _ } => {
             redactions.permission_material += 1;
             ExportEvent::PermissionAmended
         }
@@ -858,11 +882,11 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 FallbackDecision::Skipped { gaps } => {
                     ExportFallbackDecision::Skipped { gaps: gaps.clone() }
                 }
-                FallbackDecision::ExpressibilitySkipped { .. } => {
+                FallbackDecision::ExpressibilitySkipped { message: _ } => {
                     redactions.opaque_prose += 1;
                     ExportFallbackDecision::ExpressibilitySkipped
                 }
-                FallbackDecision::ResolutionSkipped { .. } => {
+                FallbackDecision::ResolutionSkipped { message: _ } => {
                     redactions.opaque_prose += 1;
                     ExportFallbackDecision::ResolutionSkipped
                 }
@@ -923,7 +947,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 prompt_revision: *prompt_revision,
             }
         }
-        EventKind::Compacted { .. } => {
+        EventKind::Compacted { summary: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::Compacted
         }
@@ -995,30 +1019,69 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 result,
             }
         }
-        EventKind::SubagentRequested { .. } => {
+        EventKind::SubagentRequested {
+            invocation: _,
+            task: _,
+            selections: _,
+        } => {
             redactions.opaque_prose += 1;
             ExportEvent::SubagentRequested
         }
-        EventKind::SubagentSpawned { .. } => ExportEvent::SubagentSpawned,
-        EventKind::SubagentSettled { terminal, .. } => {
-            if matches!(
-                terminal,
-                crate::event::domain::SubagentTerminal::Refused { .. }
-            ) {
-                redactions.opaque_prose += 1;
+        EventKind::SubagentSpawned {
+            invocation: _,
+            child: _,
+        } => ExportEvent::SubagentSpawned,
+        EventKind::SubagentSettled {
+            invocation: _,
+            child: _,
+            terminal,
+        } => {
+            // Exhaustive for the same reason as `Escalation` above, and it
+            // pays immediately: a `Failed` terminal now carries the
+            // executor's own sentence, which is redacted here exactly as
+            // `project_run_command` redacts it on the receipt.
+            match terminal {
+                SubagentTerminal::Refused { failure: _ } => redactions.opaque_prose += 1,
+                SubagentTerminal::Failed { settlement } => {
+                    redactions.raw_error += u64::from(settlement.diagnostic().is_some());
+                }
+                SubagentTerminal::Returned { final_message: _ }
+                | SubagentTerminal::ReturnBlocked {
+                    final_message: _,
+                    hook_invocation: _,
+                } => {}
             }
             ExportEvent::SubagentSettled
         }
-        EventKind::SkillCatalogueAdmitted { .. } => ExportEvent::SkillCatalogueAdmitted,
-        EventKind::SkillInstructionAdmitted { .. } => {
+        EventKind::SkillCatalogueAdmitted {
+            generation: _,
+            descriptors: _,
+        } => ExportEvent::SkillCatalogueAdmitted,
+        EventKind::SkillInstructionAdmitted {
+            invocation: _,
+            skill: _,
+            catalogue_generation: _,
+            source: _,
+            location: _,
+            source_digest: _,
+            admission: _,
+            rendered: _,
+            model: _,
+            effort: _,
+        } => {
             redactions.opaque_prose += 1;
             ExportEvent::SkillInstructionAdmitted
         }
-        EventKind::SkillResourceAdmitted { .. } => {
+        EventKind::SkillResourceAdmitted {
+            invocation: _,
+            skill: _,
+            location: _,
+            content: _,
+        } => {
             redactions.opaque_prose += 1;
             ExportEvent::SkillResourceAdmitted
         }
-        EventKind::Error { kind, .. } => {
+        EventKind::Error { message: _, kind } => {
             redactions.raw_error += 1;
             ExportEvent::Error { error_kind: *kind }
         }

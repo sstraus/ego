@@ -642,3 +642,40 @@ fn same_attempt_ref_across_invocations_is_rejected_without_bundle_or_source_muta
     ));
     assert_eq!(source_bytes(&fixture), before);
 }
+
+/// The redaction gate is *field*-exhaustive, not just variant-exhaustive.
+///
+/// `docs/decisions/2026-08-29-export-proves-redaction-and-ci-consumes-it.md`
+/// claims "exhaustive matching is the gate that makes a future event field
+/// fail compilation instead of leaking by default". A rest pattern silently
+/// weakens that to a *variant* gate: `EventKind::Error { kind, .. }` keeps
+/// compiling when a third field is added, and a sensitive one would then be
+/// dropped without ever being classified or counted.
+///
+/// The compiler cannot state this rule, so the source does. Reading the file
+/// is the whole test — it costs no fixture and no bundle, and it fails the
+/// moment someone reaches for `..` to make a new field compile.
+#[test]
+fn no_sanitizer_drops_a_field_without_naming_it() {
+    const SOURCE: &str = include_str!("../src/export.rs");
+    // Only the two disclosure boundaries. Evidence validation reads fields to
+    // build keys and discloses nothing, so a rest pattern there is ordinary
+    // Rust rather than an unclassified redaction.
+    for function in ["fn project_event(", "fn project_run_command("] {
+        let start = SOURCE
+            .find(function)
+            .unwrap_or_else(|| panic!("{function} still exists"));
+        let body = &SOURCE[start..];
+        let end = body
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("{function} has a terminated body"));
+        let offending: Vec<_> = body[..end]
+            .lines()
+            .filter(|line| line.contains(".."))
+            .collect();
+        assert!(
+            offending.is_empty(),
+            "{function} drops a field without naming it: {offending:?}"
+        );
+    }
+}

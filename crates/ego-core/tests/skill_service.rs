@@ -49,9 +49,8 @@ use ego_core::store::evidence::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{
-    ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildRequestOrigin,
-    ChildResultEvidence, ChildResultReader, ChildResultReaderError, ChildResultStore,
-    ChildRunService, ChildSelectionAdmission, ChildServicePorts, ChildTaskReader, ChildWait,
+    ChildHost, ChildJournalError, ChildRequest, ChildRequestOrigin, ChildResultEvidence,
+    ChildResultReaderError, ChildRunService, ChildServicePorts, ChildWait,
 };
 use ego_core::turn::{CancelToken, Journal, RegisteredTool, SharedJournal};
 
@@ -992,15 +991,6 @@ struct ChildJournalFixture {
     events: Arc<Mutex<Vec<DomainEvent>>>,
 }
 
-impl ChildJournal for ChildJournalFixture {
-    fn read(
-        &self,
-        _invocation: SubagentInvocationId,
-    ) -> Result<Vec<DomainEvent>, ChildJournalError> {
-        Ok(Vec::new())
-    }
-}
-
 impl SessionStore for ChildJournalFixture {
     fn append(&self, _session: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
         self.events
@@ -1041,17 +1031,28 @@ impl SessionStore for ChildJournalFixture {
     }
 }
 
-struct ChildTasks;
+/// The skill fixture's parent process: one fake for one port.
+///
+/// It also records the wait mode of every admitted request, which is the only
+/// part of this fixture a test observes — the rest exists so a child can run
+/// at all.
+#[derive(Clone, Default)]
+struct SkillChildHost {
+    waits: Arc<Mutex<Vec<ChildWait>>>,
+}
 
-impl ChildTaskReader for ChildTasks {
+impl ChildHost for SkillChildHost {
+    fn read_journal(
+        &self,
+        _invocation: SubagentInvocationId,
+    ) -> Result<Vec<DomainEvent>, ChildJournalError> {
+        Ok(Vec::new())
+    }
+
     fn read_rendered_task(&self, _reference: &BlobRef) -> Result<Vec<u8>, ChildResultReaderError> {
         Ok(BODY.to_vec())
     }
-}
 
-struct ChildResults;
-
-impl ChildResultReader for ChildResults {
     fn read_final_assistant(
         &self,
         _run: RunId,
@@ -1065,11 +1066,7 @@ impl ChildResultReader for ChildResults {
             bytes,
         ))
     }
-}
 
-struct ParentResults;
-
-impl ChildResultStore for ParentResults {
     fn copy_to_parent(
         &self,
         _child: RunId,
@@ -1077,23 +1074,12 @@ impl ChildResultStore for ParentResults {
     ) -> Result<BlobRef, ChildResultReaderError> {
         Ok(evidence.item().clone())
     }
-}
 
-struct ChildProfile;
-
-impl ChildProfileResolver for ChildProfile {
     fn resolve_profile(&self, _name: &str) -> Result<(), String> {
         Ok(())
     }
-}
 
-#[derive(Clone, Default)]
-struct ChildSelection {
-    waits: Arc<Mutex<Vec<ChildWait>>>,
-}
-
-impl ChildSelectionAdmission for ChildSelection {
-    fn admit(
+    fn admit_selections(
         &self,
         request: &ChildRequest,
         bindings: &RunExecutionBindings,
@@ -1220,18 +1206,10 @@ fn real_child_service() -> RealChildFixture {
         RunExecutionBindings::new(Arc::new(NullFactory), None).with_budget_gate(gate.clone());
     let child_journal = ChildJournalFixture::default();
     let child_events = Arc::clone(&child_journal.events);
-    let child_selection = ChildSelection::default();
-    let child_waits = Arc::clone(&child_selection.waits);
+    let child_host = SkillChildHost::default();
+    let child_waits = Arc::clone(&child_host.waits);
     let parent_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
-    let ports = ChildServicePorts::new(
-        parent_run,
-        Arc::new(child_journal.clone()),
-        Arc::new(ChildTasks),
-        Arc::new(ChildResults),
-        Arc::new(ParentResults),
-        Arc::new(ChildProfile),
-        Arc::new(child_selection),
-    );
+    let ports = ChildServicePorts::new(parent_run, Arc::new(child_host));
     let journal_store: &'static ChildJournalFixture = Box::leak(Box::new(child_journal));
     let clock: &'static FixedClock = Box::leak(Box::new(FixedClock));
     let sink: &'static NullSink = Box::leak(Box::new(NullSink));

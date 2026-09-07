@@ -84,10 +84,9 @@ use ego_core::store::run_artifact::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore};
 use ego_core::subagent::{
-    ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildRequestOrigin,
-    ChildResultEvidence, ChildResultReader, ChildResultReaderError, ChildResultStore,
-    ChildRunService, ChildSelectionAdmission, ChildServiceError, ChildServicePorts,
-    ChildTaskReader, ChildWait, RecoveryCut,
+    ChildHost, ChildJournalError, ChildRequest, ChildRequestOrigin, ChildResultEvidence,
+    ChildResultReaderError, ChildRunService, ChildServiceError, ChildServicePorts, ChildWait,
+    RecoveryCut,
 };
 use ego_core::turn::{
     AdmittedToolSource, CancelToken, GenerationPolicySource, GenerationRuntime, InteractiveControl,
@@ -2543,13 +2542,31 @@ impl IdSource for CliChildIds {
     }
 }
 
-struct CliChildJournal {
+/// The CLI's answer to everything a child run needs from its parent process.
+///
+/// One type where there were five, implementing one port where there were six.
+/// They were never independently substitutable: the journal, the parent blob
+/// store, the artifact store, the profile resolver and the selection admission
+/// were composed together at exactly one call site and always all at once.
+struct CliChildHost {
     store: Arc<JsonlStore>,
     session: SessionId,
+    blobs: SessionEvidenceStore,
+    artifacts: Arc<dyn RunArtifactStore>,
+    executor: Arc<CliRunExecutor>,
+    root: RunRoot,
 }
 
-impl ChildJournal for CliChildJournal {
-    fn read(
+impl CliChildHost {
+    fn blob_error(error: impl std::fmt::Display) -> ChildResultReaderError {
+        ChildResultReaderError::Read {
+            diagnostic: error.to_string(),
+        }
+    }
+}
+
+impl ChildHost for CliChildHost {
+    fn read_journal(
         &self,
         invocation: SubagentInvocationId,
     ) -> Result<Vec<ego_core::event::domain::DomainEvent>, ChildJournalError> {
@@ -2579,77 +2596,39 @@ impl ChildJournal for CliChildJournal {
         }
         Ok(events)
     }
-}
 
-#[derive(Clone)]
-struct CliParentBlobs(SessionEvidenceStore);
-
-impl ChildTaskReader for CliParentBlobs {
     fn read_rendered_task(&self, reference: &BlobRef) -> Result<Vec<u8>, ChildResultReaderError> {
-        self.0
-            .read(reference)
-            .map_err(|error| ChildResultReaderError::Read {
-                diagnostic: error.to_string(),
-            })
+        self.blobs.read(reference).map_err(Self::blob_error)
     }
-}
 
-impl ChildResultStore for CliParentBlobs {
-    fn copy_to_parent(
-        &self,
-        _child: RunId,
-        evidence: &ChildResultEvidence,
-    ) -> Result<BlobRef, ChildResultReaderError> {
-        let mut writer = self
-            .0
-            .begin()
-            .map_err(|error| ChildResultReaderError::Read {
-                diagnostic: error.to_string(),
-            })?;
-        writer
-            .append(evidence.bytes())
-            .map_err(|error| ChildResultReaderError::Read {
-                diagnostic: error.to_string(),
-            })?;
-        writer
-            .commit()
-            .map_err(|error| ChildResultReaderError::Read {
-                diagnostic: error.to_string(),
-            })
-    }
-}
-
-struct CliChildResults(Arc<dyn RunArtifactStore>);
-
-impl ChildResultReader for CliChildResults {
     fn read_final_assistant(
         &self,
         run: RunId,
     ) -> Result<ChildResultEvidence, ChildResultReaderError> {
-        let artifact = self.0.read(run, RunArtifactId::output()).map_err(|error| {
-            ChildResultReaderError::Read {
-                diagnostic: error.to_string(),
-            }
-        })?;
-        let id =
-            BlobId::parse(ego_core::digest::sha256_hex(artifact.bytes())).map_err(|error| {
-                ChildResultReaderError::Read {
-                    diagnostic: error.to_string(),
-                }
-            })?;
+        let artifact = self
+            .artifacts
+            .read(run, RunArtifactId::output())
+            .map_err(Self::blob_error)?;
+        let id = BlobId::parse(ego_core::digest::sha256_hex(artifact.bytes()))
+            .map_err(Self::blob_error)?;
         Ok(ChildResultEvidence::new(
             BlobRef::new(id, artifact.bytes().len() as u64),
             artifact.bytes().to_vec(),
         ))
     }
-}
 
-struct CliChildProfiles {
-    executor: Arc<CliRunExecutor>,
-    root: RunRoot,
-}
+    fn copy_to_parent(
+        &self,
+        _child: RunId,
+        evidence: &ChildResultEvidence,
+    ) -> Result<BlobRef, ChildResultReaderError> {
+        let mut writer = self.blobs.begin().map_err(Self::blob_error)?;
+        writer
+            .append(evidence.bytes())
+            .map_err(Self::blob_error)?;
+        writer.commit().map_err(Self::blob_error)
+    }
 
-impl ChildProfileResolver for CliChildProfiles {
     fn resolve_profile(&self, name: &str) -> Result<(), String> {
         if name.is_empty() {
             return Err("child profile name is empty".to_owned());
@@ -2678,12 +2657,8 @@ impl ChildProfileResolver for CliChildProfiles {
             }),
         }
     }
-}
 
-struct CliChildSelections;
-
-impl ChildSelectionAdmission for CliChildSelections {
-    fn admit(
+    fn admit_selections(
         &self,
         request: &ChildRequest,
         bindings: &RunExecutionBindings,
@@ -2737,7 +2712,6 @@ fn compose_child_service(composition: ChildComposition) -> ChildRunService {
             .expect("valid child retention"),
     ));
     let artifacts: Arc<dyn RunArtifactStore> = store.clone();
-    let parent_blobs = Arc::new(CliParentBlobs(blobs));
     ChildRunService::new(
         controller,
         gate,
@@ -2745,15 +2719,14 @@ fn compose_child_service(composition: ChildComposition) -> ChildRunService {
         bindings,
         ChildServicePorts::new(
             parent_run,
-            Arc::new(CliChildJournal {
+            Arc::new(CliChildHost {
                 store,
                 session: parent_session,
+                blobs,
+                artifacts,
+                executor,
+                root,
             }),
-            parent_blobs.clone(),
-            Arc::new(CliChildResults(artifacts)),
-            parent_blobs,
-            Arc::new(CliChildProfiles { executor, root }),
-            Arc::new(CliChildSelections),
         ),
     )
 }
@@ -8138,31 +8111,36 @@ mod tests {
         }
     }
 
-    struct LaunchBarrierTaskReader;
+    /// The launch-only fixture host: it answers what a launch needs and
+    /// refuses what a launch does not reach.
+    ///
+    /// One fake for one port. Six fakes existed because six ports did, and
+    /// every one of them was constructed in the same breath as the others —
+    /// which is the evidence that none of them was a boundary.
+    struct LaunchBarrierHost(&'static LaunchBarrierStore);
 
-    impl ChildTaskReader for LaunchBarrierTaskReader {
+    impl ChildHost for LaunchBarrierHost {
+        fn read_journal(
+            &self,
+            _invocation: SubagentInvocationId,
+        ) -> Result<Vec<DomainEvent>, ChildJournalError> {
+            Ok(self.0.events.lock().unwrap().clone())
+        }
+
         fn read_rendered_task(
             &self,
             _reference: &BlobRef,
         ) -> Result<Vec<u8>, ChildResultReaderError> {
             Ok(b"background launch task".to_vec())
         }
-    }
 
-    struct LaunchBarrierResults;
-
-    impl ChildResultReader for LaunchBarrierResults {
         fn read_final_assistant(
             &self,
             run: RunId,
         ) -> Result<ChildResultEvidence, ChildResultReaderError> {
             Err(ChildResultReaderError::Missing { run })
         }
-    }
 
-    struct LaunchBarrierParentResults;
-
-    impl ChildResultStore for LaunchBarrierParentResults {
         fn copy_to_parent(
             &self,
             _child: RunId,
@@ -8172,36 +8150,17 @@ mod tests {
                 diagnostic: "collection is outside this launch-only fixture".to_owned(),
             })
         }
-    }
 
-    struct LaunchBarrierProfiles;
-
-    impl ChildProfileResolver for LaunchBarrierProfiles {
         fn resolve_profile(&self, _name: &str) -> Result<(), String> {
             Ok(())
         }
-    }
 
-    struct LaunchBarrierSelections;
-
-    impl ChildSelectionAdmission for LaunchBarrierSelections {
-        fn admit(
+        fn admit_selections(
             &self,
             request: &ChildRequest,
             bindings: &RunExecutionBindings,
         ) -> Result<(RunSelections, RunExecutionBindings), String> {
             Ok((request.selections().clone(), bindings.clone()))
-        }
-    }
-
-    struct LaunchBarrierJournal(&'static LaunchBarrierStore);
-
-    impl ChildJournal for LaunchBarrierJournal {
-        fn read(
-            &self,
-            _invocation: SubagentInvocationId,
-        ) -> Result<Vec<DomainEvent>, ChildJournalError> {
-            Ok(self.0.events.lock().unwrap().clone())
         }
     }
 
@@ -8248,15 +8207,7 @@ mod tests {
         ));
         let bindings = RunExecutionBindings::new(Arc::new(LaunchBarrierSink), None)
             .with_budget_gate(gate.clone());
-        let ports = ChildServicePorts::new(
-            parent_run,
-            Arc::new(LaunchBarrierJournal(store)),
-            Arc::new(LaunchBarrierTaskReader),
-            Arc::new(LaunchBarrierResults),
-            Arc::new(LaunchBarrierParentResults),
-            Arc::new(LaunchBarrierProfiles),
-            Arc::new(LaunchBarrierSelections),
-        );
+        let ports = ChildServicePorts::new(parent_run, Arc::new(LaunchBarrierHost(store)));
         let controller = Arc::new(RunController::new(
             Arc::new(store.clone()),
             Arc::clone(&executor),

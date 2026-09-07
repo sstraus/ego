@@ -52,9 +52,9 @@ use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{
-    ChildAdmission, ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest,
-    ChildRequestOrigin, ChildResultEvidence, ChildResultReader, ChildResultReaderError,
-    ChildResultStore, ChildRunService, ChildSelectionAdmission, ChildServicePorts, ChildTaskReader,
+    ChildAdmission, ChildHost, ChildJournalError, ChildRequest,
+    ChildRequestOrigin, ChildResultEvidence, ChildResultReaderError,
+    ChildRunService, ChildServicePorts,
     ChildWait, ChildWaitResult,
 };
 use ego_core::turn::{CancelToken, Journal, SharedJournal};
@@ -175,7 +175,7 @@ impl ExistingAuthorityAdmission {
     }
 }
 
-impl ChildSelectionAdmission for ExistingAuthorityAdmission {
+impl ExistingAuthorityAdmission {
     fn admit(
         &self,
         request: &ChildRequest,
@@ -241,7 +241,7 @@ impl ChildTurnAuthorityAdmission {
     }
 }
 
-impl ChildSelectionAdmission for ChildTurnAuthorityAdmission {
+impl ChildTurnAuthorityAdmission {
     fn admit(
         &self,
         request: &ChildRequest,
@@ -276,7 +276,7 @@ impl RecoverySelectionAdmission {
     }
 }
 
-impl ChildSelectionAdmission for RecoverySelectionAdmission {
+impl RecoverySelectionAdmission {
     fn admit(
         &self,
         request: &ChildRequest,
@@ -294,8 +294,8 @@ struct ExistingProfileOwner {
     calls: Arc<Mutex<usize>>,
 }
 
-fn default_profile_owner() -> Arc<dyn ChildProfileResolver> {
-    Arc::new(ExistingProfileOwner {
+fn default_profile_owner() -> ProfilePolicy {
+    profile_policy(ExistingProfileOwner {
         layers: vec![
             ConfigLayer::parse(Source::User, "[profile.worker]\n").expect("default profile layer"),
         ],
@@ -304,7 +304,123 @@ fn default_profile_owner() -> Arc<dyn ChildProfileResolver> {
     })
 }
 
-impl ChildProfileResolver for ExistingProfileOwner {
+/// How a fixture resolves a child profile, and how it admits a child's
+/// selections. Two closures, not two traits: each varies per test, and a
+/// behaviour that varies per test is a function, not a boundary.
+type ProfilePolicy = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+type SelectionPolicy = Arc<
+    dyn Fn(
+            &ChildRequest,
+            &RunExecutionBindings,
+        ) -> Result<(RunSelections, RunExecutionBindings), String>
+        + Send
+        + Sync,
+>;
+
+fn profile_policy(owner: ExistingProfileOwner) -> ProfilePolicy {
+    Arc::new(move |name: &str| owner.resolve_profile(name))
+}
+
+fn default_selection_policy() -> SelectionPolicy {
+    let admission = ExistingAuthorityAdmission::new();
+    selection_policy(move |request, bindings| admission.admit(request, bindings))
+}
+
+fn selection_policy<F>(admit: F) -> SelectionPolicy
+where
+    F: Fn(
+            &ChildRequest,
+            &RunExecutionBindings,
+        ) -> Result<(RunSelections, RunExecutionBindings), String>
+        + Send
+        + Sync
+        + 'static,
+{
+    Arc::new(admit)
+}
+
+/// The fixture's parent process: one host, assembled from the collaborators a
+/// test wants to read back afterwards plus the two behaviours that vary.
+///
+/// The collaborators keep their own types because tests observe them — read
+/// counts, copied results, recorded task reads. What each lost is a trait of
+/// exactly one method with exactly one implementation, which bought a second
+/// name for the same struct and nothing else.
+#[derive(Clone)]
+struct TestChildHost {
+    journal: DurableJournal,
+    tasks: RenderedTaskReader,
+    results: DurableResults,
+    parent_blobs: ParentBlobStore,
+    profiles: ProfilePolicy,
+    selections: SelectionPolicy,
+}
+
+impl TestChildHost {
+    fn with_profiles(mut self, profiles: ProfilePolicy) -> Self {
+        self.profiles = profiles;
+        self
+    }
+
+    fn with_selections(mut self, selections: SelectionPolicy) -> Self {
+        self.selections = selections;
+        self
+    }
+
+    fn with_content(
+        mut self,
+        tasks: RenderedTaskReader,
+        results: DurableResults,
+        parent_blobs: ParentBlobStore,
+    ) -> Self {
+        self.tasks = tasks;
+        self.results = results;
+        self.parent_blobs = parent_blobs;
+        self
+    }
+}
+
+impl ChildHost for TestChildHost {
+    fn read_journal(
+        &self,
+        invocation: SubagentInvocationId,
+    ) -> Result<Vec<DomainEvent>, ChildJournalError> {
+        self.journal.read_journal(invocation)
+    }
+
+    fn read_rendered_task(&self, reference: &BlobRef) -> Result<Vec<u8>, ChildResultReaderError> {
+        self.tasks.read_rendered_task(reference)
+    }
+
+    fn read_final_assistant(
+        &self,
+        run: RunId,
+    ) -> Result<ChildResultEvidence, ChildResultReaderError> {
+        self.results.read_final_assistant(run)
+    }
+
+    fn copy_to_parent(
+        &self,
+        child: RunId,
+        evidence: &ChildResultEvidence,
+    ) -> Result<BlobRef, ChildResultReaderError> {
+        self.parent_blobs.copy_to_parent(child, evidence)
+    }
+
+    fn resolve_profile(&self, name: &str) -> Result<(), String> {
+        (self.profiles)(name)
+    }
+
+    fn admit_selections(
+        &self,
+        request: &ChildRequest,
+        bindings: &RunExecutionBindings,
+    ) -> Result<(RunSelections, RunExecutionBindings), String> {
+        (self.selections)(request, bindings)
+    }
+}
+
+impl ExistingProfileOwner {
     fn resolve_profile(&self, name: &str) -> Result<(), String> {
         *self.calls.lock().expect("profile resolutions") += 1;
         resolve_selected(&self.layers, self.trust, Some((name, Source::Flags)))
@@ -389,9 +505,7 @@ impl DurableResults {
     fn read_count(&self) -> usize {
         *self.reads.lock().expect("result reads")
     }
-}
 
-impl ChildResultReader for DurableResults {
     fn read_final_assistant(
         &self,
         run: RunId,
@@ -422,9 +536,7 @@ impl RenderedTaskReader {
             reads: Arc::new(Mutex::new(Vec::new())),
         }
     }
-}
 
-impl ChildTaskReader for RenderedTaskReader {
     fn read_rendered_task(&self, reference: &BlobRef) -> Result<Vec<u8>, ChildResultReaderError> {
         self.reads
             .lock()
@@ -448,9 +560,7 @@ impl ParentBlobStore {
     fn copied(&self) -> Vec<(RunId, ChildResultEvidence, BlobRef)> {
         self.copied.lock().expect("copied results").clone()
     }
-}
 
-impl ChildResultStore for ParentBlobStore {
     fn copy_to_parent(
         &self,
         child: RunId,
@@ -566,8 +676,8 @@ impl DurableJournal {
     }
 }
 
-impl ChildJournal for DurableJournal {
-    fn read(
+impl DurableJournal {
+    fn read_journal(
         &self,
         invocation: SubagentInvocationId,
     ) -> Result<Vec<DomainEvent>, ChildJournalError> {
@@ -1245,51 +1355,41 @@ impl Harness {
     }
 
     fn service_with_return_hook(&self, gate: BudgetGate, port: ReturnHookPort) -> TestChildService {
-        self.service_with_ports(
-            SharedBudgetGate::new(gate),
-            ChildServicePorts::new(
-                self.parent_run,
-                Arc::new(self.journal.clone()),
-                Arc::new(self.task_reader.clone()),
-                Arc::new(self.results.clone()),
-                Arc::new(self.parent_blobs.clone()),
-                default_profile_owner(),
-                Arc::new(ExistingAuthorityAdmission::new()),
-            ),
-            port,
-        )
+        self.service_with_ports(SharedBudgetGate::new(gate), self.default_ports(), port)
     }
 
     fn service_with_gate_and_authority(
         &self,
         gate: SharedBudgetGate,
-        authority: Arc<dyn ChildSelectionAdmission>,
+        selections: SelectionPolicy,
     ) -> TestChildService {
         self.service_with_ports(
             gate,
-            ChildServicePorts::new(
-                self.parent_run,
-                Arc::new(self.journal.clone()),
-                Arc::new(self.task_reader.clone()),
-                Arc::new(self.results.clone()),
-                Arc::new(self.parent_blobs.clone()),
-                default_profile_owner(),
-                authority,
-            ),
+            self.ports(self.host().with_selections(selections)),
             ReturnHookPort::new(HookDecision::Continue),
         )
     }
 
+    /// The host this harness answers a child with: its own four collaborators
+    /// plus the default profile and selection policies. Tests that need one
+    /// behaviour changed rebuild from here rather than restating the rest.
+    fn host(&self) -> TestChildHost {
+        TestChildHost {
+            journal: self.journal.clone(),
+            tasks: self.task_reader.clone(),
+            results: self.results.clone(),
+            parent_blobs: self.parent_blobs.clone(),
+            profiles: default_profile_owner(),
+            selections: default_selection_policy(),
+        }
+    }
+
+    fn ports(&self, host: TestChildHost) -> ChildServicePorts {
+        ChildServicePorts::new(self.parent_run, Arc::new(host))
+    }
+
     fn default_ports(&self) -> ChildServicePorts {
-        ChildServicePorts::new(
-            self.parent_run,
-            Arc::new(self.journal.clone()),
-            Arc::new(self.task_reader.clone()),
-            Arc::new(self.results.clone()),
-            Arc::new(self.parent_blobs.clone()),
-            default_profile_owner(),
-            Arc::new(ExistingAuthorityAdmission::new()),
-        )
+        self.ports(self.host())
     }
 
     fn service_with_ports(
@@ -1312,43 +1412,27 @@ impl Harness {
 
     fn content_service(
         &self,
-        task_reader: Arc<dyn ChildTaskReader>,
-        results: Arc<dyn ChildResultReader>,
-        parent_blobs: Arc<dyn ChildResultStore>,
+        task_reader: RenderedTaskReader,
+        results: DurableResults,
+        parent_blobs: ParentBlobStore,
     ) -> TestChildService {
-        let gate = SharedBudgetGate::new(BudgetGate::unlimited(
-            ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-        ));
-        self.service_with_ports(
-            gate,
-            ChildServicePorts::new(
-                self.parent_run,
-                Arc::new(self.journal.clone()),
-                task_reader,
-                results,
-                parent_blobs,
-                default_profile_owner(),
-                Arc::new(ExistingAuthorityAdmission::new()),
-            ),
-            ReturnHookPort::new(HookDecision::Continue),
+        self.unlimited_service(
+            self.host()
+                .with_content(task_reader, results, parent_blobs),
         )
     }
 
-    fn profile_service(&self, owner: Arc<dyn ChildProfileResolver>) -> TestChildService {
+    fn profile_service(&self, owner: ExistingProfileOwner) -> TestChildService {
+        self.unlimited_service(self.host().with_profiles(profile_policy(owner)))
+    }
+
+    fn unlimited_service(&self, host: TestChildHost) -> TestChildService {
         let gate = SharedBudgetGate::new(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
         ));
         self.service_with_ports(
             gate,
-            ChildServicePorts::new(
-                self.parent_run,
-                Arc::new(self.journal.clone()),
-                Arc::new(self.task_reader.clone()),
-                Arc::new(self.results.clone()),
-                Arc::new(self.parent_blobs.clone()),
-                owner,
-                Arc::new(ExistingAuthorityAdmission::new()),
-            ),
+            self.ports(host),
             ReturnHookPort::new(HookDecision::Continue),
         )
     }
@@ -1410,9 +1494,9 @@ fn child_uses_real_controller_and_durable_typed_parent_order() {
 fn child_reads_rendered_task_bytes_through_the_injected_reader() {
     let harness = Harness::new(RunSettlement::Completed);
     let task_bytes = b"rendered child task, not its content digest".to_vec();
-    let task_reader = Arc::new(RenderedTaskReader::with_bytes(task_bytes.clone()));
-    let results = Arc::new(DurableResults::default());
-    let parent_blobs = Arc::new(ParentBlobStore::default());
+    let task_reader = RenderedTaskReader::with_bytes(task_bytes.clone());
+    let results = DurableResults::default();
+    let parent_blobs = ParentBlobStore::default();
     let service = harness.content_service(task_reader.clone(), results.clone(), parent_blobs);
     let invocation = SubagentInvocationId::new();
     let task = blob_for_bytes(&task_bytes);
@@ -1449,11 +1533,11 @@ fn child_result_is_verified_copied_to_parent_and_only_parent_ref_is_returned() {
     let result_bytes = b"verified final assistant bytes";
     let child_item = blob_for_bytes(result_bytes);
     let harness = Harness::new(RunSettlement::Completed);
-    let results = Arc::new(DurableResults::default());
-    let parent_blobs = Arc::new(ParentBlobStore::default());
+    let results = DurableResults::default();
+    let parent_blobs = ParentBlobStore::default();
     let task = blob_for_bytes(b"task");
     let service = harness.content_service(
-        Arc::new(RenderedTaskReader::with_bytes(b"task".to_vec())),
+        RenderedTaskReader::with_bytes(b"task".to_vec()),
         results.clone(),
         parent_blobs.clone(),
     );
@@ -1522,14 +1606,14 @@ fn child_result_digest_or_parent_copy_failure_fails_closed_without_return_or_set
             b"dishonest bytes".to_vec()
         };
         let harness = Harness::new(RunSettlement::Completed);
-        let results = Arc::new(DurableResults::default());
-        let parent_blobs = Arc::new(ParentBlobStore::default());
+        let results = DurableResults::default();
+        let parent_blobs = ParentBlobStore::default();
         if copy_failure {
             parent_blobs.fail_copy();
         }
         let task = blob_for_bytes(b"task");
         let service = harness.content_service(
-            Arc::new(RenderedTaskReader::with_bytes(b"task".to_vec())),
+            RenderedTaskReader::with_bytes(b"task".to_vec()),
             results.clone(),
             parent_blobs.clone(),
         );
@@ -2093,30 +2177,33 @@ fn settled_journal_failure_preserves_result_for_exactly_once_retry() {
 #[test]
 fn request_only_recovery_admits_once_without_executing_or_delivering() {
     let harness = Harness::new(RunSettlement::Completed);
-    let authority = Arc::new(RecoverySelectionAdmission::default());
-    let profile = Arc::new(ExistingProfileOwner {
+    let authority = RecoverySelectionAdmission::default();
+    let profile = ExistingProfileOwner {
         layers: vec![
             ConfigLayer::parse(Source::User, "[profile.worker]\n").expect("profile layer"),
         ],
         trust: Trust::Trusted,
         calls: Arc::new(Mutex::new(0)),
-    });
+    };
     let task_bytes = b"request-only rendered task".to_vec();
-    let task_reader = Arc::new(RenderedTaskReader::with_bytes(task_bytes.clone()));
-    let results = Arc::new(DurableResults::default());
-    let parent_blobs = Arc::new(ParentBlobStore::default());
+    let task_reader = RenderedTaskReader::with_bytes(task_bytes.clone());
+    let results = DurableResults::default();
+    let parent_blobs = ParentBlobStore::default();
+    let recorded_calls = Arc::clone(&profile.calls);
+    let admission = authority.clone();
+
     let service = harness.service_with_ports(
         SharedBudgetGate::new(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
         )),
-        ChildServicePorts::new(
-            harness.parent_run,
-            Arc::new(harness.journal.clone()),
-            task_reader.clone(),
-            results.clone(),
-            parent_blobs.clone(),
-            profile.clone(),
-            authority.clone(),
+        harness.ports(
+            harness
+                .host()
+                .with_content(task_reader.clone(), results.clone(), parent_blobs.clone())
+                .with_profiles(profile_policy(profile))
+                .with_selections(selection_policy(move |request, bindings| {
+                    admission.admit(request, bindings)
+                })),
         ),
         ReturnHookPort::new(HookDecision::Continue),
     );
@@ -2171,7 +2258,7 @@ fn request_only_recovery_admits_once_without_executing_or_delivering() {
         "recovery re-admits the exact persisted selection"
     );
     assert_eq!(
-        *profile.calls.lock().expect("profile resolutions"),
+        *recorded_calls.lock().expect("profile resolutions"),
         1,
         "recovery resolves the persisted profile before execution"
     );
@@ -2213,7 +2300,7 @@ fn request_only_recovery_admits_once_without_executing_or_delivering() {
     assert_eq!(transactions.len(), 1);
     assert_eq!(transactions[0].run_id(), child_run);
     assert_eq!(transactions[0].origin(), recovered.origin());
-    let events = ChildJournal::read(&harness.journal, invocation)
+    let events = harness.journal.read_journal(invocation)
         .expect("request evidence remains readable");
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].env.turn, parent_turn);
@@ -2298,7 +2385,7 @@ fn after_spawn_recovery_delegates_uncertainty_without_reexecution_or_result_io()
         child_run
     };
     let events_before_recovery =
-        ChildJournal::read(&harness.journal, invocation).expect("durable child lifecycle");
+        harness.journal.read_journal(invocation).expect("durable child lifecycle");
     assert!(matches!(
         events_before_recovery.as_slice(),
         [
@@ -2525,8 +2612,12 @@ fn authority_profile_and_shared_budget_are_admitted_by_real_owners() {
         "0.04".parse().expect("amount"),
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
     )));
-    let authority = Arc::new(ExistingAuthorityAdmission::new());
-    let service = harness.service_with_gate_and_authority(gate.clone(), authority.clone());
+    let authority = ExistingAuthorityAdmission::new();
+    let admission = authority.clone();
+    let service = harness.service_with_gate_and_authority(
+        gate.clone(),
+        selection_policy(move |request, bindings| admission.admit(request, bindings)),
+    );
     let gate_id = gate.id();
     let first = futures::executor::block_on(
         service.start(request(SubagentInvocationId::new(), ChildWait::Background)),
@@ -2570,11 +2661,11 @@ fn authority_profile_and_shared_budget_are_admitted_by_real_owners() {
 #[test]
 fn profile_owner_refuses_unknown_untrusted_and_widening_profiles_before_controller_effect() {
     let layer = ConfigLayer::parse(Source::User, "[profile.worker]\n").expect("profile layer");
-    let owner = Arc::new(ExistingProfileOwner {
+    let owner = ExistingProfileOwner {
         layers: vec![layer],
         trust: Trust::Trusted,
         calls: Arc::new(Mutex::new(0)),
-    });
+    };
     let harness = Harness::new(RunSettlement::Completed);
     let service = harness.profile_service(owner);
     let known = futures::executor::block_on(
@@ -2599,11 +2690,11 @@ fn profile_owner_refuses_unknown_untrusted_and_widening_profiles_before_controll
 
     let project_layer = ConfigLayer::parse(Source::Project, "[profile.project-only]\n")
         .expect("project profile layer");
-    let untrusted = Arc::new(ExistingProfileOwner {
+    let untrusted = ExistingProfileOwner {
         layers: vec![project_layer],
         trust: Trust::Untrusted,
         calls: Arc::new(Mutex::new(0)),
-    });
+    };
     let untrusted_service = harness.profile_service(untrusted);
     let refused = futures::executor::block_on(
         untrusted_service.start(
@@ -2636,26 +2727,27 @@ fn profile_owner_refuses_unknown_untrusted_and_widening_profiles_before_controll
 #[test]
 fn unprofiled_child_cannot_widen_sandbox_or_offline_before_any_run_effect() {
     let harness = Harness::new(RunSettlement::Completed);
-    let authority = Arc::new(ChildTurnAuthorityAdmission::default());
+    let authority = ChildTurnAuthorityAdmission::default();
+    let admission = authority.clone();
     let profile_calls = Arc::new(Mutex::new(0));
     let service = harness.service_with_ports(
         SharedBudgetGate::new(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
         )),
-        ChildServicePorts::new(
-            harness.parent_run,
-            Arc::new(harness.journal.clone()),
-            Arc::new(harness.task_reader.clone()),
-            Arc::new(harness.results.clone()),
-            Arc::new(harness.parent_blobs.clone()),
-            Arc::new(ExistingProfileOwner {
-                layers: vec![
-                    ConfigLayer::parse(Source::User, "[profile.worker]\n").expect("profile layer"),
-                ],
-                trust: Trust::Trusted,
-                calls: Arc::clone(&profile_calls),
-            }),
-            authority.clone(),
+        harness.ports(
+            harness
+                .host()
+                .with_profiles(profile_policy(ExistingProfileOwner {
+                    layers: vec![
+                        ConfigLayer::parse(Source::User, "[profile.worker]\n")
+                            .expect("profile layer"),
+                    ],
+                    trust: Trust::Trusted,
+                    calls: Arc::clone(&profile_calls),
+                }))
+                .with_selections(selection_policy(move |request, bindings| {
+                    admission.admit(request, bindings)
+                })),
         ),
         ReturnHookPort::new(HookDecision::Continue),
     );
@@ -2711,12 +2803,13 @@ fn unprofiled_child_cannot_widen_sandbox_or_offline_before_any_run_effect() {
 #[test]
 fn unprofiled_narrower_child_is_admitted_and_inherited_mcp_stays_denied_at_child_authority() {
     let harness = Harness::new(RunSettlement::Completed);
-    let authority = Arc::new(ChildTurnAuthorityAdmission::default());
+    let authority = ChildTurnAuthorityAdmission::default();
+    let admission = authority.clone();
     let service = harness.service_with_gate_and_authority(
         SharedBudgetGate::new(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
         )),
-        authority.clone(),
+        selection_policy(move |request, bindings| admission.admit(request, bindings)),
     );
     let narrower = futures::executor::block_on(
         service.start(
@@ -2885,7 +2978,7 @@ fn concurrent_background_children_return_distinct_verified_parent_blobs_and_sett
         (second_invocation, second_ref),
     ] {
         let events =
-            ChildJournal::read(&harness.journal, invocation).expect("durable child lifecycle");
+            harness.journal.read_journal(invocation).expect("durable child lifecycle");
         assert!(matches!(
             events.as_slice(),
             [

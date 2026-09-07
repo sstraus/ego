@@ -188,11 +188,6 @@ impl std::fmt::Display for ChildJournalError {
 }
 impl std::error::Error for ChildJournalError {}
 
-pub trait ChildJournal: Send + Sync {
-    fn read(&self, invocation: SubagentInvocationId)
-    -> Result<Vec<DomainEvent>, ChildJournalError>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChildResultReaderError {
     Missing { run: RunId },
@@ -211,10 +206,6 @@ impl std::fmt::Display for ChildResultReaderError {
 }
 impl std::error::Error for ChildResultReaderError {}
 
-pub trait ChildTaskReader: Send + Sync {
-    fn read_rendered_task(&self, reference: &BlobRef) -> Result<Vec<u8>, ChildResultReaderError>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildResultEvidence {
     item: BlobRef,
@@ -232,27 +223,55 @@ impl ChildResultEvidence {
     }
 }
 
-pub trait ChildResultReader: Send + Sync {
+/// Everything a child run needs from the process that owns its parent.
+///
+/// One port, not six. This began as `ChildJournal`, `ChildTaskReader`,
+/// `ChildResultReader`, `ChildResultStore`, `ChildProfileResolver` and
+/// `ChildSelectionAdmission` — six traits of one method each, every one with a
+/// single production implementation, all six living in the same CLI module and
+/// wired through a seven-argument constructor that needed
+/// `#[allow(clippy::too_many_arguments)]` to compile.
+///
+/// `AGENTS.md`'s hexagonal rule admits a port at a *proven external boundary*.
+/// None of the six was one: they did not vary independently, no second adapter
+/// ever implemented one without the others, and every fake implemented all of
+/// them together. Six names bought no substitutability and cost four extra
+/// `Arc<dyn>` indirections plus an argument list long enough to trip a lint.
+/// The boundary that is real is this one — the host process holding the
+/// parent's journal, blobs, artifacts and configuration — and it is named once.
+///
+/// The rule of thumb this enacts, recorded in
+/// `docs/decisions/2026-09-07-a-port-needs-two-real-implementations.md`: one
+/// real implementation and one fake is not a boundary, it is a function.
+pub trait ChildHost: Send + Sync {
+    /// The parent's durable record of one subagent invocation.
+    fn read_journal(
+        &self,
+        invocation: SubagentInvocationId,
+    ) -> Result<Vec<DomainEvent>, ChildJournalError>;
+
+    /// The rendered task a child was handed, read back from parent storage.
+    fn read_rendered_task(&self, reference: &BlobRef) -> Result<Vec<u8>, ChildResultReaderError>;
+
+    /// What a completed child produced.
     fn read_final_assistant(
         &self,
         run: RunId,
     ) -> Result<ChildResultEvidence, ChildResultReaderError>;
-}
 
-pub trait ChildResultStore: Send + Sync {
+    /// Copy a child's result into the parent's own storage, returning the
+    /// parent-side reference.
     fn copy_to_parent(
         &self,
         child: RunId,
         evidence: &ChildResultEvidence,
     ) -> Result<BlobRef, ChildResultReaderError>;
-}
 
-pub trait ChildProfileResolver: Send + Sync {
+    /// Whether a named profile exists and does not widen the child's authority.
     fn resolve_profile(&self, name: &str) -> Result<(), String>;
-}
 
-pub trait ChildSelectionAdmission: Send + Sync {
-    fn admit(
+    /// The selections and bindings a child request is admitted under.
+    fn admit_selections(
         &self,
         request: &ChildRequest,
         bindings: &RunExecutionBindings,
@@ -261,33 +280,11 @@ pub trait ChildSelectionAdmission: Send + Sync {
 
 pub struct ChildServicePorts {
     parent_run: RunId,
-    journal: Arc<dyn ChildJournal>,
-    tasks: Arc<dyn ChildTaskReader>,
-    results: Arc<dyn ChildResultReader>,
-    parent_results: Arc<dyn ChildResultStore>,
-    profiles: Arc<dyn ChildProfileResolver>,
-    selections: Arc<dyn ChildSelectionAdmission>,
+    host: Arc<dyn ChildHost>,
 }
 impl ChildServicePorts {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        parent_run: RunId,
-        journal: Arc<dyn ChildJournal>,
-        tasks: Arc<dyn ChildTaskReader>,
-        results: Arc<dyn ChildResultReader>,
-        parent_results: Arc<dyn ChildResultStore>,
-        profiles: Arc<dyn ChildProfileResolver>,
-        selections: Arc<dyn ChildSelectionAdmission>,
-    ) -> Self {
-        Self {
-            parent_run,
-            journal,
-            tasks,
-            results,
-            parent_results,
-            profiles,
-            selections,
-        }
+    pub fn new(parent_run: RunId, host: Arc<dyn ChildHost>) -> Self {
+        Self { parent_run, host }
     }
 }
 
@@ -559,8 +556,8 @@ impl ChildRunService {
         let events = self
             .inner
             .ports
-            .journal
-            .read(invocation)
+            .host
+            .read_journal(invocation)
             .map_err(journal_error)?;
         let mut requested_events = events.iter().filter(|event| {
             matches!(&event.kind, EventKind::SubagentRequested { invocation: id, .. } if *id == invocation)
@@ -895,8 +892,8 @@ async fn start(
     let prompt = read_task(inner, &request.task)?;
     let existing = inner
         .ports
-        .journal
-        .read(request.invocation)
+        .host
+        .read_journal(request.invocation)
         .map_err(journal_error)?;
     let requested_event = if let Some(event) = existing.iter().find(|event| {
         matches!(&event.kind, EventKind::SubagentRequested { invocation, .. } if *invocation == request.invocation)
@@ -986,7 +983,7 @@ fn admit_child_authority(
     request: &mut ChildRequest,
 ) -> Result<(RunSelections, RunExecutionBindings), ChildServiceError> {
     if let Some(profile) = request.requested_profile.as_deref() {
-        if profile.is_empty() || inner.ports.profiles.resolve_profile(profile).is_err() {
+        if profile.is_empty() || inner.ports.host.resolve_profile(profile).is_err() {
             return Err(ChildServiceError::ProfileUnavailable {
                 profile: profile.to_owned(),
             });
@@ -995,8 +992,8 @@ fn admit_child_authority(
     }
     let admitted = inner
         .ports
-        .selections
-        .admit(request, &inner.bindings)
+        .host
+        .admit_selections(request, &inner.bindings)
         .map_err(|diagnostic| ChildServiceError::AuthorityWouldWiden {
             dimension: authority_dimension(&diagnostic),
         })?;
@@ -1206,13 +1203,13 @@ async fn prepare_result(
         RunSettlement::Completed => {
             let evidence = inner
                 .ports
-                .results
+                .host
                 .read_final_assistant(run)
                 .map_err(result_error)?;
             validate_blob(evidence.item(), evidence.bytes())?;
             let final_message = inner
                 .ports
-                .parent_results
+                .host
                 .copy_to_parent(run, &evidence)
                 .map_err(result_error)?;
             if final_message != *evidence.item() {
@@ -1287,8 +1284,8 @@ fn durable_settlement(
 ) -> Result<Option<(DomainEvent, ChildWaitResult)>, ChildServiceError> {
     let events = inner
         .ports
-        .journal
-        .read(invocation)
+        .host
+        .read_journal(invocation)
         .map_err(journal_error)?;
     let mut settlements = events.into_iter().filter_map(|event| match &event.kind {
         EventKind::SubagentSettled {
@@ -1359,7 +1356,7 @@ fn result_of_terminal(terminal: &SubagentTerminal) -> ChildWaitResult {
 fn read_task(inner: &Inner, reference: &BlobRef) -> Result<String, ChildServiceError> {
     let bytes = inner
         .ports
-        .tasks
+        .host
         .read_rendered_task(reference)
         .map_err(result_error)?;
     validate_blob(reference, &bytes)?;
