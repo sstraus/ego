@@ -1150,3 +1150,33 @@ fn a_retired_flag_is_refused_by_name_with_its_replacement() {
         "a live flag is not refused"
     );
 }
+
+/// `ego doctor` takes exactly one flag, and says so about anything else.
+///
+/// Doctor has no subject — it reports on this installation and there is only
+/// one of those — so its whole grammar is `--json` or nothing. That makes the
+/// interesting case the *refusal*: a mistyped flag must be named, not
+/// swallowed and quietly ignored by a command whose output an operator is
+/// about to trust.
+#[test]
+fn doctor_takes_only_json_and_names_anything_else() {
+    match cli::parse(argv(["doctor"])).expect("bare doctor parses") {
+        Invocation::Doctor(args) => assert!(!args.json, "text is the default rendering"),
+        other => panic!("that is not doctor: {other:?}"),
+    }
+    match cli::parse(argv(["doctor", "--json"])).expect("doctor --json parses") {
+        Invocation::Doctor(args) => assert!(args.json),
+        other => panic!("that is not doctor: {other:?}"),
+    }
+
+    let refusal = refused(["doctor", "--jsonn"]);
+    assert!(
+        refusal.contains("--jsonn"),
+        "the refusal must name the flag that was typed: {refusal}"
+    );
+    let refusal = refused(["doctor", "everything"]);
+    assert!(
+        !refusal.is_empty(),
+        "doctor takes no subject, so a word after it is not one"
+    );
+}
