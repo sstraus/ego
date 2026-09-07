@@ -13,7 +13,18 @@ fn text_always_renders_both_tables_deterministically_without_trailing_space() {
     let second = Ego::nowhere().subcommand("models").run();
     assert_eq!(first.code, Some(0));
     assert_eq!(first.stdout, second.stdout);
-    assert!(first.stdout.contains(MODEL_HEADER));
+    // By column *names*, not by the literal's spacing: the table pads every
+    // column to its widest cell, so the gaps in the header move whenever the
+    // rows change. The columns are the contract; their width is not.
+    let model_header = first
+        .stdout
+        .lines()
+        .next()
+        .expect("the model table has a header");
+    assert_eq!(
+        model_header.split_whitespace().collect::<Vec<_>>(),
+        MODEL_HEADER.split_whitespace().collect::<Vec<_>>(),
+    );
     assert!(first.stdout.contains("SOURCES"));
     let source_header = first
         .stdout
@@ -248,5 +259,97 @@ fn unknown_provider_exits_two_before_any_transport() {
         assert!(result.stderr.contains(provider), "{provider}");
         assert!(result.stdout.is_empty(), "{provider}");
         assert!(stub.requests().is_empty(), "{provider}");
+    }
+}
+
+/// A row nobody configured is listed, and says where it came from.
+///
+/// Story `regression_case`'s fifth criterion, both halves in one run because the
+/// interesting claim is the *difference* between them: the same command, the
+/// same provider, one file added, and only the overridden slug changes source.
+///
+/// `--provider anthropic` rather than the whole table on purpose. Anthropic's
+/// resolver is `Supplied`, so it enumerates from the catalogue and opens no
+/// socket, which makes this a test about layering rather than about whichever
+/// endpoints happen to answer on the machine running it.
+///
+/// The home is held here rather than by the harness because the two runs have
+/// to share it: `Ego` owns its temp directories and consumes itself on `run`,
+/// so a second invocation against the *same* `$EGO_HOME` needs the directory
+/// to outlive both.
+#[test]
+fn builtin_rows_are_listed_as_builtin_until_a_file_overrides_one() {
+    let home = tempfile::tempdir().expect("a temp home");
+    let workspace = tempfile::tempdir().expect("a temp workspace");
+    let sources = || -> Vec<(String, String)> {
+        let result = Ego::at(home.path(), workspace.path(), None)
+            .subcommand("models")
+            .args(["--provider", "anthropic", "--json"])
+            .run();
+        assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+        let value: serde_json::Value =
+            serde_json::from_str(&result.stdout).expect("the snapshot is JSON");
+        value["models"]
+            .as_array()
+            .expect("models is an array")
+            .iter()
+            .map(|row| {
+                (
+                    row["slug"].as_str().expect("a slug").to_owned(),
+                    row["provenance"]["authority"]
+                        .as_str()
+                        .expect("a supplied authority")
+                        .to_owned(),
+                )
+            })
+            .collect()
+    };
+
+    let before = sources();
+    assert!(
+        !before.is_empty(),
+        "no anthropic row is listed with no models.toml anywhere",
+    );
+    assert!(
+        before.iter().all(|(_, source)| source == "builtin"),
+        "a row came from somewhere other than the compiled-in catalogue: {before:?}",
+    );
+    let overridden = before.first().expect("at least one builtin row").0.clone();
+
+    std::fs::write(
+        home.path().join("models.toml"),
+        format!(
+            r#"
+[model."{overridden}".capabilities]
+schema_version = 4
+max_context_tokens = 12345
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_efforts = "any"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+"#
+        ),
+    )
+    .expect("the override is writable");
+
+    let after = sources();
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "overriding one row changed how many there are: {after:?}",
+    );
+    for (slug, source) in &after {
+        let expected = if *slug == overridden {
+            "user"
+        } else {
+            "builtin"
+        };
+        assert_eq!(
+            source, expected,
+            "`{slug}` reads as `{source}` after overriding `{overridden}`: {after:?}",
+        );
     }
 }

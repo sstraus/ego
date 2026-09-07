@@ -201,8 +201,31 @@ pub async fn resolve(
     // No branch on the provider id. The row names what resolves it
     // (`ego_ai::resolver`), so this crate does not have to know which
     // providers are daemons in order to resolve any of them.
-    let model = catalogue.resolve(&slug, http, &credential).await?;
+    let model = catalogue
+        .resolve(&slug, http, &credential)
+        .await
+        .map_err(retirement_instead)?;
     Ok((model, credential))
+}
+
+/// Replace "no capabilities are configured" with the retirement, if there is
+/// one.
+///
+/// Only that one error is reconsidered. Every other refusal already knows more
+/// than a tombstone could add — a missing credential is missing whether or not
+/// the model still exists, and an unreachable endpoint is not a fact about the
+/// slug. Widening this to every error would let a stale tombstone mask a live
+/// failure, which is worse than the unhelpful message it replaces.
+///
+/// It runs *after* resolution rather than before it, and that ordering is the
+/// point: a slug that resolves is one an operator has supplied capabilities
+/// for in their own file, and the builtin catalogue does not get to overrule
+/// them about a model they can evidently still reach.
+fn retirement_instead(error: ResolveError) -> ResolveError {
+    let ResolveError::HostedModelNotConfigured { slug } = &error else {
+        return error;
+    };
+    facts::retirement(slug).unwrap_or(error)
 }
 
 #[derive(Debug, Clone)]
@@ -461,6 +484,18 @@ mod tests {
         }
     }
 
+    struct AnthropicCredentials;
+
+    impl Credentials for AnthropicCredentials {
+        fn secret(&self, var: &str) -> Result<Secret, MissingCredential> {
+            (var == ego_ai::provider::ANTHROPIC_KEY_VAR)
+                .then(|| "sk-ant-test".into())
+                .ok_or_else(|| MissingCredential {
+                    var: var.to_owned(),
+                })
+        }
+    }
+
     struct NoHttp;
 
     impl ego_ai::http::Http for NoHttp {
@@ -593,6 +628,74 @@ mod tests {
             ));
         }
         assert!(catalogue.row("xai-oauth").is_ok());
+    }
+
+    /// An Anthropic request assembles from the builtin catalogue alone.
+    ///
+    /// The other half of story `regression_case`'s fourth criterion. The OpenAI half
+    /// is a child process in `tests/run.rs`, because the harness can point
+    /// `OPENAI_BASE_URL` at a stub; the `anthropic` row's base is fixed at
+    /// Anthropic's own address, so a run of it would leave this machine.
+    ///
+    /// So the layers are assembled here instead, with both file layers
+    /// explicitly empty — which is a *stronger* statement about where the
+    /// facts came from than an absent file would be, and reads nothing from
+    /// the environment. What it cannot say is that the real code path skips
+    /// the files; the OpenAI test says that.
+    ///
+    /// It goes as far as `build_request`, because "reaches request assembly"
+    /// is the criterion and a `ResolvedModel` that never produced bytes has
+    /// not demonstrated that its capabilities are usable.
+    #[test]
+    fn an_anthropic_request_assembles_from_the_builtin_catalogue_alone() {
+        let hosted = crate::facts::builtin_only();
+        let slug = ModelSlug::parse("anthropic/claude-opus-5").expect("a valid slug");
+        assert!(
+            hosted
+                .iter()
+                .any(|(key, _)| key == "anthropic/claude-opus-5"),
+            "the builtin catalogue does not carry the row this asserts on",
+        );
+
+        let catalogue = catalogue_from_rows(
+            hosted,
+            mapped_rows(ProviderRow::ollama_default(), ProviderRow::openai()),
+        );
+        let row = catalogue.row("anthropic").expect("anthropic is selectable");
+        let credential = row
+            .credential
+            .resolve(&AnthropicCredentials)
+            .expect("the fixture credential resolves");
+        let http: Arc<dyn Http> = Arc::new(NoHttp);
+        let resolved = futures::executor::block_on(catalogue.resolve(&slug, &http, &credential))
+            .expect("the builtin facts are enough to resolve");
+        assert_eq!(
+            resolved.capabilities.max_context_tokens,
+            Some(1_000_000),
+            "the capabilities did not come from the builtin catalogue",
+        );
+
+        let headers = credential.headers();
+        let target = RequestTarget::new(resolved.row.base(), &headers);
+        let built = resolved
+            .wire
+            .build_request(
+                &target,
+                &GenRequest {
+                    model: resolved.model.clone(),
+                    messages: Conversation::new(vec![Message::text(Role::User, "hello")])
+                        .expect("a valid conversation"),
+                    tools: Vec::new(),
+                    thinking: ThinkingLevel::High,
+                    max_output_tokens: Some(16),
+                    parallel_tool_calls: true,
+                },
+            )
+            .expect("the request is expressible against the builtin facts");
+        let body: serde_json::Value =
+            serde_json::from_slice(built.body.as_deref().expect("a JSON body"))
+                .expect("the body is JSON");
+        assert_eq!(body["model"], "claude-opus-5");
     }
 
     /// The exact selectable set. Any accidental promotion or omission fails

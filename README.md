@@ -37,8 +37,9 @@ resume/listing, session forks and compaction, local and structurally sanitized
 exports, a shared current-model catalogue, subscription login, MCP configuration
 management, atomic user-config and permission-rule management, read-only hook
 catalogue inspection, a read-only redacted health diagnosis, an inbound MCP run
-server, and an ACP server. Ollama and
-OpenAI remain selectable directly; current subscription profiles use `ego auth`.
+server, and an ACP server. Ollama, OpenAI and Anthropic remain selectable
+directly — the last two from a bootstrap catalogue compiled into the binary, so
+an API key alone is enough; current subscription profiles use `ego auth`.
 Commands whose subsystem has not landed are refused by name instead of being
 advertised as working.
 
@@ -58,6 +59,25 @@ same snapshot inside a session.
 parser and checked in. Regenerate them with
 `EGO_UPDATE_ARTIFACTS=1 cargo test -p ego-cli --test reference` after changing
 the grammar; the same test fails the build if you forget.
+
+### A hosted model, with nothing but a key
+
+An API key in the environment is the whole setup. εgo ships a bootstrap model
+catalogue compiled into the binary, so there is no `models.toml` to write
+first:
+
+```sh
+export OPENAI_API_KEY=sk-…      # or ANTHROPIC_API_KEY
+ego -m openai/gpt-5.6-sol
+```
+
+`ego models` lists what that catalogue knows, with a `SOURCE` column reading
+`builtin` until a file of yours overrides a row. The built-in facts are the
+weakest of three layers — `/etc/ego/models.toml` overrides them and
+`$EGO_HOME/models.toml` overrides both, per model — and they carry **no
+prices**, so a run under a cost ceiling still asks you to state rates rather
+than trusting a number compiled in months ago. `CLI.md` §7.2 documents the
+file and the layering.
 
 For a subscription profile, log in before selecting its model:
 

@@ -2649,3 +2649,88 @@ fn a_usage_error_still_goes_to_stderr_and_exits_two() {
     assert!(refused.stdout.is_empty(), "stdout: {}", refused.stdout);
     assert!(refused.stderr.contains("--nonsense"), "{}", refused.stderr);
 }
+
+/// The out-of-the-box hosted path: a key, and nothing else.
+///
+/// Story `regression_case`'s whole problem statement in one run. Before the builtin
+/// catalogue, this exact invocation answered "no capabilities are configured
+/// for `openai/gpt-5.6-sol`" — a true sentence about a product nobody could
+/// start, because the repository shipped neither `/etc/ego/models.toml` nor
+/// `$EGO_HOME/models.toml` and the only cure was to write one by hand.
+///
+/// **The absence of `home_file("models.toml", …)` is the assertion.** Every
+/// other hosted test in this file writes `OPENAI_FACTS` into the home first;
+/// this one deliberately does not, so the capabilities the request is
+/// assembled from can only have come from the layer compiled into the binary.
+/// Adding a `models.toml` here would make it pass for the old reason and prove
+/// nothing.
+///
+/// It asserts the request *body*, not the exit code: reaching request assembly
+/// is the criterion, and a run can exit non-zero for reasons downstream of the
+/// thing being proved.
+#[test]
+fn a_hosted_model_runs_from_the_builtin_catalogue_with_no_models_toml() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .env("OPENAI_API_KEY", "sk-test")
+        .args([
+            "--model",
+            "openai/gpt-5.6-sol",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
+        .run();
+
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        1,
+        "no request was assembled; stderr: {}",
+        finished.stderr
+    );
+    assert_eq!(
+        generations[0]["model"], "gpt-5.6-sol",
+        "the request names the wrong model: {}",
+        generations[0]
+    );
+}
+
+/// A slug the provider switched off is refused as retired, not as unsupplied.
+///
+/// The two refusals send an operator to opposite places, and only one of them
+/// is true here. "No capabilities are configured" means *supply them*, and
+/// doing that for `claude-3-opus-20240229` produces a `models.toml` entry for
+/// an endpoint Anthropic retired on 2026-01-05 — work that cannot succeed.
+///
+/// Run against the real `anthropic` base on purpose: this refusal happens
+/// during resolution, before any credential is read and before any socket is
+/// opened, so a test that reached the network would be proving the refusal
+/// does not work. `stub.requests()` being empty is that claim, made rather
+/// than assumed.
+#[test]
+fn a_retired_model_is_refused_by_name_before_anything_is_sent() {
+    let stub = Stub::start(Plan::default());
+    let refused = Ego::against(&stub)
+        .env("ANTHROPIC_API_KEY", "sk-test")
+        .args([
+            "--model",
+            "anthropic/claude-3-opus-20240229",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
+        .run();
+
+    assert!(
+        refused.stderr.contains("claude-3-opus-20240229")
+            && refused.stderr.contains("retired")
+            && refused.stderr.contains("claude-opus-4-8"),
+        "the refusal must name the slug, the retirement and the replacement: {}",
+        refused.stderr
+    );
+    assert!(
+        stub.requests().is_empty(),
+        "a retired model reached the network"
+    );
+}

@@ -241,13 +241,12 @@ fn unsupported_supplied_sources(
         if admitted.contains(provider) {
             continue;
         }
+        // The strongest layer that supplied any row for this provider.
+        // `SuppliedAuthority` orders `Builtin < System < User`, so `max` is
+        // the same rule the merge in `facts` applies, said once.
         authorities
             .entry(provider.to_string())
-            .and_modify(|authority| {
-                if facts.authority == ego_ai::catalogue::SuppliedAuthority::User {
-                    *authority = facts.authority;
-                }
-            })
+            .and_modify(|authority| *authority = (*authority).max(facts.authority))
             .or_insert(facts.authority);
     }
     authorities
@@ -470,6 +469,11 @@ fn metering(kind: ego_core::public::MeteringKind) -> &'static str {
 fn provenance(value: &ModelFactProvenance) -> String {
     match value {
         ModelFactProvenance::Supplied { authority } => match authority {
+            // Named rather than folded into "system": the whole reason a
+            // reader looks at this column is to find out whether a row came
+            // from a file they can edit, and "builtin" is the answer that
+            // tells them it did not.
+            ego_ai::catalogue::SuppliedAuthority::Builtin => "builtin".to_string(),
             ego_ai::catalogue::SuppliedAuthority::System => "system".to_string(),
             ego_ai::catalogue::SuppliedAuthority::User => "user".to_string(),
         },

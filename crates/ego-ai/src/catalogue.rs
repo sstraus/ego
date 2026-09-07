@@ -161,10 +161,25 @@ impl<'de> Deserialize<'de> for ModelSlug {
     }
 }
 
-/// The only configuration layers allowed to author hosted catalogue facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The only layers allowed to author hosted catalogue facts, weakest first.
+///
+/// The order is the override order and is derived rather than written down
+/// twice: `Builtin < System < User`, so a merge that keeps the greater
+/// authority per slug is the merge the layering describes.
+///
+/// [`Builtin`](Self::Builtin) is not a configuration layer, which is why the
+/// name of this type is now a little wide for it. It is the catalogue
+/// compiled into the binary, and it exists because
+/// `docs/decisions/2026-09-07-a-builtin-catalogue-layer-below-system-and-user.md`
+/// amended the ban on built-in facts: an installation with an API key and no
+/// files could not run a hosted model at all, and "write a `models.toml`
+/// first" is not an out-of-the-box path. It stays *below* both files, so
+/// nothing it says can override what an operator states — which is the
+/// property that made the amendment safe rather than a reversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuppliedAuthority {
+    Builtin,
     System,
     User,
 }
@@ -692,6 +707,29 @@ pub enum ResolveError {
     /// longer required, and "cannot be bounded" is no longer the reason,
     /// because a run that asked for no ceiling does not need bounding.
     HostedModelNotConfigured { slug: String },
+    /// A slug the provider has switched off.
+    ///
+    /// Distinct from [`HostedModelNotConfigured`] because the two send an
+    /// operator to opposite places. "No capabilities are configured" means
+    /// *supply them*, and doing that for a retired model produces a file that
+    /// will never work: the endpoint is gone, not unstated. This says so, and
+    /// names the replacement the vendor recommends.
+    ///
+    /// Every field is data the caller supplies. This crate holds no list of
+    /// retired models and should not — the tombstones live beside the
+    /// catalogue that has a revision to name (`ego-cli`'s `facts`), and a
+    /// second copy here would be a second thing to keep current.
+    ///
+    /// [`HostedModelNotConfigured`]: Self::HostedModelNotConfigured
+    ModelRetired {
+        slug: String,
+        replacement: String,
+        retired: String,
+        /// Where an operator may state the model anyway, in override order.
+        overrides: Vec<String>,
+        /// The catalogue revision that knows it as retired.
+        revision: String,
+    },
     /// The provider needs a credential that is not set.
     MissingCredential(MissingCredential),
     /// The provider received a credential but rejected its account authority.
@@ -741,6 +779,19 @@ impl fmt::Display for ResolveError {
                 "no capabilities are configured for `{slug}`: a hosted provider \
                  publishes no capability endpoint, so its context window and \
                  output ceiling have to be supplied"
+            ),
+            ResolveError::ModelRetired {
+                slug,
+                replacement,
+                retired,
+                overrides,
+                revision,
+            } => write!(
+                f,
+                "`{slug}` was retired by its provider on {retired}; it recommends \
+                 `{replacement}`. Catalogue revision {revision}. To use it anyway, \
+                 state its capabilities in {}",
+                overrides.join(" or ")
             ),
             ResolveError::MissingCredential(missing) => write!(f, "{missing}"),
             ResolveError::RejectedCredential { provider, status } => write!(

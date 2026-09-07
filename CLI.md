@@ -1184,3 +1184,88 @@ are the credential and config holds no secrets, the rest are wire facts. Nothing
 in this table reaches the credential store — `ego auth status` reports an id, a
 kind and an expiry, never a header.
 
+### 7.2 `models.toml` — hosted model capabilities, in three layers
+
+Hosted providers do not tell ego what their models can do, so those facts are
+*supplied*: stated by an authority rather than guessed. There are three, and
+the weakest is compiled into the binary:
+
+```
+builtin                   (compiled in; the catalogue revision below)
+/etc/ego/models.toml      system   (admin)
+$EGO_HOME/models.toml     user     (EGO_HOME overrides ~/.ego)
+```
+
+They merge **per slug**, strongest wins. Overriding one model changes nothing
+about the others, and the `SOURCE` column of `ego models` names which of the
+three won for every row — so a surprising capability is one command away from
+its origin.
+
+The builtin layer exists so that a machine with an API key and no files can
+run. It carries only what each vendor publishes, cites the source and read
+date beside every provider's rows, and **states no prices**: a rate is the one
+fact whose staleness costs money instead of raising an error, so a run under a
+`--max-cost` ceiling with no operator rates still refuses with
+`NoPricingQuote`. Unknown price is not free price. It ships rows only for
+providers the selectable table already admits, and only for those whose
+resolver reads this file at all — `openai` and `anthropic`.  `openrouter` is
+selectable but stays operator-supplied: it proxies hundreds of third-party
+models under no citable contract. Everything else enumerates its own models.
+See `docs/decisions/2026-09-07-a-builtin-catalogue-layer-below-system-and-user.md`.
+
+A full entry, with every field the schema accepts:
+
+```toml
+# `provider/model`. The model half is what goes on the wire.
+[model."openai/gpt-5.6-sol".capabilities]
+schema_version = 4                 # required; rejects an older document
+max_context_tokens = 1050000       # omit if the vendor does not state it
+max_output_tokens = 128000
+# max_tools = 128                  # most tools accepted in one request
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"   # | "same_provider_only" | "portable"
+# reasoning_state_dialect = "anthropic-messages"   # with same_provider_only
+reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+                                   # or "unknown" (fails closed) or "any"
+cancel = "cooperative"             # "unsupported" | "cooperative" | "immediate"
+cache = "short"                    # "none" | "short" | "long"
+transport = "sse"
+
+# `image_input` is either a bare string — `"unknown"` (the default, and it
+# fails closed) or `"unsupported"` — or this table. There is no
+# `kind = "unknown"`.
+[model."openai/gpt-5.6-sol".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+# Omit any limit the vendor does not state. Every one is optional, and a
+# stated limit above the product's own ceiling is rejected at load.
+# max_bytes_per_image = 10485760
+# max_total_bytes = 67108864
+# max_width = 8000
+# max_height = 8000
+# max_pixels = 100000000
+
+# A slug the provider has switched off. Optional, and only the builtin layer
+# ships them today: it turns "no capabilities are configured" — which says
+# *write a file* — into the truth, which is *use this instead*.
+[retired."anthropic/claude-3-opus-20240229"]
+replacement = "anthropic/claude-opus-4-8"
+retired = "2026-01-05"
+```
+
+Omit a field rather than guess it: a missing ceiling stays unknown, and
+`kind = "unknown"` refuses images rather than inventing a media-type list.
+`ego models --json` emits the resulting capabilities verbatim, which is the
+fastest way to check that a file said what you meant.
+
+**The `ego models` cache is not permission to generate.** Its rows are a
+listing snapshot, and the `FRESHNESS` column says `current` or `cached`
+precisely so a stale one is visible. Every generation boundary re-resolves the
+model against these files, the live provider row and the current credential —
+a cached row is never handed to a request
+(`docs/decisions/2026-08-25-the-catalogue-is-a-snapshot-not-generation-authority.md`).
+Only supplied rows come from this file, and they are rebuilt on every
+invocation rather than cached at all; the cache holds only *discovered* rows,
+from providers that enumerate themselves.
+

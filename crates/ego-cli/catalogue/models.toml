@@ -1,0 +1,329 @@
+# The bootstrap model catalogue, compiled into the binary.
+#
+# Read `crates/ego-cli/src/facts.rs` first: this file is the *lowest* of three
+# layers. `/etc/ego/models.toml` overrides it and `$EGO_HOME/models.toml`
+# overrides both, per slug. Nothing here is authority over what an operator
+# states; it exists so that a machine with an API key and no files can run.
+#
+# ## What may be written here
+#
+# Capabilities, and only capabilities that were read from the vendor's own
+# published contract on the date each section cites. **No prices.** A rate
+# written from memory is a number the budget gate would trust and nothing
+# could check, and `docs/decisions/2026-08-21-what-a-model-resolves-to.md` §1
+# forbids it. A run with a money ceiling and no operator rates therefore still
+# refuses with `NoPricingQuote`, which is the correct answer — unknown price is
+# not free price.
+#
+# A fact nobody published stays absent. `max_tools` is omitted rather than
+# guessed, `image_input = "unknown"` fails closed rather than inventing a
+# media-type list. `docs/decisions/2026-08-25-...` §provenance: "Missing
+# numeric or reasoning facts remain `None` or `ReasoningEffortSupport::
+# Unknown`; zero, a maximum, or `Any` is never used as a presentation default."
+#
+# ## Which providers appear
+#
+# Only the rows whose resolver is `Supplied`, because those are the only ones
+# that read this file: `openai`, `anthropic` and `openrouter`. The other seven
+# rows in `ego_ai::conformance::final_provider_rows` enumerate their own models
+# from the provider (`ollama` from the daemon; `openai-codex`,
+# `github-copilot`, `xai-oauth`, `kimi-coding`, `minimax-oauth` and `nous` from
+# their subscription endpoints), so a row here would be a second answer to a
+# question the provider already answers.
+#
+# `gemini` is deliberately absent. Its mapping is complete and its fixtures are
+# deterministic, but `docs/decisions/2026-09-03-public-provider-wires-require-
+# live-promotion.md` gates selectability on a sanitized live recording that
+# does not exist, so it is not in the selectable table and facts for it would
+# describe a provider `--model gemini/…` cannot reach. Story `regression_case` owns
+# promoting it, facts and row together.
+#
+# `openrouter` appears with no rows for the opposite reason: it is selectable
+# and it proxies hundreds of models from dozens of vendors, changing weekly.
+# Any handful chosen here would be arbitrary and stale, and the vendor
+# publishes no contract this file could cite. Openrouter stays operator-
+# supplied, which is what the user layer is for.
+#
+# ## Revision
+#
+# `BUILTIN_CATALOGUE_REVISION` in `facts.rs` must equal the date below, and a
+# test holds that. The revision is what a retirement error names, so a stale
+# constant would send an operator to the wrong catalogue.
+#
+# revision = 2026-09-07
+
+# ---------------------------------------------------------------------------
+# openai — read 2026-09-07 from https://developers.openai.com/api/docs/models,
+# https://developers.openai.com/api/docs/guides/function-calling and
+# https://developers.openai.com/api/docs/guides/images-vision.
+#
+# Shared by every row below, and stated once here rather than in each comment:
+#
+# - `reasoning_carryover = "unsupported"`: the mapping this row speaks
+#   (`wire::openai_completions`) refuses a history carrying reasoning state
+#   with `ReasoningStateNotCarriable`. That is a property of Chat Completions,
+#   which returns no reasoning item to carry.
+# - `max_tools` omitted: the function-calling guide gives "fewer than 20 …
+#   though this is just a soft suggestion" and no hard limit. A soft
+#   suggestion is not a ceiling to refuse a request against.
+# - `supports_parallel_tool_calls = true`: "The model may choose to call
+#   multiple functions in a single turn. You can prevent this by setting
+#   `parallel_tool_calls` to `false`."
+# - `cache = "short"`: prompt caching is listed as a supported feature with a
+#   cached-input price, and no retention the caller controls is documented.
+# - images: "PNG (.png), JPEG (.jpeg or .jpg), WEBP (.webp), and non-animated
+#   GIF (.gif)"; "Up to 1,500 images per request", capped here at ego's own
+#   `MAX_IMAGES_PER_PROMPT` of 100 because that is the limit a request will
+#   actually meet. No per-image byte limit is published, so none is stated.
+
+[model."openai/gpt-6-astra".capabilities]
+# Context window 1,050,000; max output 128,000. Reasoning efforts: low,
+# medium, high, xhigh, max — this row does not offer `none`, so `off` is
+# absent from the set and a request that asks for it is refused by name.
+schema_version = 4
+max_context_tokens = 1050000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[model."openai/gpt-6-astra".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
+[model."openai/gpt-5.6-sol".capabilities]
+# Context window 1,050,000; max output 128,000. Reasoning efforts: "none, low,
+# medium (default), high, xhigh, and max" — `none` is what this build spells
+# `off`.
+schema_version = 4
+max_context_tokens = 1050000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[model."openai/gpt-5.6-sol".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
+[model."openai/gpt-5.6-terra".capabilities]
+schema_version = 4
+max_context_tokens = 1050000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[model."openai/gpt-5.6-terra".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
+[model."openai/gpt-5.6-luna".capabilities]
+schema_version = 4
+max_context_tokens = 1050000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[model."openai/gpt-5.6-luna".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
+# `openai/gpt-5.6-cyber` is listed by the vendor and is absent here: its
+# context window and output ceiling are given as "Not specified" on the models
+# page, and a row with an unstated context window is one compaction and
+# occupancy reporting cannot use. Supply it in your own file if you have the
+# numbers.
+
+# ---------------------------------------------------------------------------
+# anthropic — read 2026-09-07 from
+# https://platform.claude.com/docs/en/about-claude/models/overview,
+# https://platform.claude.com/docs/en/build-with-claude/effort and
+# https://platform.claude.com/docs/en/build-with-claude/vision.
+#
+# Shared by every row below:
+#
+# - `reasoning_carryover = "same_provider_only"` with
+#   `reasoning_state_dialect = "anthropic-messages"`: thinking blocks carry a
+#   signature this provider mints and only it accepts. The dialect is the tag
+#   `wire::anthropic_messages::DIALECT` stamps, and the pair is what stops
+#   another provider's state being replayed here.
+# - `supports_parallel_tool_calls = true`: parallel tool use is the default and
+#   is declined with `tool_choice.disable_parallel_tool_use`, which is the
+#   parameter this build already emits.
+# - `max_tools` omitted: no limit is published.
+# - `cache = "long"`: prompt caching offers a 1-hour retention beside the
+#   5-minute default, which is what `long` means here.
+# - images: "Claude supports JPEG, PNG, GIF, and WebP images"; "The maximum
+#   dimensions per image are 8000x8000 px"; "10 MB (base64-encoded) when using
+#   the Claude API directly". The published per-request count is 600 (100 for
+#   200k-context models); both are stated as 100 because ego's own
+#   `MAX_IMAGES_PER_PROMPT` refuses above that first.
+
+[model."anthropic/claude-fable-5-1".capabilities]
+# Context window 1M; max output 128K. Effort: low, medium, high (default),
+# xhigh, max. `off` is included because this mapping spells it as *omitting*
+# thinking rather than as an effort value the provider must accept.
+schema_version = 4
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "anthropic-messages"
+reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."anthropic/claude-fable-5-1".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+[model."anthropic/claude-opus-5".capabilities]
+# Context window 1M; max output 128K. Effort: low, medium, high (default),
+# xhigh, max.
+schema_version = 4
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "anthropic-messages"
+reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."anthropic/claude-opus-5".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+[model."anthropic/claude-sonnet-5".capabilities]
+# Context window 1M; max output 128K. Effort: low, medium, high (default),
+# xhigh, max.
+schema_version = 4
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "anthropic-messages"
+reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."anthropic/claude-sonnet-5".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+[model."anthropic/claude-haiku-4-5".capabilities]
+# Context window 200K; max output 64K. The alias, which resolves to the pinned
+# `claude-haiku-4-5-20251001`; write the pinned id in your own file if you
+# need the snapshot named in the request.
+#
+# `reasoning_efforts = ["off"]` and that is not an omission. This model is
+# absent from the effort parameter's supported-model list, so every level
+# above `off` would be sent as a value it rejects. `off` is expressible
+# because it is the absence of the parameter.
+schema_version = 4
+max_context_tokens = 200000
+max_output_tokens = 64000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "anthropic-messages"
+reasoning_efforts = { only = ["off"] }
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."anthropic/claude-haiku-4-5".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# ---------------------------------------------------------------------------
+# Tombstones.
+#
+# A slug the vendor has switched off. Without these, `--model
+# anthropic/claude-3-opus-20240229` is answered with "no capabilities are
+# configured", which sends someone to write a `models.toml` entry for a model
+# that will never answer again. With them the refusal names the retirement and
+# the replacement the vendor recommends.
+#
+# `replacement` is the vendor's own recommendation, verbatim, and is not
+# promised to be in this catalogue — it is a fact about their lineup, not
+# about ours. `retired` is the date they stopped serving it.
+#
+# Read 2026-09-07 from
+# https://platform.claude.com/docs/en/about-claude/model-deprecations.
+
+[retired."anthropic/claude-opus-4-1-20250805"]
+replacement = "anthropic/claude-opus-4-8"
+retired = "2026-08-05"
+
+[retired."anthropic/claude-opus-4-20250514"]
+replacement = "anthropic/claude-opus-4-8"
+retired = "2026-06-15"
+
+[retired."anthropic/claude-sonnet-4-20250514"]
+replacement = "anthropic/claude-sonnet-4-6"
+retired = "2026-06-15"
+
+[retired."anthropic/claude-3-7-sonnet-20250219"]
+replacement = "anthropic/claude-sonnet-4-6"
+retired = "2026-02-19"
+
+[retired."anthropic/claude-3-5-haiku-20241022"]
+replacement = "anthropic/claude-haiku-4-5-20251001"
+retired = "2026-02-19"
+
+[retired."anthropic/claude-3-haiku-20240307"]
+replacement = "anthropic/claude-haiku-4-5-20251001"
+retired = "2026-04-20"
+
+[retired."anthropic/claude-3-5-sonnet-20240620"]
+replacement = "anthropic/claude-sonnet-4-6"
+retired = "2025-10-28"
+
+[retired."anthropic/claude-3-5-sonnet-20241022"]
+replacement = "anthropic/claude-sonnet-4-6"
+retired = "2025-10-28"
+
+[retired."anthropic/claude-3-opus-20240229"]
+replacement = "anthropic/claude-opus-4-8"
+retired = "2026-01-05"
+
+[retired."anthropic/claude-3-sonnet-20240229"]
+replacement = "anthropic/claude-sonnet-4-6"
+retired = "2025-07-21"

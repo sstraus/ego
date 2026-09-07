@@ -8,11 +8,26 @@
 //! `Catalogue::with_hosted` has no caller and `--model openai/…` can only ever
 //! refuse, which would make the refusal a dead end rather than a contract.
 //!
-//! ## Why its own file, and only two of them
+//! ## Why its own file, and three layers of it
 //!
-//! Two locations, `/etc/ego/models.toml` then `$EGO_HOME/models.toml`, with the
-//! user's winning — §7's system-then-user order, and pricing is exactly the
-//! fleet fact an administrator states once.
+//! Two locations on disk, `/etc/ego/models.toml` then `$EGO_HOME/models.toml`,
+//! with the user's winning — §7's system-then-user order, and pricing is
+//! exactly the fleet fact an administrator states once.
+//!
+//! Below both sits [`BUILTIN`], compiled in. It is there because without it a
+//! machine with a valid `ANTHROPIC_API_KEY` and no files could not run a
+//! hosted model at all: `--model anthropic/claude-opus-5` answered "no
+//! capabilities are configured", which is a true sentence about a product
+//! nobody could start. `docs/decisions/2026-09-07-a-builtin-catalogue-layer-
+//! below-system-and-user.md` amends the ban on built-in facts to allow it,
+//! under three conditions this module enforces: it is the *weakest* layer, it
+//! carries no prices, and it states only what a vendor published.
+//!
+//! **No prices in the builtin layer**, and that is not caution about staleness
+//! — it is §1 of `2026-08-21-what-a-model-resolves-to.md` unchanged. A rate
+//! this repository wrote down is a number the budget gate would trust and
+//! nothing could check. A run with a money ceiling and no operator rates still
+//! refuses with `NoPricingQuote`; an unknown price is not a free one.
 //!
 //! **The project and project-local layers are not read here, in any posture.**
 //! A repository that could state its own model's price could state a low one,
@@ -62,6 +77,23 @@ pub const MODELS_FILE: &str = "models.toml";
 /// The administrator's copy.
 const SYSTEM_DIR: &str = "/etc/ego";
 
+/// The catalogue compiled into this binary.
+///
+/// `include_str!` and not a file read at startup: a bootstrap layer that can
+/// go missing is not a bootstrap layer, and an installation is one binary.
+/// The file's own header explains which providers appear in it and why the
+/// rest do not.
+const BUILTIN: &str = include_str!("../catalogue/models.toml");
+
+/// The date every fact in [`BUILTIN`] was read from its vendor's contract.
+///
+/// A date rather than a counter, because what a reader wants to know about a
+/// capability claim is *when somebody last checked*, and a monotonic integer
+/// answers a different question. It is what a retirement refusal names, so a
+/// test holds it equal to the `revision =` line in the file itself — a
+/// constant that had drifted would send an operator to the wrong catalogue.
+pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-07";
+
 /// One `models.toml`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +104,29 @@ struct Facts {
     /// one entry.
     #[serde(default)]
     model: BTreeMap<String, Supplied>,
+    /// Slugs the provider has switched off.
+    ///
+    /// Decoded from every layer rather than only from [`BUILTIN`], because
+    /// the type is one and an operator's file that says `[retired."x"]` is
+    /// better answered than rejected. Only the builtin table is *consulted*
+    /// (see [`retirement`]) — an operator who wants a slug gone deletes its
+    /// row, and one who wants it back states it, which is the layering
+    /// already in place rather than a second mechanism beside it.
+    #[serde(default)]
+    retired: BTreeMap<String, Retired>,
+}
+
+/// A tombstone: what the provider did, and what it says to use instead.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Retired {
+    /// The vendor's own recommendation, verbatim, and **not** promised to be
+    /// in this catalogue. It is a fact about their lineup, not about ours,
+    /// and rewriting it to the nearest row we happen to ship would be
+    /// answering a question the vendor did not ask.
+    replacement: String,
+    /// The date they stopped serving it.
+    retired: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,19 +201,83 @@ fn read(path: &Path) -> Result<Facts, UsageError> {
 /// so callers name it once.
 pub type Hosted = HostedModel;
 
+/// [`BUILTIN`], decoded.
+///
+/// Panics if it does not decode, and that is the right failure: the file is
+/// compiled in, so a malformed one is a broken build rather than a broken
+/// installation, and a test decodes it so the panic is reached in CI and not
+/// on somebody's machine. Returning an empty layer instead would ship a binary
+/// whose out-of-the-box path silently is not one.
+fn builtin() -> Facts {
+    toml::from_str(BUILTIN).expect("the compiled-in catalogue is valid TOML this build controls")
+}
+
+/// The three layers as one table, the strongest authority winning per slug.
+///
+/// Whole rows replace, they do not merge field by field. An operator who
+/// states `[model."anthropic/claude-opus-5"]` gets exactly what they wrote and
+/// nothing of the builtin row underneath — because a half-inherited row is one
+/// where a context window they never typed is still in effect, and the point
+/// of overriding is to be believed.
 fn merge_layers(
+    builtin: BTreeMap<String, Supplied>,
     system: BTreeMap<String, Supplied>,
     user: BTreeMap<String, Supplied>,
 ) -> BTreeMap<String, (SuppliedAuthority, Supplied)> {
-    let mut merged = system
-        .into_iter()
-        .map(|(slug, supplied)| (slug, (SuppliedAuthority::System, supplied)))
-        .collect::<BTreeMap<_, _>>();
-    merged.extend(
-        user.into_iter()
-            .map(|(slug, supplied)| (slug, (SuppliedAuthority::User, supplied))),
-    );
+    let mut merged = BTreeMap::new();
+    for (authority, layer) in [
+        (SuppliedAuthority::Builtin, builtin),
+        (SuppliedAuthority::System, system),
+        (SuppliedAuthority::User, user),
+    ] {
+        merged.extend(
+            layer
+                .into_iter()
+                .map(|(slug, supplied)| (slug, (authority, supplied))),
+        );
+    }
     merged
+}
+
+/// What the builtin catalogue knows about a slug its provider switched off.
+///
+/// Only the builtin table is consulted. A tombstone is a claim about a
+/// vendor's lineup with a revision attached, and the two file layers have no
+/// revision to attach — so a `[retired]` table in an operator's file would
+/// produce a refusal naming a catalogue date that says nothing about it.
+///
+/// The lookup is by full slug and the answer is data, not a message: the
+/// refusal is assembled by the caller that also knows which paths an operator
+/// may override in.
+pub fn retirement(slug: &str) -> Option<ego_ai::catalogue::ResolveError> {
+    let mut catalogue = builtin();
+    let retired = catalogue.retired.remove(slug)?;
+    Some(ego_ai::catalogue::ResolveError::ModelRetired {
+        slug: slug.to_owned(),
+        replacement: retired.replacement,
+        retired: retired.retired,
+        overrides: override_paths(),
+        revision: BUILTIN_CATALOGUE_REVISION.to_owned(),
+    })
+}
+
+/// The files that may override the builtin layer, weakest first.
+///
+/// Built from the same two constants [`supplied`] reads, so a refusal cannot
+/// name a location this module does not actually consult. `$EGO_HOME` is
+/// resolved rather than printed as the variable, because an operator about to
+/// create a file needs the path and not the recipe for it.
+fn override_paths() -> Vec<String> {
+    let mut paths = vec![
+        PathBuf::from(SYSTEM_DIR)
+            .join(MODELS_FILE)
+            .display()
+            .to_string(),
+    ];
+    if let Some(home) = config::ego_home() {
+        paths.push(home.join(MODELS_FILE).display().to_string());
+    }
+    paths
 }
 
 /// Every supplied hosted model, keyed by slug, user's winning over system's.
@@ -175,8 +294,32 @@ pub fn supplied(ceilings: &Ceilings) -> Result<Vec<(String, HostedModel)>, Usage
         Some(home) => read(&home.join(MODELS_FILE))?.model,
         None => BTreeMap::new(),
     };
-    let merged = merge_layers(system, user);
+    project(merge_layers(builtin().model, system, user), ceilings)
+}
 
+/// The builtin layer alone, with both file layers explicitly empty.
+///
+/// `#[cfg(test)]` because that is the whole truth about it: nothing in a
+/// running binary wants the weakest layer without the ones above it. What a
+/// test wants it for is to assert *where a fact came from* without reading the
+/// environment — which [`supplied`] necessarily does, and which would make the
+/// answer depend on whether the machine running the suite happens to have a
+/// `models.toml`.
+#[cfg(test)]
+pub(crate) fn builtin_only() -> Vec<(String, HostedModel)> {
+    project(
+        merge_layers(builtin().model, BTreeMap::new(), BTreeMap::new()),
+        &Ceilings::default(),
+    )
+    .expect("the compiled-in catalogue keys are slugs")
+}
+
+/// Merged layers as the catalogue's own type, or the first key that is not a
+/// slug.
+fn project(
+    merged: BTreeMap<String, (SuppliedAuthority, Supplied)>,
+    ceilings: &Ceilings,
+) -> Result<Vec<(String, HostedModel)>, UsageError> {
     merged
         .into_iter()
         .map(|(slug, (authority, supplied))| {
@@ -268,11 +411,141 @@ transport = "sse"
             ))
             .unwrap()
         };
+        let builtin = layer(100000);
         let system = layer(200000);
         let user = layer(400000);
-        let merged = merge_layers(system.model, user.model);
+        let merged = merge_layers(builtin.model, system.model, user.model);
         let (authority, supplied) = &merged["openai/gpt-5.6"];
         assert_eq!(*authority, ego_ai::catalogue::SuppliedAuthority::User);
         assert_eq!(supplied.capabilities.max_context_tokens, Some(400000));
+    }
+
+    /// The builtin layer loses to both files, one at a time.
+    ///
+    /// Separate from the case above because that one proves `User` beats
+    /// `System` and would pass with a builtin layer that was never consulted
+    /// at all. Each pair here has exactly one file in it, so the builtin row
+    /// is the only other candidate and losing is the only way to be absent.
+    #[test]
+    fn the_builtin_layer_is_the_weakest_of_the_three() {
+        let layer = |context: u64| {
+            toml::from_str::<Facts>(&format!(
+                r#"
+[model."openai/gpt-5.6".capabilities]
+schema_version = 4
+max_context_tokens = {context}
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_efforts = "any"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+"#
+            ))
+            .unwrap()
+            .model
+        };
+
+        for (winner, system, user) in [
+            (SuppliedAuthority::System, layer(200000), BTreeMap::new()),
+            (SuppliedAuthority::User, BTreeMap::new(), layer(400000)),
+        ] {
+            let merged = merge_layers(layer(100000), system, user);
+            let (authority, supplied) = &merged["openai/gpt-5.6"];
+            assert_eq!(*authority, winner, "the builtin row won against a file");
+            assert_ne!(
+                supplied.capabilities.max_context_tokens,
+                Some(100000),
+                "the builtin facts survived a file that replaced the row"
+            );
+        }
+
+        // And with no file at all it is what answers, or the layer is
+        // decoration.
+        let merged = merge_layers(layer(100000), BTreeMap::new(), BTreeMap::new());
+        let (authority, supplied) = &merged["openai/gpt-5.6"];
+        assert_eq!(*authority, SuppliedAuthority::Builtin);
+        assert_eq!(supplied.capabilities.max_context_tokens, Some(100000));
+    }
+
+    /// The compiled-in catalogue decodes, and says what its header says.
+    ///
+    /// [`builtin`] panics on a malformed file, which is correct for a broken
+    /// build and useless if nothing ever calls it before release. This is what
+    /// reaches that panic in CI. The revision check is the other half: the
+    /// constant is what a retirement refusal prints, so a constant that had
+    /// drifted from the file would send an operator to the wrong catalogue,
+    /// and nothing else compares the two.
+    #[test]
+    fn the_compiled_in_catalogue_decodes_and_names_its_own_revision() {
+        let catalogue = builtin();
+        assert!(
+            !catalogue.model.is_empty(),
+            "a bootstrap catalogue with no models is not one"
+        );
+        assert!(
+            BUILTIN.contains(&format!("# revision = {BUILTIN_CATALOGUE_REVISION}")),
+            "the file's revision line and BUILTIN_CATALOGUE_REVISION disagree"
+        );
+        for slug in catalogue.model.keys() {
+            let slug = ModelSlug::parse(slug).expect("every builtin key is a slug");
+            assert!(
+                ["openai", "anthropic", "openrouter"].contains(&slug.provider.as_str()),
+                "`{slug}` names a provider whose resolver does not read this file",
+            );
+        }
+    }
+
+    /// Every builtin row is priceless, in the literal sense.
+    ///
+    /// The rule this holds is the one that made the amendment safe:
+    /// `2026-08-21-what-a-model-resolves-to.md` §1 forbids this repository
+    /// from writing a hosted price down. A `[model."x".pricing]` block added
+    /// to the compiled-in file would be a rate the budget gate trusts and
+    /// nothing can check, and it would look exactly like the rows beside it.
+    #[test]
+    fn the_compiled_in_catalogue_states_no_prices() {
+        for (slug, supplied) in builtin().model {
+            assert!(
+                supplied.pricing.is_none(),
+                "the builtin catalogue priced `{slug}`",
+            );
+        }
+    }
+
+    /// A tombstone refuses by name, and names somewhere to go.
+    ///
+    /// Read through [`retirement`] rather than the table, because the message
+    /// is what an operator sees and the parts that make it actionable — the
+    /// replacement, the revision, and a path that exists — are assembled here
+    /// and nowhere else.
+    #[test]
+    fn a_retired_slug_is_refused_with_its_replacement_and_the_revision() {
+        let slug = "anthropic/claude-3-opus-20240229";
+        let refusal = retirement(slug)
+            .expect("that slug is tombstoned")
+            .to_string();
+
+        assert!(
+            refusal.contains(slug),
+            "the refusal must name what was typed"
+        );
+        assert!(
+            refusal.contains("claude-opus-4-8"),
+            "the refusal must name the replacement: {refusal}"
+        );
+        assert!(
+            refusal.contains(BUILTIN_CATALOGUE_REVISION),
+            "the refusal must name the catalogue that knows it: {refusal}"
+        );
+        assert!(
+            refusal.contains("/etc/ego/models.toml"),
+            "the refusal must name where to override it: {refusal}"
+        );
+        assert!(
+            retirement("anthropic/claude-opus-5").is_none(),
+            "a current model must not be reported as retired"
+        );
     }
 }
