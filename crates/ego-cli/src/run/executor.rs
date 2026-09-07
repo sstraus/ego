@@ -1,0 +1,888 @@
+//! The `RunExecutor` this binary hands the controller, and the adapters it
+//! owns.
+//!
+//! `ego-core` decides *whether* a turn may run; everything here is what
+//! actually happens when it may — the executor, the authority that answers a
+//! child's ceiling, the compaction command, and the small projections between
+//! a `RunTermination` and the typed answers the controller expects.
+//!
+//! Split out of `run.rs` because it is the one cluster in that file with a
+//! single caller and a single trait to satisfy: the controller calls
+//! `RunExecutor`, and nothing else in the CLI needs to see how it is met.
+
+//!
+//! The parent's namespace is glob-imported deliberately. This is a file split
+//! for navigability, not a decoupling: the executor legitimately reaches back
+//! into the composition pipeline it sits in — `settings`, `prepared_materials`,
+//! `generation_preflight`, `effect_scope` — because preparing a turn is what
+//! it exists to do. Ninety explicit imports would restate the parent module
+//! and claim an independence this code does not have.
+use super::*;
+
+pub(super) fn public_result_artifact(
+    result: Value,
+) -> Result<PublishedRunArtifact, RunExecutorError> {
+    match result {
+        Value::String(text) => Ok(PublishedRunArtifact::output(
+            "text/plain",
+            text.into_bytes(),
+        )),
+        structured => serde_json::to_vec(&structured)
+            .map(|bytes| PublishedRunArtifact::output("application/json", bytes))
+            .map_err(|error| RunExecutorError::new(error.to_string())),
+    }
+}
+
+pub(super) fn run_executor_error(termination: RunTermination) -> RunExecutorError {
+    RunExecutorError::new(match termination {
+        RunTermination::UsageError { message }
+        | RunTermination::Provider { message }
+        | RunTermination::ContextOverflow { message }
+        | RunTermination::Failed { message } => message,
+        other => format!(
+            "the prepared run stopped before submission: {}",
+            other.exit_reason()
+        ),
+    })
+}
+
+pub(super) fn settlement(termination: RunTermination) -> Result<RunSettlement, RunExecutorError> {
+    match termination {
+        RunTermination::Done | RunTermination::TaskFailed | RunTermination::MaxTurns => {
+            Ok(RunSettlement::completed())
+        }
+        RunTermination::PermissionRequired { action, by } => {
+            Ok(RunSettlement::permission_required(action, by))
+        }
+        RunTermination::TimedOut => Ok(RunSettlement::cancelled(CancelReason::Timeout)),
+        RunTermination::Signalled(Signal::Int) => Ok(RunSettlement::cancelled(CancelReason::User)),
+        RunTermination::Signalled(Signal::Term) => Ok(RunSettlement::cancelled(CancelReason::Host)),
+        RunTermination::BudgetExceeded => Ok(RunSettlement::completed()),
+        RunTermination::ContextOverflow { .. } => Ok(RunSettlement::ContextOverflow),
+        // Not the catch-all below: an executor error says the run could not
+        // be carried out, and a paused run was carried out exactly as far as
+        // it was asked to go. It is a settlement, and the one the host that
+        // asked for it is waiting to read.
+        RunTermination::Paused => Ok(RunSettlement::Paused),
+        RunTermination::QuestionRequired { question } => Err(RunExecutorError::new(format!(
+            "question {} still requires an answer",
+            question.as_ref().id
+        ))),
+        termination => Err(run_executor_error(termination)),
+    }
+}
+
+#[derive(Default)]
+struct CliRunAuthority {
+    state: Mutex<CliRunAuthorityState>,
+}
+
+#[derive(Default)]
+struct CliRunAuthorityState {
+    active: Option<CancelToken>,
+    pending_interrupt: bool,
+    /// The hold this run is under, or the one it will start under.
+    ///
+    /// Two fields for one fact, exactly as cancellation has two: `holding`
+    /// is the token a live turn is watching, and `pending_pause` is a
+    /// request that arrived before there was one. Without the second, a
+    /// pause racing the start of a run would be dropped and the host would
+    /// be told a hold was in place that nothing was honouring.
+    holding: Option<PauseToken>,
+    pending_pause: Option<RequestId>,
+    settlement: Option<RunSettlement>,
+    observers: Vec<Waker>,
+}
+
+impl CliRunAuthority {
+    fn begin(&self) -> (CancelToken, PauseToken) {
+        let mut state = self.state.lock().expect("CLI run authority");
+        let cancel = CancelToken::new();
+        if state.pending_interrupt {
+            state.pending_interrupt = false;
+            cancel.cancel(CancelCause::User);
+        }
+        let pause = PauseToken::new();
+        if let Some(request) = state.pending_pause.take() {
+            pause.pause(request);
+        }
+        state.active = Some(cancel.clone());
+        state.holding = Some(pause.clone());
+        state.settlement = None;
+        (cancel, pause)
+    }
+
+    fn interrupt(&self) {
+        let mut state = self.state.lock().expect("CLI run authority");
+        match state.active.as_ref() {
+            Some(cancel) => cancel.cancel(CancelCause::User),
+            None => state.pending_interrupt = true,
+        }
+    }
+
+    fn hold(&self, request: RequestId) {
+        let mut state = self.state.lock().expect("CLI run authority");
+        match state.holding.as_ref() {
+            Some(pause) => pause.pause(request),
+            None => {
+                // First writer wins here too, and for the reason
+                // `PauseToken::pause` gives: the boundary that eventually
+                // happens belongs to whoever asked for it first.
+                state.pending_pause.get_or_insert(request);
+            }
+        }
+    }
+
+    fn complete(&self, settlement: RunSettlement) {
+        let observers = {
+            let mut state = self.state.lock().expect("CLI run authority");
+            state.active = None;
+            state.holding = None;
+            state.settlement = Some(settlement);
+            std::mem::take(&mut state.observers)
+        };
+        for observer in observers {
+            observer.wake();
+        }
+    }
+
+    async fn observe(&self) -> RunSettlement {
+        futures::future::poll_fn(|context| {
+            let mut state = self.state.lock().expect("CLI run authority");
+            match state.settlement.clone() {
+                Some(settlement) => std::task::Poll::Ready(settlement),
+                None => {
+                    if !state
+                        .observers
+                        .iter()
+                        .any(|observer| observer.will_wake(context.waker()))
+                    {
+                        state.observers.push(context.waker().clone());
+                    }
+                    std::task::Poll::Pending
+                }
+            }
+        })
+        .await
+    }
+}
+
+/// Production executor adapter for controller-owned headless turns.
+#[derive(Clone)]
+pub struct CliRunExecutor {
+    pub(super) args: Args,
+    pub(super) store: Arc<JsonlStore>,
+    pub(super) concurrency: Option<Arc<Semaphore>>,
+    pub(super) frozen: Option<Arc<config::FrozenRunConfig>>,
+    pub(super) artifacts: Option<Arc<dyn RunArtifactStore>>,
+    pub(super) admission: Arc<EvidenceAdmissionService>,
+    pub(super) child_authority: Option<Arc<ChildAuthorityCeiling>>,
+    pub(super) child: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct ChildAuthorityCeiling {
+    mode: Mode,
+    sandbox: Confinement,
+    offline: bool,
+    permissions: Ruleset,
+    ceilings: Ceilings,
+}
+
+impl ChildAuthorityCeiling {
+    pub(super) fn from_parent(effective: &Effective, confinement: &RunConfinement) -> Self {
+        Self {
+            mode: effective.mode.unwrap_or(Mode::Default),
+            sandbox: effective.sandbox.unwrap_or_default(),
+            offline: confinement.offline(),
+            permissions: effective.permissions.clone(),
+            ceilings: effective.ceilings.clone(),
+        }
+    }
+
+    pub(super) fn admit(&self, effective: &Effective, offline: bool) -> Result<(), String> {
+        let mode = effective.mode.unwrap_or(Mode::Default);
+        if !mode_is_no_wider(mode, self.mode) {
+            return Err(format!(
+                "child profile mode {mode} widens parent mode {}",
+                self.mode
+            ));
+        }
+        let sandbox = effective.sandbox.unwrap_or_default();
+        if confinement_rank(sandbox) > confinement_rank(self.sandbox) {
+            return Err(format!(
+                "child profile sandbox {sandbox} widens parent sandbox {}",
+                self.sandbox
+            ));
+        }
+        if self.offline && !offline {
+            return Err("child profile cannot clear the parent offline ceiling".to_owned());
+        }
+        let child = &effective.permissions;
+        let allows_no_more = child.allow.iter().all(|candidate| {
+            self.permissions
+                .allow
+                .iter()
+                .any(|parent| parent.rule() == candidate.rule())
+        });
+        let denies_no_less = self.permissions.deny.iter().all(|parent| {
+            child
+                .deny
+                .iter()
+                .any(|candidate| candidate.rule() == parent.rule())
+        });
+        if !allows_no_more || !denies_no_less {
+            return Err(
+                "child profile permissions are not a syntactic narrowing of the parent authority"
+                    .to_owned(),
+            );
+        }
+        let mut bounded = effective.ceilings.clone();
+        bounded.clamp(&self.ceilings);
+        if bounded != effective.ceilings {
+            return Err("child profile budget widens the parent ceiling".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn confinement_rank(confinement: Confinement) -> u8 {
+    match confinement {
+        Confinement::Ro => 0,
+        Confinement::Workspace => 1,
+        Confinement::Off => 2,
+    }
+}
+
+fn mode_is_no_wider(child: Mode, parent: Mode) -> bool {
+    child == Mode::Plan
+        || child == parent
+        || matches!(parent, Mode::Edits | Mode::Yolo) && !matches!(child, Mode::Yolo)
+}
+
+#[derive(Clone)]
+pub(crate) struct CliMcpRunPolicy {
+    pub(crate) root: ego_core::run::RunRoot,
+    pub(crate) model: ModelRef,
+    pub(crate) thinking: ThinkingLevel,
+    pub(crate) mode: Mode,
+    pub(crate) ceilings: Ceilings,
+    pub(crate) profile: Option<String>,
+}
+
+/// The configuration a protocol server resolves for its workspace.
+///
+/// Exactly the capture `for_mcp` performs, hoisted so `ego acp` seeds its
+/// operator seat from the same resolution its runs will use. Resolving it
+/// twice from two code paths is how a picker starts disagreeing with the run
+/// it is meant to be steering.
+pub(crate) fn protocol_effective(
+    root: &Path,
+    session_dir: Option<PathBuf>,
+) -> Result<ego_core::config::Effective, UsageError> {
+    let args = protocol_args(session_dir);
+    let frozen = config::FrozenRunConfig::capture(root, &args, Trust::Untrusted)?;
+    frozen.resolve(&args)
+}
+
+pub(super) fn protocol_args(session_dir: Option<PathBuf>) -> Args {
+    Args {
+        prompt: None,
+        agent_file: None,
+        attach: Vec::new(),
+        stdin: crate::cli::Stdin::Ambient,
+        model: None,
+        offline: false,
+        sandbox: None,
+        thinking: None,
+        system: None,
+        append_system: None,
+        instructions: None,
+        bare: false,
+        mode: None,
+        allow: Vec::new(),
+        deny: Vec::new(),
+        answers: Vec::new(),
+        session: SessionChoice::New,
+        session_dir,
+        artifact_dir: None,
+        output: Output::Json,
+        schema: None,
+        schema_retries: 0,
+        retry: 0,
+        fallbacks: Vec::new(),
+        budget: None,
+        max_turns: None,
+        timeout: None,
+        tools: None,
+        mcp: Vec::new(),
+        directory: None,
+        set: Vec::new(),
+        profile: None,
+        profile_source: None,
+        quiet: false,
+        no_color: false,
+    }
+}
+
+/// Compose the one complete pre-effect evidence value used by every CLI host.
+pub(super) fn complete_run_context(
+    args: &Args,
+    effective: &Effective,
+    confinement: &RunConfinement,
+    cwd: &Path,
+    invocation: RunInvocationId,
+    run_id: RunId,
+    instructions: Vec<InstructionDescriptor>,
+) -> Result<RunContextEvidence, UsageError> {
+    let session = run_id.session_id();
+    let mut auth = effective
+        .auth
+        .iter()
+        .map(|(provider, layer)| (provider.clone(), format!("{layer:?}")))
+        .collect::<Vec<_>>();
+    auth.sort();
+    let mcp_config = effective
+        .mcp
+        .entries()
+        .iter()
+        .map(|(name, entry)| (name.as_str().to_owned(), format!("{entry:?}")))
+        .collect::<Vec<_>>();
+    let config_facts = vec![
+        format!("model={:?}", effective.model),
+        format!("thinking={:?}", effective.thinking),
+        format!("mode={:?}", effective.mode),
+        format!("sandbox={:?}", effective.sandbox),
+        format!("permissions={:?}", effective.permissions),
+        format!("judge={:?}", effective.judge),
+        format!("posture={:?}", effective.posture),
+        format!("profile={:?}", effective.active_profile),
+        format!("session_dir={:?}", effective.session_dir),
+        format!("artifact_dir={:?}", effective.artifact_dir),
+        format!("ceilings={:?}", effective.ceilings),
+        format!("clamped={:?}", effective.clamped),
+        format!("ui={:?}", effective.ui),
+    ];
+    let config_digest = canonical_evidence_digest(&(config_facts, auth, mcp_config))?;
+    let mcp = config::selected_mcp(args, effective, cwd)?
+        .into_iter()
+        .map(|(name, server, provenance)| {
+            let transport = match &server {
+                McpServerConfig::Stdio(_) => McpTransportKind::Stdio,
+                McpServerConfig::Http(_) => McpTransportKind::Http,
+            };
+            let provenance_digest = canonical_evidence_digest(&(
+                name.as_str(),
+                format!("{server:?}"),
+                format!("{provenance:?}"),
+            ))?;
+            McpContextDescriptor::new(name.as_str(), transport, Vec::new(), provenance_digest)
+                .map_err(|error| UsageError(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let policy = ego_core::digest::sha256_hex(format!("{:?}", effective.permissions).as_bytes());
+    let policy = PolicyDigest::try_from(policy).expect("sha256_hex is a valid policy digest");
+    let workspace_digest = canonical_evidence_digest(
+        &confinement
+            .workspace()
+            .as_path()
+            .to_string_lossy()
+            .into_owned(),
+    )?;
+    let capabilities_digest = canonical_evidence_digest(&confinement.requirements().required())?;
+    let execution = ExecutionAdmissionDescriptor::new(
+        confinement.level(),
+        !confinement.offline(),
+        workspace_digest,
+        capabilities_digest,
+    );
+    Ok(RunContextEvidence::complete(
+        session,
+        invocation,
+        run_id,
+        EgoVersion::current(),
+        ConfigProvenance::resolved(effective.active_profile.clone()),
+        config_digest,
+        policy,
+        effective.ceilings.clone(),
+        instructions,
+        mcp,
+        execution,
+    ))
+}
+
+fn canonical_evidence_digest<T: serde::Serialize>(value: &T) -> Result<EvidenceDigest, UsageError> {
+    EvidenceAdmissionService::new()
+        .canonical_digest(value)
+        .map_err(|error| UsageError(error.to_string()))
+}
+
+/// Production composition for every host-facing compaction command.
+pub struct CliCompactionCommand {
+    args: Args,
+    store: Arc<JsonlStore>,
+    admission: Arc<EvidenceAdmissionService>,
+}
+
+impl CliCompactionCommand {
+    pub fn new(
+        args: Args,
+        store: Arc<JsonlStore>,
+        admission: Arc<EvidenceAdmissionService>,
+    ) -> Self {
+        Self {
+            args,
+            store,
+            admission,
+        }
+    }
+
+    pub fn for_protocol(
+        root: PathBuf,
+        session_dir: Option<PathBuf>,
+        store: Arc<JsonlStore>,
+        admission: Arc<EvidenceAdmissionService>,
+    ) -> Self {
+        let mut args = protocol_args(session_dir);
+        args.directory = Some(root);
+        Self::new(args, store, admission)
+    }
+
+    async fn prepare_source(
+        &self,
+        source_id: SessionId,
+    ) -> Result<PreparedCompaction, CompactionError> {
+        let settings = settings(&self.args, |_| Trust::Untrusted, &Stderr)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        let Materials {
+            system,
+            registry,
+            skills: _,
+            compiled: _,
+            text: _,
+            slug,
+        } = prepared_materials(&settings, &self.args, String::new(), &Stderr)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        let Settings {
+            run_deadline,
+            root,
+            cwd,
+            confinement,
+            effective,
+            ..
+        } = settings;
+        let clock = SystemClock;
+        let opened = Opened::Durable(Box::new(
+            session::open(self.store.as_ref(), &source_id, &clock)
+                .map_err(|error| CompactionError::Internal(error.to_string()))?,
+        ));
+        let invocation = RunInvocationId::new();
+        let context = complete_run_context(
+            &self.args,
+            &effective,
+            &confinement,
+            &cwd,
+            invocation,
+            RunId::new(source_id, invocation.uuid()),
+            system
+                .as_ref()
+                .map(|prompt| prompt.sources.clone())
+                .unwrap_or_default(),
+        )
+        .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        let Opened::Durable(opened_session) = &opened;
+        self.admission
+            .admit_run_context(&opened_session.writer, context)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+
+        let cancel = CancelToken::new();
+        let mut no_status = None;
+        let GenerationPreflight {
+            source,
+            selection: _,
+            capabilities: _,
+            judge_available,
+            proof_directory,
+            proof_evidence,
+        } = generation_preflight(
+            GenerationPreflightInput {
+                session_id: source_id,
+                confinement: &confinement,
+                effective: &effective,
+                slug,
+                cancel: &cancel,
+                run_deadline,
+                mcp_registry: None,
+                native_tools: &registry,
+            },
+            &mut no_status,
+        )
+        .await
+        .map_err(compaction_termination)?;
+        let opening = opened.state();
+        drop(proof_directory);
+        drop(proof_evidence);
+        let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
+            .map_err(CompactionError::Internal)?;
+        let mode = effective.mode.unwrap_or(Mode::Default);
+        let policy_selection = GenerationPolicySelection::new(mode, effective.permissions.clone());
+        let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
+            CliGenerationPolicySource::new(policy_selection, CanonPath::new(&root), None),
+        );
+        let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
+        let gate = SharedBudgetGate::new(budget::gate(
+            &effective.ceilings,
+            effective.clamped.money,
+            currency,
+        ));
+        let config = TurnConfig {
+            system: system.clone(),
+            token_ceiling: effective.ceilings.tokens,
+            retry: 0,
+            fallbacks: Vec::new(),
+        };
+        let (ports, observation) =
+            effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
+                .await
+                .map_err(compaction_termination)?;
+        let fs = OsFs;
+        let sink = NullSink;
+        let session = Session {
+            id: active.id(),
+            state: opening,
+            store: active.store(),
+            evidence: active.run_evidence(),
+            clock: &clock,
+            sink: &sink,
+            cancel: cancel.clone(),
+        };
+        let http =
+            Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
+        let runtime = GenerationRuntime {
+            source: source.bind(http, cancel.clone(), run_deadline),
+            policy_source,
+            gate,
+            config,
+            admission: Arc::clone(&self.admission),
+            invocation,
+        };
+        let effect_ports = ToolEffectPorts::new(
+            &fs,
+            ports.process(),
+            active.evidence(),
+            ports.resolver_handle(),
+            ports.one_hop_handle(),
+            ports.duplex_handle(),
+        );
+        let tools = Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd));
+        let mut loop_ = TurnLoop::new(session, runtime, tools)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        if let Some(replayed) = active.replayed() {
+            loop_ = loop_.with_ancestor_conversation(replayed.conversation().clone());
+        }
+        if judge_available {
+            loop_ = loop_.with_judge(JudgeContext {
+                confinement: confinement.clone(),
+                exec_caps: observation.capabilities(),
+            });
+        }
+        loop_ = loop_.with_execution_observation(observation);
+        let target_tools = registry.iter().map(RegisteredTool::descriptor).collect();
+        let prepared = loop_.prepare_compaction(system, target_tools).await?;
+        let state = loop_
+            .into_state()
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        active.replace_state(state);
+        Ok(prepared)
+    }
+}
+
+struct CliCompactionPreparation<'a> {
+    command: &'a CliCompactionCommand,
+    source: SessionId,
+}
+
+pub(super) struct DeferredCompactionPreparation<'a> {
+    pub(super) source: SessionId,
+    pub(super) future: Option<CompactionFuture<'a, Result<PreparedCompaction, CompactionError>>>,
+}
+
+impl CompactionPreparation for DeferredCompactionPreparation<'_> {
+    fn source(&self) -> SessionId {
+        self.source
+    }
+
+    fn prepare<'a>(
+        &'a mut self,
+    ) -> CompactionFuture<'a, Result<PreparedCompaction, CompactionError>> {
+        self.future.take().unwrap_or_else(|| {
+            Box::pin(std::future::ready(Err(CompactionError::Internal(
+                "compaction preparation was requested more than once".to_owned(),
+            ))))
+        })
+    }
+}
+
+impl CompactionPreparation for CliCompactionPreparation<'_> {
+    fn source(&self) -> SessionId {
+        self.source
+    }
+
+    fn prepare<'a>(
+        &'a mut self,
+    ) -> CompactionFuture<'a, Result<PreparedCompaction, CompactionError>> {
+        Box::pin(async move { self.command.prepare_source(self.source).await })
+    }
+}
+
+impl CompactionCommand for CliCompactionCommand {
+    fn compact<'a>(
+        &'a self,
+        request: CompactionTransitionRequest,
+    ) -> CompactionFuture<'a, Result<CompactionReceipt, CompactionTransitionError>> {
+        Box::pin(async move {
+            let mut preparation = CliCompactionPreparation {
+                command: self,
+                source: request.source,
+            };
+            CompactionTransitionService::new(SystemClock)
+                .compact(request, &mut preparation, self.store.as_ref())
+                .await
+        })
+    }
+}
+
+pub(super) fn compaction_termination(termination: RunTermination) -> CompactionError {
+    CompactionError::Internal(run_executor_error(termination).to_string())
+}
+
+impl CliRunExecutor {
+    pub(super) fn for_children(&self) -> Self {
+        let mut executor = self.clone();
+        let artifacts: Arc<dyn RunArtifactStore> = self.store.clone();
+        executor.artifacts = Some(artifacts);
+        executor.child = true;
+        executor
+    }
+
+    pub(super) fn with_child_authority(
+        &self,
+        effective: &Effective,
+        confinement: &RunConfinement,
+    ) -> Self {
+        let mut executor = self.for_children();
+        executor.child_authority = Some(Arc::new(ChildAuthorityCeiling::from_parent(
+            effective,
+            confinement,
+        )));
+        executor
+    }
+
+    pub(super) fn admit_child_authority(
+        &self,
+        effective: &Effective,
+        offline: bool,
+    ) -> Result<(), String> {
+        match self.child_authority.as_deref() {
+            Some(authority) => authority.admit(effective, offline),
+            None => Ok(()),
+        }
+    }
+
+    /// Build the fixed headless inputs for the ACP host once, before admission.
+    pub fn for_acp(
+        session_dir: Option<PathBuf>,
+        store: Arc<JsonlStore>,
+        admission: Arc<EvidenceAdmissionService>,
+    ) -> Self {
+        Self {
+            args: protocol_args(session_dir),
+            store,
+            concurrency: None,
+            frozen: None,
+            artifacts: None,
+            admission,
+            child_authority: None,
+            child: false,
+        }
+    }
+
+    pub(crate) fn for_mcp(
+        root: ego_core::run::RunRoot,
+        session_dir: Option<PathBuf>,
+        store: Arc<JsonlStore>,
+        artifacts: Arc<dyn RunArtifactStore>,
+        max_concurrent_runs: NonZeroUsize,
+        admission: Arc<EvidenceAdmissionService>,
+    ) -> Result<(Self, CliMcpRunPolicy), UsageError> {
+        let args = protocol_args(session_dir);
+        let frozen = Arc::new(config::FrozenRunConfig::capture(
+            root.as_path(),
+            &args,
+            Trust::Untrusted,
+        )?);
+        let effective = frozen.resolve(&args)?;
+        let model = effective.model.clone().ok_or_else(|| {
+            UsageError("mcp-server requires an effective configured model".to_owned())
+        })?;
+        if effective.ceilings.money.is_none() && effective.ceilings.tokens.is_none() {
+            return Err(UsageError(
+                "mcp-server requires at least one effective budget ceiling".to_owned(),
+            ));
+        }
+        let policy = CliMcpRunPolicy {
+            root,
+            model,
+            thinking: effective.thinking.unwrap_or(ThinkingLevel::Off),
+            mode: effective.mode.unwrap_or(Mode::Default),
+            ceilings: effective.ceilings,
+            profile: frozen.profile().map(str::to_owned),
+        };
+        Ok((
+            Self {
+                args,
+                store,
+                concurrency: Some(Arc::new(Semaphore::new(max_concurrent_runs.get()))),
+                frozen: Some(frozen),
+                artifacts: Some(artifacts),
+                admission,
+                child_authority: None,
+                child: false,
+            },
+            policy,
+        ))
+    }
+
+    fn authority(handle: &RunHandle) -> Result<Arc<CliRunAuthority>, RunExecutorError> {
+        handle
+            .authority::<Arc<CliRunAuthority>>()
+            .cloned()
+            .ok_or_else(|| RunExecutorError::new("run handle carries another executor authority"))
+    }
+}
+
+impl RunExecutor for CliRunExecutor {
+    type Prepared = CliPrepared;
+
+    fn prepare<'a>(
+        &'a self,
+        request: &'a RunPreparation,
+    ) -> futures::future::BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
+        Box::pin(async move {
+            let permit = match &self.concurrency {
+                Some(concurrency) => {
+                    Some(Arc::clone(concurrency).try_acquire_owned().map_err(|_| {
+                        RunExecutorError::new("run concurrency ceiling is unavailable")
+                    })?)
+                }
+                None => None,
+            };
+            CliPrepared::prepare(
+                self.args.clone(),
+                Arc::clone(&self.store),
+                self.artifacts.clone(),
+                request,
+                permit,
+                self.frozen.as_deref(),
+                PreparedExecutionRuntime {
+                    admission: Arc::clone(&self.admission),
+                    child_executor: Arc::new(self.for_children()),
+                    child_authority: self.child_authority.clone(),
+                    child: self.child,
+                },
+            )
+            .await
+            .map_err(run_executor_error)
+        })
+    }
+
+    fn admit_run_context<'a>(
+        &'a self,
+        prepared: &'a Self::Prepared,
+    ) -> ego_core::run::RunFuture<'a, Result<EvidenceWrite, EvidenceError>> {
+        Box::pin(async move {
+            let key = EvidenceRecord::RunContext(prepared.run_context.clone()).key();
+            let clock = SystemClock;
+            let opened = session::open(self.store.as_ref(), &prepared.session_id, &clock).map_err(
+                |error| EvidenceError::Store {
+                    key,
+                    diagnostic: error.to_string(),
+                },
+            )?;
+            self.admission
+                .admit_run_context(&opened.writer, prepared.run_context.clone())
+        })
+    }
+
+    fn attach<'a>(
+        &'a self,
+        request: &'a RunAttachment,
+    ) -> futures::future::BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
+        Box::pin(async move {
+            Ok(RunHandle::new(
+                request.run_id,
+                Arc::new(CliRunAuthority::default()),
+            ))
+        })
+    }
+
+    fn recover<'a>(
+        &'a self,
+        _run: &'a ego_core::run::RunId,
+    ) -> futures::future::BoxFuture<'a, Result<RecoveryEvidence, RunExecutorError>> {
+        Box::pin(async { Ok(RecoveryEvidence::NotRecoverable) })
+    }
+
+    fn observe<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        _bindings: RunExecutionBindings,
+    ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        Box::pin(async move { Ok(Self::authority(handle)?.observe().await) })
+    }
+
+    fn submit<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        prompt: &'a RunPrompt,
+        prepared: Self::Prepared,
+        bindings: RunExecutionBindings,
+    ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        Box::pin(async move {
+            let authority = Self::authority(handle)?;
+            let (cancel, pause) = authority.begin();
+            let result = prepared.submit(prompt, bindings, &cancel, &pause).await;
+            match result.as_ref() {
+                Ok(settlement) => authority.complete(settlement.clone()),
+                // The same sentence the controller would have settled this
+                // turn with, so the authority's record of how it ended and the
+                // durable receipt do not disagree about why.
+                Err(error) => authority.complete(RunSettlement::Uncertain {
+                    diagnostic: Some(error.to_string()),
+                }),
+            }
+            result
+        })
+    }
+
+    fn interrupt<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+    ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(async move {
+            Self::authority(handle)?.interrupt();
+            Ok(())
+        })
+    }
+
+    fn pause<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        request: RequestId,
+    ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(async move {
+            Self::authority(handle)?.hold(request);
+            Ok(())
+        })
+    }
+}
