@@ -688,6 +688,23 @@ pub enum RunSettlement {
         action: String,
         by: DeniedBy,
     },
+    /// A cancellation that arrived before the executor started the turn.
+    ///
+    /// Split out of [`Interrupted`], which used to carry both this and an
+    /// internal invariant failure. That conflation was the defect: the two
+    /// settle identically as far as the lease is concerned — nothing ran —
+    /// but they are opposite answers to the only question a host asks about a
+    /// finished turn. One is the turn doing what it was told; the other is
+    /// this agent failing. `prompt_result` now answers `cancelled` for this
+    /// and an error for that.
+    ///
+    /// It carries no [`CancelReason`] on purpose. `RunCommand::CancelRequested`
+    /// does not record who asked, so naming a reason here would be inventing
+    /// one. The distinction the surfaces need is failure-versus-cancellation,
+    /// and that is exactly what this variant encodes and no more.
+    CancelledBeforeStart,
+    /// An internal invariant failed and the turn could not proceed. Never a
+    /// user's doing, and never reported as a successful stop.
     Interrupted,
     Uncertain,
 }
@@ -714,7 +731,10 @@ impl RunSettlement {
                 RunStatus::Settled
             }
             Self::Paused => RunStatus::Paused,
-            Self::Cancelled { .. } => RunStatus::Cancelled,
+            // A cancellation before start is a cancellation: the durable
+            // status has to say so, or `session/list` shows an internal
+            // failure where a host cancelled its own turn.
+            Self::Cancelled { .. } | Self::CancelledBeforeStart => RunStatus::Cancelled,
             Self::Interrupted => RunStatus::Interrupted,
             Self::Uncertain => RunStatus::Uncertain,
         }
@@ -1595,9 +1615,26 @@ struct AdmissionReceipt {
     digest: RequestDigest,
     lease: TurnLease,
     settlement: Option<RunSettlement>,
+    /// What the run looked like at the moment *this* receipt settled.
+    ///
+    /// Without it a replay answers from `folded.snapshot`, which is the run as
+    /// it stands now — so retrying a retained older receipt reports a later
+    /// turn's revision and settlement as if they were its own. `None` while
+    /// the turn is still open, which is the only time the current snapshot and
+    /// the receipt's own state are the same thing.
+    settled: Option<SettledOutcome>,
     start: bool,
     model: ModelRef,
     pruned: bool,
+}
+
+/// The terminal state one settlement produced, kept beside the receipt that
+/// caused it. Both fields or neither: a settlement always advances the
+/// revision and the status together.
+#[derive(Clone, Copy)]
+struct SettledOutcome {
+    revision: RunRevision,
+    status: RunStatus,
 }
 
 #[derive(Clone, Copy)]
@@ -2123,7 +2160,7 @@ where
                     .await
             }
             RecoveryEvidence::CancelledBeforeStart => {
-                self.settle_and_observe(run_id, lease, RunSettlement::Interrupted)
+                self.settle_and_observe(run_id, lease, RunSettlement::CancelledBeforeStart)
                     .await
             }
             RecoveryEvidence::Ambiguous | RecoveryEvidence::NotRecoverable => {
@@ -2293,22 +2330,53 @@ where
     }
 
     fn observation(&self, folded: &FoldedRun, lease: TurnLease) -> RunObservation {
+        self.observation_of(folded, folded.snapshot.clone(), lease)
+    }
+
+    /// The observation a retained receipt deserves: the run as it was when
+    /// *that* receipt settled.
+    ///
+    /// A replay is an answer to a request that already happened, so answering
+    /// it from the current snapshot reports whatever turn ran most recently.
+    /// That is latent today only because the ACP adapter remembers one command
+    /// and so never replays anything older; widening that window without this
+    /// would make a stale answer reachable.
+    fn replayed_observation(
+        &self,
+        folded: &FoldedRun,
+        receipt: &AdmissionReceipt,
+    ) -> RunObservation {
+        let mut snapshot = folded.snapshot.clone();
+        if let Some(settled) = receipt.settled {
+            snapshot.revision = settled.revision;
+            snapshot.status = settled.status;
+            snapshot.settlement = receipt.settlement.clone();
+        }
+        self.observation_of(folded, snapshot, receipt.lease)
+    }
+
+    fn observation_of(
+        &self,
+        folded: &FoldedRun,
+        snapshot: RunSnapshot,
+        lease: TurnLease,
+    ) -> RunObservation {
         let state = self
             .live
             .lock()
             .expect("run live state")
             .subscriptions
-            .get(&(folded.snapshot.run_id, lease))
+            .get(&(snapshot.run_id, lease))
             .cloned()
             .unwrap_or_else(|| {
                 Arc::new(Mutex::new(SubscriptionState {
-                    snapshot: folded.snapshot.clone(),
+                    snapshot: snapshot.clone(),
                     complete: folded.active.is_none_or(|active| active.lease != lease),
                     wakers: Vec::new(),
                 }))
             });
         RunObservation {
-            snapshot: folded.snapshot.clone(),
+            snapshot,
             subscription: RunSubscription { state },
         }
     }
@@ -2348,9 +2416,17 @@ where
                 message: "replayed run request changes its durable origin".to_owned(),
             });
         }
+        // `CancelledBeforeStart` is named here because it used to *be*
+        // `Interrupted` and matched this check. Splitting the variant must not
+        // quietly make a turn retryable that was not retryable yesterday: all
+        // three ended before effect authority.
         if matches!(
             receipt.settlement,
-            Some(RunSettlement::Interrupted | RunSettlement::Uncertain)
+            Some(
+                RunSettlement::Interrupted
+                    | RunSettlement::CancelledBeforeStart
+                    | RunSettlement::Uncertain
+            )
         ) {
             return Err(RunError::Integrity {
                 message: "the retained request ended before effect authority and cannot be retried"
@@ -2358,7 +2434,7 @@ where
             });
         }
         Ok(RunCommandOutcome::Replayed(
-            self.observation(&folded, receipt.lease),
+            self.replayed_observation(&folded, receipt),
         ))
     }
 
@@ -2374,7 +2450,7 @@ where
             });
         }
         Ok(RunCommandOutcome::Replayed(
-            self.observation(folded, receipt.lease),
+            self.replayed_observation(folded, receipt),
         ))
     }
 
@@ -2984,6 +3060,7 @@ impl FoldedRun {
                         digest: digest.clone(),
                         lease: *lease,
                         settlement: None,
+                        settled: None,
                         start: *start,
                         model: model.clone(),
                         pruned: false,
@@ -3006,6 +3083,14 @@ impl FoldedRun {
                         .find(|receipt| receipt.lease == *lease)
                         .expect("validated settlement has an admission");
                     receipt.settlement = Some(settlement.clone());
+                    // Read from the transaction rather than from `snapshot`,
+                    // which the two lines below this match arm have not
+                    // advanced yet. This is the receipt's own terminal state
+                    // and the only chance to record it.
+                    receipt.settled = Some(SettledOutcome {
+                        revision: transaction.revision,
+                        status: transaction.status,
+                    });
                     active = None;
                     snapshot.settlement = Some(settlement.clone());
                 }

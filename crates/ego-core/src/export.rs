@@ -170,8 +170,15 @@ pub enum ExportRunSettlement {
     Completed,
     ContextOverflow,
     Paused,
-    Cancelled { reason: CancelReason },
+    Cancelled {
+        reason: CancelReason,
+    },
     PermissionRequired,
+    /// Exported distinctly from [`Interrupted`] rather than folded into
+    /// `Cancelled`: an export is evidence, and evidence that cannot say
+    /// whether a cancellation beat the executor or an invariant broke is the
+    /// ambiguity this story exists to remove.
+    CancelledBeforeStart,
     Interrupted,
     Uncertain,
 }
@@ -681,6 +688,7 @@ fn project_run_command(command: &RunCommand, redactions: &mut Redactions) -> Exp
                     redactions.permission_material += 1;
                     ExportRunSettlement::PermissionRequired
                 }
+                RunSettlement::CancelledBeforeStart => ExportRunSettlement::CancelledBeforeStart,
                 RunSettlement::Interrupted => ExportRunSettlement::Interrupted,
                 RunSettlement::Uncertain => ExportRunSettlement::Uncertain,
             };

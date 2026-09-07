@@ -940,9 +940,20 @@ fn prompt_result(snapshot: &RunSnapshot) -> Result<v1::StopReason, String> {
             })
         }
         Some(RunSettlement::Paused) => stop_reason_v1(&ego_core::run::RunTermination::Paused),
-        Some(RunSettlement::Cancelled { .. }) | Some(RunSettlement::Interrupted) => stop_reason_v1(
-            &ego_core::run::RunTermination::Signalled(ego_core::run::Signal::Int),
-        ),
+        // A cancellation, however early it arrived, is what the host asked
+        // for and answers `cancelled`.
+        Some(RunSettlement::Cancelled { .. }) | Some(RunSettlement::CancelledBeforeStart) => {
+            stop_reason_v1(&ego_core::run::RunTermination::Signalled(
+                ego_core::run::Signal::Int,
+            ))
+        }
+        // An internal invariant failed. This used to answer `cancelled`
+        // alongside the line above, which told a host its own cancellation
+        // had succeeded when in fact this agent had broken. It is an error,
+        // for the same reason `Uncertain` below is one.
+        Some(RunSettlement::Interrupted) => {
+            Err("the turn was interrupted by an internal failure and did not run".to_string())
+        }
         Some(RunSettlement::PermissionRequired { action, by }) => {
             stop_reason_v1(&ego_core::run::RunTermination::PermissionRequired {
                 action: action.clone(),

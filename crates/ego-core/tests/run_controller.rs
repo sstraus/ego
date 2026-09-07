@@ -1360,6 +1360,77 @@ fn exact_terminal_continuation_replay_does_not_attach_or_submit_again() {
     assert_eq!(executor.calls(), calls_before_replay);
 }
 
+/// A, then B, then retry A: the retry must answer with A's outcome.
+///
+/// The replay used to be built from the run's *current* snapshot, so retrying
+/// a retained older receipt reported whatever turn had settled most recently.
+/// Retention here is 2, so both receipts survive and the older one is genuinely
+/// reachable — which is the condition the ACP adapter's one-command memory has
+/// been hiding.
+#[test]
+fn replaying_an_older_receipt_reports_its_own_outcome_and_not_a_later_turn() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let first = admitted_start(&controller, start("/receipt-faithful", 200, "first"));
+    let run = first.run_id();
+    executor.allow_effects();
+    execute(&controller, first.into_execution());
+    let after_start = futures::executor::block_on(controller.status(run)).expect("settled start");
+
+    // Turn A.
+    let turn_a = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request(201),
+            digest("turn-a"),
+            after_start.revision(),
+            "a",
+        ),
+    );
+    execute(&controller, turn_a.into_execution());
+    let after_a = futures::executor::block_on(controller.status(run)).expect("settled A");
+
+    // Turn B, which advances the run past A.
+    let turn_b = admitted_continue(
+        &controller,
+        ContinueRequest::new(run, request(202), digest("turn-b"), after_a.revision(), "b"),
+    );
+    execute(&controller, turn_b.into_execution());
+    let after_b = futures::executor::block_on(controller.status(run)).expect("settled B");
+    assert_ne!(
+        after_a.revision(),
+        after_b.revision(),
+        "the two turns must be distinguishable for this test to mean anything"
+    );
+
+    let replay = continue_command(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request(201),
+            digest("turn-a"),
+            after_start.revision(),
+            "a",
+        ),
+    )
+    .expect("A is still retained and replays");
+    let RunCommandOutcome::Replayed(observation) = replay else {
+        panic!("retrying a settled receipt admitted a second execution");
+    };
+    assert_eq!(
+        observation.snapshot().revision(),
+        after_a.revision(),
+        "replaying A reported a later turn's revision"
+    );
+    assert_eq!(
+        observation.snapshot().status(),
+        after_a.status(),
+        "replaying A reported a later turn's status"
+    );
+}
+
 #[test]
 fn attach_failure_settles_uncertain_and_completes_the_continuation_subscription() {
     let store = Arc::new(RecordingSessionStore::default());
@@ -2298,7 +2369,7 @@ fn recovery_terminal_preserves_terminal_settlement() {
 }
 
 #[test]
-fn recovery_cancelled_before_start_settles_interrupted() {
+fn recovery_cancelled_before_start_settles_cancelled() {
     let (controller, store, executor, run, _) = recovery_controller();
     executor.recovery_result(Ok(ego_core::run::RecoveryEvidence::CancelledBeforeStart));
     assert_eq!(
@@ -2306,20 +2377,24 @@ fn recovery_cancelled_before_start_settles_interrupted() {
         RunStatus::Running
     );
     let recovery = futures::executor::block_on(controller.recover(run, bindings()))
-        .expect("interrupted recovery");
+        .expect("cancelled-before-start recovery");
     let observation = match recovery {
         RunRecoveryOutcome::Observed(observation) => observation,
-        RunRecoveryOutcome::Reattached(_) => panic!("interrupted recovery reattached"),
+        RunRecoveryOutcome::Reattached(_) => panic!("a run cancelled before start reattached"),
     };
+    // Renamed from `..._settles_interrupted`, which pinned the conflation this
+    // story removes: a cancellation that beat the executor settled the same
+    // value an internal invariant violation settles, so a host could not tell
+    // "you cancelled in time" from "this agent broke".
     assert_eq!(
         observation.snapshot().settlement(),
-        Some(&RunSettlement::Interrupted)
+        Some(&RunSettlement::CancelledBeforeStart)
     );
     assert_eq!(
         futures::executor::block_on(controller.status(run))
-            .expect("interrupted status")
+            .expect("cancelled status")
             .status(),
-        RunStatus::Interrupted
+        RunStatus::Cancelled
     );
     assert_eq!(executor.calls(), vec![ExecutorCall::Recover(run)]);
     assert_eq!(store.transactions(run.session_id()).len(), 2);
@@ -2329,7 +2404,8 @@ fn recovery_cancelled_before_start_settles_interrupted() {
     ));
     assert_eq!(
         store.transactions(run.session_id())[1].status(),
-        RunStatus::Interrupted
+        RunStatus::Cancelled,
+        "the durable transaction disagrees with the observation"
     );
 }
 

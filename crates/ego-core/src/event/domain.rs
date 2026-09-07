@@ -780,6 +780,7 @@ mod subagent_failed_settlement {
         ContextOverflow,
         Cancelled { reason: CancelReason },
         PermissionRequired { action: String, by: DeniedBy },
+        CancelledBeforeStart,
         Interrupted,
         Uncertain,
     }
@@ -810,6 +811,7 @@ mod subagent_failed_settlement {
                 action: action.clone(),
                 by: by.clone(),
             },
+            RunSettlement::CancelledBeforeStart => Wire::CancelledBeforeStart,
             RunSettlement::Interrupted => Wire::Interrupted,
             RunSettlement::Uncertain => Wire::Uncertain,
         };
@@ -826,6 +828,7 @@ mod subagent_failed_settlement {
             Wire::PermissionRequired { action, by } => {
                 RunSettlement::PermissionRequired { action, by }
             }
+            Wire::CancelledBeforeStart => RunSettlement::CancelledBeforeStart,
             Wire::Interrupted => RunSettlement::Interrupted,
             Wire::Uncertain => RunSettlement::Uncertain,
         })
