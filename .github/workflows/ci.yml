@@ -1,0 +1,133 @@
+# The gate, on every platform the product claims to run on.
+#
+# Every step here calls a `just` recipe rather than spelling out a cargo
+# invocation. That is deliberate and it is the whole design of this file: a
+# contributor running `just gate` and this workflow run the same commands by
+# construction, so "it passed locally" and "it passed in CI" cannot come apart
+# through a flag that was added in one place and not the other.
+#
+# NOT YET RUNNING. `AGENTS.md` records "No remote until maintainer decides", so this
+# repository has no remote and nothing has ever executed this file. It is
+# committed anyway because the alternative — writing it on the day a remote
+# appears — is writing it under time pressure, and because the `justfile` half
+# of it is useful today regardless. See regression case for the decision this is
+# waiting on.
+#
+# The `windows-latest` leg is expected to fail until regression case and
+# regression_case land native Windows confinement and process ownership. That is
+# honest rather than convenient: a matrix that omitted Windows would report
+# green for a platform the product does not yet support.
+
+name: gate
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace on the one failure that matters is worth more than the noise it
+  # adds to the runs that pass.
+  RUST_BACKTRACE: 1
+
+jobs:
+  gate:
+    name: gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Do not cancel Linux because Windows failed. Until regression_case lands,
+      # Windows failing is the expected state, and fail-fast would hide every
+      # other platform's answer behind it.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v2
+
+      # The temp directory is set here rather than in test code, because it is a
+      # property of the machine a suite runs on and not of the suite. Several
+      # tests write an executable to a temp path and exec it; on a developer
+      # Mac that path is scanned by Defender and costs ~26s per exec, and on a
+      # Windows runner the default temp path is fine but the variable names are
+      # different. Pointing all three at a workspace-local directory makes the
+      # three platforms agree and keeps the knowledge out of the crates.
+      - name: Point the temp directory at the workspace
+        shell: bash
+        run: |
+          mkdir -p "${{ github.workspace }}/.tmp"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "TMP=${{ github.workspace }}\\.tmp" >> "$GITHUB_ENV"
+            echo "TEMP=${{ github.workspace }}\\.tmp" >> "$GITHUB_ENV"
+          else
+            echo "TMPDIR=${{ github.workspace }}/.tmp" >> "$GITHUB_ENV"
+          fi
+
+      - run: just fmt-check
+      - run: just lint
+      - run: just test
+
+      # The live check, and the only provider that is free and credential-less.
+      # Where Ollama is not installed this reports a skip in the job summary
+      # rather than passing silently: a smoke that did not run is not a smoke
+      # that succeeded, and a green check mark that means "we did not look" is
+      # the failure mode this step exists to avoid.
+      - name: Smoke against Ollama, where it exists
+        shell: bash
+        run: |
+          if command -v ollama >/dev/null 2>&1; then
+            just smoke ollama
+            echo "ollama smoke: ran" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ollama smoke: SKIPPED — no ollama on ${{ matrix.os }}" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+
+      # Read from the manifest instead of restating it here. A version pinned in
+      # two files is a version that will disagree with itself.
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: echo "version=$(just _msrv)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `check`, not `test`: this job answers "does the promised toolchain
+      # compile this?", which is what `rust-version` claims. Whether the tests
+      # pass is the `gate` job's question and is already answered on stable.
+      - run: cargo check --workspace --all-targets
+
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # The policy is `deny.toml`, committed next to the manifest.
+          command: --all-features check
