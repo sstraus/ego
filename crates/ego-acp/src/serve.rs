@@ -1396,20 +1396,31 @@ where
                     }
                     let attachment_root = root.clone();
                     let _ = sessions.open(id.clone(), root, Some(start_request), None, mcp);
-                    if let Some(lifecycle) = &lifecycle {
+                    let announcement = if let Some(lifecycle) = &lifecycle {
                         match lifecycle.resume(session, attachment_root.as_path()).await {
-                            Ok(attachment) => {
-                                if let Err(error) = emit_info(&cx, &id, &attachment.meta) {
-                                    return responder.respond_with_error(error);
-                                }
+                            Ok(attachment) => Some(attachment.meta),
+                            Err(error) => {
+                                return responder.respond_with_error(lifecycle_error(&error));
                             }
-                            Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                         }
-                    }
+                    } else {
+                        None
+                    };
+                    // The response first, the announcement after it. A
+                    // `session_info_update` names a session by an id the client
+                    // learns from *this* response, so a client that indexes
+                    // sessions by the response — the ordering `project.rs`
+                    // already documents — drops any update that precedes it.
+                    // Everything able to fail the request has happened above;
+                    // answering first therefore loses nothing.
                     responder.respond(
-                        v1::NewSessionResponse::new(id)
+                        v1::NewSessionResponse::new(id.clone())
                             .config_options(config_options(controls.as_ref(), session)),
-                    )
+                    )?;
+                    match announcement {
+                        Some(meta) => emit_info(&cx, &id, &meta),
+                        None => Ok(()),
+                    }
                 }
             },
             on_receive_request!(),
@@ -1532,13 +1543,16 @@ where
                             watched.finish(&watched_id, generation, &snapshot);
                         }));
                     }
-                    if let Err(error) = emit_attachment(&cx, &request.session_id, &attachment) {
-                        return responder.respond_with_error(error);
-                    }
+                    // Answer before replaying, for the reason `session/new`
+                    // does: every notification below names this session, and a
+                    // client that indexes by the response has not seen the id
+                    // yet. The whole replay, not just the trailing info update,
+                    // would be dropped.
                     responder.respond(
                         v1::LoadSessionResponse::new()
                             .config_options(config_options(controls.as_ref(), id)),
-                    )
+                    )?;
+                    emit_attachment(&cx, &request.session_id, &attachment)
                 }
             },
             on_receive_request!(),
@@ -1632,13 +1646,11 @@ where
                             watched.finish(&watched_id, generation, &snapshot);
                         }));
                     }
-                    if let Err(error) = emit_attachment(&cx, &request.session_id, &attachment) {
-                        return responder.respond_with_error(error);
-                    }
                     responder.respond(
                         v1::ResumeSessionResponse::new()
                             .config_options(config_options(controls.as_ref(), id)),
-                    )
+                    )?;
+                    emit_attachment(&cx, &request.session_id, &attachment)
                 }
             },
             on_receive_request!(),
@@ -1695,14 +1707,18 @@ where
                         None,
                         mcp,
                     );
-                    if let Err(error) = emit_info(&cx, &child_id, &attachment.meta) {
-                        sessions.close(&child_id);
-                        return responder.respond_with_error(error);
-                    }
+                    // The child's id reaches the client here and nowhere else,
+                    // so its own announcement cannot precede this. The failure
+                    // compensation that used to close the child is gone with
+                    // the failure it compensated: once the response is out the
+                    // child is announced, and the only way `emit_info` fails
+                    // now is a connection that can no longer carry either
+                    // message.
                     responder.respond(
-                        v1::ForkSessionResponse::new(child_id)
+                        v1::ForkSessionResponse::new(child_id.clone())
                             .config_options(config_options(controls.as_ref(), child)),
-                    )
+                    )?;
+                    emit_info(&cx, &child_id, &attachment.meta)
                 }
             },
             on_receive_request!(),

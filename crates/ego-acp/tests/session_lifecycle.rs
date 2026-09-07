@@ -109,6 +109,25 @@ impl Connected {
         }
     }
 
+    /// The notifications the agent wrote *after* answering the last request.
+    ///
+    /// Every session notification now follows the response that names its
+    /// session, so a test cannot collect them by reading up to that response.
+    /// Reading "until the stream goes quiet" would make the assertions timing
+    /// dependent; instead this sends a second request and reads up to *its*
+    /// answer. The agent writes a handler's notifications before it takes the
+    /// next request off the wire, so everything ahead of the fence belongs to
+    /// the operation under test, deterministically.
+    ///
+    /// `session/list` is the fence because it is read-only and emits nothing of
+    /// its own.
+    async fn announced(&mut self) -> Vec<serde_json::Value> {
+        let fence = self
+            .send_request("session/list", serde_json::json!({ "cwd": ROOT }))
+            .await;
+        self.response(fence).await.1
+    }
+
     async fn initialize(&mut self) -> serde_json::Value {
         self.request(
             "initialize",
@@ -122,7 +141,7 @@ impl Connected {
     }
 
     async fn new_session(&mut self, root: &str) -> (String, Vec<serde_json::Value>) {
-        let (response, notifications) = self
+        let (response, before) = self
             .request(
                 "session/new",
                 serde_json::json!({
@@ -131,13 +150,16 @@ impl Connected {
                 }),
             )
             .await;
-        (
-            response["result"]["sessionId"]
-                .as_str()
-                .expect("session/new returns a session id")
-                .to_owned(),
-            notifications,
-        )
+        assert!(
+            before.is_empty(),
+            "session/new spoke about a session before the response that names it: {before:?}"
+        );
+        let id = response["result"]["sessionId"]
+            .as_str()
+            .expect("session/new returns a session id")
+            .to_owned();
+        let announced = self.announced().await;
+        (id, announced)
     }
 
     async fn finish(self) {
@@ -207,8 +229,11 @@ async fn initialize_advertises_exactly_the_composed_v1_lifecycle_surface() {
     connection.finish().await;
 }
 
+/// Renamed from `..._before_answering`, which asserted the inversion this story
+/// fixes. The durability half is unchanged; only the ordering claim moved, and
+/// `new_session` now fails if anything at all precedes the response.
 #[tokio::test]
-async fn new_is_durable_and_emits_current_session_info_before_answering() {
+async fn new_is_durable_and_announces_the_session_after_naming_it() {
     let fixture = support::DurableAcpFixture::new();
     let mut first = Connected::new(fixture.router());
     first.initialize().await;
@@ -717,7 +742,7 @@ async fn load_replays_projectable_history_then_one_final_usage_and_current_info(
     let mut connection = Connected::new(fixture.router());
     connection.initialize().await;
 
-    let (loaded, notifications) = connection
+    let (loaded, before) = connection
         .request(
             "session/load",
             serde_json::json!({
@@ -728,6 +753,11 @@ async fn load_replays_projectable_history_then_one_final_usage_and_current_info(
         )
         .await;
     assert!(loaded.get("result").is_some(), "load failed: {loaded}");
+    assert!(
+        before.is_empty(),
+        "load replayed history before answering the request that names the session: {before:?}"
+    );
+    let notifications = connection.announced().await;
     let actual = updates(&notifications);
     assert_eq!(
         actual
@@ -757,7 +787,7 @@ async fn resume_emits_current_info_but_no_history_or_usage() {
     let mut connection = Connected::new(fixture.router());
     connection.initialize().await;
 
-    let (resumed, notifications) = connection
+    let (resumed, before) = connection
         .request(
             "session/resume",
             serde_json::json!({
@@ -768,6 +798,11 @@ async fn resume_emits_current_info_but_no_history_or_usage() {
         )
         .await;
     assert!(resumed.get("result").is_some(), "resume failed: {resumed}");
+    assert!(
+        before.is_empty(),
+        "resume announced the session before answering: {before:?}"
+    );
+    let notifications = connection.announced().await;
     assert_eq!(
         updates(&notifications).len(),
         1,
@@ -784,7 +819,7 @@ async fn fork_uses_durable_lineage_and_attaches_only_the_child() {
     let mut connection = Connected::new(fixture.router());
     connection.initialize().await;
 
-    let (forked, notifications) = connection
+    let (forked, before) = connection
         .request(
             "session/fork",
             serde_json::json!({
@@ -796,11 +831,19 @@ async fn fork_uses_durable_lineage_and_attaches_only_the_child() {
         .await;
     let child = forked["result"]["sessionId"]
         .as_str()
-        .expect("fork returns the child id");
+        .expect("fork returns the child id")
+        .to_owned();
     assert_ne!(child, source.session_id);
-    assert_info_update(&notifications, child, Some("Source title"));
+    // The child's id exists nowhere but this response, so an announcement
+    // ahead of it names a session the client has never heard of.
+    assert!(
+        before.is_empty(),
+        "fork announced the child before naming it: {before:?}"
+    );
+    let notifications = connection.announced().await;
+    assert_info_update(&notifications, &child, Some("Source title"));
     assert_eq!(
-        fixture.lineage_source(child).as_deref(),
+        fixture.lineage_source(&child).as_deref(),
         Some(source.session_id.as_str())
     );
     connection.finish().await;
