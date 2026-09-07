@@ -48,7 +48,7 @@ use url::Url;
 mod support;
 use support::FakeCredentials;
 
-const TEXT_TRANSCRIPT: &str = include_str!("goldens/profile/openai/stream/text.sse");
+const TEXT_TRANSCRIPT: &str = include_str!("goldens/chat_completions/stream/text.sse");
 
 /// The variable the fixture row names, and the value a configured machine
 /// would have put in it. Two constants rather than two literals: the tests

@@ -37,9 +37,12 @@ resume/listing, session forks and compaction, local and structurally sanitized
 exports, a shared current-model catalogue, subscription login, MCP configuration
 management, atomic user-config and permission-rule management, read-only hook
 catalogue inspection, a read-only redacted health diagnosis, an inbound MCP run
-server, and an ACP server. Ollama, OpenAI and Anthropic remain selectable
-directly — the last two from a bootstrap catalogue compiled into the binary, so
-an API key alone is enough; current subscription profiles use `ego auth`.
+server, and an ACP server. Ollama and Anthropic are selectable directly — the
+latter from a bootstrap catalogue compiled into the binary, so an API key alone
+is enough; current subscription profiles use `ego auth`. The public **OpenAI**
+row speaks the Responses contract and is *not* selectable yet: it is refused by
+name until an operator records a sanitized live call against a current entitled
+model, which needs a key this project does not have.
 Commands whose subsystem has not landed are refused by name instead of being
 advertised as working.
 
@@ -67,9 +70,15 @@ catalogue compiled into the binary, so there is no `models.toml` to write
 first:
 
 ```sh
-export OPENAI_API_KEY=sk-…      # or ANTHROPIC_API_KEY
-ego -m openai/gpt-5.6-sol
+export ANTHROPIC_API_KEY=sk-…
+ego -m anthropic/claude-opus-5
 ```
+
+`openai/…` is deliberately absent from that line. Its Responses mapping is
+implemented and pinned against fixtures, but
+`docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`
+does not let a public row become selectable on published schema alone, so the
+row refuses and says how the missing evidence is made.
 
 `ego models` lists what that catalogue knows, with a `SOURCE` column reading
 `builtin` until a file of yours overrides a row. The built-in facts are the

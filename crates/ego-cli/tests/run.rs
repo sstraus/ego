@@ -81,8 +81,8 @@ fn the_version_in_the_document_is_the_version_the_binary_writes() {
 /// A rate per single token, not per million (`budget.rs`: "division is where
 /// exactness goes to die"), and deliberately large, so a test can name a budget
 /// small enough to be crossed without arithmetic nobody can follow.
-const OPENAI_FACTS: &str = r#"
-[model."openai/gpt-5.1".capabilities]
+const ANTHROPIC_FACTS: &str = r#"
+[model."anthropic/claude-test-5".capabilities]
 schema_version = 2
 max_context_tokens = 400000
 max_output_tokens = 128000
@@ -94,8 +94,8 @@ cancel = "cooperative"
 cache = "long"
 transport = "sse"
 
-[model."openai/gpt-5.1".pricing]
-revision = "openai/2026-08-01"
+[model."anthropic/claude-test-5".pricing]
+revision = "anthropic/2026-08-01"
 currency = "USD"
 uncached_input = "0.00000125"
 cache_read = "0.000000125"
@@ -1429,12 +1429,12 @@ fn a_model_the_daemon_does_not_serve_exits_two() {
 fn a_money_budget_smaller_than_the_generation_exits_five() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    ego.home_file("models.toml", OPENAI_FACTS);
+    ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
-            "openai/gpt-5.1",
+            "anthropic/claude-test-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "--budget",
@@ -1930,12 +1930,12 @@ fn quiet_does_not_silence_a_budget_that_cannot_bind() {
 fn a_money_budget_that_binds_is_not_announced() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    ego.home_file("models.toml", OPENAI_FACTS);
+    ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
-            "openai/gpt-5.1",
+            "anthropic/claude-test-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "--budget",
@@ -1969,12 +1969,12 @@ fn a_money_budget_that_binds_is_not_announced() {
 fn a_hosted_model_resolves_from_supplied_facts_and_a_real_credential() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    ego.home_file("models.toml", OPENAI_FACTS);
+    ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
-            "openai/gpt-5.1",
+            "anthropic/claude-test-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "--budget",
@@ -1991,7 +1991,7 @@ fn a_hosted_model_resolves_from_supplied_facts_and_a_real_credential() {
     // The supplied rates were used, so the cost is a real figure and not zero.
     assert_eq!(report["cost"]["state"], "known");
     assert_ne!(report["cost"]["total"]["amount"], "0");
-    assert_eq!(stub.generations()[0]["model"], "gpt-5.1");
+    assert_eq!(stub.generations()[0]["model"], "claude-test-5");
     // No `/api/tags`: a hosted model's facts are supplied, never discovered.
     assert!(
         stub.requests()
@@ -2021,12 +2021,12 @@ fn a_hosted_model_resolves_from_supplied_facts_and_a_real_credential() {
 fn a_hosted_run_with_no_ceiling_consults_no_rates_and_reports_no_cost() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    ego.home_file("models.toml", OPENAI_FACTS);
+    ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
-            "openai/gpt-5.1",
+            "anthropic/claude-test-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "--output",
@@ -2063,12 +2063,12 @@ fn a_hosted_run_with_no_ceiling_consults_no_rates_and_reports_no_cost() {
 fn a_token_ceiling_alone_still_consults_no_rates() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    ego.home_file("models.toml", OPENAI_FACTS);
+    ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
-            "openai/gpt-5.1",
+            "anthropic/claude-test-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "--budget",
@@ -2088,17 +2088,24 @@ fn a_token_ceiling_alone_still_consults_no_rates() {
     );
 }
 
-/// Without the credential, the refusal names the variable to set — before a
-/// request is built, sent, and charged to somebody's rate limit.
+/// Without the credential, the refusal names the remedy — before a request is
+/// built, sent, and charged to somebody's rate limit.
+///
+/// It named an environment *variable* while this test ran on the `openai` row,
+/// whose credential is a plain `BearerFromEnv`. Story `regression_case` moved it to
+/// `anthropic`, which accepts a subscription token as well as an API key and
+/// so cannot honestly name one variable — it names the command that settles
+/// either. The claim under test is unchanged and is the one that matters: the
+/// refusal tells the operator what to do, and arrives before the request.
 #[test]
-fn a_hosted_model_without_its_credential_names_the_variable() {
+fn a_hosted_model_without_its_credential_names_the_remedy() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    ego.home_file("models.toml", OPENAI_FACTS);
+    ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
         .args([
             "--model",
-            "openai/gpt-5.1",
+            "anthropic/claude-test-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "Ask",
@@ -2107,7 +2114,7 @@ fn a_hosted_model_without_its_credential_names_the_variable() {
 
     assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
     assert!(
-        finished.stderr.contains("OPENAI_API_KEY"),
+        finished.stderr.contains("ego auth login anthropic"),
         "{}",
         finished.stderr
     );
@@ -2125,12 +2132,12 @@ fn a_hosted_model_without_its_credential_names_the_variable() {
 #[test]
 fn a_credential_set_to_whitespace_is_refused_like_a_missing_one() {
     let stub = Stub::start(Plan::default());
-    let ego = Ego::against(&stub).env("OPENAI_API_KEY", "   ");
-    ego.home_file("models.toml", OPENAI_FACTS);
+    let ego = Ego::against(&stub).env("ANTHROPIC_API_KEY", "   ");
+    ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
         .args([
             "--model",
-            "openai/gpt-5.1",
+            "anthropic/claude-test-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "Ask",
@@ -2139,7 +2146,7 @@ fn a_credential_set_to_whitespace_is_refused_like_a_missing_one() {
 
     assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
     assert!(
-        finished.stderr.contains("OPENAI_API_KEY"),
+        finished.stderr.contains("ego auth login anthropic"),
         "{}",
         finished.stderr
     );
@@ -2153,10 +2160,10 @@ fn a_credential_set_to_whitespace_is_refused_like_a_missing_one() {
 fn a_hosted_model_with_no_supplied_facts_refuses_rather_than_guessing() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
-            "openai/gpt-5.1",
+            "anthropic/claude-test-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "Ask",
@@ -2165,7 +2172,7 @@ fn a_hosted_model_with_no_supplied_facts_refuses_rather_than_guessing() {
 
     assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
     assert!(
-        finished.stderr.contains("openai/gpt-5.1"),
+        finished.stderr.contains("anthropic/claude-test-5"),
         "{}",
         finished.stderr
     );
@@ -2179,12 +2186,12 @@ fn a_hosted_model_with_no_supplied_facts_refuses_rather_than_guessing() {
 fn a_models_file_that_does_not_parse_is_refused_by_name() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    ego.home_file("models.toml", "[model.\"openai/gpt-5.1\"\n");
+    ego.home_file("models.toml", "[model.\"anthropic/claude-test-5\"\n");
     let finished = ego
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
-            "openai/gpt-5.1",
+            "anthropic/claude-test-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "Ask",
@@ -2222,16 +2229,16 @@ fn a_transport_no_row_can_speak_is_refused_where_it_is_written() {
         let ego = Ego::against(&stub);
         ego.home_file(
             "models.toml",
-            &OPENAI_FACTS.replace(
+            &ANTHROPIC_FACTS.replace(
                 r#"transport = "sse""#,
                 &format!("transport = \"{spelling}\""),
             ),
         );
         let finished = ego
-            .env("OPENAI_API_KEY", "sk-test")
+            .env("ANTHROPIC_API_KEY", "sk-test")
             .args([
                 "--model",
-                "openai/gpt-5.1",
+                "anthropic/claude-test-5",
                 "--session-id",
                 support::FIXTURE_SESSION_ID,
                 "Ask",
@@ -2654,12 +2661,16 @@ fn a_usage_error_still_goes_to_stderr_and_exits_two() {
 ///
 /// Story `regression_case`'s whole problem statement in one run. Before the builtin
 /// catalogue, this exact invocation answered "no capabilities are configured
-/// for `openai/gpt-5.6-sol`" — a true sentence about a product nobody could
-/// start, because the repository shipped neither `/etc/ego/models.toml` nor
-/// `$EGO_HOME/models.toml` and the only cure was to write one by hand.
+/// for `anthropic/claude-opus-5`" — a true sentence about a product nobody
+/// could start, because the repository shipped neither `/etc/ego/models.toml`
+/// nor `$EGO_HOME/models.toml` and the only cure was to write one by hand.
+///
+/// It ran on `openai/gpt-5.6-sol` until story `regression_case` moved that row to
+/// Responses and made it unselectable pending live evidence. The claim is the
+/// same one, made on the row that can still be selected.
 ///
 /// **The absence of `home_file("models.toml", …)` is the assertion.** Every
-/// other hosted test in this file writes `OPENAI_FACTS` into the home first;
+/// other hosted test in this file writes `ANTHROPIC_FACTS` into the home first;
 /// this one deliberately does not, so the capabilities the request is
 /// assembled from can only have come from the layer compiled into the binary.
 /// Adding a `models.toml` here would make it pass for the old reason and prove
@@ -2672,10 +2683,10 @@ fn a_usage_error_still_goes_to_stderr_and_exits_two() {
 fn a_hosted_model_runs_from_the_builtin_catalogue_with_no_models_toml() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
-            "openai/gpt-5.6-sol",
+            "anthropic/claude-opus-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "Ask",
@@ -2690,7 +2701,7 @@ fn a_hosted_model_runs_from_the_builtin_catalogue_with_no_models_toml() {
         finished.stderr
     );
     assert_eq!(
-        generations[0]["model"], "gpt-5.6-sol",
+        generations[0]["model"], "claude-opus-5",
         "the request names the wrong model: {}",
         generations[0]
     );

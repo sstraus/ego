@@ -31,6 +31,7 @@ use crate::wire::minimax_anthropic::MiniMaxAnthropic;
 use crate::wire::nous_portal::NousPortal;
 use crate::wire::openai_codex_responses::OpenAiCodexResponses;
 use crate::wire::openai_completions::OpenAiCompletions;
+use crate::wire::openai_responses::OpenAiResponses;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
 use crate::wire::xai_responses::XaiResponses;
 
@@ -359,6 +360,44 @@ pub struct ProviderRow {
     /// Behind an `Arc` because a row is `Clone` and a decoder is immutable
     /// configuration shared by every generation against that row.
     pub cost: Option<Arc<dyn ProviderCost>>,
+    /// Whether this row's wire mapping has cleared the live-promotion gate.
+    ///
+    /// Stated by every constructor rather than defaulted, because a new row
+    /// that silently inherited "selectable" is precisely what
+    /// `docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`
+    /// was written to stop.
+    pub promotion: Promotion,
+}
+
+/// Whether a row may be offered, or is waiting on evidence only an operator
+/// can produce.
+///
+/// The ADR above requires a sanitized live request and response recording —
+/// conformance check five — before a row whose mapping it names may be
+/// selected: "Published schema and deterministic fixtures establish checks one
+/// through four; only an operator-supplied key and live model can establish
+/// check five." It is the one property of a row this repository cannot
+/// establish about itself.
+///
+/// **[`Selectable`](Self::Selectable) is not a claim that check five was
+/// made.** Three rows carry it whose fixtures are `VendorSchemaDerived` and
+/// which have never been live-recorded either — `openrouter`, `anthropic`, and
+/// `openai` before this change (`crates/ego-ai/tests/profiles/mod.rs`). It
+/// says the narrower true thing: *no promotion gate is outstanding against
+/// this row's mapping*. Widening it to mean "live evidence exists" would make
+/// most of the table liars, and a status that lies is worse than no status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Promotion {
+    /// No outstanding gate. May be resolved, listed as available, and picked.
+    Selectable,
+    /// The mapping is implemented and its deterministic fixtures pass; check
+    /// five has never been run for it. Refused on every surface that offers a
+    /// model, before any credential is read.
+    PendingLiveEvidence {
+        /// The mapping awaiting the recording, named so the refusal says what
+        /// would lift it rather than only that something is missing.
+        mapping: &'static str,
+    },
 }
 
 /// The base OpenAI serves its API under.
@@ -398,7 +437,21 @@ pub const GEMINI_KEY_VAR: &str = "GEMINI_API_KEY";
 const READ_ON: &str = "2026-08-21";
 const XAI_RESPONSES_READ_ON: &str = "2026-08-24";
 
-static OPENAI_SUPPLIED: Supplied = Supplied::new(&OpenAiCompletions);
+/// OpenAI's own row, which speaks the public Responses contract.
+static OPENAI_SUPPLIED: Supplied = Supplied::new(&OpenAiResponses);
+
+/// Gateways that publish an OpenAI-*compatible* chat-completions surface.
+///
+/// A separate static from [`OPENAI_SUPPLIED`] because the two are separate
+/// facts that happened to coincide until 2026-09-07. `openrouter` is not
+/// OpenAI: it serves `POST {base}chat/completions` and has never published a
+/// Responses endpoint, so
+/// `2026-09-03-public-provider-wires-require-live-promotion.md`'s "delete the
+/// public Chat selection in the same change" is a statement about *OpenAI's
+/// row*, not about the mapping. Sharing one static would have made moving
+/// OpenAI to Responses silently retarget every compatible gateway at an
+/// endpoint it does not serve.
+static OPENAI_COMPATIBLE_SUPPLIED: Supplied = Supplied::new(&OpenAiCompletions);
 static ANTHROPIC_SUPPLIED: Supplied = Supplied::new(&AnthropicMessages);
 static GEMINI_SUPPLIED: Supplied = Supplied::new(&GeminiInteractions);
 static OPENAI_CODEX_SUBSCRIPTION: SubscriptionSupplied = SubscriptionSupplied::new(
@@ -446,6 +499,20 @@ impl ProviderRow {
         &self.id
     }
 
+    /// The mapping this row is waiting on live evidence for, if it is waiting.
+    ///
+    /// The whole of the promotion question as anything outside this module
+    /// needs to ask it: `Some` means refuse and name this mapping, `None`
+    /// means no gate is outstanding. Callers do not match on [`Promotion`]
+    /// themselves, so adding a state cannot silently mean "selectable" at a
+    /// call site that forgot to handle it.
+    pub const fn pending_live_evidence(&self) -> Option<&'static str> {
+        match self.promotion {
+            Promotion::Selectable => None,
+            Promotion::PendingLiveEvidence { mapping } => Some(mapping),
+        }
+    }
+
     /// The normalized base URL bound into this row's HTTP profile.
     pub fn base(&self) -> &Url {
         &self.base
@@ -489,6 +556,16 @@ impl ProviderRow {
             // (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §6), so
             // this row is priced from a supplied table or not at all.
             cost: None,
+            // Not selectable, and this is the whole cost of the ADR being
+            // honoured rather than argued with. The Responses mapping beside
+            // it is complete and its deterministic fixtures pass, but this
+            // repository holds no OpenAI key, so nothing here has ever been
+            // sent to OpenAI and check five has not been made. Leaving the row
+            // selectable would send a never-validated body to a billed
+            // endpoint under an operator's own key.
+            promotion: Promotion::PendingLiveEvidence {
+                mapping: "openai-responses",
+            },
         }
     }
 
@@ -538,6 +615,7 @@ impl ProviderRow {
             // A daemon serving its own weights charges nothing and states
             // nothing; the metering says so, not a cost field.
             cost: None,
+            promotion: Promotion::Selectable,
         }
     }
 
@@ -571,6 +649,7 @@ impl ProviderRow {
                 provider: "openai-codex".to_string(),
             },
             cost: None,
+            promotion: Promotion::Selectable,
         }
     }
 
@@ -600,6 +679,7 @@ impl ProviderRow {
                 provider: "github-copilot".to_string(),
             },
             cost: None,
+            promotion: Promotion::Selectable,
         }
     }
 
@@ -622,6 +702,7 @@ impl ProviderRow {
             // still installs subscription metering, so this never invents or
             // settles a monetary subscription price.
             cost: Some(Arc::new(XaiUsdTicks::new(XAI_RESPONSES_READ_ON))),
+            promotion: Promotion::Selectable,
         }
     }
 
@@ -641,6 +722,7 @@ impl ProviderRow {
                 provider: "kimi-coding".to_string(),
             },
             cost: None,
+            promotion: Promotion::Selectable,
         }
     }
 
@@ -660,6 +742,7 @@ impl ProviderRow {
                 provider: "minimax-oauth".to_string(),
             },
             cost: None,
+            promotion: Promotion::Selectable,
         }
     }
 
@@ -679,6 +762,7 @@ impl ProviderRow {
                 provider: "nous".to_string(),
             },
             cost: None,
+            promotion: Promotion::Selectable,
         }
     }
 
@@ -711,12 +795,13 @@ impl ProviderRow {
             http_profile,
             extra_headers: Vec::new(),
             cost_expectation: CostExpectation::Positive,
-            resolver: &OPENAI_SUPPLIED,
+            resolver: &OPENAI_COMPATIBLE_SUPPLIED,
             credential: CredentialStrategy::OAuthOrEnv {
                 provider: "openrouter".to_string(),
                 var: OPENROUTER_KEY_VAR.to_string(),
             },
             cost: Some(Arc::new(OpenRouterUsd::new(READ_ON))),
+            promotion: Promotion::Selectable,
         }
     }
 
@@ -758,6 +843,7 @@ impl ProviderRow {
             // first to exercise — and no monetary total. See this field's own
             // doc: `None` is the assertion that none will be stated.
             cost: None,
+            promotion: Promotion::Selectable,
         }
     }
 
@@ -797,6 +883,7 @@ impl ProviderRow {
             // The stable v1 contract states usage dimensions and no monetary
             // figure. `None` is that schema-derived assertion, not an omission.
             cost: None,
+            promotion: Promotion::Selectable,
         }
     }
 

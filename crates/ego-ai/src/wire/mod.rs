@@ -25,6 +25,7 @@ pub mod nous_portal;
 pub mod ollama;
 pub mod openai_codex_responses;
 pub mod openai_completions;
+pub mod openai_responses;
 pub mod provider_cost;
 pub mod sse;
 pub mod xai_responses;

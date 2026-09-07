@@ -19,9 +19,9 @@ fn png_bytes() -> Vec<u8> {
     ]
 }
 
-fn supported_openai_facts() -> &'static str {
+fn supported_anthropic_facts() -> &'static str {
     r#"
-[model."openai/fixture-vision".capabilities]
+[model."anthropic/fixture-vision".capabilities]
 schema_version = 4
 max_context_tokens = 128000
 max_output_tokens = 4096
@@ -531,12 +531,12 @@ fn placeholder_set_is_exact_and_substitution_is_literal_single_pass() {
 #[test]
 fn unknown_image_capability_refuses_before_remote_attachment_fetch() {
     let stub = Stub::start(Plan::default());
-    let ego = Ego::against(&stub).env("OPENAI_API_KEY", "test-key");
+    let ego = Ego::against(&stub).env("ANTHROPIC_API_KEY", "test-key");
     let finished = ego
         .args(["--sandbox", "off"])
         .args([
             "--model",
-            "openai/no-facts",
+            "anthropic/no-facts",
             "--attach",
             "https://images.example.invalid/a.png",
             "--session-id",
@@ -562,15 +562,15 @@ fn unknown_image_capability_refuses_before_remote_attachment_fetch() {
 fn local_attach_is_read_once_and_projects_to_an_inline_image_without_origin() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    ego.home_file("models.toml", supported_openai_facts());
+    ego.home_file("models.toml", supported_anthropic_facts());
     let image = ego.file("image.png", "");
     std::fs::write(&image, png_bytes()).expect("image fixture is writable");
     let finished = ego
-        .env("OPENAI_API_KEY", "test-key")
+        .env("ANTHROPIC_API_KEY", "test-key")
         .args(["--sandbox", "off"])
         .args([
             "--model",
-            "openai/fixture-vision",
+            "anthropic/fixture-vision",
             "--attach",
             image.to_str().unwrap(),
             "--session-id",
@@ -587,8 +587,11 @@ fn local_attach_is_read_once_and_projects_to_an_inline_image_without_origin() {
         .next()
         .expect("one generation request");
     let encoded = body.to_string();
+    // The Messages spelling of an inlined image: a `base64` source carrying
+    // the bytes, rather than the data-URL the chat family uses. The claim is
+    // the same one — the bytes travelled, and the path did not.
     assert!(
-        encoded.contains("data:image/png;base64,"),
+        encoded.contains(r#""type":"base64""#) && encoded.contains(r#""media_type":"image/png""#),
         "image was not inlined: {body}"
     );
     assert!(
@@ -610,7 +613,7 @@ fn attachment_bounds_and_rejected_schemes_are_usage_errors_before_generation() {
             .args(["--sandbox", "off"])
             .args([
                 "--model",
-                "openai/no-facts",
+                "anthropic/no-facts",
                 "--attach",
                 attach,
                 "--session-id",

@@ -56,7 +56,7 @@ use ego_ai::wire::{
     RequestTarget, WireFormat, anthropic_messages, gemini_interactions,
     github_copilot_completions::GithubCopilotCompletions, kimi_anthropic, kimi_openai,
     minimax_anthropic, nous_portal::NousPortal, ollama, openai_codex_responses, openai_completions,
-    xai_responses,
+    openai_responses, xai_responses,
 };
 use ego_core::generator::types::{
     ContentBlock, Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
@@ -72,6 +72,7 @@ use url::Url;
 /// mapping that is gone, and [`every_mapping_this_build_has_is_walked`]
 /// asserts no mapping is missing from it.
 const OPENAI_COMPLETIONS: &str = "wire::openai_completions";
+const OPENAI_RESPONSES: &str = "wire::openai_responses";
 const OPENAI_CODEX_RESPONSES: &str = "wire::openai_codex_responses";
 const XAI_RESPONSES: &str = "wire::xai_responses";
 const OLLAMA: &str = "wire::ollama";
@@ -278,6 +279,10 @@ fn bodies() -> Vec<(&'static str, serde_json::Value)> {
         (
             GEMINI_INTERACTIONS,
             gemini_interactions::request_body(&req).map_err(|why| format!("{why:?}")),
+        ),
+        (
+            OPENAI_RESPONSES,
+            openai_responses::request_body(&req).map_err(|why| format!("{why:?}")),
         ),
         (
             OPENAI_CODEX_RESPONSES,

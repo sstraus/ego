@@ -2,8 +2,11 @@
 //!
 //! Two things this harness refuses to do, and both are the point.
 //!
-//! **It never reaches the network.** Every test here points `OLLAMA_HOST` and
-//! `OPENAI_BASE_URL` at a loopback socket this process owns. A paid call is not
+//! **It never reaches the network.** Every test here points `OLLAMA_HOST`,
+//! `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` at a loopback socket this process
+//! owns — `anthropic` is the hosted row these tests select, and the other two
+//! are pointed at loopback so a run that reached them by mistake still cannot
+//! leave the machine. A paid call is not
 //! an ordinary gate — a suite that bills someone is a suite people stop
 //! running — and a stub also lets a test say "the daemon answered 500", which
 //! no real provider will do on request.
@@ -285,7 +288,7 @@ impl Stub {
     pub fn generations(&self) -> Vec<serde_json::Value> {
         self.requests()
             .into_iter()
-            .filter(|req| req.path.contains("chat/completions"))
+            .filter(|req| req.path.contains("chat/completions") || req.path.ends_with("/messages"))
             .map(|req| serde_json::from_str(&req.body).expect("the request body is JSON"))
             .collect()
     }
@@ -369,7 +372,7 @@ fn serve(
                 .cloned()
                 .unwrap_or(Reply::Status(500));
             *generation += 1;
-            sse(&mut stream, reply)
+            sse(&mut stream, reply, &path)
         }
     }
 }
@@ -429,11 +432,145 @@ fn json(stream: &mut TcpStream, value: &serde_json::Value) -> std::io::Result<()
     stream.flush()
 }
 
+/// Re-spell one complete chat-completions transcript as Anthropic Messages.
+///
+/// The reply builders above speak one dialect, and after story `regression_case` the
+/// hosted row these tests select is `anthropic`, which speaks another. The
+/// alternative was a second spelling of every fixture at all fifty-odd call
+/// sites, where the *semantics* — this answer, these tokens, this tool call —
+/// are what each test is actually asserting on and are identical in both.
+/// So the transcript is written once and rendered per endpoint.
+///
+/// It translates a **whole** transcript, never a fragment, which is why
+/// [`Reply::Paced`] has no Messages form: `message_start` must carry
+/// `input_tokens`, and the chat dialect does not report them until the final
+/// chunk. No hosted test paces its stub — every one of them uses
+/// `Plan::default()` — so this refuses loudly rather than inventing a figure a
+/// budget assertion would then read back as fact.
+fn as_messages(chat: &str) -> String {
+    let mut text = String::new();
+    let mut tools: Vec<serde_json::Value> = Vec::new();
+    let mut prompt_tokens = 0u64;
+    let mut completion_tokens = 0u64;
+    let mut stop_reason = "end_turn";
+
+    for line in chat.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if payload.trim() == "[DONE]" {
+            continue;
+        }
+        let chunk: serde_json::Value =
+            serde_json::from_str(payload).expect("the stub writes its own chunks as JSON");
+        if let Some(usage) = chunk.get("usage").filter(|usage| !usage.is_null()) {
+            prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or_default();
+            completion_tokens = usage["completion_tokens"].as_u64().unwrap_or_default();
+        }
+        for choice in chunk["choices"].as_array().into_iter().flatten() {
+            if let Some(content) = choice["delta"]["content"].as_str() {
+                text.push_str(content);
+            }
+            for call in choice["delta"]["tool_calls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                tools.push(call.clone());
+            }
+            if choice["finish_reason"].as_str() == Some("tool_calls") {
+                stop_reason = "tool_use";
+            }
+        }
+    }
+
+    let mut out = String::new();
+    let start = serde_json::json!({
+        "type": "message_start",
+        "message": {
+            "id": "msg_stub",
+            "type": "message",
+            "role": "assistant",
+            "model": MODEL,
+            "content": [],
+            "stop_reason": serde_json::Value::Null,
+            "stop_sequence": serde_json::Value::Null,
+            "usage": { "input_tokens": prompt_tokens, "output_tokens": 0 },
+        },
+    });
+    out.push_str(&format!("event: message_start\ndata: {start}\n\n"));
+
+    let mut index = 0;
+    if !text.is_empty() {
+        let begin = serde_json::json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": { "type": "text", "text": "" },
+        });
+        let delta = serde_json::json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": { "type": "text_delta", "text": text },
+        });
+        out.push_str(&format!("event: content_block_start\ndata: {begin}\n\n"));
+        out.push_str(&format!("event: content_block_delta\ndata: {delta}\n\n"));
+        out.push_str(&format!(
+            "event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{index}}}\n\n"
+        ));
+        index += 1;
+    }
+
+    for call in &tools {
+        let arguments = call["function"]["arguments"].as_str().unwrap_or("{}");
+        let begin = serde_json::json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {
+                "type": "tool_use",
+                "id": call["id"],
+                "name": call["function"]["name"],
+                "input": {},
+            },
+        });
+        let delta = serde_json::json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": { "type": "input_json_delta", "partial_json": arguments },
+        });
+        out.push_str(&format!("event: content_block_start\ndata: {begin}\n\n"));
+        out.push_str(&format!("event: content_block_delta\ndata: {delta}\n\n"));
+        out.push_str(&format!(
+            "event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{index}}}\n\n"
+        ));
+        index += 1;
+    }
+
+    let end = serde_json::json!({
+        "type": "message_delta",
+        "delta": { "stop_reason": stop_reason, "stop_sequence": serde_json::Value::Null },
+        "usage": { "output_tokens": completion_tokens },
+    });
+    out.push_str(&format!("event: message_delta\ndata: {end}\n\n"));
+    out.push_str("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    out
+}
+
 /// An SSE response, delimited by the connection closing.
 ///
 /// No `content-length`, so the client reads until EOF — which is what lets the
 /// paced variant stop mid-stream and resume without knowing the total up front.
-fn sse(stream: &mut TcpStream, reply: Reply) -> std::io::Result<()> {
+fn sse(stream: &mut TcpStream, reply: Reply, path: &str) -> std::io::Result<()> {
+    let reply = if path.ends_with("/messages") {
+        match reply {
+            Reply::Sse(body) => Reply::Sse(as_messages(&body)),
+            Reply::Status(status) => Reply::Status(status),
+            Reply::Paced { .. } | Reply::GatedPaced { .. } => {
+                panic!("the Messages rendering has no paced form; see `as_messages`")
+            }
+        }
+    } else {
+        reply
+    };
     match reply {
         Reply::Status(status) => {
             let body = format!("the stub was told to answer {status}");
@@ -627,6 +764,18 @@ impl Ego {
             env.insert("OLLAMA_HOST".to_string(), stub.address.clone());
             env.insert(
                 "OPENAI_BASE_URL".to_string(),
+                format!("http://{}", stub.address),
+            );
+            // The hosted row these tests select. `openai` moved to Responses
+            // and is unselectable pending live evidence
+            // (`2026-09-03-public-provider-wires-require-live-promotion.md`),
+            // so `anthropic` carries the offline hosted assertions: it is the
+            // selectable row that settles the same way, from a supplied rate
+            // table rather than a provider-reported total. `OPENAI_BASE_URL`
+            // stays set so the openai row still points at loopback and a test
+            // that reaches it by mistake cannot leave this machine.
+            env.insert(
+                "ANTHROPIC_BASE_URL".to_string(),
                 format!("http://{}", stub.address),
             );
         }

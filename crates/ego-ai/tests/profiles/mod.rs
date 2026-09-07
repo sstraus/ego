@@ -27,6 +27,7 @@ use ego_ai::wire::nous_portal::NousPortal;
 use ego_ai::wire::ollama::Ollama;
 use ego_ai::wire::openai_codex_responses::OpenAiCodexResponses;
 use ego_ai::wire::openai_completions::OpenAiCompletions;
+use ego_ai::wire::openai_responses::OpenAiResponses;
 use ego_ai::wire::xai_responses::XaiResponses;
 use ego_ai::wire::{RequestTarget, WireFormat};
 use ego_core::budget::{Metering, SettlementSource};
@@ -157,15 +158,23 @@ pub const OLLAMA: Profile = Profile {
 /// worth having and is *not* the acceptance check.
 /// `crates/ego-cli/tests/smoke.rs` is where that gap closes, on a machine that
 /// has a key and asks for it by name.
+///
+/// **This profile is now the reason the row is unselectable rather than a
+/// footnote to it.** Until `2026-09-03-public-provider-wires-require-live-
+/// promotion.md` the gap above was tolerated on a shipping row; that ADR moved
+/// public OpenAI onto Responses and made the missing recording *binding*, so
+/// `ProviderRow::openai_at` carries `Promotion::PendingLiveEvidence`. The
+/// fixtures below still prove checks one to four against the Responses
+/// contract; nothing proves check five, and now nothing pretends to.
 pub const OPENAI: Profile = Profile {
     id: "openai",
     thinking: ThinkingLevel::Off,
     base: OPENAI_BASE,
-    model: "gpt-5.1",
+    model: "gpt-5.6-sol",
     row: ProviderRow::openai,
-    wire: &OpenAiCompletions,
+    wire: &OpenAiResponses,
     provenance: Provenance::VendorSchemaDerived,
-    source: "the OpenAI Chat Completions streaming specification",
+    source: "the OpenAI Responses reference, reasoning guide and streaming guide, read 2026-09-07",
     subscription: false,
     error_message_at: NESTED,
 };

@@ -700,6 +700,18 @@ pub enum ResolveError {
     /// not. Kept distinct so callers cannot mistake login success for a
     /// license to substitute a superficially similar protocol.
     ProviderMappingUnavailable { provider: String, mapping: String },
+    /// The mapping exists and works; the evidence that it works *against the
+    /// provider* does not.
+    ///
+    /// Deliberately not [`ProviderMappingUnavailable`], which renders "mapping
+    /// is not implemented". For a row waiting on conformance check five that
+    /// sentence is false in the one direction that matters: it sends an
+    /// operator to look for missing code, when what is missing is a sanitized
+    /// live recording only their own key can produce
+    /// (`docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`).
+    ///
+    /// [`ProviderMappingUnavailable`]: ResolveError::ProviderMappingUnavailable
+    LivePromotionPending { provider: String, mapping: String },
     /// A hosted model with no supplied **capabilities**.
     ///
     /// Narrowed from "no pricing or capabilities" by
@@ -773,6 +785,14 @@ impl fmt::Display for ResolveError {
             ResolveError::ProviderMappingUnavailable { provider, mapping } => write!(
                 f,
                 "provider `{provider}` is authenticated but cannot generate in this build: mapping `{mapping}` is not implemented"
+            ),
+            ResolveError::LivePromotionPending { provider, mapping } => write!(
+                f,
+                "`{provider}` is not selectable yet: its `{mapping}` mapping has never been \
+                 recorded against a live model, and conformance check five needs an \
+                 operator's own key to make. Run `EGO_SMOKE={provider} EGO_SMOKE_RECORD=1 \
+                 cargo test -p ego-cli --test smoke -- --ignored` with that key set to \
+                 establish it"
             ),
             ResolveError::HostedModelNotConfigured { slug } => write!(
                 f,
@@ -970,6 +990,30 @@ pub struct Catalogue {
     hosted: BTreeMap<String, HostedModel>,
 }
 
+/// The refusal a row owes when it has not cleared the live-promotion gate.
+///
+/// One function with three call sites — [`Catalogue::resolve`],
+/// [`Catalogue::static_request_profile`], and the CLI's listing projection —
+/// because "may this row be offered" must have exactly one answer everywhere
+/// a model is offered. `2026-09-03-public-provider-wires-require-live-promotion.md`
+/// assigns promotion to the catalogue ("The shared catalogue owns promotion
+/// and selectability from recorded evidence"), and a gate applied only where a
+/// request is finally built would let `ego models` list the row as available
+/// and a picker offer it, so the refusal would arrive after the choice instead
+/// of instead of it.
+///
+/// It runs **before any credential is read**, on both paths. A row that cannot
+/// be selected at all should not cause a keychain prompt or a
+/// `credential_command` to run, and "missing key" must not be reported for a
+/// row whose key would change nothing.
+pub fn live_promotion_refusal(row: &ProviderRow) -> Option<ResolveError> {
+    row.pending_live_evidence()
+        .map(|mapping| ResolveError::LivePromotionPending {
+            provider: row.id().to_string(),
+            mapping: mapping.to_string(),
+        })
+}
+
 impl Catalogue {
     /// A catalogue with rows and no hosted models, so every hosted slug
     /// refuses until one is supplied.
@@ -1010,6 +1054,9 @@ impl Catalogue {
         slug: &ModelSlug,
     ) -> Result<Option<StaticRequestProfile>, ResolveError> {
         let row = self.row(&slug.provider)?;
+        if let Some(refusal) = live_promotion_refusal(row) {
+            return Err(refusal);
+        }
         row.resolver.supplied_request_mapping(&StaticResolution {
             catalogue: self,
             slug,
@@ -1062,6 +1109,9 @@ impl Catalogue {
         credential: &ResolvedCredential,
     ) -> Result<ResolvedModel, ResolveError> {
         let row = self.row(&slug.provider)?;
+        if let Some(refusal) = live_promotion_refusal(row) {
+            return Err(refusal);
+        }
         let at = Resolution {
             catalogue: self,
             row,

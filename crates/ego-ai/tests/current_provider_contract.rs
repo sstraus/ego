@@ -280,15 +280,48 @@ fn kimi_anthropic_fixture_decodes_usage_on_the_beta_messages_stream() {
     );
 }
 
+/// The public `openai` row is absent from the table above because it cannot
+/// be resolved at all, and this is the test that says so rather than letting
+/// the omission look like an oversight.
+///
+/// `2026-09-03-public-provider-wires-require-live-promotion.md` makes the row
+/// unselectable until conformance check five is recorded against a live
+/// entitled model, and the catalogue owns that gate — so `resolve` refuses
+/// before a resolver is chosen, and the refusal names the mapping whose
+/// evidence is outstanding. Its endpoint is pinned in `request_target.rs`,
+/// which needs no resolution to make the claim.
+#[test]
+fn the_public_openai_row_refuses_to_resolve_and_names_the_mapping_it_awaits() {
+    let slug = "openai/gpt-5.6";
+    let catalogue = Catalogue::new([ProviderRow::openai()]).with_hosted(
+        slug,
+        HostedModel {
+            capabilities: supplied_capabilities(),
+            authority: SuppliedAuthority::System,
+            metering: tabulated(),
+            rates: None,
+        },
+    );
+    let refused = block_on(catalogue.resolve(
+        &ModelSlug::parse(slug).unwrap(),
+        &unasked_http(),
+        &credential(),
+    ))
+    .expect_err("the public openai row is not selectable yet");
+    let said = refused.to_string();
+    assert!(
+        said.contains("openai-responses"),
+        "the refusal does not name the mapping awaiting evidence: {said}"
+    );
+    assert!(
+        said.contains("EGO_SMOKE"),
+        "the refusal does not say how the evidence is made: {said}"
+    );
+}
+
 #[test]
 fn every_current_fixed_profile_also_installs_its_wire_on_resolved_model() {
     for (row, provider, model, wire) in [
-        (
-            ProviderRow::openai(),
-            "openai",
-            "gpt-5.6",
-            "OpenAiCompletions",
-        ),
         (
             ProviderRow::openai_codex_default(),
             "openai-codex",

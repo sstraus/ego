@@ -1211,6 +1211,17 @@ providers the selectable table already admits, and only for those whose
 resolver reads this file at all — `openai` and `anthropic`.  `openrouter` is
 selectable but stays operator-supplied: it proxies hundreds of third-party
 models under no citable contract. Everything else enumerates its own models.
+
+The `openai` rows are shipped and *not* selectable. The row moved to the public
+Responses contract, and
+`docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`
+does not admit a public row on published schema alone: it needs a sanitized
+recording of a live call to a current entitled model, which only an operator's
+own key can make. Until one exists, `ego models` lists the row as unavailable
+with cause `mapping_unavailable`, and `-m openai/…` refuses before reading a
+credential or opening a socket, naming `openai-responses` and the `EGO_SMOKE`
+run that closes the gap. The facts are shipped anyway so that promotion is one
+recording rather than a recording plus a table.
 See `docs/decisions/2026-09-07-a-builtin-catalogue-layer-below-system-and-user.md`.
 
 A full entry, with every field the schema accepts:

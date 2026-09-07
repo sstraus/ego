@@ -12,7 +12,9 @@ use std::sync::{Arc, RwLock};
 use ego_ai::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use ego_ai::generator::StaticRequestProfile;
 use ego_ai::http::Http;
-use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow, ResolvedCredential};
+use ego_ai::provider::{
+    ANTHROPIC_BASE, Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow, ResolvedCredential,
+};
 use ego_core::ceiling::Ceilings;
 use ego_core::config::{AuthProviderLayer, ModelRef};
 use ego_core::generation_model_source::{
@@ -45,13 +47,31 @@ pub const OLLAMA_HOST: &str = "OLLAMA_HOST";
 /// loopback stub without a network.
 pub const OPENAI_BASE_URL: &str = "OPENAI_BASE_URL";
 
+/// The variable every Anthropic client reads to be pointed somewhere other
+/// than `api.anthropic.com`.
+///
+/// It exists for the reason the other two do, and it became *necessary* on
+/// 2026-09-07. Until then `openai` was the only hosted row a test could point
+/// at a stub, so it carried every offline assertion about hosted behaviour;
+/// `2026-09-03-public-provider-wires-require-live-promotion.md` moved that row
+/// to Responses and made it unselectable pending live evidence.
+///
+/// `anthropic` and not `openrouter` is the row that inherits those tests,
+/// because the two settle identically: both declare
+/// [`CostExpectation::Positive`] with no `ProviderCost` decoder, so both are
+/// priced from a supplied rate table. OpenRouter reports its own monetary
+/// total, so moving a budget assertion there would change what it proves
+/// rather than where it runs.
+pub const ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
+
 /// The API base an address variable names, or the default.
 ///
-/// `OLLAMA_HOST` is conventionally a bare `host:port` and `OPENAI_BASE_URL` is
-/// conventionally a base URL without the path; both spellings are accepted for
-/// both, and anything else is refused rather than half-parsed into a request to
-/// somewhere unintended. The path is always set, so a variable that already
-/// carries one and a variable that does not resolve to the same address.
+/// `OLLAMA_HOST` is conventionally a bare `host:port` and `OPENAI_BASE_URL`
+/// and `ANTHROPIC_BASE_URL` are conventionally base URLs without the path; all
+/// spellings are accepted for all three, and anything else is refused rather
+/// than half-parsed into a request to somewhere unintended. The path is always
+/// set, so a variable that already carries one and a variable that does not
+/// resolve to the same address.
 ///
 /// It sets `/v1/` and not `/v1/chat/completions`: a row carries a base and the
 /// mapping joins its own path onto it
@@ -100,6 +120,7 @@ pub(crate) fn rows(
     let mut rows = mapped_rows(
         ProviderRow::ollama(base(OLLAMA_HOST, OLLAMA_BASE)?),
         ProviderRow::openai_at(base(OPENAI_BASE_URL, OPENAI_BASE)?),
+        ProviderRow::anthropic(base(ANTHROPIC_BASE_URL, ANTHROPIC_BASE)?),
     );
     for row in &mut rows {
         if let Some(config) = auth.get(row.id()) {
@@ -119,8 +140,12 @@ pub(crate) fn rows(
     Ok(rows)
 }
 
-fn mapped_rows(ollama: ProviderRow, openai: ProviderRow) -> Vec<ProviderRow> {
-    ego_ai::conformance::final_provider_rows(ollama, openai).into()
+fn mapped_rows(
+    ollama: ProviderRow,
+    openai: ProviderRow,
+    anthropic: ProviderRow,
+) -> Vec<ProviderRow> {
+    ego_ai::conformance::final_provider_rows(ollama, openai, anthropic).into()
 }
 
 /// Assemble the one resolver-selected catalogue from current rows and facts.
@@ -158,6 +183,7 @@ pub(crate) fn supplied_request_profile(
             ProviderRow::openai_at(
                 Url::parse(OPENAI_BASE).expect("the built-in OpenAI base is a URL"),
             ),
+            ProviderRow::anthropic_default(),
         ),
     );
     catalogue
@@ -193,6 +219,12 @@ pub async fn resolve(
     let slug = ModelSlug::parse(slug)?;
     let catalogue = catalogue(hosted, auth)?;
     let row = catalogue.row(&slug.provider)?;
+    // Before the credential, deliberately: a row nobody may select should not
+    // make a keychain prompt or a `credential_command` run, and "no key" is
+    // the wrong thing to tell somebody whose key would change nothing.
+    if let Some(refusal) = ego_ai::catalogue::live_promotion_refusal(row) {
+        return Err(refusal);
+    }
     // Read here, where a refusal can name the variable to set, rather than as
     // a 401 several layers later. No per-provider branch: the row names its
     // own variable, so this one line covers every provider that has one and
@@ -632,16 +664,16 @@ mod tests {
 
     /// An Anthropic request assembles from the builtin catalogue alone.
     ///
-    /// The other half of story `regression_case`'s fourth criterion. The OpenAI half
-    /// is a child process in `tests/run.rs`, because the harness can point
-    /// `OPENAI_BASE_URL` at a stub; the `anthropic` row's base is fixed at
-    /// Anthropic's own address, so a run of it would leave this machine.
+    /// The other half of story `regression_case`'s fourth criterion, kept as an
+    /// in-process assertion after story `regression_case` moved the child-process
+    /// half onto this same row.
     ///
-    /// So the layers are assembled here instead, with both file layers
-    /// explicitly empty — which is a *stronger* statement about where the
-    /// facts came from than an absent file would be, and reads nothing from
-    /// the environment. What it cannot say is that the real code path skips
-    /// the files; the OpenAI test says that.
+    /// The layers are assembled here, with both file layers explicitly empty
+    /// — which is a *stronger* statement about where the facts came from than
+    /// an absent file would be, and reads nothing from the environment,
+    /// including the `ANTHROPIC_BASE_URL` the harness now sets. What it cannot
+    /// say is that the real code path skips the files; the child-process test
+    /// in `tests/run.rs` says that.
     ///
     /// It goes as far as `build_request`, because "reaches request assembly"
     /// is the criterion and a `ResolvedModel` that never produced bytes has
@@ -659,7 +691,11 @@ mod tests {
 
         let catalogue = catalogue_from_rows(
             hosted,
-            mapped_rows(ProviderRow::ollama_default(), ProviderRow::openai()),
+            mapped_rows(
+                ProviderRow::ollama_default(),
+                ProviderRow::openai(),
+                ProviderRow::anthropic_default(),
+            ),
         );
         let row = catalogue.row("anthropic").expect("anthropic is selectable");
         let credential = row

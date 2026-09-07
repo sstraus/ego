@@ -1287,7 +1287,7 @@ mod tests {
     use futures::StreamExt;
 
     const TEXT_TRANSCRIPT: &str =
-        include_str!("../../tests/goldens/profile/openai/stream/text.sse");
+        include_str!("../../tests/goldens/chat_completions/stream/text.sse");
 
     #[test]
     fn a_stream_cut_mid_frame_is_an_error_and_not_a_short_answer() {

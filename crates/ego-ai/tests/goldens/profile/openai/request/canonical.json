@@ -1,18 +1,18 @@
 {
   "body": {
-    "max_completion_tokens": 16,
-    "messages": [
+    "model": "gpt-5.6-sol",
+    "stream": true,
+    "store": false,
+    "input": [
       {
-        "content": "Reply with the single word: ok",
-        "role": "user"
+        "role": "user",
+        "content": "Reply with the single word: ok"
       }
     ],
-    "model": "gpt-5.1",
-    "reasoning_effort": "none",
-    "stream": true,
-    "stream_options": {
-      "include_usage": true
-    }
+    "reasoning": {
+      "effort": "none"
+    },
+    "max_output_tokens": 16
   },
   "header_names": [
     "content-type",
@@ -20,5 +20,5 @@
     "authorization"
   ],
   "method": "Post",
-  "url": "https://api.openai.com/v1/chat/completions"
+  "url": "https://api.openai.com/v1/responses"
 }

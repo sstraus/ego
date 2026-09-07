@@ -854,6 +854,7 @@ fn gemini_is_not_among_the_providers_a_model_can_be_selected_from() {
         ego_ai::provider::ProviderRow::openai_at(
             Url::parse("https://api.openai.com").expect("a constant this test controls"),
         ),
+        ego_ai::provider::ProviderRow::anthropic_default(),
     );
     let ids: Vec<_> = rows.iter().map(ego_ai::provider::ProviderRow::id).collect();
     assert!(

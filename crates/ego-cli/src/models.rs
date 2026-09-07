@@ -291,7 +291,18 @@ fn project_supplied(
     models: &mut Vec<ModelCatalogueEntry>,
     sources: &mut Vec<ModelCatalogueSourceStatus>,
 ) {
-    let credential = credential_for(row);
+    // Promotion first, credential second. A row waiting on live evidence
+    // cannot be run with any key, so reporting `missing_credential` for it
+    // would name a fix that does not work — and reading the credential to
+    // find that out would run an operator's `credential_command` for a row
+    // nothing may select.
+    let credential = match ego_ai::catalogue::live_promotion_refusal(row) {
+        Some(refusal) => ModelAvailability::Unavailable {
+            cause: ModelAvailabilityCause::MappingUnavailable,
+            message: refusal.to_string(),
+        },
+        None => credential_for(row),
+    };
     for entry in entries {
         models.push(ModelCatalogueEntry {
             slug: entry.slug.clone(),

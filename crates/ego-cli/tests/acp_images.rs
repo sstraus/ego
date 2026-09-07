@@ -34,7 +34,7 @@ const READS_NO_PICTURES: &str = r#"image_input = "unsupported""#;
 fn facts(image_input: &str) -> String {
     format!(
         r#"
-[model."openai/fixture-vision".capabilities]
+[model."anthropic/fixture-vision".capabilities]
 schema_version = 4
 max_context_tokens = 128000
 max_output_tokens = 4096
@@ -88,11 +88,11 @@ impl Host {
     fn start(stub: &Stub, image_input: &str) -> (Self, Ego) {
         let ego = Ego::against(stub);
         ego.home_file("models.toml", &facts(image_input));
-        ego.home_file("config.toml", "model = \"openai/fixture-vision\"\n");
+        ego.home_file("config.toml", "model = \"anthropic/fixture-vision\"\n");
         let workspace = ego.workspace_path().to_owned();
         let mut running = Ego::at(ego.home_path(), &workspace, Some(stub))
             .subcommand("acp")
-            .env("OPENAI_API_KEY", "test-key")
+            .env("ANTHROPIC_API_KEY", "test-key")
             .spawn_conversing();
         let inbox = BufReader::new(running.child.stdout.take().expect("stdout was piped"));
         let outbox = running.child.stdin.take().expect("stdin was piped");
@@ -196,8 +196,10 @@ fn an_acp_image_block_reaches_the_provider_through_the_blob_path() {
         .next()
         .unwrap_or_else(|| panic!("the turn never reached the provider. stderr: {stderr}"));
     let encoded = body.to_string();
+    // The Messages spelling of an inlined image: a `base64` source carrying
+    // the bytes, rather than the data-URL the chat family uses.
     assert!(
-        encoded.contains("data:image/png;base64,"),
+        encoded.contains(r#""type":"base64""#) && encoded.contains(r#""media_type":"image/png""#),
         "the image did not reach the provider inlined: {body}"
     );
     assert!(

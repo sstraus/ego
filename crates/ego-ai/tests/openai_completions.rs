@@ -41,8 +41,8 @@ use ego_core::state::Usage;
 use futures::StreamExt;
 use url::Url;
 
-const TEXT_TRANSCRIPT: &str = include_str!("goldens/profile/openai/stream/text.sse");
-const TOOL_TRANSCRIPT: &str = include_str!("goldens/profile/openai/stream/tool_calls.sse");
+const TEXT_TRANSCRIPT: &str = include_str!("goldens/chat_completions/stream/text.sse");
+const TOOL_TRANSCRIPT: &str = include_str!("goldens/chat_completions/stream/tool_calls.sse");
 
 fn conversation(messages: Vec<Message>) -> Conversation {
     Conversation::new(messages).expect("the test histories here are valid")

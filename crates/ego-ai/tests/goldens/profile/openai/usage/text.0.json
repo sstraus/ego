@@ -1,23 +1,18 @@
 {
-  "choices": [],
-  "created": 1787000000,
-  "id": "chatcmpl-golden-text",
-  "model": "gpt-5.1",
-  "object": "chat.completion.chunk",
-  "usage": {
-    "completion_tokens": 250,
-    "completion_tokens_details": {
-      "accepted_prediction_tokens": 0,
-      "audio_tokens": 0,
-      "reasoning_tokens": 180,
-      "rejected_prediction_tokens": 0
-    },
-    "prompt_tokens": 1000,
-    "prompt_tokens_details": {
-      "audio_tokens": 0,
-      "cache_write_tokens": 100,
-      "cached_tokens": 400
-    },
-    "total_tokens": 1250
+  "type": "response.completed",
+  "response": {
+    "status": "completed",
+    "usage": {
+      "input_tokens": 10,
+      "input_tokens_details": {
+        "cached_tokens": 3,
+        "cache_write_tokens": 2
+      },
+      "output_tokens": 3,
+      "output_tokens_details": {
+        "reasoning_tokens": 1
+      },
+      "total_tokens": 13
+    }
   }
 }

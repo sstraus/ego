@@ -65,8 +65,14 @@ fn local_row() -> ProviderRow {
     ProviderRow::ollama(Url::parse("http://localhost:11434/v1/chat/completions").unwrap())
 }
 
+/// A hosted row these tests can actually resolve.
+///
+/// `anthropic` and not `openai`: since story `regression_case` the public OpenAI row
+/// is unselectable pending live evidence, and `resolve` refuses it before a
+/// resolver is chosen. Every test here is about catalogue mechanics rather
+/// than about one vendor, so it uses a row the gate lets through.
 fn hosted_row() -> ProviderRow {
-    ProviderRow::openai()
+    ProviderRow::anthropic_default()
 }
 
 /// A deliberately NON-zero hosted quote. The point of the test that uses it:
@@ -166,7 +172,7 @@ fn a_hosted_model_with_no_supplied_capabilities_is_refused_by_name() {
     // (`a_hosted_row_with_capabilities_and_no_rates_resolves`) is the other
     // half of that pair.
     let catalogue = Catalogue::new([hosted_row()]);
-    let slug = ModelSlug::parse("openai/gpt-5.6").unwrap();
+    let slug = ModelSlug::parse("anthropic/claude-opus-5").unwrap();
 
     let refused = catalogue
         .resolve_hosted(&slug, &OpenAiCompletions)
@@ -175,11 +181,11 @@ fn a_hosted_model_with_no_supplied_capabilities_is_refused_by_name() {
     assert_eq!(
         refused,
         ResolveError::HostedModelNotConfigured {
-            slug: "openai/gpt-5.6".to_string()
+            slug: "anthropic/claude-opus-5".to_string()
         }
     );
     assert!(
-        refused.to_string().contains("openai/gpt-5.6"),
+        refused.to_string().contains("anthropic/claude-opus-5"),
         "the refusal names the model: {refused}"
     );
 }
@@ -187,7 +193,7 @@ fn a_hosted_model_with_no_supplied_capabilities_is_refused_by_name() {
 #[test]
 fn a_supplied_hosted_model_resolves_to_exactly_what_was_supplied() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
-        "openai/gpt-5.6",
+        "anthropic/claude-opus-5",
         HostedModel {
             authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
@@ -198,13 +204,16 @@ fn a_supplied_hosted_model_resolves_to_exactly_what_was_supplied() {
 
     let resolved = catalogue
         .resolve_hosted(
-            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &ModelSlug::parse("anthropic/claude-opus-5").unwrap(),
             &OpenAiCompletions,
         )
         .expect("it was supplied");
 
-    assert_eq!(resolved.model, "gpt-5.6", "the provider half is not sent");
-    assert_eq!(resolved.row.id(), "openai");
+    assert_eq!(
+        resolved.model, "claude-opus-5",
+        "the provider half is not sent"
+    );
+    assert_eq!(resolved.row.id(), "anthropic");
     assert_eq!(resolved.capabilities, hosted_caps());
     assert_eq!(resolved.metering, tabulated());
     assert_eq!(
@@ -220,7 +229,7 @@ fn a_supplied_hosted_model_resolves_to_exactly_what_was_supplied() {
 #[test]
 fn a_hosted_row_with_capabilities_and_no_rates_resolves() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
-        "openai/gpt-5.6",
+        "anthropic/claude-opus-5",
         HostedModel {
             authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
@@ -231,7 +240,7 @@ fn a_hosted_row_with_capabilities_and_no_rates_resolves() {
 
     let resolved = catalogue
         .resolve_hosted(
-            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &ModelSlug::parse("anthropic/claude-opus-5").unwrap(),
             &OpenAiCompletions,
         )
         .expect("a shape was supplied, which is all a run without a ceiling needs");
@@ -257,7 +266,7 @@ fn a_hosted_model_is_not_quietly_free() {
     // zero by accident to a hosted row is what a free-first table hides. So
     // one test bounds a real hosted request and asserts it costs money.
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
-        "openai/gpt-5.6",
+        "anthropic/claude-opus-5",
         HostedModel {
             authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
@@ -267,7 +276,7 @@ fn a_hosted_model_is_not_quietly_free() {
     );
     let resolved = catalogue
         .resolve_hosted(
-            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &ModelSlug::parse("anthropic/claude-opus-5").unwrap(),
             &OpenAiCompletions,
         )
         .expect("it was supplied");
@@ -319,13 +328,13 @@ fn a_hosted_model_is_not_quietly_free() {
 fn an_unknown_provider_is_refused_with_the_ones_that_exist() {
     let catalogue = Catalogue::new([hosted_row(), local_row()]);
     let refused = catalogue
-        .row("anthropic")
+        .row("acme")
         .expect_err("no such row is configured");
 
     match refused {
         ResolveError::UnknownProvider { provider, known } => {
-            assert_eq!(provider, "anthropic");
-            assert_eq!(known, vec!["ollama".to_string(), "openai".to_string()]);
+            assert_eq!(provider, "acme");
+            assert_eq!(known, vec!["anthropic".to_string(), "ollama".to_string()]);
         }
         other => panic!("an unconfigured provider is not {other:?}"),
     }
@@ -669,7 +678,7 @@ fn a_policy_metered_row_names_the_policy_that_produced_it_not_a_date() {
 #[test]
 fn a_subscription_hosted_row_resolves_to_the_subscription_that_was_supplied() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
-        "openai/gpt-5.6",
+        "anthropic/claude-opus-5",
         HostedModel {
             authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
@@ -680,7 +689,7 @@ fn a_subscription_hosted_row_resolves_to_the_subscription_that_was_supplied() {
 
     let resolved = catalogue
         .resolve_hosted(
-            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &ModelSlug::parse("anthropic/claude-opus-5").unwrap(),
             &OpenAiCompletions,
         )
         .expect("it was supplied");
@@ -768,7 +777,7 @@ fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
     );
 
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
-        "openai/gpt-5.6",
+        "anthropic/claude-opus-5",
         HostedModel {
             authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
@@ -778,7 +787,7 @@ fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
     );
     let resolved = catalogue
         .resolve_hosted(
-            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &ModelSlug::parse("anthropic/claude-opus-5").unwrap(),
             &OpenAiCompletions,
         )
         .expect("it was supplied");
@@ -808,7 +817,7 @@ fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
 fn a_provider_reported_row_with_no_rates_has_no_bound_and_is_not_an_error() {
     let decoder = XaiUsdTicks::new("2026-08-21");
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
-        "openai/gpt-5.6",
+        "anthropic/claude-opus-5",
         HostedModel {
             authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
@@ -819,7 +828,7 @@ fn a_provider_reported_row_with_no_rates_has_no_bound_and_is_not_an_error() {
 
     let resolved = catalogue
         .resolve_hosted(
-            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &ModelSlug::parse("anthropic/claude-opus-5").unwrap(),
             &OpenAiCompletions,
         )
         .expect("it was supplied");
@@ -850,7 +859,7 @@ fn a_provider_reported_row_with_no_rates_has_no_bound_and_is_not_an_error() {
 fn a_hosted_slug_resolves_from_the_table_and_asks_nothing() {
     let (http, stub) = unasked();
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
-        "openai/gpt-5.6",
+        "anthropic/claude-opus-5",
         HostedModel {
             authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
@@ -860,13 +869,13 @@ fn a_hosted_slug_resolves_from_the_table_and_asks_nothing() {
     );
 
     let resolved = block_on(catalogue.resolve(
-        &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+        &ModelSlug::parse("anthropic/claude-opus-5").unwrap(),
         &http,
         &credential(),
     ))
     .expect("it was supplied");
 
-    assert_eq!(resolved.model, "gpt-5.6");
+    assert_eq!(resolved.model, "claude-opus-5");
     assert_eq!(resolved.capabilities, hosted_caps());
     assert!(
         stub.paths().is_empty(),
@@ -906,20 +915,20 @@ fn a_local_slug_resolves_by_asking_the_daemon_through_the_same_call() {
 #[test]
 fn a_row_that_is_not_called_ollama_can_still_be_a_daemon() {
     let (http, stub) = server([(200, TAGS), (200, PS_LOADED)]);
-    let mut acme = ProviderRow::openai_at(
+    let mut acme = ProviderRow::openrouter(
         Url::parse("http://localhost:11434/v1/").expect("a valid local base"),
     );
     acme.resolver = &OllamaDaemon;
     let catalogue = Catalogue::new([acme]);
 
     let resolved = block_on(catalogue.resolve(
-        &ModelSlug::parse("openai/gemma4:e4b-mlx").unwrap(),
+        &ModelSlug::parse("openrouter/gemma4:e4b-mlx").unwrap(),
         &http,
         &credential(),
     ))
     .expect("the daemon serves it");
 
-    assert_eq!(resolved.row.id(), "openai");
+    assert_eq!(resolved.row.id(), "openrouter");
     assert_eq!(resolved.capabilities.max_context_tokens, Some(32_768));
     assert_eq!(stub.paths(), vec!["/api/tags", "/api/ps"]);
 }
@@ -981,7 +990,7 @@ fn an_unknown_provider_is_refused_before_a_resolver_is_chosen() {
         refused,
         ResolveError::UnknownProvider {
             provider: "acme".to_string(),
-            known: vec!["ollama".to_string(), "openai".to_string()],
+            known: vec!["anthropic".to_string(), "ollama".to_string()],
         }
     );
     assert!(stub.paths().is_empty());

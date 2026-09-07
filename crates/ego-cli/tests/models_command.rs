@@ -353,3 +353,79 @@ transport = "sse"
         );
     }
 }
+
+/// The pending row is listed as unavailable even when its key is set.
+///
+/// `2026-09-03-public-provider-wires-require-live-promotion.md` says a
+/// pre-promotion selection "returns unavailable with the missing live-evidence
+/// reason". The key is deliberately present: a row whose only problem were a
+/// missing credential would read the same way to an operator scanning this
+/// table, and the two send them to opposite places — one to a keychain, the
+/// other to `EGO_SMOKE`. So the credential is supplied and the row is *still*
+/// unavailable, which is the only way to prove the gate is not the key check
+/// wearing a different hat.
+#[test]
+fn the_openai_row_reads_as_unavailable_with_its_key_set_and_names_the_mapping() {
+    let listed = Ego::nowhere()
+        .subcommand("models")
+        .env("OPENAI_API_KEY", "sk-test")
+        .arg("--json")
+        .run();
+    assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
+    let report: serde_json::Value =
+        serde_json::from_str(&listed.stdout).expect("the models report is JSON");
+    let sources = report["sources"]
+        .as_array()
+        .expect("the report carries a source table");
+    let openai = sources
+        .iter()
+        .find(|row| row["provider"] == "openai")
+        .expect("the openai row is listed at all");
+    assert_eq!(
+        openai["availability"]["status"], "unavailable",
+        "the openai row is offered despite the outstanding gate: {openai}"
+    );
+    assert_eq!(
+        openai["availability"]["cause"], "mapping_unavailable",
+        "the refusal is filed under the wrong cause: {openai}"
+    );
+    let message = openai["availability"]["message"]
+        .as_str()
+        .expect("an unavailable row states why");
+    assert!(
+        message.contains("openai-responses"),
+        "the message does not name the mapping awaiting evidence: {message}"
+    );
+}
+
+/// The same row refuses a run, before a socket and before a credential.
+///
+/// The listing above and this refusal are the same function
+/// (`ego_ai::catalogue::live_promotion_refusal`) on purpose: a row that reads
+/// as unavailable in one surface and runs in another is worse than either.
+/// `Ego::nowhere` points every provider at a refused port, so "nothing was
+/// sent" is enforced by the harness rather than asserted about it.
+#[test]
+fn selecting_the_openai_row_refuses_by_name_rather_than_sending_anything() {
+    let refused = Ego::nowhere()
+        .env("OPENAI_API_KEY", "sk-test")
+        .args([
+            "--model",
+            "openai/gpt-5.6-sol",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
+        .run();
+    assert_eq!(refused.code, Some(2), "stdout: {}", refused.stdout);
+    assert!(
+        refused.stderr.contains("openai-responses"),
+        "the refusal does not name the mapping: {}",
+        refused.stderr
+    );
+    assert!(
+        refused.stderr.contains("EGO_SMOKE"),
+        "the refusal does not say how the evidence is made: {}",
+        refused.stderr
+    );
+}

@@ -12,11 +12,11 @@ use std::path::Path;
 use support::{Ego, Plan, Reply, Stub, text, tool_call};
 
 const MODEL: &str = "ollama/qwen3";
-const HOSTED_MODEL: &str = "openai/gpt-5.1";
+const HOSTED_MODEL: &str = "anthropic/claude-test-5";
 const XAI_JUDGE_MODEL: &str = "xai-oauth/grok-code-fast-1";
 
-const OPENAI_FACTS: &str = r#"
-[model."openai/gpt-5.1".capabilities]
+const ANTHROPIC_FACTS: &str = r#"
+[model."anthropic/claude-test-5".capabilities]
 schema_version = 2
 max_context_tokens = 400000
 max_output_tokens = 128000
@@ -28,8 +28,8 @@ cancel = "cooperative"
 cache = "long"
 transport = "sse"
 
-[model."openai/gpt-5.1".pricing]
-revision = "openai/2026-08-01"
+[model."anthropic/claude-test-5".pricing]
+revision = "anthropic/2026-08-01"
 currency = "USD"
 uncached_input = "0.00000125"
 cache_read = "0.000000125"
@@ -139,9 +139,12 @@ fn auto_args(ego: Ego) -> Ego {
 
 fn hosted_auto_run(stub: &Stub) -> Ego {
     let ego = Ego::against(stub);
-    ego.home_file("config.toml", "[permissions]\njudge = \"openai/gpt-5.1\"\n");
-    ego.home_file("models.toml", OPENAI_FACTS);
-    ego.env("OPENAI_API_KEY", "sk-test").args([
+    ego.home_file(
+        "config.toml",
+        "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
+    );
+    ego.home_file("models.toml", ANTHROPIC_FACTS);
+    ego.env("ANTHROPIC_API_KEY", "sk-test").args([
         "--model",
         HOSTED_MODEL,
         "--mode",
@@ -281,10 +284,13 @@ fn auto_allow_uses_one_toolless_judge_and_then_executes_the_exact_call() {
 fn auto_uses_a_separately_resolved_judge_model_without_inheriting_main_tools() {
     let stub = Stub::start(plan(judge_response("deny", "judge model"), None));
     let ego = Ego::against(&stub);
-    let config = ego.home_file("config.toml", "[permissions]\njudge = \"openai/gpt-5.1\"\n");
-    ego.home_file("models.toml", OPENAI_FACTS);
+    let config = ego.home_file(
+        "config.toml",
+        "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
+    );
+    ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
             MODEL,
@@ -314,7 +320,7 @@ fn auto_uses_a_separately_resolved_judge_model_without_inheriting_main_tools() {
         "static judge preflight must perform no HTTP beyond the main and judge generations"
     );
     assert_eq!(requests[0]["model"], "qwen3");
-    assert_eq!(requests[1]["model"], "gpt-5.1");
+    assert_eq!(requests[1]["model"], "claude-test-5");
     assert!(
         requests[1]
             .get("tools")
@@ -334,15 +340,18 @@ fn auto_uses_a_separately_resolved_judge_model_without_inheriting_main_tools() {
 fn incompatible_judge_capabilities_refuse_before_generation_or_session_creation() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    let config = ego.home_file("config.toml", "[permissions]\njudge = \"openai/gpt-5.1\"\n");
-    let incompatible_facts = OPENAI_FACTS.replace(
+    let config = ego.home_file(
+        "config.toml",
+        "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
+    );
+    let incompatible_facts = ANTHROPIC_FACTS.replace(
         "reasoning_efforts = \"any\"",
         "reasoning_efforts = \"unknown\"",
     );
     ego.home_file("models.toml", &incompatible_facts);
 
     let finished = ego
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
             "--model",
             MODEL,

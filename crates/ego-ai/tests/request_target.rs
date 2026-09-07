@@ -17,7 +17,9 @@
 //! replaced, which is the same wrong address by a different route.
 
 use ego_ai::provider::ProviderRow;
-use ego_ai::wire::{RequestTarget, ollama, openai_codex_responses, openai_completions};
+use ego_ai::wire::{
+    RequestTarget, ollama, openai_codex_responses, openai_completions, openai_responses,
+};
 use ego_core::permit::HttpHeader;
 use url::Url;
 
@@ -36,8 +38,8 @@ fn parse(url: &str) -> Url {
 fn the_shipped_rows_address_the_endpoints_their_providers_serve() {
     let openai = ProviderRow::openai();
     assert_eq!(
-        RequestTarget::new(openai.base(), &[]).url(openai_completions::PATH),
-        parse("https://api.openai.com/v1/chat/completions")
+        RequestTarget::new(openai.base(), &[]).url(openai_responses::PATH),
+        parse("https://api.openai.com/v1/responses")
     );
 
     let ollama = ProviderRow::ollama_default();

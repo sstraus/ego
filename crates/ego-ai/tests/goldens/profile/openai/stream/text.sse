@@ -1,16 +1,9 @@
-: schema-derived from the OpenAI Chat Completions streaming specification
+: schema-derived from the OpenAI Responses reference, reasoning guide and streaming guide (read 2026-09-07)
 : provider openai, ego 0.1.0
-: ping
+data: {"type":"response.reasoning_text.delta","delta":"check"}
 
-data: {"id":"chatcmpl-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"gpt-5.1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"usage":null}
+data: {"type":"response.output_text.delta","delta":"ok"}
 
-data: {"id":"chatcmpl-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"gpt-5.1","choices":[{"index":0,"delta":{"content":"Due "},"logprobs":null,"finish_reason":null}],"obfuscation":"xLq9","usage":null}
-
-data: {"id":"chatcmpl-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"gpt-5.1","choices":[{"index":0,"delta":{"content":"file — perché no? 😀"},"logprobs":null,"finish_reason":null}],"usage":null}
-
-data: {"id":"chatcmpl-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"gpt-5.1","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":null}
-
-data: {"id":"chatcmpl-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"gpt-5.1","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":250,"total_tokens":1250,"prompt_tokens_details":{"cached_tokens":400,"cache_write_tokens":100,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":180,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2},"output_tokens":3,"output_tokens_details":{"reasoning_tokens":1},"total_tokens":13}}}
 
 data: [DONE]
-

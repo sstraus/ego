@@ -94,7 +94,7 @@ use support::{FakeCredentials, NoForeign};
 /// Reused deliberately: I1 is the claim that a *new provider* on a supported
 /// dialect needs no new code, and a fixture minted for the occasion would
 /// quietly weaken it into "a new provider and a new transcript".
-const FAMILY_TRANSCRIPT: &str = include_str!("goldens/profile/openai/stream/text.sse");
+const FAMILY_TRANSCRIPT: &str = include_str!("goldens/chat_completions/stream/text.sse");
 
 /// The key a configured machine would have put in the fake credentials.
 const KEY: &str = "sk-not-a-real-key";
