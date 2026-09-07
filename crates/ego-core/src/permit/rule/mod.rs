@@ -27,17 +27,21 @@
 //! ## What is here and what is waiting
 //!
 //! All seven heads parse, canonicalise and take an ID, because the grammar is
-//! published as one thing — `ARCHITECTURE.md:252` makes that a gate. Five can
-//! currently match: `read`, `write`, `list`, `search`, and `exec`. `net` and
-//! `tool` still name operations no tool produces.
+//! published as one thing — `ARCHITECTURE.md:252` makes that a gate. All seven
+//! can currently match, `net` and `tool` included: `net` matches
+//! [`Op::Connect`] and [`Op::ProtocolConnect`], `tool` matches [`Op::Opaque`],
+//! and this build produces all three shapes.
 //!
-//! A rule with one of those two heads is well-formed, has a stable ID and
-//! renders in `rules ls` — and [`Rule::load`] **refuses it**, by name, saying
-//! that no tool in this build produces operations of that shape. Not a parse
-//! error, which would lie about the grammar and churn the ID later; and not a
-//! silent non-match, which is the worse failure: an operator who writes
-//! `exec(rm -rf /)` in a deny list cannot tell a rule that matches nothing
-//! apart from a boundary that works. §6a.
+//! The refusal path below is therefore unreachable today, and it stays because
+//! the condition it guards is a property of the *build*, not of the grammar.
+//! Were a head to lose its operations, a rule with it would still be
+//! well-formed, still have a stable ID and still render in `rules ls` — and
+//! [`Rule::load`] would **refuse it**, by name, saying that no tool in this
+//! build produces operations of that shape. Not a parse error, which would lie
+//! about the grammar and churn the ID later; and not a silent non-match, which
+//! is the worse failure: an operator who writes `exec(rm -rf /)` in a deny list
+//! cannot tell a rule that matches nothing apart from a boundary that works.
+//! §6a.
 //!
 //! It self-heals. When the operations arrive, [`Rule::matches`] gains an arm
 //! and one entry in `parse.rs`'s `OPERATIONS` table changes; no rule is

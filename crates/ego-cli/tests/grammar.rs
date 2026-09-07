@@ -12,6 +12,7 @@
 //! spellings sitting next to the flag would have said nothing about the key.
 
 use std::io::Result as IoResult;
+use std::path::{Path, PathBuf};
 
 use ego_cli::budget;
 use ego_cli::cli::{self, Invocation, Output, SessionChoice, Stdin};
@@ -20,41 +21,21 @@ use ego_core::budget::Ledger;
 use ego_core::ceiling::Ceilings;
 use ego_core::config::{Mode, ModelRef};
 use ego_core::cost::{Amount, CurrencyCode, Money};
+use ego_core::permit::rule::Head;
 
 fn argv<const N: usize>(args: [&str; N]) -> Vec<String> {
-    std::iter::once("ego".to_string())
-        .chain(args.iter().map(|arg| arg.to_string()))
-        .collect()
+    argv_slice(&args)
 }
 
 /// `run` and `resume` both produce an [`Args`](ego_cli::cli::Args) — that is
 /// the point of them sharing one — so one helper unwraps either, and every
 /// table below can be pointed at whichever subcommand it is about.
+///
+/// The array form exists only because most tables are written as literals; it
+/// is the slice form with one coercion, so the exhaustive match that keeps this
+/// honest as subcommands are added lives in exactly one place.
 fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
-    match cli::parse(argv(args)).expect("the command line parses") {
-        Invocation::Run(args) | Invocation::Resume(args) => *args,
-        Invocation::Interactive(_) => {
-            panic!("that starts a session: use `converses` for it")
-        }
-        Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
-        Invocation::Models(_) => panic!("`models` takes no Args: use the models tests for it"),
-        Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
-        Invocation::Auth(_) => panic!("`auth` takes no Args: use the auth tests for it"),
-        Invocation::Mcp(_) => panic!("`mcp` takes no Args: use the MCP tests for it"),
-        Invocation::McpServer(_) => {
-            panic!("`mcp-server` takes no Args: use the MCP server tests for it")
-        }
-        Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
-        Invocation::Fork(_) => panic!("`fork` takes no Args: use the fork tests for it"),
-        Invocation::Compact(_) => panic!("`compact` takes no Args: use the compact tests for it"),
-        Invocation::Export(_) => panic!("`export` takes no Args: use the export tests for it"),
-        Invocation::Usage(_) => panic!("`usage` takes no Args: use the usage tests for it"),
-        Invocation::Hooks(_) => panic!("`hooks` takes no Args: use the hooks tests for it"),
-        Invocation::Config(_) => panic!("`config` takes no Args: use the config tests for it"),
-        Invocation::Rules(_) => panic!("`rules` takes no Args: use the rules tests for it"),
-        Invocation::SessionMetadata(_) => panic!("metadata is covered by metadata grammar tests"),
-        Invocation::Doctor(_) => panic!("`doctor` takes no Args: use the doctor tests for it"),
-    }
+    parsed_slice(&args)
 }
 
 fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
@@ -66,6 +47,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
         Invocation::Models(_) => panic!("`models` takes no Args: use the models tests for it"),
         Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
+        Invocation::A2a(_) => panic!("`a2a` takes no Args: use the A2A tests for it"),
         Invocation::Auth(_) => panic!("`auth` takes no Args: use the auth tests for it"),
         Invocation::Mcp(_) => panic!("`mcp` takes no Args: use the MCP tests for it"),
         Invocation::McpServer(_) => {
@@ -1179,4 +1161,208 @@ fn doctor_takes_only_json_and_names_anything_else() {
         !refusal.is_empty(),
         "doctor takes no subject, so a word after it is not one"
     );
+}
+
+/// The two documents that say which `--allow`/`--deny` heads enforce are held
+/// to the parser's own table, not to each other.
+///
+/// This is the [`BUILT`](cli::BUILT)/[`UNBUILT`](cli::UNBUILT) binding pointed
+/// at prose. `parse.rs`'s `OPERATIONS` table is the only thing that decides
+/// whether a rule with a given head can match anything, and `Rule::load`
+/// refuses one that cannot — so a document naming a smaller set than the table
+/// does is telling an operator that a boundary they can actually have is
+/// unavailable. That is the *safe* direction of the lie and it is still a lie:
+/// someone who reads `docs/18` and concludes `exec` heads do not enforce does
+/// not write `deny exec(**)`, and does not get the boundary they would have
+/// got by trying.
+///
+/// Both documents had drifted, in opposite directions and by different
+/// amounts, which is exactly what happens to two hand-maintained copies of one
+/// fact: `docs/18` named four heads, `CLI.md` named five, and the table has
+/// said all seven since `net` gained `Op::Connect` and `tool` gained
+/// `Op::Opaque`.
+#[test]
+fn the_documents_name_the_rule_heads_the_parser_actually_enforces() {
+    // The rows are found by their flag pair rather than by line number: these
+    // are living tables and a fixed offset would make an ordinary edit look
+    // like a regression.
+    let rows = [
+        ("CLI.md", row(include_str!("../../../CLI.md"))),
+        (
+            "docs/18-pi-hermes-slash-command-parity.md",
+            row(include_str!(
+                "../../../docs/18-pi-hermes-slash-command-parity.md"
+            )),
+        ),
+    ];
+
+    let awaiting: Vec<&str> = Head::ALL
+        .iter()
+        .filter(|head| head.awaiting().is_some())
+        .map(|head| head.as_str())
+        .collect();
+
+    for (document, row) in rows {
+        for head in Head::ALL {
+            assert!(
+                row.contains(head.as_str()),
+                "{document}'s `--allow`/`--deny` row never mentions the \
+                 `{head}` head, which the grammar publishes. A head a document \
+                 omits is one an operator does not know they may write.\n\
+                 row: {row}"
+            );
+        }
+
+        // The heads are all named; the remaining way to be wrong is to name
+        // one and then take it back. Every refusal word below appeared in one
+        // of these two rows while the table said nothing was awaiting.
+        if awaiting.is_empty() {
+            for retraction in ["refused", "unsupported", "cannot be enforced", "no tool"] {
+                assert!(
+                    !row.contains(retraction),
+                    "{document}'s `--allow`/`--deny` row says \"{retraction}\", \
+                     but `OPERATIONS` reports every head enforceable, so there \
+                     is nothing left for it to refuse.\nrow: {row}"
+                );
+            }
+        } else {
+            assert!(
+                ["refused", "unsupported", "cannot be enforced", "no tool"]
+                    .iter()
+                    .any(|retraction| row.contains(retraction)),
+                "`OPERATIONS` says {awaiting:?} cannot match anything, and \
+                 {document}'s `--allow`/`--deny` row does not say so. A rule \
+                 with one of those heads loads, renders in `rules ls`, and is \
+                 refused at the point it would have protected something.\n\
+                 row: {row}"
+            );
+        }
+    }
+}
+
+/// No message a person is shown is built by asking a Rust value to describe
+/// itself.
+///
+/// `{value:?}` is the derive talking: it renders `ExecCaps(5)`,
+/// `TimedOut { timeout: 30s }`, `RegistryError("…")`, `Seq(7)` — the *shape of
+/// a Rust value* offered to somebody who wanted to know what went wrong with
+/// their session. Worse, `Debug` renders whatever a field happens to hold, so
+/// it is also how a secret gets printed: `ego-cli`'s device-code login
+/// interpolated a whole `PollOutcome` this way, and three of that enum's five
+/// variants carry an authorization code, a PKCE verifier or a bearer token.
+///
+/// The fix at each site is the same and is not cosmetic: give the type a
+/// `Display` that says what happened, or call the accessor that already does.
+/// That forces somebody to decide what the sentence is, which is exactly the
+/// decision `{:?}` exists to avoid making.
+///
+/// Scoped to the three constructors that carry operator-facing prose. A `{:?}`
+/// in a log line, a test assertion or an evidence digest is not this rule's
+/// business — those have machine readers, and `Debug` is the right tool for
+/// them.
+#[test]
+fn no_message_shown_to_a_person_is_a_debug_rendering() {
+    const CONSTRUCTORS: [&str; 3] = [
+        "message: format!(",
+        "reason: format!(",
+        "UsageError(format!(",
+    ];
+
+    let mut offences = Vec::new();
+    for file in rust_sources(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))) {
+        let source = std::fs::read_to_string(&file).expect("a source file reads");
+        for constructor in CONSTRUCTORS {
+            let mut from = 0;
+            while let Some(found) = source[from..].find(constructor) {
+                let start = from + found;
+                from = start + constructor.len();
+                let Some(template) = format_template(&source, from) else {
+                    continue;
+                };
+                if template.contains(":?}") {
+                    let line = source[..start].matches('\n').count() + 1;
+                    offences.push(format!(
+                        "{}:{line}: {}",
+                        file.display(),
+                        template.lines().next().unwrap_or_default().trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offences.is_empty(),
+        "these build a message for a person out of a `Debug` rendering. Give \
+         the type a `Display` that says what happened, or call the accessor \
+         that already does:\n{}",
+        offences.join("\n")
+    );
+}
+
+/// The format template of the `format!` call whose opening parenthesis ends at
+/// `after`, which is the only place a `{:?}` can be written.
+///
+/// Reading past the template is what the first version of this test did: it
+/// scanned to the next `");`, which a call ending in `),` does not have, so the
+/// window ran on into the next function and charged an innocent call site with
+/// a `Debug` rendering three screens further down.
+fn format_template(source: &str, after: usize) -> Option<&str> {
+    let rest = source[after..].trim_start();
+    // `format!(a_constant)` and friends have no template to read.
+    let body = rest.strip_prefix('"')?;
+    let mut escaped = false;
+    for (offset, character) in body.char_indices() {
+        match character {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return Some(&body[..offset]),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Every `.rs` file under a crate's `src`, which is where production messages
+/// are built. Tests and generated output are deliberately not walked.
+fn rust_sources(workspace: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let crates = workspace.join("crates");
+    let entries = std::fs::read_dir(&crates).expect("the workspace has a crates directory");
+    for entry in entries.flatten() {
+        collect_rust(&entry.path().join("src"), &mut found);
+    }
+    assert!(
+        found.len() > 100,
+        "the walk found only {} sources, so it is looking in the wrong place \
+         and this test is passing vacuously",
+        found.len()
+    );
+    found
+}
+
+fn collect_rust(directory: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust(&path, found);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            found.push(path);
+        }
+    }
+}
+
+/// The one table row in `doc` that is about `--allow` and `--deny`.
+fn row(doc: &str) -> String {
+    doc.lines()
+        .find(|line| {
+            line.starts_with('|') && line.contains("`--allow`") && line.contains("`--deny`")
+        })
+        .unwrap_or_else(|| {
+            panic!("the document still has a table row describing `--allow` and `--deny`")
+        })
+        .to_owned()
 }

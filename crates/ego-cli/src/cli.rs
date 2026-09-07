@@ -78,6 +78,9 @@ pub enum Invocation {
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
     /// closes it.
     Acp(Box<AcpArgs>),
+    /// `ego a2a --listen ADDR` — serve the Agent2Agent protocol on a socket,
+    /// until the process is stopped.
+    A2a(Box<A2aArgs>),
     /// `ego mcp-server` — serve scoped ego runs over MCP on stdio.
     McpServer(Box<McpServerArgs>),
     /// `ego [PROMPT]`, or promptless `ego resume [ID]` — the interactive
@@ -133,14 +136,17 @@ struct Unavailable {
 /// every `waiting_on` here: these are subsystems, and the sentence says which.
 const UNAVAILABLE: &[Unavailable] = &[Unavailable {
     flags: &["-v", "--verbose"],
-    waiting_on: "a decision about what it shows. Every other entry here \
-                     waits on a subsystem; this one waits on a meaning. \
-                     `CLI.md` §4.7 says exactly what `-q` suppresses and \
-                     nothing says what `-v` adds — and the obvious answer, \
-                     turning up `tracing`, stops being obvious at R12: this \
-                     build installs no subscriber, and adding one puts a \
-                     second writer on the stream the marks and the \
-                     notification already own",
+    waiting_on: "nothing, and it is not coming. The capability it used to \
+                     wait on now exists — `EGO_LOG` installs a subscriber for \
+                     the `tracing` events this build emits, and `EGO_LOG_FILE` \
+                     collects them — but it is deliberately not a flag. \
+                     `CLI.md` §3 is the argument grammar of a *run*, and a \
+                     diagnostic level changes nothing a run does and is \
+                     recorded in none of its evidence; regression case froze this \
+                     table with verbose excluded, and reading the environment \
+                     is what lets the capability ship without amending it. See \
+                     `docs/decisions/\
+                     2026-09-07-diagnostics-get-a-destination-before-a-switch.md`",
 }];
 
 /// The commands of `CLI.md` §2 this build implements.
@@ -166,6 +172,7 @@ pub const BUILT: &[&str] = &[
     "hooks",
     "doctor",
     "acp",
+    "a2a",
     "auth",
     "mcp",
     "config",
@@ -244,6 +251,7 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("hooks", HooksCommand::command()))
         .subcommand(named("doctor", DoctorCommand::command()))
         .subcommand(named("acp", AcpCommand::command()))
+        .subcommand(named("a2a", A2aCommand::command()))
         .subcommand(named("auth", AuthCommand::command()))
         .subcommand(named("mcp", McpCommand::command()))
         .subcommand(named("config", ConfigCommand::command()))
@@ -507,6 +515,20 @@ pub struct DoctorArgs {
 pub struct AcpArgs {
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
+}
+
+/// Where `ego a2a` serves, and whether the operator asked for it to be
+/// reachable from outside this machine.
+///
+/// `listen` is unparsed on purpose: which endpoint kind a spelling means is
+/// `ego_core::endpoint`'s decision, not the argument parser's, and duplicating
+/// it here would be a second place that could disagree about what is loopback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct A2aArgs {
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    pub listen: String,
+    pub allow_public_bind: bool,
 }
 
 /// Fixed deployment bounds for `ego mcp-server`.
@@ -914,6 +936,35 @@ enum HooksSubcommand {
 struct AcpCommand {
     #[command(flatten)]
     places: Places,
+}
+
+/// `ego a2a` — the Agent2Agent protocol, on an endpoint.
+///
+/// `--listen` is required and has no default. Every other surface ego serves
+/// speaks over stdio to a parent that already had the right to run it; this one
+/// opens an endpoint, and an endpoint that appears because a default said so is
+/// one nobody decided to open.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego a2a",
+    about = "Serve the Agent2Agent protocol on a local or loopback endpoint.",
+    disable_help_subcommand = true
+)]
+struct A2aCommand {
+    #[command(flatten)]
+    places: Places,
+
+    /// Where to serve: a socket path, or an address such as `127.0.0.1:8080`.
+    ///
+    /// Anything that parses as an address is one; anything else is a local
+    /// endpoint, which the operating system authenticates and which therefore
+    /// needs no credential. A path is preferred for that reason.
+    #[arg(long)]
+    listen: String,
+
+    /// Serve on an address reachable from outside this machine.
+    #[arg(long)]
+    allow_public_bind: bool,
 }
 
 /// `ego mcp-server` — the scoped run protocol, on stdio.
@@ -1804,6 +1855,15 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Command(parsed) => Ok(Invocation::Acp(Box::new(AcpArgs {
                 session_dir: parsed.places.session_dir,
                 directory: parsed.places.directory,
+            }))),
+        },
+        Some("a2a") => match clap_or_answer::<A2aCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::A2a(Box::new(A2aArgs {
+                session_dir: parsed.places.session_dir,
+                directory: parsed.places.directory,
+                listen: parsed.listen,
+                allow_public_bind: parsed.allow_public_bind,
             }))),
         },
         Some("mcp-server") => match clap_or_answer::<McpServerCommand>(&tokens)? {

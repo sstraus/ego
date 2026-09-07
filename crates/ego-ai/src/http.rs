@@ -596,8 +596,16 @@ pub(crate) async fn fetch(
 /// a structured subscriber can drop it without losing the status beside it.
 /// This is the same rule `oauth::BuiltInFlow::classify` applies to the login
 /// half and `RunTermination::after_turn` applies to the mid-turn half.
+///
+/// That subscriber now exists, and the "can drop it" is no longer advice:
+/// `ego::body` is off in every filter `ego-cli` builds unless an operator names
+/// the target, so `EGO_LOG=info` — the level someone sets to watch something
+/// else entirely — does not print this.
+/// `docs/decisions/2026-09-07-diagnostics-get-a-destination-before-a-switch.md`
+/// §3a.
 pub(crate) fn refusal(answer: &Exchange) -> String {
     tracing::warn!(
+        target: "ego::body",
         status = answer.status,
         body = %String::from_utf8_lossy(&answer.bytes),
         "an upstream endpoint refused a pre-turn request"

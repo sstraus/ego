@@ -726,6 +726,7 @@ impl ExecRequirements {
                 available,
                 missing,
                 probe_evidence: None,
+                backend: None,
             })
         }
     }
@@ -738,6 +739,10 @@ pub struct MissingExecCaps {
     available: ExecCaps,
     missing: ExecCaps,
     probe_evidence: Option<EvidenceRef>,
+    /// `None` when the refusal was raised before a backend was selected —
+    /// which is why it is an option rather than a required field. A refusal
+    /// that cannot name a backend says so instead of inventing one.
+    backend: Option<BackendIdentity>,
 }
 
 impl MissingExecCaps {
@@ -764,15 +769,42 @@ impl MissingExecCaps {
         self.probe_evidence = reference;
         self
     }
+
+    /// Which backend fell short.
+    ///
+    /// `ExecRequirements::check` compares two capability sets and has no idea
+    /// whose they are, so the refusal it builds said "the process backend" —
+    /// true on every platform and useful on none. The caller that selected the
+    /// backend knows its name and revision; this is where it says so, and the
+    /// difference for an operator is between "something did not measure up"
+    /// and "Seatbelt did not, and here is the revision that was probed".
+    #[must_use]
+    pub fn from_backend(mut self, backend: BackendIdentity) -> Self {
+        self.backend = Some(backend);
+        self
+    }
 }
 
 impl fmt::Display for MissingExecCaps {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the process backend demonstrated {}, but this run requires {}; missing {}",
-            self.available, self.required, self.missing
-        )?;
+        match &self.backend {
+            Some(backend) => write!(
+                f,
+                "the {} process backend (revision {}) demonstrated {}, but this \
+                 run requires {}; missing {}",
+                backend.name(),
+                backend.revision(),
+                self.available,
+                self.required,
+                self.missing
+            )?,
+            None => write!(
+                f,
+                "the process backend demonstrated {}, but this run requires \
+                 {}; missing {}",
+                self.available, self.required, self.missing
+            )?,
+        }
         if let Some(reference) = &self.probe_evidence {
             write!(f, " (probe transcript {})", reference.id.as_str())?;
         }

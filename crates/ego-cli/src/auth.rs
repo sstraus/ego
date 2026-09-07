@@ -1033,7 +1033,18 @@ async fn minimax_login(
             other => {
                 return Err(AuthError::MissingCredential {
                     program: "ego built-in minimax-oauth login".to_string(),
-                    reason: format!("unexpected token response: {other:?}"),
+                    // `other.kind()` and never `{other:?}`: the variants that
+                    // reach here carry an authorization code, a PKCE verifier
+                    // or a bearer token, and this string is shown to an
+                    // operator. Naming the shape is the whole diagnostic — an
+                    // operator cannot act on the bytes of a token they were
+                    // not supposed to receive, and neither can anyone reading
+                    // over their shoulder.
+                    reason: format!(
+                        "the authorization server answered with {}, which this \
+                         login flow cannot use",
+                        other.kind()
+                    ),
                 });
             }
         }

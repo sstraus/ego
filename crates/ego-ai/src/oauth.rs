@@ -665,8 +665,12 @@ impl BuiltInFlow {
         // The whole answer, for the operator debugging a real outage. `warn`
         // rather than `error` because a rate limit is routine, and the body is
         // a field rather than part of the message so a structured subscriber
-        // can drop it without losing the classification beside it.
+        // can drop it without losing the classification beside it. A login
+        // answer is the likeliest of all of them to quote a credential back,
+        // so it carries the `ego::body` target that keeps it out of every
+        // filter an operator did not write by hand — see `http::refusal`.
         tracing::warn!(
+            target: "ego::body",
             provider = self.id(),
             status = response.status,
             body = %body_text,
@@ -751,13 +755,45 @@ pub struct MiniMaxUserCode {
     pub interval_ms: u64,
 }
 
-#[derive(Debug)]
 pub enum PollOutcome {
     Pending,
     SlowDown,
     CodexAuthorization { code: String, verifier: String },
     GitHubToken(String),
     Token(OAuthToken),
+}
+
+impl PollOutcome {
+    /// What kind of answer this is, carrying none of it.
+    ///
+    /// Three of the five variants hold credential material — an authorization
+    /// code, a PKCE verifier, a bearer token — so a caller reporting "the
+    /// server said something I did not expect" needs a way to say *which*
+    /// something without quoting it. This is that way, and
+    /// `ego-cli`'s device-code login is the caller that needed it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            PollOutcome::Pending => "still pending",
+            PollOutcome::SlowDown => "a slow-down instruction",
+            PollOutcome::CodexAuthorization { .. } => "a Codex authorization grant",
+            PollOutcome::GitHubToken(_) => "a GitHub token",
+            PollOutcome::Token(_) => "a token",
+        }
+    }
+}
+
+/// Hand-written, and the derive is deliberately gone.
+///
+/// `#[derive(Debug)]` rendered the authorization code, the PKCE verifier and
+/// the GitHub token in full, and `ego-cli`'s device-code login interpolated a
+/// whole `PollOutcome` into an operator-visible error with `{other:?}` — so an
+/// unexpected answer printed the secret it was complaining about. Naming the
+/// variant and dropping the payload makes that impossible to reintroduce at any
+/// call site, present or future, rather than only at the one that had it.
+impl fmt::Debug for PollOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PollOutcome({})", self.kind())
+    }
 }
 
 pub fn pkce_challenge(verifier: &str) -> String {

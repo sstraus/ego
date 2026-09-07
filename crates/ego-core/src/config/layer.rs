@@ -22,6 +22,17 @@ use crate::permit::rule::Rule;
 #[serde(transparent)]
 pub struct ModelRef(pub String);
 
+/// The reference as the operator wrote it, and not `ModelRef("…")` around it.
+///
+/// `ego-core`'s continuation integrity check reported a model mismatch with
+/// `{model:?}`, which put the wrapper into a sentence an operator reads when
+/// their resumed run refuses to continue.
+impl std::fmt::Display for ModelRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Permission mode — `ARCHITECTURE.md` §3.4 axis 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

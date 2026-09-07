@@ -13,9 +13,12 @@ name = "ego"
 path = "src/main.rs"
 
 [dependencies]
+ego-a2a = { path = "../ego-a2a" }
 ego-acp = { path = "../ego-acp" }
 ego-ai = { path = "../ego-ai" }
 ego-core.workspace = true
+# The shared inbound seam, for the endpoint kind `--listen` names.
+ego-listen.workspace = true
 ego-mcp = { path = "../ego-mcp" }
 ego-tools = { path = "../ego-tools" }
 agent-client-protocol = { version = "2.0.0", features = ["unstable_protocol_v2"] }
@@ -61,6 +64,18 @@ tokio = { version = "1", features = [
 tokio-util = { version = "0.7", features = ["compat"] }
 toml = "1.1.4"
 tracing = "0.1.44"
+# The consumer for the `tracing` seven crates already emit into. It is a
+# dependency of `ego-cli` alone: the composition root decides where events go,
+# and no library crate learns that they go anywhere. `env-filter` is the
+# feature the whole design rests on — `ego::body=off` underneath the operator's
+# own directives is what keeps a response body out of an ordinary level. `ansi`
+# is dropped because `render::caps` owns the colour decision and a subscriber
+# is not entitled to reach around it.
+tracing-subscriber = { version = "0.3.20", default-features = false, features = [
+    "std",
+    "fmt",
+    "env-filter",
+] }
 url = "2.5.8"
 # `v5`: a named session's id is derived from the workspace and name. `v4`:
 # OAuth PKCE verifiers and state must be unpredictable. Session ids this build

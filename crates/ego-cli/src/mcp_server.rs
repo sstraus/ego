@@ -221,7 +221,7 @@ pub async fn serve(
             RunTermination::Done
         }
         Ok(settlement) => RunTermination::Failed {
-            message: format!("the MCP stdio connection ended as {:?}", settlement.end()),
+            message: format!("the MCP stdio connection ended: {}", settlement.end()),
         },
         Err(error) if error.failure() == McpFailure::InvalidValue => RunTermination::UsageError {
             message: error.to_string(),

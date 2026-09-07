@@ -25,6 +25,16 @@ pub enum Head {
 }
 
 impl Head {
+    /// Every head the grammar publishes, in the order the documents list them.
+    ///
+    /// Public for one reason: `CLI.md` §4.5, `docs/18`'s existing-surfaces
+    /// table and this module's own header all describe *which* heads enforce,
+    /// and prose cannot be held to a private table. All three had fallen
+    /// behind — two of them said `exec` could not match and one said `net` and
+    /// `tool` were still refused, months after [`OPERATIONS`] said otherwise —
+    /// because nothing read the table on their behalf. Something does now.
+    pub const ALL: &'static [Head] = HEADS;
+
     pub fn as_str(self) -> &'static str {
         match self {
             Head::Read => "read",

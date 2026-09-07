@@ -2498,7 +2498,7 @@ async fn dispatch_session_hook(
         })?;
     if result.is_blocked() || result.is_observer_failure() {
         return Err(RunTermination::Failed {
-            message: format!("the {lifecycle:?} hook lifecycle did not complete"),
+            message: format!("the {} hook lifecycle did not complete", lifecycle.as_str()),
         });
     }
     Ok(result)
@@ -2527,7 +2527,7 @@ async fn dispatch_request_hook(
         })?;
     if result.is_blocked() || result.is_observer_failure() {
         return Err(RunTermination::Failed {
-            message: format!("the {lifecycle:?} hook lifecycle did not complete"),
+            message: format!("the {} hook lifecycle did not complete", lifecycle.as_str()),
         });
     }
     Ok(result)
@@ -4088,7 +4088,7 @@ async fn execute<S: EventSink>(
         actions
             .bind_skill_view(skills.view())
             .map_err(|error| RunTermination::Failed {
-                message: format!("interactive skill actions could not be installed: {error:?}"),
+                message: format!("interactive skill actions could not be installed: {error}"),
             })?;
     }
     if let Some(note_text) = opened.repair_note() {
@@ -5110,12 +5110,15 @@ async fn execute<S: EventSink>(
                                         diagnostics.note(&crate::doctor::observed(root.clone()));
                                         continue;
                                     }
-                                    // Sanitized, and to the transcript rather
-                                    // than to a file this action would have had
-                                    // to invent a name for. `ego export ID` is
-                                    // where a file is asked for by name.
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Export,
+                                    // To the transcript rather than to a file
+                                    // this action would have had to invent a
+                                    // name for. `ego export ID --file` is where
+                                    // a file is asked for by name; the two
+                                    // disclosure modes and the three formats
+                                    // are the same ones, carried by the slash
+                                    // grammar — `/export local json`.
+                                    repl::Line::HostCommand(repl::HostCommand::Export(
+                                        selection,
                                     )) => {
                                         // The same workspace and store the
                                         // session was opened against, so
@@ -5123,8 +5126,8 @@ async fn execute<S: EventSink>(
                                         // whatever the process happens to sit in.
                                         let args = crate::cli::ExportArgs {
                                             source: active.id(),
-                                            sanitize: true,
-                                            format: crate::cli::ExportFormat::Md,
+                                            sanitize: selection.sanitize,
+                                            format: selection.format,
                                             file: None,
                                             session_dir: args.session_dir.clone(),
                                             directory: args.directory.clone(),

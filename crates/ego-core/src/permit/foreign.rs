@@ -1221,6 +1221,35 @@ pub enum DuplexEnd {
     Failed,
 }
 
+/// How a duplex connection ended, in words an operator can act on.
+///
+/// `ego mcp-server` reported this with `{:?}`, so an MCP client's operator was
+/// shown `TimedOut { timeout: 30s }` when a server had stopped answering. The
+/// sentences say what happened and, where there is one, what to look at next.
+impl fmt::Display for DuplexEnd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DuplexEnd::Exited { code } => write!(f, "the peer exited with status {code}"),
+            DuplexEnd::Signalled {
+                signal: Some(signal),
+            } => {
+                write!(f, "the peer was killed by signal {signal}")
+            }
+            DuplexEnd::Signalled { signal: None } => {
+                f.write_str("the peer was killed by a signal the operating system did not name")
+            }
+            DuplexEnd::Cancelled => f.write_str("the connection was cancelled"),
+            DuplexEnd::TimedOut { timeout } => write!(
+                f,
+                "the peer did not answer within {} seconds",
+                timeout.as_secs()
+            ),
+            DuplexEnd::Interrupted => f.write_str("the connection was interrupted"),
+            DuplexEnd::Failed => f.write_str("the connection failed"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CleanupCertainty {
     Complete,

@@ -18,7 +18,7 @@ pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };
 
-use actions::{ActionId, SkillSurfaceAction};
+use actions::{ActionId, ExportSelection, SkillSurfaceAction};
 use ego_core::skill::AdmittedSkillOperation;
 use policy_controls::PolicyControlRequest;
 
@@ -56,6 +56,11 @@ pub enum HostCommand {
     Policy(PolicyControlRequest),
     Skill(AdmittedSkillOperation),
     Skills(SkillSurfaceAction),
+    /// `/export`, carrying what it was asked for. Not an
+    /// [`ActionId::Export`](actions::ActionId::Export) any more: an action id
+    /// alone cannot say `json`, and the shortcut and the menu reach the same
+    /// handler by sending [`ExportSelection::default`].
+    Export(ExportSelection),
     Hooks,
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,

@@ -61,6 +61,23 @@ async fn ordinary_main() -> std::process::ExitCode {
             "profile `ci` is available only through ego run or ego resume".to_owned(),
         ));
     }
+    // Before any run work, so a malformed `EGO_LOG` is a usage error rather
+    // than a run that quietly reports nothing — the one failure an operator
+    // cannot detect by looking. Only when the command line itself parsed: a
+    // usage error already in hand is the one worth printing, and replacing it
+    // with a complaint about an environment variable would answer a question
+    // nobody asked.
+    //
+    // `Interactive` is the sole invocation that paints its own prompt, and that
+    // is what decides whether stderr is free. See `diagnostics::plan`.
+    if invocation.is_ok()
+        && let Err(message) = ego_cli::diagnostics::install_from_environment(matches!(
+            &invocation,
+            Ok(Invocation::Interactive(_))
+        ))
+    {
+        invocation = Err(cli::UsageError(message));
+    }
     let mut ci_preflight = match &invocation {
         Ok(Invocation::Run(args) | Invocation::Resume(args))
             if args.profile.as_deref() == Some("ci") =>
@@ -242,6 +259,16 @@ async fn ordinary_main() -> std::process::ExitCode {
             },
             // `mcp-server` owns stdout as its JSON-RPC transport and serves many
             // rooted runs, so the ordinary process projection must stay silent.
+            // `a2a` binds a socket and serves many callers over it, so it has
+            // no single session to report either. Its termination says whether
+            // the listener refused to start or ended badly.
+            Ok(Invocation::A2a(args)) => Ended {
+                termination: ego_cli::a2a::serve(&args).await,
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
             Ok(Invocation::McpServer(args)) => Ended {
                 termination: ego_cli::mcp_server::serve(&args, std::sync::Arc::clone(&evidence))
                     .await,

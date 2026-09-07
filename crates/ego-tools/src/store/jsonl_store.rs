@@ -2130,7 +2130,8 @@ impl ReplaySource for JsonlStore {
                     return Err(ReplaySourceError::CorruptSession {
                         session: *session,
                         reason: format!(
-                            "physical position {:?} followed {:?}",
+                            "physical position {} followed {}, so the session \
+                             file is out of order",
                             record.seq, expected
                         ),
                     });

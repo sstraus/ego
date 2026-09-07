@@ -77,6 +77,7 @@ pub enum Dispatch {
     SessionMetadata(SessionMetadataOperation),
     Skill(AdmittedSkillOperation),
     Skills(SkillSurfaceAction),
+    Export(ExportSelection),
     Hooks,
     Prompt,
     Immediate,
@@ -89,6 +90,29 @@ pub enum SkillSurfaceAction {
     List,
     Diagnose,
     Rescan,
+}
+
+/// What `/export` was asked for, in the exporter's own terms.
+///
+/// The fields are exactly two of [`crate::cli::ExportArgs`]'s, and they are
+/// carried rather than re-derived so the interactive surface cannot drift into
+/// meaning something different by `json` than `ego export --format json` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportSelection {
+    pub sanitize: bool,
+    pub format: crate::cli::ExportFormat,
+}
+
+impl Default for ExportSelection {
+    /// Sanitized markdown: see [`parse_export_action`] for why this is not the
+    /// flag's default. This is also what the keyboard shortcut and the action
+    /// menu select, since neither can carry a word.
+    fn default() -> Self {
+        Self {
+            sanitize: true,
+            format: crate::cli::ExportFormat::Md,
+        }
+    }
 }
 
 /// The action selected from one displayed registry snapshot.
@@ -324,6 +348,20 @@ impl SurfaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryError(&'static str);
 
+/// The inner sentence, and not `RegistryError("…")` around it.
+///
+/// The one thing this type holds is already a sentence written for a person,
+/// so the only way to get it wrong was to print the wrapper too — which
+/// `run.rs` did, with `{error:?}`, in a message an operator reads when their
+/// slash commands failed to install.
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
 #[derive(Debug, Clone)]
 pub struct ActionRegistry {
     registrations: Vec<ActionRegistration>,
@@ -398,7 +436,11 @@ impl ActionRegistry {
             enabled(Clear, "clear", "Clear composer and menu state"),
             enabled(Usage, "usage", "Show usage, context, cost and budget"),
             enabled(Statusline, "statusline", "Configure the native status line"),
-            enabled(Export, "export", "Export sanitized session data"),
+            enabled(
+                Export,
+                "export",
+                "Export this session — /export [local|sanitized] [md|json|jsonl]",
+            ),
             enabled(Doctor, "doctor", "Diagnose local subsystem health"),
             enabled(Quit, "quit", "Exit the interactive session"),
             enabled(New, "new", "Create a durable session"),
@@ -674,6 +716,15 @@ impl ActionRegistry {
                     },
                 };
             }
+            if name == "export" && self.resolve_slash(name) == Some(ActionId::Export) {
+                return if self.availability(ActionId::Export) == Availability::Enabled {
+                    parse_export_action(raw_arguments)
+                } else {
+                    Dispatch::Refused {
+                        reason: "export is unavailable",
+                    }
+                };
+            }
             if name == "hooks" && self.resolve_slash(name) == Some(ActionId::Hooks) {
                 return if !raw_arguments.is_empty() {
                     Dispatch::Refused {
@@ -727,6 +778,47 @@ impl ActionRegistry {
         }
         Dispatch::Prompt
     }
+}
+
+/// `/export [local|sanitized] [md|json|jsonl]`, in either order.
+///
+/// The two disclosure words are `CLI.md`'s own — line 74 describes `ego export`
+/// as rendering "one local or structurally sanitized transcript" — so the slash
+/// grammar names the same two things the flag does rather than inventing a
+/// third vocabulary for one exporter.
+///
+/// **The default differs from the flag's, deliberately.** `ego export` writes a
+/// file the operator named and defaults to a local transcript; `/export` writes
+/// to the *transcript on screen*, which is a place a bundle can be read over a
+/// shoulder or captured by a recorder, so it defaults to sanitized and makes
+/// `local` the word you type when you mean it. Same exporter, same options,
+/// different safe default for a different destination.
+fn parse_export_action(arguments: &str) -> Dispatch {
+    const USAGE: &str = "usage: /export [local|sanitized] [md|json|jsonl]";
+
+    let mut selection = ExportSelection::default();
+    let (mut disclosure, mut format) = (false, false);
+    for word in arguments.split_whitespace() {
+        let claimed = match word {
+            "local" | "sanitized" => std::mem::replace(&mut disclosure, true),
+            "md" | "json" | "jsonl" => std::mem::replace(&mut format, true),
+            _ => return Dispatch::Refused { reason: USAGE },
+        };
+        // Saying the same thing twice is a typo, and the second word silently
+        // winning is how an operator gets `local` when they typed `sanitized`.
+        if claimed {
+            return Dispatch::Refused { reason: USAGE };
+        }
+        match word {
+            "local" => selection.sanitize = false,
+            "sanitized" => selection.sanitize = true,
+            "md" => selection.format = crate::cli::ExportFormat::Md,
+            "json" => selection.format = crate::cli::ExportFormat::Json,
+            "jsonl" => selection.format = crate::cli::ExportFormat::Jsonl,
+            _ => unreachable!("every accepted word is matched above"),
+        }
+    }
+    Dispatch::Export(selection)
 }
 
 fn parse_name_action(arguments: &str) -> Dispatch {
@@ -808,6 +900,99 @@ fn admitted_skill_operation(
         .descriptor(name)
         .filter(|spec| spec.descriptor().user_invocable)
         .map(|spec| AdmittedSkillOperation::invoke(spec.descriptor(), raw_arguments))
+}
+
+#[cfg(test)]
+mod export_grammar {
+    use super::*;
+    use crate::cli::ExportFormat;
+
+    fn selection(arguments: &str) -> ExportSelection {
+        match parse_export_action(arguments) {
+            Dispatch::Export(selection) => selection,
+            other => panic!("`/export {arguments}` should have been accepted: {other:?}"),
+        }
+    }
+
+    fn refusal(arguments: &str) -> &'static str {
+        match parse_export_action(arguments) {
+            Dispatch::Refused { reason } => reason,
+            other => panic!("`/export {arguments}` should have been refused: {other:?}"),
+        }
+    }
+
+    /// Bare `/export` is the safe rendering, because its destination is a
+    /// transcript on a screen rather than a file the operator chose.
+    #[test]
+    fn the_default_is_sanitized_markdown() {
+        assert_eq!(
+            selection(""),
+            ExportSelection {
+                sanitize: true,
+                format: ExportFormat::Md
+            }
+        );
+        assert_eq!(selection(""), ExportSelection::default());
+    }
+
+    /// Both axes, independently, and in whichever order they were typed —
+    /// an operator should not have to remember which word comes first.
+    #[test]
+    fn each_word_sets_its_own_axis_in_either_order() {
+        for arguments in ["local jsonl", "jsonl local"] {
+            assert_eq!(
+                selection(arguments),
+                ExportSelection {
+                    sanitize: false,
+                    format: ExportFormat::Jsonl
+                },
+                "`/export {arguments}` names one disclosure and one format"
+            );
+        }
+        assert!(
+            selection("json").sanitize,
+            "a format alone changes no disclosure"
+        );
+        assert_eq!(selection("json").format, ExportFormat::Json);
+        assert_eq!(
+            selection("local").format,
+            ExportFormat::Md,
+            "a disclosure alone changes no format"
+        );
+        assert!(!selection("local").sanitize);
+        assert!(
+            selection("sanitized").sanitize,
+            "the safe word is sayable, not only implied"
+        );
+    }
+
+    /// The failure this guards is the quiet one: `/export sanitized local`
+    /// silently exporting a *local* bundle because the last word won.
+    #[test]
+    fn a_repeated_axis_is_refused_rather_than_letting_the_last_word_win() {
+        for arguments in ["sanitized local", "local sanitized", "md json", "json json"] {
+            assert!(
+                refusal(arguments).contains("usage:"),
+                "`/export {arguments}` says one thing twice and must be refused"
+            );
+        }
+    }
+
+    /// An unknown word is never a prompt and never a silent default: an
+    /// operator who typed `/export markdown` must be told, not handed a
+    /// bundle in a format they did not ask for.
+    #[test]
+    fn an_unknown_word_is_refused_and_the_usage_names_every_option() {
+        let reason = refusal("markdown");
+        for option in ["local", "sanitized", "md", "json", "jsonl"] {
+            assert!(
+                reason.contains(option),
+                "the usage line must name `{option}`: {reason}"
+            );
+        }
+        assert!(refusal("--format json").contains("usage:"));
+        assert!(refusal("local extra").contains("usage:"));
+    }
 }
 
 #[cfg(test)]

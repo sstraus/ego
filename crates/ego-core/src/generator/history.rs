@@ -31,6 +31,24 @@ pub enum Repair {
     TruncatedUnidentifiedCall,
 }
 
+/// What was repaired, as a clause that reads inside a list.
+///
+/// A replay refusal used to print `[AnsweredTornCall { call_id: "abc" }]`,
+/// which tells an operator the shape of a Rust value rather than what happened
+/// to their session.
+impl std::fmt::Display for Repair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Repair::AnsweredTornCall { call_id } => {
+                write!(f, "tool call {call_id} was answered by the harness")
+            }
+            Repair::TruncatedUnidentifiedCall => {
+                f.write_str("an unidentified tool call truncated the conversation")
+            }
+        }
+    }
+}
+
 /// What a synthesized answer says. Deliberately not a tool's own vocabulary:
 /// the tool did not say this, the harness did.
 ///

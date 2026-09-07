@@ -262,13 +262,12 @@ fn image_request_gaps_report_unknown_unsupported_media_count_bytes_dimensions_pi
     let request = request_with_image(image_value());
     let cases = [
         (capabilities(json!("unknown")), "unknown image input"),
+        (capabilities(json!("unsupported")), "does not accept images"),
         (
-            capabilities(json!("unsupported")),
-            "unsupported image input",
-        ),
-        (
+            // The refusal names the encoding the way the world spells it,
+            // rather than the way `rustc` spells the variant.
             capabilities(json!({"accepted_media_types":["jpeg"]})),
-            "media type",
+            "image/png",
         ),
         (
             capabilities(json!({"accepted_media_types":["png"],"max_bytes_per_image":1})),
@@ -334,6 +333,61 @@ fn image_request_gaps_report_unknown_unsupported_media_count_bytes_dimensions_pi
         pixel_gaps
             .iter()
             .any(|gap| gap.to_string().contains("pixel"))
+    );
+}
+
+/// The refusal says where the images came from, because the person reading it
+/// only wrote the last message.
+///
+/// `request_gaps` scans the whole request, and it is right to: the history is
+/// resent on every turn, so historical images really are part of what a
+/// text-only model would have to accept. But the refusal used to say
+/// "unsupported image input" on a prompt that supplied none — reachable by
+/// `ego --attach` followed by a mid-session model change — and the person had
+/// no way to tell that the image was one they sent four turns ago.
+///
+/// The two halves also have different remedies, which is the reason the count
+/// is split rather than merely mentioned: an attachment on this prompt can be
+/// dropped, and one already in the conversation cannot be.
+#[test]
+fn a_refusal_names_the_images_the_prompt_sent_apart_from_the_ones_it_inherited() {
+    let text_only = capabilities(json!("unsupported"));
+
+    let carried: GenRequest = serde_json::from_value(json!({
+        "model":"fixture-vision",
+        "messages":[
+            {"role":"user","content":[image_value(), {"type":"text","text":"describe it"}]},
+            {"role":"assistant","content":[{"type":"text","text":"a dot"}]},
+            {"role":"user","content":[{"type":"text","text":"and now in French"}]}
+        ],
+        "tools":[],"thinking":"off","max_output_tokens":64,"parallel_tool_calls":false
+    }))
+    .expect("a conversation that already contains an image");
+    let rendered = text_only
+        .request_gaps(&carried)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        rendered.contains("already carries 1") && !rendered.contains("this prompt supplied"),
+        "a text-only prompt was told it sent an image: {rendered}"
+    );
+    // The remedy is the half a bare count would have lost.
+    assert!(
+        rendered.contains("start a new session"),
+        "the refusal names no way out: {rendered}"
+    );
+
+    let supplied = text_only
+        .request_gaps(&request_with_image(image_value()))
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        supplied.contains("this prompt supplied 1") && !supplied.contains("already carries"),
+        "an image sent now was blamed on the history: {supplied}"
     );
 }
 

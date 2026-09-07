@@ -395,13 +395,13 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--tools`, `--no-tools` | **yes** | |
 | `-C`, `-c/--set`, `--profile` | **yes** | |
 | `-q`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §1 |
-| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. Five of the seven rule heads enforce: `read`, `write`, `list`, `search`, and `exec`; `net` and `tool` remain refused by name because no builtin produces those operations. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
+| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. All seven rule heads enforce: `read`, `write`, `list`, `search`, `exec`, `net`, and `tool` — `net` matches `Op::Connect`/`Op::ProtocolConnect` and `tool` matches `Op::Opaque`, both of which this build now produces. This sentence is derived from `parse.rs`'s `OPERATIONS` table by `the_documents_name_the_rule_heads_the_parser_actually_enforces`, not maintained beside it. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
 | `--sandbox` | **yes** | `ro\|workspace\|off`, default `workspace`, enforced by the measured platform backend before a prepared process can launch; an unavailable required capability fails closed |
 | `-f`, `--file`, `--var` | **yes** | strict version-1 agent files load through the existing bounded YAML implementation, apply their configuration layer below flags, and substitute declared body variables. M4 extracts the shared envelope for skills and still owns the direct executable shebang end-to-end proof, not these flags' availability |
 | `--attach` | **yes** | repeatable local-path or HTTPS image input; bytes enter the durable session-blob/content path before model-specific projection and unsupported model/profile combinations refuse before acquisition |
 | `--mcp` | **yes** | repeatable ordered selection of effective `NAME` entries and strict invocation-scoped `@FILE` entries; the selected live admission is shared by dispatch, `/tools`, `/doctor`, and deterministic `mcp_errors` |
 | `--retry`, `--fallback` | **M5 target** | regression case installs the one-turn attempt coordinator; current delivery certainty alone does not authorize re-issue |
-| `-v`, `--verbose` | excluded | the current binary refuses this legacy placeholder by name. No final behavior was ratified; regression case retires the spelling while preserving the named retired-flag error contract |
+| `-v`, `--verbose` | excluded | the binary refuses this legacy placeholder by name, and the exclusion regression case recorded stands. What it once waited on now exists and is not a flag: `EGO_LOG` (an `EnvFilter` string) installs a subscriber for the `tracing` events this build emits and `EGO_LOG_FILE` collects them to a file, because a diagnostic level is not an argument of a run — see §4.8. regression case was expected to retire the spelling and did not; it stays in the unavailable table rather than the retired one, because retiring a flag requires naming its replacement and there is deliberately no replacement flag to name |
 
 The table distinguishes implemented flags, intentional refusals, frozen M5
 target spellings, and the excluded verbose placeholder. The defect would be §3
@@ -662,6 +662,37 @@ The human-facing product name is `εgo`, and every window title begins with the
 exact prefix `ɛ । `. Every payload is stripped of control characters before it
 goes into a sequence: a tool name, an error message and an intent line all come
 from somewhere that is not ego.
+
+### 4.8 Diagnostics (`EGO_LOG`, `EGO_LOG_FILE`)
+
+The `tracing` events this build emits reach nobody by default. Two environment
+variables — not flags, see below — decide otherwise:
+
+| Variable | Meaning |
+| --- | --- |
+| `EGO_LOG` | A `tracing` `EnvFilter` string: a level (`warn`, `debug`) or target directives (`ego::listen=info,ego_ai=debug`). Unset or empty installs **nothing** — not a silent subscriber, nothing — so every stream is byte-for-byte unchanged |
+| `EGO_LOG_FILE` | An absolute path to append to instead of stderr. Required for an interactive session, which paints its own prompt on the terminal stderr would land on; without it such a session is refused by name rather than having its display corrupted |
+
+Diagnostics never touch stdout, which is protocol-clean in `json`, `jsonl` and
+`acp` modes. A malformed `EGO_LOG` is a usage error before any run work, because
+a typo that silently disables diagnostics is the one failure an operator cannot
+detect by looking. A relative `EGO_LOG_FILE` is refused: it would resolve
+against the working directory of whatever started the process, which under a
+host is not the operator's.
+
+**One target is special.** `ego::body` carries whole upstream response bodies —
+the ones removed from operator-visible errors because those errors reach an ACP
+host — and a failing endpoint or an intercepting proxy may echo a credential
+back inside one. It is **off in every filter unless named**, so `EGO_LOG=trace`
+does not print it and `EGO_LOG=ego::body=debug` does. The rule that generalises:
+a level chosen to watch one subsystem never discloses another's secrets.
+
+**Why not a flag.** §3 is the argument grammar of a *run*, and a diagnostic
+level changes nothing a run does, is recorded in none of its evidence, and
+belongs in neither the generated reference nor the completions. It is also the
+shape a host can use: something spawning `ego acp` sets variables for its child
+and cannot inject arguments into a command line it did not compose. See
+`docs/decisions/2026-09-07-diagnostics-get-a-destination-before-a-switch.md`.
 
 ## 5. Agent files — the scripting language
 

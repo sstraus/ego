@@ -320,7 +320,11 @@ impl RunEffectPorts {
             .requirements()
             .check(capabilities)
             .map_err(|missing| {
-                ProcessError::MissingCapabilities(missing.with_probe_evidence(transcript))
+                ProcessError::MissingCapabilities(
+                    missing
+                        .with_probe_evidence(transcript)
+                        .from_backend(selected.identity()),
+                )
             })?;
         let observation = ExecObservation::new(
             selected.identity(),

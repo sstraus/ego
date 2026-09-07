@@ -713,6 +713,9 @@ impl Seat {
                     }
                     Dispatch::Skill(operation) => Line::HostCommand(HostCommand::Skill(operation)),
                     Dispatch::Skills(action) => Line::HostCommand(HostCommand::Skills(action)),
+                    Dispatch::Export(selection) => {
+                        Line::HostCommand(HostCommand::Export(selection))
+                    }
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Refused { reason } => Line::Refused(reason),
                     Dispatch::Action(_)
@@ -1393,6 +1396,15 @@ fn surface_line(
                     }
                     return (Line::HostCommand(HostCommand::Skills(action)), failed);
                 }
+                Dispatch::Export(selection) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice =
+                            Some("export is unavailable while a turn is running".to_owned());
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::Export(selection)), failed);
+                }
                 Dispatch::Hooks => {
                     if phase.get() == EditPhase::Busy {
                         status.lock().expect("surface status lock").notice = Some(
@@ -1509,6 +1521,15 @@ fn surface_line(
                         status.lock().expect("surface status lock").notice = Some(
                             "skill actions are unavailable while a turn is running".to_owned(),
                         );
+                        repaint_status(status);
+                        continue;
+                    }
+                    Dispatch::Export(_) => {
+                        // The same refusal the shortcut gives while busy. A
+                        // transcript exported mid-turn would be a snapshot of a
+                        // conversation that is still moving.
+                        status.lock().expect("surface status lock").notice =
+                            Some("export is unavailable while a turn is running".to_owned());
                         repaint_status(status);
                         continue;
                     }
@@ -1720,7 +1741,11 @@ fn apply_surface_effect(
                 status.lock().expect("surface status lock").notice =
                     Some("export is unavailable while a turn is running".to_owned());
             } else {
-                return Some(Line::HostCommand(HostCommand::Action(ActionId::Export)));
+                // The shortcut and the menu carry no words, so they select the
+                // default the slash grammar documents: sanitized markdown.
+                return Some(Line::HostCommand(HostCommand::Export(
+                    crate::repl::actions::ExportSelection::default(),
+                )));
             }
         }
         SurfaceActionEffect::Name => {

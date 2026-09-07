@@ -311,6 +311,15 @@ impl Default for GateId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Seq(u64);
 
+/// The number alone. A corrupt-session refusal names positions, and `Seq(7)`
+/// in that sentence is the wrapper leaking into a report an operator is meant
+/// to compare against a file on disk.
+impl std::fmt::Display for Seq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl Seq {
     /// The initial sequence value.
     pub const ZERO: Seq = Seq(0);

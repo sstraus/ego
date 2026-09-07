@@ -15,6 +15,7 @@
 /// The product name shown to a person. Machine-facing names remain `ego`.
 pub(crate) const DISPLAY_NAME: &str = "εgo";
 
+pub mod a2a;
 pub mod acp;
 pub mod acp_controls;
 pub(crate) mod agent_file;
@@ -25,6 +26,7 @@ pub mod build_info;
 pub mod catalogue;
 pub mod cli;
 pub mod config;
+pub mod diagnostics;
 pub mod doctor;
 pub mod facts;
 pub mod hook;

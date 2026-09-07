@@ -1915,7 +1915,8 @@ where
         if prepared_model != model {
             return Err(RunError::Integrity {
                 message: format!(
-                    "continuation preparation model mismatch: expected {model:?}, actual {prepared_model:?}"
+                    "the continuation prepared {prepared_model} but the run is \
+                     pinned to {model}; a resumed run may not change model"
                 ),
             });
         }

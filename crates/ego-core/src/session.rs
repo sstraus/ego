@@ -365,7 +365,14 @@ impl<'a> ReplayContext<'a> {
         })?;
         if !repairs.is_empty() {
             return Err(ReplayError::InvalidConversation {
-                reason: format!("ancestor conversation required repair: {repairs:?}"),
+                reason: format!(
+                    "the ancestor conversation required repair: {}",
+                    repairs
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
             });
         }
         Ok(ReplayedContext {

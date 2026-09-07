@@ -14,9 +14,22 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ContentBlock, GenRequest, ImageMediaType, MAX_IMAGE_BYTES, MAX_IMAGE_EDGE, MAX_IMAGE_PIXELS,
-    MAX_IMAGES_PER_PROMPT, MAX_TOTAL_IMAGE_BYTES, ReasoningState, ThinkingLevel,
+    ContentBlock, GenRequest, Image, ImageMediaType, MAX_IMAGE_BYTES, MAX_IMAGE_EDGE,
+    MAX_IMAGE_PIXELS, MAX_IMAGES_PER_PROMPT, MAX_TOTAL_IMAGE_BYTES, Message, ReasoningState,
+    ThinkingLevel,
 };
+
+/// Every image `messages` carries, in order.
+fn images_in(messages: &[Message]) -> Vec<&Image> {
+    messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Image { image } => Some(image),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Per-model image limits, always bounded by the product's absolute limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -402,7 +415,20 @@ pub struct ModelCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CapabilityGap {
     ImageInputUnknown,
-    ImageInputUnsupported,
+    /// Where the images came from, because the gap is a statement about the
+    /// whole request and the person only sent the last message of it.
+    ///
+    /// `supplied` counts the images in the newest prompt and `carried` counts
+    /// the ones already in the conversation before it. They are never both
+    /// zero: the gap is only produced when the request carries an image.
+    ///
+    /// Without the split this refused a text-only prompt with "unsupported
+    /// image input", which is true of the request and a lie to the person —
+    /// reachable by attaching an image and then changing model mid-session.
+    ImageInputUnsupported {
+        supplied: usize,
+        carried: usize,
+    },
     ImageMediaTypeUnsupported {
         index: usize,
         media_type: ImageMediaType,
@@ -501,10 +527,35 @@ impl std::fmt::Display for CapabilityGap {
             Self::ImageInputUnknown => {
                 write!(f, "unknown image input support; resolve the model again")
             }
-            Self::ImageInputUnsupported => write!(f, "unsupported image input for this model"),
+            // Three sentences rather than one, because the remedy differs:
+            // a prompt that supplied an image can drop it, and a conversation
+            // that already carries one cannot — the history is resent whole
+            // on every turn, so the only ways out are a different model or a
+            // different session.
+            Self::ImageInputUnsupported { supplied, carried } => match (supplied, carried) {
+                (0, carried) => write!(
+                    f,
+                    "this model does not accept images, and this conversation \
+                     already carries {carried} from earlier in it; the history \
+                     is sent whole on every turn, so switch back to a model \
+                     that accepts images or start a new session"
+                ),
+                (supplied, 0) => write!(
+                    f,
+                    "this model does not accept images, and this prompt \
+                     supplied {supplied}"
+                ),
+                (supplied, carried) => write!(
+                    f,
+                    "this model does not accept images: this prompt supplied \
+                     {supplied}, and this conversation already carries \
+                     {carried} from earlier in it that are sent with it"
+                ),
+            },
             Self::ImageMediaTypeUnsupported { index, media_type } => write!(
                 f,
-                "image {index} media type {media_type:?} is not accepted by this model"
+                "image {index} is {}, which this model does not accept",
+                media_type.mime()
             ),
             Self::TooManyImages { requested, max } => write!(
                 f,
@@ -603,20 +654,30 @@ impl ModelCapabilities {
     pub fn request_gaps(&self, req: &GenRequest) -> Vec<CapabilityGap> {
         let mut gaps = Vec::new();
 
-        let images: Vec<_> = req
+        // Split at the newest message rather than counting the request as one
+        // heap. Every gap below is a fact about the whole request — history is
+        // part of what gets sent — but the *refusal* is read by somebody who
+        // only wrote the last message, and one of these two numbers is the
+        // difference between "drop the attachment" and "you cannot".
+        let (earlier, newest) = req
             .messages
             .messages()
-            .iter()
-            .flat_map(|message| &message.content)
-            .filter_map(|block| match block {
-                ContentBlock::Image { image } => Some(image),
-                _ => None,
-            })
-            .collect();
+            .split_last()
+            .map_or((&[][..], &[][..]), |(newest, earlier)| {
+                (earlier, std::slice::from_ref(newest))
+            });
+        let carried = images_in(earlier);
+        let supplied = images_in(newest);
+        // Back in order, because the `index` every limit gap reports is a
+        // position in the request as sent.
+        let images: Vec<_> = carried.iter().chain(supplied.iter()).copied().collect();
         if !images.is_empty() {
             match &self.image_input {
                 ImageInputSupport::Unknown => gaps.push(CapabilityGap::ImageInputUnknown),
-                ImageInputSupport::Unsupported => gaps.push(CapabilityGap::ImageInputUnsupported),
+                ImageInputSupport::Unsupported => gaps.push(CapabilityGap::ImageInputUnsupported {
+                    supplied: supplied.len(),
+                    carried: carried.len(),
+                }),
                 ImageInputSupport::Supported(limits) => {
                     for (offset, image) in images.iter().enumerate() {
                         let index = offset + 1;
