@@ -29,6 +29,7 @@ pub mod doctor;
 pub mod facts;
 pub mod hook;
 pub mod hooks;
+pub mod host_ports;
 pub mod mcp;
 pub mod mcp_server;
 pub mod metadata;

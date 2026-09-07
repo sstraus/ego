@@ -1,15 +1,13 @@
 //! `ego acp`: production composition for the inbound ACP adapter.
 
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::{ConnectTo, Stdio};
 use agent_client_protocol_schema::v1;
 use ego_acp::serve::{
-    AcpRunBindingsBuilder, ExecutionSpawner, McpSessionAdmissionError, McpSessionAdmitter,
-    RootResolveError, RootResolver, SessionMcpAdmission,
+    AcpRunBindingsBuilder, McpSessionAdmissionError, McpSessionAdmitter, SessionMcpAdmission,
 };
 use ego_core::config::{
     McpConfigProvenance, McpEnvironmentName, McpHttpAuth, McpServerConfig, McpServerName, Source,
@@ -18,7 +16,7 @@ use ego_core::credentials::SecretMaterial;
 use ego_core::event::domain::CancelCause;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::mcp::McpRuntimeBinding;
-use ego_core::run::{IdSource, RunController, RunRetention, RunRoot, RunTermination};
+use ego_core::run::{RunController, RunRetention, RunTermination};
 use ego_core::session_lifecycle::{SessionLifecycle, SessionRunLifecycle};
 use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::{AdmittedToolSource, CancelToken};
@@ -37,56 +35,9 @@ use ego_tools::store::OsIo;
 use futures::future::BoxFuture;
 
 use crate::cli::AcpArgs;
+use crate::host_ports::{CanonicalRoots, TokioExecutionSpawner, UuidIds};
 use crate::provider_http::{CommandHttpScope, ProviderHttpAdapter};
 use crate::{run, session};
-
-struct CanonicalRoots {
-    base: PathBuf,
-}
-
-impl RootResolver for CanonicalRoots {
-    fn resolve(&self, cwd: &Path) -> Result<RunRoot, RootResolveError> {
-        let candidate = if cwd.is_absolute() {
-            cwd.to_path_buf()
-        } else {
-            self.base.join(cwd)
-        };
-        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
-            RootResolveError::new(format!(
-                "the ACP working directory {} could not be resolved: {error}",
-                candidate.display()
-            ))
-        })?;
-        if !canonical.is_dir() {
-            return Err(RootResolveError::new(format!(
-                "the ACP working directory {} is not a directory",
-                canonical.display()
-            )));
-        }
-        RunRoot::new(canonical).map_err(|error| RootResolveError::new(error.to_string()))
-    }
-}
-
-#[derive(Debug, Default)]
-struct TokioExecutionSpawner;
-
-impl ExecutionSpawner for TokioExecutionSpawner {
-    fn spawn(
-        &self,
-        execution: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) {
-        tokio::spawn(execution);
-    }
-}
-
-#[derive(Debug, Default)]
-struct UuidIds;
-
-impl IdSource for UuidIds {
-    fn next_uuid(&self) -> uuid::Uuid {
-        uuid::Uuid::new_v4()
-    }
-}
 
 struct AcpSessionMcpAdmission {
     runtime: Arc<McpRegistryRuntime>,
@@ -424,38 +375,5 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         Err(error) => RunTermination::Failed {
             message: format!("the ACP connection ended badly: {error}"),
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn canonical_roots_accepts_a_directory_but_rejects_an_existing_regular_file() {
-        let owner = tempdir().expect("ACP root owner");
-        let directory = owner.path().join("workspace");
-        std::fs::create_dir(&directory).expect("ACP workspace directory");
-        let regular_file = owner.path().join("workspace-file");
-        std::fs::write(&regular_file, b"not a workspace").expect("ACP workspace file");
-        let roots = CanonicalRoots {
-            base: owner.path().to_path_buf(),
-        };
-
-        assert_eq!(
-            roots
-                .resolve(Path::new("workspace"))
-                .expect("directory is an ACP root")
-                .as_path(),
-            std::fs::canonicalize(directory)
-                .expect("canonical ACP workspace")
-                .as_path()
-        );
-        assert!(
-            roots.resolve(Path::new("workspace-file")).is_err(),
-            "an existing regular file must be rejected as an ACP root: {}",
-            regular_file.display()
-        );
     }
 }

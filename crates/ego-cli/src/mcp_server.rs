@@ -1,8 +1,6 @@
 //! `ego mcp-server`: production composition for scoped rooted runs over stdio.
 
 use std::collections::BTreeSet;
-use std::future::Future;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -12,16 +10,13 @@ use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::permit::{CleanupCertainty, DuplexEnd, DuplexSession, DuplexSettlement, ToolResult};
-use ego_core::run::{
-    EventSinkFactory, IdSource, RunController, RunRetention, RunRoot, RunTermination,
-};
+use ego_core::run::{EventSinkFactory, RunController, RunRetention, RunRoot, RunTermination};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::run_artifact::{RunArtifactId, RunArtifactStore, RunArtifactStoreError};
 use ego_mcp::{
-    McpError, McpFailure, McpFuture, McpRunBindingsBuilder, McpRunExecutionSpawner,
-    McpRunResourceReader, McpRunResourceRequest, McpRunRootResolver, McpRunSelectionPolicy,
-    McpRunServerConfig, McpRunServerFactory, McpRunServerPorts, McpServerPort,
-    SanitizedMcpRunResource, serialize_run_snapshot,
+    McpError, McpFailure, McpFuture, McpRunBindingsBuilder, McpRunResourceReader,
+    McpRunResourceRequest, McpRunSelectionPolicy, McpRunServerConfig, McpRunServerFactory,
+    McpRunServerPorts, McpServerPort, SanitizedMcpRunResource, serialize_run_snapshot,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::store::JsonlStore;
@@ -30,62 +25,10 @@ use futures::io::{AsyncRead, AsyncWrite};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::cli::McpServerArgs;
+use crate::host_ports::{CanonicalRoots, TokioExecutionSpawner, UuidIds};
 use crate::{run, session};
 
 type Controller = RunController<JsonlStore, run::CliRunExecutor, SystemClock, UuidIds>;
-
-struct CanonicalRoots {
-    base: PathBuf,
-}
-
-impl McpRunRootResolver for CanonicalRoots {
-    fn resolve(&self, raw: &Path) -> Result<RunRoot, McpError> {
-        let candidate = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else {
-            self.base.join(raw)
-        };
-        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
-            McpError::new(
-                McpFailure::InvalidValue,
-                format!(
-                    "the MCP run root {} could not be resolved: {error}",
-                    candidate.display()
-                ),
-            )
-        })?;
-        if !canonical.is_dir() {
-            return Err(McpError::new(
-                McpFailure::InvalidValue,
-                format!(
-                    "the MCP run root {} is not a directory",
-                    canonical.display()
-                ),
-            ));
-        }
-        RunRoot::new(canonical)
-            .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))
-    }
-}
-
-#[derive(Debug, Default)]
-struct TokioExecutionSpawner;
-
-impl McpRunExecutionSpawner for TokioExecutionSpawner {
-    fn spawn(
-        &self,
-        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    ) -> Result<(), McpError> {
-        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
-            McpError::new(
-                McpFailure::Transport,
-                format!("the MCP run execution runtime is unavailable: {error}"),
-            )
-        })?;
-        runtime.spawn(future);
-        Ok(())
-    }
-}
 
 #[derive(Debug, Default)]
 struct NoOutputBindings;
@@ -176,15 +119,6 @@ fn artifact_error(error: RunArtifactStoreError) -> McpError {
         RunArtifactStoreError::Io { .. } => McpFailure::Transport,
     };
     McpError::new(failure, error.to_string())
-}
-
-#[derive(Debug, Default)]
-struct UuidIds;
-
-impl IdSource for UuidIds {
-    fn next_uuid(&self) -> uuid::Uuid {
-        uuid::Uuid::new_v4()
-    }
 }
 
 struct ProcessStdio {
