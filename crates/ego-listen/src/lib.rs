@@ -32,6 +32,12 @@ use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
+mod limits;
+
+pub use limits::{
+    ConnectionGate, ConnectionGateError, ConnectionLimits, ConnectionLimitsError, GuardedStream,
+};
+
 /// Who connected, as far as the transport can prove it.
 ///
 /// Not a uid or a `SocketAddr`: what a protocol above needs to decide is

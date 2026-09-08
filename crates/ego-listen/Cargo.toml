@@ -13,10 +13,12 @@ publish.workspace = true
 # be able to reach one, and `ego-acp` and `ego-a2a` both sit above it.
 ego-core.workspace = true
 # `net` for the listeners, `io-util` for the `AsyncRead`/`AsyncWrite` the
-# protocols above consume. The peer's uid comes from tokio's own `peer_cred`
-# and the socket owner's from `std::os::unix::fs::MetadataExt`; rustix also
-# supplies the current euid and no-follow lease open.
-tokio = { version = "1", features = ["net", "io-util", "rt", "time"] }
+# protocols above consume, and `sync`/`time` plus `tokio-util` for connection
+# occupancy, lifetime and shutdown. The peer's uid comes from tokio's own
+# `peer_cred` and the socket owner's from `std::os::unix::fs::MetadataExt`;
+# rustix also supplies the current euid and no-follow lease open.
+tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1.44"
 
 [target.'cfg(unix)'.dependencies]

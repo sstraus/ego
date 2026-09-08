@@ -12,10 +12,59 @@
 //! exist, which are refused, and which authentication each kind compels. The
 //! listener that binds is the thin half and lives outside `ego-core`; the
 //! protocols that serve — A2A over `hyper`, ACP over `ByteStreams` — compose
-//! above an already-authenticated stream and never see this module at all.
+//! above the listener and consume only the admitted policy and credential,
+//! never transport I/O owned by this module.
 
 use std::fmt;
 use std::net::SocketAddr;
+
+use crate::credentials::SecretMaterial;
+use crate::permit::Confinement;
+
+/// One already-loaded bearer secret, compared without interpreting HTTP.
+///
+/// Protocol adapters own where their secret comes from and how an
+/// `Authorization` value is parsed. This type owns only the policy common to
+/// every bearer-authenticated endpoint: secret lifetime and byte equality.
+pub struct BearerCredential {
+    secret: SecretMaterial,
+}
+
+impl BearerCredential {
+    pub fn new(secret: SecretMaterial) -> Self {
+        Self { secret }
+    }
+
+    /// Whether `presented` is exactly the configured secret.
+    ///
+    /// Empty configured secrets admit nobody. Protocol adapters already refuse
+    /// them at startup, and keeping that refusal true here prevents an omitted
+    /// adapter check from turning an empty value into anonymous access.
+    pub fn matches(&self, presented: &[u8]) -> bool {
+        let expected = self.secret.expose_secret_bytes();
+        !expected.is_empty() && constant_time_eq(presented, expected)
+    }
+}
+
+impl fmt::Debug for BearerCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BearerCredential")
+            .finish_non_exhaustive()
+    }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
 
 /// What the operator asked to listen on, before anything has judged it.
 ///
@@ -72,6 +121,18 @@ impl Admitted {
         match self {
             Self::Local { .. } => Authentication::PeerIdentity,
             Self::Loopback(_) | Self::Public(_) => Authentication::BearerCredential,
+        }
+    }
+
+    /// Narrow the operator's confinement ceiling for this endpoint.
+    ///
+    /// A publicly reachable peer may never select unconfined execution. Local
+    /// and loopback endpoints add no restriction, and a public endpoint never
+    /// weakens an already stricter operator choice.
+    pub fn cap_confinement(&self, configured: Confinement) -> Confinement {
+        match (self, configured) {
+            (Self::Public(_), Confinement::Off) => Confinement::Workspace,
+            _ => configured,
         }
     }
 }

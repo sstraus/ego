@@ -1123,6 +1123,7 @@ dependencies = [
  "rustix",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -3654,6 +3655,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
