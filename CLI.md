@@ -1291,7 +1291,7 @@ A full entry, with every field the schema accepts:
 ```toml
 # `provider/model`. The model half is what goes on the wire.
 [model."openai/gpt-5.6-sol".capabilities]
-schema_version = 4                 # required; rejects an older document
+schema_version = 5                 # required; rejects an older document
 max_context_tokens = 1050000       # omit if the vendor does not state it
 max_output_tokens = 128000
 # max_tools = 128                  # most tools accepted in one request
@@ -1300,6 +1300,7 @@ reasoning_carryover = "unsupported"   # | "same_provider_only" | "portable"
 # reasoning_state_dialect = "anthropic-messages"   # with same_provider_only
 reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
                                    # or "unknown" (fails closed) or "any"
+default_reasoning_effort = "medium" # optional; omission means unknown
 cancel = "cooperative"             # "unsupported" | "cooperative" | "immediate"
 cache = "short"                    # "none" | "short" | "long"
 transport = "sse"

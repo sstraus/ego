@@ -67,7 +67,12 @@ impl<'de> Deserialize<'de> for SessionEntry {
             SessionEntryWire::RunTransaction { run_transaction } => {
                 Self::RunTransaction(run_transaction)
             }
-            SessionEntryWire::Evidence { evidence } => Self::Evidence(evidence),
+            SessionEntryWire::Evidence { evidence } => {
+                if let Some(error) = evidence.current_schema_error() {
+                    return Err(serde::de::Error::custom(error));
+                }
+                Self::Evidence(evidence)
+            }
         })
     }
 }

@@ -309,6 +309,7 @@ impl ego_core::generation_model_source::GenerationModelSource for TestGeneration
             cache: ego_core::generator::capabilities::CacheRetention::Short,
             transport: ego_core::generator::capabilities::Transport::Sse,
             image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
+            default_reasoning_effort: None,
         };
         Box::pin(futures::future::ready(Ok(
             ego_core::generation_model_source::GenerationProfile {

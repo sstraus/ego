@@ -564,6 +564,7 @@ mod tests {
                 supports_parallel_tool_calls: true,
                 reasoning_carryover: ReasoningCarryover::Portable,
                 reasoning_efforts: ReasoningEffortSupport::Any,
+                default_reasoning_effort: None,
                 reasoning_state_dialect: None,
                 cancel: CancelSemantics::Cooperative,
                 cache: CacheRetention::Short,

@@ -66,7 +66,7 @@ use ego_ai::catalogue::{self, HostedModel, ModelSlug, SuppliedAuthority};
 use ego_core::budget::PricingQuote;
 use ego_core::ceiling::Ceilings;
 use ego_core::cost::{Amount, CurrencyCode, PricingRevision};
-use ego_core::generator::capabilities::ModelCapabilities;
+use ego_core::generator::capabilities::{ModelCapabilities, ReasoningSelectionError};
 use serde::Deserialize;
 
 use crate::cli::UsageError;
@@ -92,7 +92,7 @@ const BUILTIN: &str = include_str!("../catalogue/models.toml");
 /// answers a different question. It is what a retirement refusal names, so a
 /// test holds it equal to the `revision =` line in the file itself — a
 /// constant that had drifted would send an operator to the wrong catalogue.
-pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-07";
+pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-08";
 
 /// One `models.toml`.
 #[derive(Debug, Default, Deserialize)]
@@ -352,6 +352,17 @@ fn project(
         .into_iter()
         .map(|(slug, (authority, supplied))| {
             ModelSlug::parse(&slug).map_err(|error| UsageError(error.to_string()))?;
+            match supplied
+                .capabilities
+                .resolve_reasoning_effort(supplied.capabilities.default_reasoning_effort)
+            {
+                Ok(_) | Err(ReasoningSelectionError::DefaultUnstated) => {}
+                Err(error) => {
+                    return Err(UsageError(format!(
+                        "model `{slug}` has invalid capabilities: {error}"
+                    )));
+                }
+            }
             Ok((
                 slug,
                 HostedModel {
@@ -398,6 +409,7 @@ fn project_defaults(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ego_core::generator::types::ThinkingLevel;
 
     /// A transport no row can speak must be refused *by the decoder the file
     /// actually goes through*.
@@ -411,7 +423,7 @@ mod tests {
             format!(
                 r#"
 [model."openai/gpt-5.1".capabilities]
-schema_version = 2
+schema_version = 5
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128
@@ -443,7 +455,7 @@ transport = "{transport}"
             toml::from_str::<Facts>(&format!(
                 r#"
 [model."openai/gpt-5.6".capabilities]
-schema_version = 2
+schema_version = 5
 max_context_tokens = {context}
 max_output_tokens = 128000
 max_tools = 128
@@ -466,6 +478,42 @@ transport = "sse"
         assert_eq!(supplied.capabilities.max_context_tokens, Some(400000));
     }
 
+    #[test]
+    fn parsed_default_reasoning_effort_survives_layer_merge() {
+        let layer = |context: u64, default: &str| {
+            toml::from_str::<Facts>(&format!(
+                r#"
+[model."openai/gpt-5.6-sol".capabilities]
+schema_version = 5
+max_context_tokens = {context}
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_efforts = {{ only = ["off", "low", "medium", "high", "xhigh", "max"] }}
+default_reasoning_effort = "{default}"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+"#
+            ))
+            .unwrap()
+            .model
+        };
+
+        let merged = merge_layers(
+            layer(100000, "low"),
+            layer(200000, "medium"),
+            layer(400000, "high"),
+        );
+        let (authority, supplied) = &merged["openai/gpt-5.6-sol"];
+        assert_eq!(*authority, SuppliedAuthority::User);
+        assert_eq!(
+            supplied.capabilities.default_reasoning_effort,
+            Some(ThinkingLevel::High)
+        );
+        assert_eq!(supplied.capabilities.max_context_tokens, Some(400000));
+    }
+
     /// The builtin layer loses to both files, one at a time.
     ///
     /// Separate from the case above because that one proves `User` beats
@@ -478,7 +526,7 @@ transport = "sse"
             toml::from_str::<Facts>(&format!(
                 r#"
 [model."openai/gpt-5.6".capabilities]
-schema_version = 4
+schema_version = 5
 max_context_tokens = {context}
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -537,7 +585,7 @@ transport = "sse"
         for slug in catalogue.model.keys() {
             let slug = ModelSlug::parse(slug).expect("every builtin key is a slug");
             assert!(
-                ["openai", "anthropic", "openrouter"].contains(&slug.provider.as_str()),
+                ["openai", "anthropic", "openrouter", "gemini"].contains(&slug.provider.as_str()),
                 "`{slug}` names a provider whose resolver does not read this file",
             );
         }

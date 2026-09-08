@@ -464,6 +464,9 @@ fn capabilities_from(tag: &Tag, served_context: Option<u64>) -> ModelCapabilitie
             ThinkingLevel::High,
             ThinkingLevel::Max,
         ])),
+        // The daemon does not expose a normalized default for ego's actual
+        // OpenAI-compatible mapping.
+        default_reasoning_effort: None,
         // Dropping the connection stops the runner at a token boundary.
         cancel: CancelSemantics::Cooperative,
         // Ollama's prompt cache does not survive the model being unloaded,

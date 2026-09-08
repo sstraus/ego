@@ -535,6 +535,7 @@ fn generation_evidence(session: SessionId, context_window: u64) -> EvidenceRecor
             cache: CacheRetention::None,
             transport: Transport::Sse,
             image_input: ImageInputSupport::Unknown,
+            default_reasoning_effort: None,
         },
         PricingEvidence::Unpriced {
             source: "fixture".to_owned(),

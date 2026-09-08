@@ -11,6 +11,7 @@ use ego_ai::catalogue::{Catalogue, HostedModel, ModelSlug, SuppliedAuthority, ta
 use ego_ai::http::{Http, HttpError, HttpResponse};
 use ego_ai::provider::ProviderRow;
 use ego_ai::wire::RequestTarget;
+use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
@@ -68,13 +69,13 @@ fn resolve(
 
 fn supplied_capabilities() -> ego_core::generator::capabilities::ModelCapabilities {
     serde_json::from_value(json!({
-        "schema_version":4,"max_context_tokens":131072,"max_output_tokens":4096,
+        "schema_version":ModelCapabilities::SCHEMA_VERSION,"max_context_tokens":131072,"max_output_tokens":4096,
         "max_tools":16,"supports_parallel_tool_calls":false,
         "reasoning_carryover":"unsupported","reasoning_efforts":"any",
         "reasoning_state_dialect":null,"cancel":"cooperative","cache":"none",
         "transport":"sse","image_input":"unknown"
     }))
-    .expect("schema v4 supplied facts")
+    .expect("schema v5 supplied facts")
 }
 
 fn request(model: &str, tools: Vec<ToolDescriptor>) -> GenRequest {

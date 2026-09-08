@@ -22,7 +22,7 @@ use crate::permit::{Confinement, PolicyDigest};
 use crate::public::InstructionDescriptor;
 use crate::run::{RunId, RunOrigin};
 
-pub const EVIDENCE_SCHEMA_VERSION: u32 = 2;
+pub const EVIDENCE_SCHEMA_VERSION: u32 = 3;
 
 /// Stable identity for one host invocation of a rooted run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -739,6 +739,30 @@ impl EvidenceRecord {
         }
     }
 
+    /// Return the exact current-schema refusal before this record reaches a
+    /// writer, durable reader, or manifest projection.
+    pub fn current_schema_error(&self) -> Option<EvidenceError> {
+        if self.version() != EVIDENCE_SCHEMA_VERSION {
+            return Some(EvidenceError::UnsupportedVersion {
+                key: self.key(),
+                found: self.version(),
+                required: EVIDENCE_SCHEMA_VERSION,
+            });
+        }
+        match self {
+            Self::GenerationAdmission(value)
+                if value.capabilities.schema_version != ModelCapabilities::SCHEMA_VERSION =>
+            {
+                Some(EvidenceError::UnsupportedVersion {
+                    key: self.key(),
+                    found: value.capabilities.schema_version,
+                    required: ModelCapabilities::SCHEMA_VERSION,
+                })
+            }
+            Self::RunContext(_) | Self::GenerationAdmission(_) => None,
+        }
+    }
+
     pub const fn semantic_event_sequence(&self) -> Option<crate::event::id::Seq> {
         None
     }
@@ -870,12 +894,8 @@ impl EvidenceAdmissionService {
         evidence: RunContextEvidence,
     ) -> Result<EvidenceWrite, EvidenceError> {
         let record = EvidenceRecord::RunContext(evidence);
-        if record.version() != EVIDENCE_SCHEMA_VERSION {
-            return Err(EvidenceError::UnsupportedVersion {
-                key: record.key(),
-                found: record.version(),
-                required: EVIDENCE_SCHEMA_VERSION,
-            });
+        if let Some(error) = record.current_schema_error() {
+            return Err(error);
         }
         store.write(record.key(), record)
     }
@@ -886,12 +906,8 @@ impl EvidenceAdmissionService {
         evidence: GenerationAdmissionEvidence,
     ) -> Result<EvidenceWrite, EvidenceError> {
         let record = EvidenceRecord::GenerationAdmission(evidence);
-        if record.version() != EVIDENCE_SCHEMA_VERSION {
-            return Err(EvidenceError::UnsupportedVersion {
-                key: record.key(),
-                found: record.version(),
-                required: EVIDENCE_SCHEMA_VERSION,
-            });
+        if let Some(error) = record.current_schema_error() {
+            return Err(error);
         }
         store.write(record.key(), record)
     }
@@ -930,10 +946,12 @@ impl ManifestEvidence {
         let mut projected = Self::default();
         let mut attempt_owners = std::collections::HashMap::new();
         for record in records {
-            if record.version() != EVIDENCE_SCHEMA_VERSION {
-                return Err(ManifestEvidenceError::UnsupportedVersion {
-                    found: record.version(),
-                    required: EVIDENCE_SCHEMA_VERSION,
+            if let Some(error) = record.current_schema_error() {
+                return Err(match error {
+                    EvidenceError::UnsupportedVersion {
+                        found, required, ..
+                    } => ManifestEvidenceError::UnsupportedVersion { found, required },
+                    _ => unreachable!("schema validation returns only schema errors"),
                 });
             }
             match record {

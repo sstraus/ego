@@ -79,7 +79,7 @@ fn facts(image_input: &str) -> String {
     format!(
         r#"
 [model."anthropic/fixture-vision".capabilities]
-schema_version = 4
+schema_version = 5
 max_context_tokens = 128000
 max_output_tokens = 4096
 max_tools = 16

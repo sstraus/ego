@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ego_ai::catalogue::{
-    CachedDiscoverySlice, DiscoveryCacheV1, FactFreshness, ModelAvailability,
-    ModelAvailabilityCause, ModelCatalogueEntry, ModelCatalogueSnapshot,
+    CachedDiscoverySlice, DiscoveryCacheDecodeError, DiscoveryCacheV2, FactFreshness,
+    ModelAvailability, ModelAvailabilityCause, ModelCatalogueEntry, ModelCatalogueSnapshot,
     ModelCatalogueSourceStatus, ModelDiscoveryFailure, ModelDiscoveryFailureCause,
     ModelDiscoverySource, ModelFactProvenance,
 };
@@ -67,7 +67,7 @@ pub async fn build_catalogue_snapshot(
     })?;
     let io = OsIo;
     let cache_store = ModelCatalogueCache::new(&io, &home);
-    let mut cache = read_cache(&cache_store)?;
+    let (mut cache, _) = read_cache(&cache_store, args.refresh)?;
     let needs_observation = selected
         .iter()
         .any(|row| args.refresh || !cache.providers.contains_key(row.id()));
@@ -90,8 +90,9 @@ pub async fn build_catalogue_snapshot(
             .map_err(internal)?;
         // The lease owner must merge against the newest baseline, not the one
         // read before it waited for another process.
-        cache = read_cache(&cache_store)?;
-        let mut publish = false;
+        let (latest, obsolete) = read_cache(&cache_store, args.refresh)?;
+        cache = latest;
+        let mut publish = obsolete;
 
         for row in &selected {
             let observe = args.refresh || !cache.providers.contains_key(row.id());
@@ -117,6 +118,11 @@ pub async fn build_catalogue_snapshot(
                             Some(credential)
                         }
                         Err(error) => {
+                            if obsolete && args.provider.as_deref() == Some(row.id()) {
+                                return Err(RunTermination::Provider {
+                                    message: error.to_string(),
+                                });
+                            }
                             missing_enumeration_credentials
                                 .insert(row.id().to_owned(), error.to_string());
                             continue;
@@ -134,6 +140,24 @@ pub async fn build_catalogue_snapshot(
                 })
                 .await
                 .map_err(|message| RunTermination::Failed { message })?;
+
+            if obsolete && (!report.is_complete() || !report.failures().is_empty()) {
+                let failures = report
+                    .failures()
+                    .iter()
+                    .map(|failure| match &failure.model {
+                        Some(model) => format!("model `{model}`: {}", failure.message),
+                        None => failure.message.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(RunTermination::Provider {
+                    message: format!(
+                        "provider `{}` could not rebuild the obsolete model cache: {failures}",
+                        row.id()
+                    ),
+                });
+            }
 
             match report.source().clone() {
                 ModelDiscoverySource::Supplied => {
@@ -296,8 +320,8 @@ pub(crate) async fn build_startup_catalogue_snapshot(
         }
     }
     let mut cache = match config::ego_home() {
-        Some(home) => read_cache(&ModelCatalogueCache::new(&OsIo, &home))?,
-        None => DiscoveryCacheV1::default(),
+        Some(home) => read_cache(&ModelCatalogueCache::new(&OsIo, &home), false)?.0,
+        None => DiscoveryCacheV2::default(),
     };
     let mut current = BTreeSet::new();
     let mut current_sources = BTreeSet::new();
@@ -418,12 +442,29 @@ fn select_rows(
         .ok_or_else(|| usage_message(format!("no admitted model provider `{provider}`")))
 }
 
-fn read_cache(cache: &ModelCatalogueCache<'_>) -> Result<DiscoveryCacheV1, RunTermination> {
+fn read_cache(
+    cache: &ModelCatalogueCache<'_>,
+    refresh: bool,
+) -> Result<(DiscoveryCacheV2, bool), RunTermination> {
     match cache.read_bytes().map_err(internal)? {
-        Some(bytes) => {
-            DiscoveryCacheV1::decode(&bytes).map_err(|message| RunTermination::Failed { message })
-        }
-        None => Ok(DiscoveryCacheV1::default()),
+        Some(bytes) => match DiscoveryCacheV2::decode(&bytes) {
+            Ok(cache) => Ok((cache, false)),
+            Err(DiscoveryCacheDecodeError::ObsoleteSchema { .. }) if refresh => {
+                Ok((DiscoveryCacheV2::default(), true))
+            }
+            Err(error @ DiscoveryCacheDecodeError::ObsoleteSchema { .. }) => {
+                Err(RunTermination::UsageError {
+                    message: format!(
+                        "{error}; run `ego models --refresh` to rebuild the current cache"
+                    ),
+                })
+            }
+            Err(error @ DiscoveryCacheDecodeError::UnsupportedSchema { .. })
+            | Err(error @ DiscoveryCacheDecodeError::Corrupt(_)) => Err(RunTermination::Failed {
+                message: error.to_string(),
+            }),
+        },
+        None => Ok((DiscoveryCacheV2::default(), false)),
     }
 }
 

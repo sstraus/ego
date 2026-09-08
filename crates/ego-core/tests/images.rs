@@ -1,4 +1,4 @@
-//! RED contract for immutable images, capability schema v4, and durable image metadata.
+//! RED contract for immutable images, capability schema v5, and durable image metadata.
 //!
 //! The image value is deliberately constructed through its public serde shape in
 //! this module. That keeps the contract independent of constructor convenience
@@ -75,7 +75,7 @@ fn capabilities(image_input: Value) -> ModelCapabilities {
         other => other,
     };
     serde_json::from_value(json!({
-        "schema_version": 4,
+        "schema_version": ModelCapabilities::SCHEMA_VERSION,
         "max_context_tokens": null,
         "max_output_tokens": 1024,
         "max_tools": null,
@@ -88,7 +88,7 @@ fn capabilities(image_input: Value) -> ModelCapabilities {
         "transport": "sse",
         "image_input": image_input
     }))
-    .expect("capability schema v4 is valid")
+    .expect("capability schema v5 is valid")
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn capability_schema_v4_is_fail_closed_and_old_records_decode_as_unknown() {
     }));
     for record in [unknown, unsupported, supported] {
         let encoded = serde_json::to_value(&record).unwrap();
-        assert_eq!(encoded["schema_version"], 4);
+        assert_eq!(encoded["schema_version"], ModelCapabilities::SCHEMA_VERSION);
         assert!(encoded.get("image_input").is_some());
     }
 
@@ -447,7 +447,7 @@ fn product_image_caps_are_hard_bounds_without_checked_in_large_fixtures() {
         ("max_pixels", 100_000_001_u64),
     ] {
         let mut record = json!({
-            "schema_version":4,"max_context_tokens":null,"max_output_tokens":1024,
+            "schema_version":ModelCapabilities::SCHEMA_VERSION,"max_context_tokens":null,"max_output_tokens":1024,
             "max_tools":null,"supports_parallel_tool_calls":false,
             "reasoning_carryover":"unsupported","reasoning_efforts":"any",
             "reasoning_state_dialect":null,"cancel":"cooperative","cache":"none",
@@ -472,7 +472,7 @@ fn capability_limits_are_nonzero_when_present() {
         "max_pixels",
     ] {
         let mut record = json!({
-            "schema_version":4,"max_context_tokens":null,"max_output_tokens":1024,
+            "schema_version":ModelCapabilities::SCHEMA_VERSION,"max_context_tokens":null,"max_output_tokens":1024,
             "max_tools":null,"supports_parallel_tool_calls":false,
             "reasoning_carryover":"unsupported","reasoning_efforts":"any",
             "reasoning_state_dialect":null,"cancel":"cooperative","cache":"none",

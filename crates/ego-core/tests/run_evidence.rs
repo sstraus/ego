@@ -4,10 +4,10 @@ use ego_core::config::ModelRef;
 use ego_core::event::domain::GenerationRole;
 use ego_core::event::id::{GenerationId, SessionId};
 use ego_core::evidence::{
-    ConfigProvenance, EvidenceAdmissionService, EvidenceError, EvidenceKey, EvidenceRecord,
-    EvidenceStore, EvidenceWrite, ExecutionAdmissionDescriptor, GenerationAdmissionEvidence,
-    GenerationTarget, ManifestEvidence, McpContextDescriptor, PricingEvidence, RunContextEvidence,
-    RunInvocationId,
+    ConfigProvenance, EVIDENCE_SCHEMA_VERSION, EvidenceAdmissionService, EvidenceError,
+    EvidenceKey, EvidenceRecord, EvidenceStore, EvidenceWrite, ExecutionAdmissionDescriptor,
+    GenerationAdmissionEvidence, GenerationTarget, ManifestEvidence, McpContextDescriptor,
+    PricingEvidence, RunContextEvidence, RunInvocationId,
 };
 use ego_core::generator::attempt::AttemptRef;
 use ego_core::generator::capabilities::{
@@ -54,6 +54,7 @@ fn capabilities() -> ModelCapabilities {
         cache: CacheRetention::None,
         transport: Transport::Sse,
         image_input: ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     }
 }
 
@@ -648,7 +649,7 @@ fn run_context_schema_requires_complete_pre_effect_facts_and_closed_mcp_subjects
     let session = SessionId::new();
     let invocation = invocation();
     let wire = serde_json::json!({
-        "version": 2,
+        "version": EVIDENCE_SCHEMA_VERSION,
         "session": session,
         "invocation": invocation,
         "run_id": RunId::new(session, invocation.uuid()),
@@ -682,9 +683,9 @@ fn run_context_schema_requires_complete_pre_effect_facts_and_closed_mcp_subjects
             "capabilities_digest": "1".repeat(64)
         }
     });
-    let context: RunContextEvidence =
-        serde_json::from_value(wire.clone()).expect("exact v2 RunContextEvidence deserializes");
-    let wire = serde_json::to_value(&context).expect("exact v2 RunContextEvidence serializes");
+    let context: RunContextEvidence = serde_json::from_value(wire.clone())
+        .expect("exact current RunContextEvidence deserializes");
+    let wire = serde_json::to_value(&context).expect("exact current RunContextEvidence serializes");
     let exact_fields = [
         "version",
         "session",
@@ -702,7 +703,7 @@ fn run_context_schema_requires_complete_pre_effect_facts_and_closed_mcp_subjects
     ];
     let mut keys: Vec<_> = wire
         .as_object()
-        .expect("v2 RunContextEvidence is an object")
+        .expect("current RunContextEvidence is an object")
         .keys()
         .map(String::as_str)
         .collect();
@@ -805,6 +806,97 @@ fn manifest_evidence_rebuilds_from_ordered_records_and_refuses_unknown_prefix() 
     assert_eq!(manifest.run_contexts().len(), 1);
     assert_eq!(manifest.generations().len(), 1);
     assert!(ManifestEvidence::from_records_with_unknown(&records).is_err());
+}
+
+#[test]
+fn persisted_evidence_read_rejects_old_outer_and_inner_schema_versions() {
+    assert_eq!(EVIDENCE_SCHEMA_VERSION, 3);
+    assert_eq!(ModelCapabilities::SCHEMA_VERSION, 5);
+    let session = SessionId::new();
+    let id = invocation();
+    let record = EvidenceRecord::GenerationAdmission(generation(
+        session,
+        id,
+        attempt(),
+        GenerationRole::Main,
+    ));
+    let entry = SessionEntry::Evidence(record);
+    let current = serde_json::to_value(&entry).unwrap();
+    let _: SessionEntry = serde_json::from_value(current.clone()).unwrap();
+
+    let mut old_outer = current.clone();
+    old_outer["evidence"]["version"] = serde_json::json!(2);
+    assert!(serde_json::from_value::<SessionEntry>(old_outer).is_err());
+
+    let mut old_inner = current;
+    old_inner["evidence"]["capabilities"]["schema_version"] = serde_json::json!(4);
+    assert!(serde_json::from_value::<SessionEntry>(old_inner).is_err());
+}
+
+#[test]
+fn generation_evidence_version_and_manifest_rebuild_use_current_authorities() {
+    let session = SessionId::new();
+    let id = invocation();
+    let generation = generation(session, id, attempt(), GenerationRole::Main);
+    let record = EvidenceRecord::GenerationAdmission(generation.clone());
+    assert_eq!(record.version(), EVIDENCE_SCHEMA_VERSION);
+    assert_eq!(
+        generation.capabilities().schema_version,
+        ModelCapabilities::SCHEMA_VERSION
+    );
+
+    let source = FixtureEvidenceLog {
+        records: vec![EvidenceRecord::RunContext(run_context(session, id)), record],
+    };
+    let manifest = ManifestEvidence::rebuild(&source, &session).unwrap();
+    assert_eq!(manifest.run_contexts().len(), 1);
+    assert_eq!(manifest.generations().len(), 1);
+}
+
+#[test]
+fn manifest_projection_refuses_typed_old_outer_and_inner_versions() {
+    assert_eq!(EVIDENCE_SCHEMA_VERSION, 3);
+    assert_eq!(ModelCapabilities::SCHEMA_VERSION, 5);
+    let session = SessionId::new();
+    let id = invocation();
+    let attempt = attempt();
+    let current = generation(session, id, attempt, GenerationRole::Main);
+    let current_records = vec![
+        EvidenceRecord::RunContext(run_context(session, id)),
+        EvidenceRecord::GenerationAdmission(current.clone()),
+    ];
+    let manifest = ManifestEvidence::from_records(&current_records).unwrap();
+    assert_eq!(manifest.generations().len(), 1);
+
+    for (outer, inner, expected_found, expected_required) in [(3, 4, 4, 5), (2, 5, 2, 3)] {
+        let mut wire = serde_json::to_value(&current).unwrap();
+        wire["version"] = serde_json::json!(outer);
+        wire["capabilities"]["schema_version"] = serde_json::json!(inner);
+        let stale: GenerationAdmissionEvidence = serde_json::from_value(wire).unwrap();
+        let error = ManifestEvidence::from_records(&[
+            EvidenceRecord::RunContext(run_context(session, id)),
+            EvidenceRecord::GenerationAdmission(stale),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ego_core::evidence::ManifestEvidenceError::UnsupportedVersion { found, required }
+                if found == expected_found && required == expected_required
+        ));
+    }
+}
+
+struct FixtureEvidenceLog {
+    records: Vec<EvidenceRecord>,
+}
+
+impl ego_core::evidence::EvidenceLogSource for FixtureEvidenceLog {
+    fn evidence_records(
+        &self,
+        _session: &SessionId,
+    ) -> Result<Vec<EvidenceRecord>, ego_core::evidence::ManifestEvidenceError> {
+        Ok(self.records.clone())
+    }
 }
 
 type TestController = RunController<FakeSessionStore, FakeRunExecutor, FixedClock, FixedIds>;

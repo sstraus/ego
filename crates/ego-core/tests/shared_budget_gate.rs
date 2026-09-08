@@ -79,6 +79,7 @@ fn provider_reservation_is_admitted_before_pending_io_without_holding_a_budget_g
         cache: CacheRetention::Short,
         transport: Transport::Sse,
         image_input: ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     };
     let (sender, receiver) = futures::channel::oneshot::channel();
     let reservation = root
@@ -163,6 +164,7 @@ fn admitted_stream(root: &SharedBudgetGate, model: &str) -> (AttemptStream, Gate
         cache: CacheRetention::Short,
         transport: Transport::Sse,
         image_input: ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     };
     let reservation = root
         .reserve(&metering, None, &request, &caps)

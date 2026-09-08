@@ -34,10 +34,8 @@
 #
 # `gemini` is selectable under the published-contract decision in
 # `docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`.
-# Its bootstrap model facts are still pending in story `regression_case`; operator
-# facts can already reach the row. `docs/23-first-run-model-default-sources.md`
-# records the current capability and default-thinking work required before a
-# built-in Gemini row can be supplied.
+# `docs/23-first-run-model-default-sources.md` records the current capability,
+# replay, and default-thinking evidence used by its built-in row below.
 #
 # `openrouter` appears with no rows for the opposite reason: it is selectable
 # and it proxies hundreds of models from dozens of vendors, changing weekly.
@@ -51,13 +49,14 @@
 # test holds that. The revision is what a retirement error names, so a stale
 # constant would send an operator to the wrong catalogue.
 #
-# revision = 2026-09-07
+# revision = 2026-09-08
 
 # First-run policy selected on 2026-09-08; availability is still observed.
 # See docs/23-first-run-model-default-sources.md and the first-run ADR.
 [default_model]
 openai = "openai/gpt-5.6-sol"
 anthropic = "anthropic/claude-opus-5"
+gemini = "gemini/gemini-3.8-flash"
 
 # ---------------------------------------------------------------------------
 # openai — read 2026-09-07 from https://developers.openai.com/api/docs/models,
@@ -87,7 +86,7 @@ anthropic = "anthropic/claude-opus-5"
 # Context window 1,050,000; max output 128,000. Reasoning efforts: low,
 # medium, high, xhigh, max — this row does not offer `none`, so `off` is
 # absent from the set and a request that asks for it is refused by name.
-schema_version = 4
+schema_version = 5
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -106,12 +105,13 @@ max_images = 100
 # Context window 1,050,000; max output 128,000. Reasoning efforts: "none, low,
 # medium (default), high, xhigh, and max" — `none` is what this build spells
 # `off`.
-schema_version = 4
+schema_version = 5
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
 reasoning_carryover = "unsupported"
 reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "medium"
 cancel = "cooperative"
 cache = "short"
 transport = "sse"
@@ -122,12 +122,13 @@ accepted_media_types = ["png", "jpeg", "webp", "gif"]
 max_images = 100
 
 [model."openai/gpt-5.6-terra".capabilities]
-schema_version = 4
+schema_version = 5
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
 reasoning_carryover = "unsupported"
 reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "medium"
 cancel = "cooperative"
 cache = "short"
 transport = "sse"
@@ -138,12 +139,13 @@ accepted_media_types = ["png", "jpeg", "webp", "gif"]
 max_images = 100
 
 [model."openai/gpt-5.6-luna".capabilities]
-schema_version = 4
+schema_version = 5
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
 reasoning_carryover = "unsupported"
 reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "medium"
 cancel = "cooperative"
 cache = "short"
 transport = "sse"
@@ -158,6 +160,33 @@ max_images = 100
 # page, and a row with an unstated context window is one compaction and
 # occupancy reporting cannot use. Supply it in your own file if you have the
 # numbers.
+
+# ---------------------------------------------------------------------------
+# gemini — read 2026-09-08 from the current Gemini 3.8 Flash model,
+# function-calling, thinking, image-understanding, API-version and
+# Interactions documentation linked from
+# docs/23-first-run-model-default-sources.md.
+#
+# The published facts establish the two token ceilings, parallel function
+# calls, low/medium/high thinking with medium as the default, streaming, and
+# replay of the provider's signed thought blocks. `max_tools` and exact image
+# admission limits stay unknown. Caching exists, but no long retention this
+# caller controls was established, so it uses the catalogue's short class.
+# Dropping this mapper's stream is cooperative cancellation; the mapper does
+# not retain an interaction id through which it could claim immediate cancel.
+
+[model."gemini/gemini-3.8-flash".capabilities]
+schema_version = 5
+max_context_tokens = 1048576
+max_output_tokens = 65536
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "gemini-interactions"
+reasoning_efforts = { only = ["low", "medium", "high"] }
+default_reasoning_effort = "medium"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
 
 # ---------------------------------------------------------------------------
 # anthropic — read 2026-09-07 from
@@ -188,13 +217,14 @@ max_images = 100
 # Context window 1M; max output 128K. Effort: low, medium, high (default),
 # xhigh, max. `off` is included because this mapping spells it as *omitting*
 # thinking rather than as an effort value the provider must accept.
-schema_version = 4
+schema_version = 5
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
 reasoning_carryover = "same_provider_only"
 reasoning_state_dialect = "anthropic-messages"
 reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "high"
 cancel = "cooperative"
 cache = "long"
 transport = "sse"
@@ -210,13 +240,14 @@ max_height = 8000
 [model."anthropic/claude-opus-5".capabilities]
 # Context window 1M; max output 128K. Effort: low, medium, high (default),
 # xhigh, max.
-schema_version = 4
+schema_version = 5
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
 reasoning_carryover = "same_provider_only"
 reasoning_state_dialect = "anthropic-messages"
 reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "high"
 cancel = "cooperative"
 cache = "long"
 transport = "sse"
@@ -232,13 +263,14 @@ max_height = 8000
 [model."anthropic/claude-sonnet-5".capabilities]
 # Context window 1M; max output 128K. Effort: low, medium, high (default),
 # xhigh, max.
-schema_version = 4
+schema_version = 5
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
 reasoning_carryover = "same_provider_only"
 reasoning_state_dialect = "anthropic-messages"
 reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "high"
 cancel = "cooperative"
 cache = "long"
 transport = "sse"
@@ -260,13 +292,14 @@ max_height = 8000
 # absent from the effort parameter's supported-model list, so every level
 # above `off` would be sent as a value it rejects. `off` is expressible
 # because it is the absence of the parameter.
-schema_version = 4
+schema_version = 5
 max_context_tokens = 200000
 max_output_tokens = 64000
 supports_parallel_tool_calls = true
 reasoning_carryover = "same_provider_only"
 reasoning_state_dialect = "anthropic-messages"
 reasoning_efforts = { only = ["off"] }
+default_reasoning_effort = "off"
 cancel = "cooperative"
 cache = "long"
 transport = "sse"

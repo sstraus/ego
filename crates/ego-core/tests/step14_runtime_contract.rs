@@ -690,6 +690,7 @@ mod turn_execution_observation {
                     cache: CacheRetention::Short,
                     transport: Transport::Sse,
                     image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
+                    default_reasoning_effort: None,
                 },
                 metering: Metering::Unmetered {
                     revision: MeteringRevision(String::from("test")),

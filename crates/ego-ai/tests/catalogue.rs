@@ -104,6 +104,7 @@ fn hosted_caps() -> ModelCapabilities {
         cache: CacheRetention::Long,
         transport: Transport::Sse,
         image_input: ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     }
 }
 

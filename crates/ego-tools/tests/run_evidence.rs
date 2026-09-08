@@ -5,9 +5,9 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
 use ego_core::event::id::{EventId, GenerationId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::evidence::{
-    ConfigProvenance, EvidenceAdmissionService, EvidenceError, EvidenceRecord,
-    GenerationAdmissionEvidence, GenerationTarget, ManifestEvidence, PricingEvidence,
-    RunContextEvidence, RunInvocationId,
+    ConfigProvenance, EVIDENCE_SCHEMA_VERSION, EvidenceAdmissionService, EvidenceError,
+    EvidenceKey, EvidenceRecord, EvidenceStore, GenerationAdmissionEvidence, GenerationTarget,
+    ManifestEvidence, PricingEvidence, RunContextEvidence, RunInvocationId,
 };
 use ego_core::generator::attempt::AttemptRef;
 use ego_core::generator::capabilities::{
@@ -78,6 +78,7 @@ fn capabilities() -> ModelCapabilities {
         cache: CacheRetention::None,
         transport: Transport::Sse,
         image_input: ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     }
 }
 
@@ -142,6 +143,24 @@ fn log_path(root: &Path, session: &SessionId) -> PathBuf {
 fn manifest_path(root: &Path, session: &SessionId) -> PathBuf {
     root.join(serde_json::to_string(session).unwrap().trim_matches('"'))
         .join("manifest.json")
+}
+
+fn write_evidence_log(root: &Path, session: SessionId, entries: &[serde_json::Value]) -> PathBuf {
+    let log = log_path(root, &session);
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let mut image = encode_header(&Header {
+        v: CODEC_VERSION,
+        session,
+        created: Timestamp::from_millis(1),
+        workspace_root: "/workspace".into(),
+    });
+    image.push(b'\n');
+    for (offset, entry) in entries.iter().enumerate() {
+        image.extend_from_slice(&encode_record(seq((offset + 1) as u64), entry).unwrap());
+        image.push(b'\n');
+    }
+    std::fs::write(&log, image).unwrap();
+    log
 }
 
 fn legacy_run_transaction(session: &SessionId) -> serde_json::Value {
@@ -393,7 +412,7 @@ fn schema_v1_run_context_is_checksum_valid_but_rejected_without_rewriting_source
         service.admit_run_context(&opened.writer, legacy.clone()),
         Err(EvidenceError::UnsupportedVersion {
             found: 1,
-            required: 2,
+            required: 3,
             ..
         })
     ));
@@ -405,19 +424,19 @@ fn schema_v1_run_context_is_checksum_valid_but_rejected_without_rewriting_source
         Err(
             ego_core::evidence::ManifestEvidenceError::UnsupportedVersion {
                 found: 1,
-                required: 2,
+                required: 3,
             }
         )
     ));
-    assert!(matches!(
-        ManifestEvidence::rebuild(&store, &session),
-        Err(
-            ego_core::evidence::ManifestEvidenceError::UnsupportedVersion {
-                found: 1,
-                required: 2,
-            }
-        )
-    ));
+    let persisted_rebuild = ManifestEvidence::rebuild(&store, &session);
+    assert!(
+        matches!(
+            &persisted_rebuild,
+            Err(ego_core::evidence::ManifestEvidenceError::Store(message))
+                if message.contains("unknown payload in the valid session prefix")
+        ),
+        "persisted reader must reject the stale payload before projection: {persisted_rebuild:?}"
+    );
     assert_eq!(std::fs::read(&log).unwrap(), before);
 
     assert!(store.open_writer(&session, lease()).is_err());
@@ -641,4 +660,191 @@ fn final_codec_evidence_is_tagged_and_does_not_infer_from_lifecycle_events() {
     )))
     .unwrap();
     assert!(lifecycle["evidence"].is_null());
+}
+
+#[test]
+fn generation_evidence_rejects_old_outer_and_inner_versions_at_every_authority() {
+    assert_eq!(EVIDENCE_SCHEMA_VERSION, 3);
+    assert_eq!(ModelCapabilities::SCHEMA_VERSION, 5);
+
+    let root = tempdir().unwrap();
+    let session = SessionId::new();
+    let invocation = RunInvocationId::new();
+    let attempt = AttemptRef::first(GenerationId::new());
+    let current_context = context(session, invocation);
+    let current = EvidenceRecord::GenerationAdmission(generation(session, invocation, attempt));
+    let current_wire = serde_json::to_value(SessionEntry::Evidence(current)).unwrap();
+    let current_generation: GenerationAdmissionEvidence =
+        serde_json::from_value(current_wire["evidence"].clone()).unwrap();
+    assert_eq!(current_generation.version(), EVIDENCE_SCHEMA_VERSION);
+    assert_eq!(
+        current_generation.capabilities().schema_version,
+        ModelCapabilities::SCHEMA_VERSION
+    );
+
+    let current_session = SessionId::new();
+    let current_invocation = RunInvocationId::new();
+    let current_attempt = AttemptRef::first(GenerationId::new());
+    let current_context_wire = serde_json::to_value(SessionEntry::Evidence(
+        EvidenceRecord::RunContext(context(current_session, current_invocation)),
+    ))
+    .unwrap();
+    let current_generation_wire =
+        serde_json::to_value(SessionEntry::Evidence(EvidenceRecord::GenerationAdmission(
+            generation(current_session, current_invocation, current_attempt),
+        )))
+        .unwrap();
+    let current_log = write_evidence_log(
+        root.path(),
+        current_session,
+        &[current_context_wire, current_generation_wire],
+    );
+    let current_store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+    let current_entries = entries(&current_store, &current_session);
+    assert!(matches!(
+        &current_entries[0],
+        SessionEntry::Evidence(EvidenceRecord::RunContext(value))
+            if value.session() == current_session && value.invocation() == current_invocation
+    ));
+    assert!(matches!(
+        &current_entries[1],
+        SessionEntry::Evidence(EvidenceRecord::GenerationAdmission(value))
+            if value.session() == current_session
+                && value.invocation() == current_invocation
+                && value.attempt() == current_attempt
+                && value.version() == EVIDENCE_SCHEMA_VERSION
+                && value.capabilities().schema_version == ModelCapabilities::SCHEMA_VERSION
+    ));
+    let current_manifest = ManifestEvidence::rebuild(&current_store, &current_session).unwrap();
+    assert_eq!(current_manifest.run_contexts().len(), 1);
+    assert_eq!(current_manifest.generations().len(), 1);
+    assert!(std::fs::metadata(current_log).is_ok());
+
+    let service = EvidenceAdmissionService::new();
+    let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+    let opened = store.open_writer(&session, lease()).unwrap();
+    opened
+        .writer
+        .write(
+            EvidenceKey::RunContext {
+                session,
+                invocation,
+            },
+            EvidenceRecord::RunContext(current_context),
+        )
+        .unwrap();
+    opened
+        .writer
+        .write(
+            EvidenceKey::GenerationAdmission {
+                session,
+                invocation,
+                attempt,
+            },
+            EvidenceRecord::GenerationAdmission(current_generation.clone()),
+        )
+        .unwrap();
+
+    for (outer, inner) in [(3, 4), (2, 5)] {
+        let mut wire = current_wire.clone();
+        wire["evidence"]["version"] = json!(outer);
+        wire["evidence"]["capabilities"]["schema_version"] = json!(inner);
+        let stale: GenerationAdmissionEvidence =
+            serde_json::from_value(wire["evidence"].clone()).unwrap();
+        let expected_found = if outer == 2 { outer } else { inner };
+        let expected_required = if outer == 2 {
+            EVIDENCE_SCHEMA_VERSION
+        } else {
+            ModelCapabilities::SCHEMA_VERSION
+        };
+        assert!(matches!(
+            service.admit_generation(&opened.writer, stale.clone()),
+            Err(EvidenceError::UnsupportedVersion { found, required, .. })
+                if found == expected_found && required == expected_required
+        ));
+
+        let stale_session = SessionId::new();
+        let stale_invocation = RunInvocationId::new();
+        let stale_attempt = AttemptRef::first(GenerationId::new());
+        let stale_record =
+            serde_json::to_value(SessionEntry::Evidence(EvidenceRecord::GenerationAdmission(
+                generation(stale_session, stale_invocation, stale_attempt),
+            )))
+            .unwrap();
+        let mut typed_wire = stale_record.clone();
+        typed_wire["evidence"]["version"] = json!(outer);
+        typed_wire["evidence"]["capabilities"]["schema_version"] = json!(inner);
+        let typed_stale: GenerationAdmissionEvidence =
+            serde_json::from_value(typed_wire["evidence"].clone()).unwrap();
+        let stale_context = context(stale_session, stale_invocation);
+        let stale_store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+        let stale_opened = stale_store.open_writer(&stale_session, lease()).unwrap();
+        stale_opened
+            .writer
+            .write(
+                EvidenceKey::RunContext {
+                    session: stale_session,
+                    invocation: stale_invocation,
+                },
+                EvidenceRecord::RunContext(stale_context.clone()),
+            )
+            .unwrap();
+        assert!(matches!(
+            stale_opened.writer.write(
+                EvidenceKey::GenerationAdmission {
+                    session: stale_session,
+                    invocation: stale_invocation,
+                    attempt: stale_attempt,
+                },
+                EvidenceRecord::GenerationAdmission(typed_stale.clone()),
+            ),
+            Err(EvidenceError::UnsupportedVersion { found, required, .. })
+                if found == expected_found && required == expected_required
+        ));
+
+        drop(stale_opened);
+
+        let stale_context_wire = serde_json::to_value(SessionEntry::Evidence(
+            EvidenceRecord::RunContext(context(stale_session, stale_invocation)),
+        ))
+        .unwrap();
+        typed_wire["evidence"]["session"] = serde_json::to_value(stale_session).unwrap();
+        let stale_log = write_evidence_log(
+            root.path(),
+            stale_session,
+            &[stale_context_wire, typed_wire],
+        );
+        let persisted = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+        let read = persisted.read(&stale_session);
+        match read {
+            Err(_) => {}
+            Ok(stream) => assert!(
+                block_on(stream.collect::<Vec<_>>())
+                    .into_iter()
+                    .any(|entry| entry.is_err()),
+                "persisted read accepted evidence outer {outer} / capabilities {inner}"
+            ),
+        }
+        assert!(
+            ManifestEvidence::rebuild(&persisted, &stale_session).is_err(),
+            "persisted manifest must refuse evidence outer {outer} / capabilities {inner}"
+        );
+        let manifest_error = ManifestEvidence::from_records(&[
+            EvidenceRecord::RunContext(stale_context),
+            EvidenceRecord::GenerationAdmission(typed_stale.clone()),
+        ])
+        .unwrap_err();
+        let expected_found = if outer == 2 { outer } else { inner };
+        let expected_required = if outer == 2 {
+            EVIDENCE_SCHEMA_VERSION
+        } else {
+            ModelCapabilities::SCHEMA_VERSION
+        };
+        assert!(matches!(
+            manifest_error,
+            ego_core::evidence::ManifestEvidenceError::UnsupportedVersion { found, required }
+                if found == expected_found && required == expected_required
+        ));
+        assert!(std::fs::metadata(stale_log).is_ok());
+    }
 }

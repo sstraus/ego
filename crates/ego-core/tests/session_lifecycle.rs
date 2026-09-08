@@ -436,6 +436,7 @@ fn generation_evidence(session: SessionId, context_window: u64) -> EvidenceRecor
         cache: CacheRetention::None,
         transport: Transport::Sse,
         image_input: ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     };
     let invocation = RunInvocationId::new();
     EvidenceRecord::GenerationAdmission(GenerationAdmissionEvidence::new(

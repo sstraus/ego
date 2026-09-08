@@ -7,6 +7,7 @@ use ego_ai::wire::ollama::Ollama;
 use ego_ai::wire::openai_codex_responses::OpenAiCodexResponses;
 use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::{RequestTarget, WireFormat};
+use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::types::{GenRequest, ThinkingLevel};
 use ego_core::permit::HttpHeader;
 use serde_json::{Value, json};
@@ -89,7 +90,7 @@ fn resolve_minimax() -> (
         "minimax-oauth/MiniMax-M2.7",
         HostedModel {
             capabilities: serde_json::from_value(json!({
-                "schema_version":4,"max_context_tokens":131072,"max_output_tokens":4096,
+                "schema_version":ModelCapabilities::SCHEMA_VERSION,"max_context_tokens":131072,"max_output_tokens":4096,
                 "max_tools":16,"supports_parallel_tool_calls":false,
                 "reasoning_carryover":"unsupported","reasoning_efforts":"any",
                 "reasoning_state_dialect":null,"cancel":"cooperative","cache":"none",

@@ -90,6 +90,7 @@ mod generator {
             cache: CacheRetention::Short,
             transport: Transport::Sse,
             image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
+            default_reasoning_effort: None,
         }
     }
 

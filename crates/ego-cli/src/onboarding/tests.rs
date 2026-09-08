@@ -178,6 +178,7 @@ fn entry(slug: &str, availability: ModelAvailability) -> ModelCatalogueEntry {
             cache: CacheRetention::None,
             transport: Transport::Sse,
             image_input: ImageInputSupport::Unknown,
+            default_reasoning_effort: None,
         },
         metering: MeteringKind::Unmetered,
         provenance: ModelFactProvenance::supplied(SuppliedAuthority::Builtin),

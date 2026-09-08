@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::cost::{MeteringRevision, RateSource};
-use ego_core::generator::capabilities::ModelCapabilities;
+use ego_core::generator::capabilities::{ModelCapabilities, ReasoningSelectionError};
 use ego_core::public::MeteringKind;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
@@ -291,7 +291,7 @@ impl ModelCatalogueSourceStatus {
     }
 }
 
-/// Version 1 of the ordered public catalogue projection.
+/// Version 2 of the ordered public catalogue projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCatalogueSnapshot {
     pub v: u32,
@@ -307,7 +307,7 @@ impl ModelCatalogueSnapshot {
         models.sort_by(|left, right| left.slug.cmp(&right.slug));
         sources.sort_by(|left, right| left.provider.cmp(&right.provider));
         Self {
-            v: 1,
+            v: 2,
             models,
             sources,
         }
@@ -398,6 +398,9 @@ impl ModelDiscoveryReport {
         failures: Vec<ModelDiscoveryFailure>,
         complete: bool,
     ) -> Result<Self, String> {
+        for entry in &models {
+            validate_model_capabilities(&entry.slug, &entry.capabilities)?;
+        }
         match &source {
             ModelDiscoverySource::Supplied => {
                 if models
@@ -555,6 +558,7 @@ impl CachedDiscoverySlice {
         }
         let mut seen = BTreeSet::new();
         for model in &self.models {
+            validate_model_capabilities(&model.entry.slug, &model.entry.capabilities)?;
             if model.entry.slug.provider != provider {
                 return Err(format!(
                     "cached provider `{provider}` contains `{}`",
@@ -597,31 +601,129 @@ impl CachedDiscoverySlice {
     }
 }
 
-/// Private, durable version 1 discovery cache document.
+fn validate_model_capabilities(
+    slug: &ModelSlug,
+    capabilities: &ModelCapabilities,
+) -> Result<(), String> {
+    match capabilities.resolve_reasoning_effort(capabilities.default_reasoning_effort) {
+        Ok(_) | Err(ReasoningSelectionError::DefaultUnstated) => Ok(()),
+        Err(error) => Err(format!("model `{slug}` has invalid capabilities: {error}")),
+    }
+}
+
+/// A typed refusal to interpret model-discovery cache bytes as current facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryCacheDecodeError {
+    ObsoleteSchema {
+        component: &'static str,
+        found: u32,
+        required: u32,
+    },
+    UnsupportedSchema {
+        component: &'static str,
+        found: u32,
+        required: u32,
+    },
+    Corrupt(String),
+}
+
+impl fmt::Display for DiscoveryCacheDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ObsoleteSchema {
+                component,
+                found,
+                required,
+            } => write!(
+                f,
+                "obsolete {component} schema version {found}; version {required} is required"
+            ),
+            Self::UnsupportedSchema {
+                component,
+                found,
+                required,
+            } => write!(
+                f,
+                "unsupported {component} schema version {found}; version {required} is required"
+            ),
+            Self::Corrupt(message) => write!(f, "corrupt discovery cache: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for DiscoveryCacheDecodeError {}
+
+const DISCOVERY_CACHE_VERSION: u32 = 2;
+
+/// Private, durable version 2 discovery cache document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiscoveryCacheV1 {
+pub struct DiscoveryCacheV2 {
     pub v: u32,
     pub providers: BTreeMap<String, CachedDiscoverySlice>,
 }
 
-impl Default for DiscoveryCacheV1 {
+impl Default for DiscoveryCacheV2 {
     fn default() -> Self {
         Self {
-            v: 1,
+            v: DISCOVERY_CACHE_VERSION,
             providers: BTreeMap::new(),
         }
     }
 }
 
-impl DiscoveryCacheV1 {
+impl DiscoveryCacheV2 {
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
         serde_json::to_vec(self).map_err(|error| error.to_string())
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let cache: Self = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-        cache.validate()?;
+    pub fn decode(bytes: &[u8]) -> Result<Self, DiscoveryCacheDecodeError> {
+        #[derive(Deserialize)]
+        struct Version {
+            v: u32,
+        }
+
+        let version: Version = serde_json::from_slice(bytes)
+            .map_err(|error| DiscoveryCacheDecodeError::Corrupt(error.to_string()))?;
+        if version.v < DISCOVERY_CACHE_VERSION {
+            return Err(DiscoveryCacheDecodeError::ObsoleteSchema {
+                component: "discovery cache",
+                found: version.v,
+                required: DISCOVERY_CACHE_VERSION,
+            });
+        }
+        if version.v > DISCOVERY_CACHE_VERSION {
+            return Err(DiscoveryCacheDecodeError::UnsupportedSchema {
+                component: "discovery cache",
+                found: version.v,
+                required: DISCOVERY_CACHE_VERSION,
+            });
+        }
+        let cache: Self = serde_json::from_slice(bytes)
+            .map_err(|error| DiscoveryCacheDecodeError::Corrupt(error.to_string()))?;
+        for slice in cache.providers.values() {
+            for model in &slice.models {
+                let found = model.entry.capabilities.schema_version;
+                let required = ModelCapabilities::SCHEMA_VERSION;
+                if found < required {
+                    return Err(DiscoveryCacheDecodeError::ObsoleteSchema {
+                        component: "model capabilities",
+                        found,
+                        required,
+                    });
+                }
+                if found > required {
+                    return Err(DiscoveryCacheDecodeError::UnsupportedSchema {
+                        component: "model capabilities",
+                        found,
+                        required,
+                    });
+                }
+            }
+        }
+        cache
+            .validate()
+            .map_err(DiscoveryCacheDecodeError::Corrupt)?;
         Ok(cache)
     }
 
@@ -668,7 +770,7 @@ impl DiscoveryCacheV1 {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.v != 1 {
+        if self.v != DISCOVERY_CACHE_VERSION {
             return Err(format!("unsupported discovery cache version {}", self.v));
         }
         for (provider, slice) in &self.providers {

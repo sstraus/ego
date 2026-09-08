@@ -20,8 +20,8 @@ use ego_core::event::hook::HookCatalogueEvidence;
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::evidence::{
-    EVIDENCE_SCHEMA_VERSION, EvidenceError, EvidenceKey, EvidenceLogSource, EvidenceRecord,
-    EvidenceWrite, ManifestEvidence, ManifestEvidenceError, RunInvocationId,
+    EvidenceError, EvidenceKey, EvidenceLogSource, EvidenceRecord, EvidenceWrite, ManifestEvidence,
+    ManifestEvidenceError, RunInvocationId,
 };
 use ego_core::generator::attempt::AttemptRef;
 use ego_core::permit::ExecObservation;
@@ -102,12 +102,8 @@ impl EvidenceIndex {
     fn from_records(id: SessionId, records: Vec<EvidenceRecord>) -> Result<Self, StoreError> {
         let mut index = Self::default();
         for record in records {
-            if record.version() != EVIDENCE_SCHEMA_VERSION {
-                return Err(invalid_log(format!(
-                    "unsupported evidence version {}; version {} is required",
-                    record.version(),
-                    EVIDENCE_SCHEMA_VERSION
-                )));
+            if let Some(error) = record.current_schema_error() {
+                return Err(invalid_log(error.to_string()));
             }
             let key = record.key();
             if key.session() != id || index.records.contains_key(&key) {
@@ -416,7 +412,9 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                     EventKind::Forked { source, at_seq } => {
                         lineage = Some(SessionLineage::Fork { source, at_seq })
                     }
-                    EventKind::ExecutionObserved { observation, .. } => execution = Some(observation),
+                    EventKind::ExecutionObserved { observation, .. } => {
+                        execution = Some(observation)
+                    }
                     EventKind::HookCatalogueAdmitted { descriptors } => hooks = descriptors,
                     _ => {}
                 }
@@ -1285,12 +1283,8 @@ impl JsonlStore {
                 diagnostic: "evidence key, payload, and lease-held session do not agree".to_owned(),
             });
         }
-        if record.version() != EVIDENCE_SCHEMA_VERSION {
-            return Err(EvidenceError::UnsupportedVersion {
-                key,
-                found: record.version(),
-                required: EVIDENCE_SCHEMA_VERSION,
-            });
+        if let Some(error) = record.current_schema_error() {
+            return Err(error);
         }
         if let Some(previous) = index.records.get(&key) {
             if previous == &record {

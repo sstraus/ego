@@ -8,6 +8,7 @@
 //! than letting a switch proceed and silently drop or mistranslate state.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::ser::SerializeMap;
@@ -377,6 +378,11 @@ pub struct ModelCapabilities {
     /// [`Unknown`]: ReasoningEffortSupport::Unknown
     #[serde(default)]
     pub reasoning_efforts: ReasoningEffortSupport,
+    /// The effort selected when no caller, configuration layer, or host
+    /// supplied one. `None` means the current fact source did not establish a
+    /// default; it never means `off` or the first accepted level.
+    #[serde(default)]
+    pub default_reasoning_effort: Option<ThinkingLevel>,
     /// Which reasoning-state dialect this model mints and accepts, when
     /// anybody said.
     ///
@@ -518,6 +524,58 @@ pub enum CapabilityGap {
     },
 }
 
+/// Why an optional reasoning selection could not become one concrete effort.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReasoningSelectionError {
+    UnsupportedCapabilitiesVersion {
+        found: u32,
+        required: u32,
+    },
+    DefaultUnstated,
+    EffortUnstated {
+        requested: ThinkingLevel,
+    },
+    EffortUnsupported {
+        requested: ThinkingLevel,
+        accepted: BTreeSet<ThinkingLevel>,
+    },
+}
+
+impl fmt::Display for ReasoningSelectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedCapabilitiesVersion { found, required } => write!(
+                f,
+                "unsupported model capabilities version {found}; version {required} is required"
+            ),
+            Self::DefaultUnstated => f.write_str(
+                "the model does not state a default reasoning effort; pass --thinking \
+                 off|minimal|low|medium|high|xhigh|max",
+            ),
+            Self::EffortUnstated { requested } => write!(
+                f,
+                "nobody stated whether the model accepts `{}` reasoning",
+                requested.as_str()
+            ),
+            Self::EffortUnsupported {
+                requested,
+                accepted,
+            } => write!(
+                f,
+                "the model does not accept `{}` reasoning; accepted: {}",
+                requested.as_str(),
+                accepted
+                    .iter()
+                    .map(|level| level.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReasoningSelectionError {}
+
 /// What the caller is told. Every gap names both what was asked for and what
 /// would have worked, because a usage error the caller has to guess at is only
 /// marginally better than no message.
@@ -630,21 +688,52 @@ impl std::fmt::Display for CapabilityGap {
 }
 
 impl ModelCapabilities {
-    /// The version this build writes. Bumped whenever the field set or its
-    /// meaning changes; `2` added [`reasoning_efforts`], so a `1` record
-    /// decodes with [`ReasoningEffortSupport::Unknown`] — which is what it
-    /// proved about that model, namely nothing. `3` added
-    /// [`reasoning_state_dialect`] on the same terms: a `2` record decodes
-    /// with `None`, which is likewise what it proved.
-    ///
-    /// Read this at merge rather than trusting it. A sibling ADR names a
-    /// possible `2` -> `3` for an Anthropic thinking budget; if both land
-    /// together it is one bump and not two, and the number here is arithmetic
-    /// on the base this branch forked from.
+    /// The exact version this build writes and admits. Structural decoding is
+    /// deliberately separate from admission so a stale durable record can be
+    /// identified and refused by its typed boundary rather than misreported
+    /// as corrupt data.
     ///
     /// [`reasoning_efforts`]: ModelCapabilities::reasoning_efforts
     /// [`reasoning_state_dialect`]: ModelCapabilities::reasoning_state_dialect
-    pub const SCHEMA_VERSION: u32 = 4;
+    pub const SCHEMA_VERSION: u32 = 5;
+
+    /// Resolve one explicit override or the model's stated default, then
+    /// validate that exact value against the existing reasoning-support fact.
+    pub fn resolve_reasoning_effort(
+        &self,
+        requested: Option<ThinkingLevel>,
+    ) -> Result<ThinkingLevel, ReasoningSelectionError> {
+        if self.schema_version != Self::SCHEMA_VERSION {
+            return Err(ReasoningSelectionError::UnsupportedCapabilitiesVersion {
+                found: self.schema_version,
+                required: Self::SCHEMA_VERSION,
+            });
+        }
+        let selected = requested
+            .or(self.default_reasoning_effort)
+            .ok_or(ReasoningSelectionError::DefaultUnstated)?;
+        self.validate_reasoning_effort(selected)?;
+        Ok(selected)
+    }
+
+    fn validate_reasoning_effort(
+        &self,
+        requested: ThinkingLevel,
+    ) -> Result<(), ReasoningSelectionError> {
+        match &self.reasoning_efforts {
+            ReasoningEffortSupport::Unknown => {
+                Err(ReasoningSelectionError::EffortUnstated { requested })
+            }
+            ReasoningEffortSupport::Any => Ok(()),
+            ReasoningEffortSupport::Only(accepted) if accepted.contains(&requested) => Ok(()),
+            ReasoningEffortSupport::Only(accepted) => {
+                Err(ReasoningSelectionError::EffortUnsupported {
+                    requested,
+                    accepted: accepted.clone(),
+                })
+            }
+        }
+    }
 
     /// Every way `req` does not fit *this* model — empty means it can be
     /// sent. Checked after the model resolves and before the budget gate
@@ -800,20 +889,22 @@ impl ModelCapabilities {
         {
             gaps.push(CapabilityGap::OutputTooLarge { requested, max });
         }
-        match &self.reasoning_efforts {
-            ReasoningEffortSupport::Unknown => {
-                gaps.push(CapabilityGap::ReasoningEffortUnstated {
-                    requested: req.thinking,
-                });
+        match self.validate_reasoning_effort(req.thinking) {
+            Err(ReasoningSelectionError::EffortUnstated { requested }) => {
+                gaps.push(CapabilityGap::ReasoningEffortUnstated { requested });
             }
-            ReasoningEffortSupport::Any => {}
-            ReasoningEffortSupport::Only(accepted) if !accepted.contains(&req.thinking) => {
+            Err(ReasoningSelectionError::EffortUnsupported {
+                requested,
+                accepted,
+            }) => {
                 gaps.push(CapabilityGap::ReasoningEffortUnsupported {
-                    requested: req.thinking,
-                    accepted: accepted.clone(),
+                    requested,
+                    accepted,
                 });
             }
-            ReasoningEffortSupport::Only(_) => {}
+            Ok(())
+            | Err(ReasoningSelectionError::UnsupportedCapabilitiesVersion { .. })
+            | Err(ReasoningSelectionError::DefaultUnstated) => {}
         }
 
         gaps

@@ -1,11 +1,63 @@
 //! RED contract for the real ego models process surface.
 
 mod support;
+use std::path::{Path, PathBuf};
 use support::{Ego, Plan, Stub};
+
+use ego_ai::catalogue::DiscoveryCacheV2;
 
 const MODEL_HEADER: &str =
     "SLUG  CONTEXT  OUTPUT  REASONING  METERING  SOURCE  FRESHNESS  AVAILABILITY";
 const SOURCE_HEADER: &str = "PROVIDER  SOURCE  FRESHNESS  AVAILABILITY";
+const CACHE_RELATIVE_PATH: &str = "model-catalogue/snapshot-v1.json";
+
+fn cache_path(home: &Path) -> PathBuf {
+    home.join(CACHE_RELATIVE_PATH)
+}
+
+fn seed_current_cache(home: &Path, workspace: &Path) -> Vec<u8> {
+    let stub = Stub::start(Plan::default());
+    let result = Ego::at(home, workspace, Some(&stub))
+        .subcommand("models")
+        .args(["--provider", "ollama", "--refresh", "--json"])
+        .run();
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    std::fs::read(cache_path(home)).expect("refresh writes the discovery cache")
+}
+
+fn stale_capabilities(bytes: &[u8]) -> Vec<u8> {
+    stale_capabilities_for(bytes, "ollama")
+}
+
+fn stale_capabilities_for(bytes: &[u8], provider: &str) -> Vec<u8> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).expect("cache is JSON");
+    value["providers"][provider]["models"][0]["entry"]["capabilities"]["schema_version"] =
+        serde_json::json!(4);
+    serde_json::to_vec(&value).expect("stale cache remains JSON")
+}
+
+fn stale_kimi_cache(bytes: &[u8]) -> Vec<u8> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).expect("cache is JSON");
+    let mut slice = value["providers"]["ollama"].clone();
+    for model in slice["models"].as_array_mut().expect("cached models") {
+        model["entry"]["slug"] = serde_json::json!("kimi-coding/qwen3");
+        model["entry"]["provenance"]["provider"] = serde_json::json!("kimi-coding");
+    }
+    value["providers"]["kimi-coding"] = slice;
+    value["providers"].as_object_mut().unwrap().remove("ollama");
+    let stale = serde_json::to_vec(&value).expect("provider cache remains JSON");
+    stale_capabilities_for(&stale, "kimi-coding")
+}
+
+fn newer_cache(bytes: &[u8]) -> Vec<u8> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).expect("cache is JSON");
+    value["v"] = serde_json::json!(3);
+    serde_json::to_vec(&value).expect("newer cache remains JSON")
+}
+
+fn write_cache(home: &Path, bytes: &[u8]) {
+    std::fs::write(cache_path(home), bytes).expect("cache is writable");
+}
 
 #[test]
 fn text_always_renders_both_tables_deterministically_without_trailing_space() {
@@ -66,7 +118,7 @@ fn json_is_exactly_the_snapshot_envelope_with_one_newline_and_clean_stdout() {
     assert!(object.contains_key("v"));
     assert!(object.contains_key("models"));
     assert!(object.contains_key("sources"));
-    assert_eq!(value["v"], 1);
+    assert_eq!(value["v"], 2);
     assert!(!value["models"].as_array().unwrap().is_empty());
     assert!(value["models"].is_array());
     assert!(
@@ -132,7 +184,7 @@ fn provider_filter_excludes_unadmitted_supplied_sources() {
         "models.toml",
         r#"
 [model."gemini/gemini-2.5-pro".capabilities]
-schema_version = 2
+schema_version = 5
 max_context_tokens = 1000000
 max_output_tokens = 65536
 max_tools = 128
@@ -208,6 +260,176 @@ fn empty_ollama_refresh_is_available_and_cache_first_reuses_empty_slice() {
 }
 
 #[test]
+fn refresh_rebuilds_obsolete_cache_atomically_and_publishes_current_bytes() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let current = seed_current_cache(home.path(), workspace.path());
+    let stale = stale_capabilities(&current);
+    write_cache(home.path(), &stale);
+
+    let stub = Stub::start(Plan::default());
+    let result = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("models")
+        .args(["--provider", "ollama", "--refresh", "--json"])
+        .run();
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    let rebuilt = std::fs::read(cache_path(home.path())).unwrap();
+    assert_ne!(
+        rebuilt, stale,
+        "successful rebuild must replace stale bytes"
+    );
+    let cache = DiscoveryCacheV2::decode(&rebuilt).expect("rebuild publishes current schema");
+    assert!(cache.providers.contains_key("ollama"));
+}
+
+#[test]
+fn obsolete_cache_preserves_bytes_when_provider_transport_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let current = seed_current_cache(home.path(), workspace.path());
+    let stale = stale_capabilities(&current);
+    write_cache(home.path(), &stale);
+
+    let stub = Stub::start(Plan {
+        tags_refusal: Some((500, "discovery refused".to_string())),
+        ..Plan::default()
+    });
+    let result = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("models")
+        .args(["--provider", "ollama", "--refresh", "--json"])
+        .run();
+    assert_ne!(result.code, Some(0));
+    assert!(
+        !result.stderr.is_empty(),
+        "transport failure must be actionable"
+    );
+    assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), stale);
+}
+
+#[test]
+fn obsolete_cache_preserves_bytes_when_model_report_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let current = seed_current_cache(home.path(), workspace.path());
+    let stale = stale_capabilities(&current);
+    write_cache(home.path(), &stale);
+
+    let stub = Stub::start(Plan {
+        installed: vec!["qwen3-cloud".to_string()],
+        ..Plan::default()
+    });
+    let result = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("models")
+        .args(["--provider", "ollama", "--refresh", "--json"])
+        .run();
+    assert_ne!(result.code, Some(0));
+    assert!(
+        result.stderr.contains("rebuild") || result.stderr.contains("discovery"),
+        "model failure must identify the failed recovery: {}",
+        result.stderr
+    );
+    assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), stale);
+}
+
+#[test]
+fn obsolete_cache_preserves_bytes_when_required_credential_is_missing() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let current = seed_current_cache(home.path(), workspace.path());
+    let stale = stale_kimi_cache(&current);
+    write_cache(home.path(), &stale);
+
+    let stub = Stub::start(Plan::default());
+    let result = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("models")
+        .args(["--provider", "kimi-coding", "--refresh", "--json"])
+        .run();
+    assert_ne!(result.code, Some(0));
+    assert!(
+        result.stderr.contains("credential") || result.stderr.contains("auth"),
+        "missing required credential must be actionable: {}",
+        result.stderr
+    );
+    assert!(
+        stub.requests().is_empty(),
+        "credential refusal precedes transport"
+    );
+    assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), stale);
+}
+
+#[test]
+fn unfiltered_refresh_skips_optional_missing_credentials_and_reports_unavailable() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let current = seed_current_cache(home.path(), workspace.path());
+    let stale = stale_kimi_cache(&current);
+    write_cache(home.path(), &stale);
+
+    let stub = Stub::start(Plan::default());
+    let result = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("models")
+        .args(["--refresh", "--json"])
+        .run();
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    let snapshot: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    let kimi = snapshot["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "kimi-coding")
+        .expect("the optional provider remains visible");
+    assert_eq!(kimi["availability"]["status"], "unavailable");
+    assert_eq!(kimi["availability"]["cause"], "missing_credential");
+}
+
+#[test]
+fn ordinary_read_of_obsolete_cache_prescribes_refresh_without_writing() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let current = seed_current_cache(home.path(), workspace.path());
+    let stale = stale_capabilities(&current);
+    write_cache(home.path(), &stale);
+
+    let result = Ego::at(home.path(), workspace.path(), None)
+        .subcommand("models")
+        .args(["--provider", "ollama", "--json"])
+        .run();
+    assert_ne!(result.code, Some(0));
+    assert!(result.stderr.contains("--refresh"), "{}", result.stderr);
+    assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), stale);
+}
+
+#[test]
+fn malformed_and_newer_cache_fail_distinctly_without_refreshing() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let current = seed_current_cache(home.path(), workspace.path());
+
+    write_cache(home.path(), b"not-json");
+    let malformed = Ego::at(home.path(), workspace.path(), None)
+        .subcommand("models")
+        .args(["--provider", "ollama", "--json"])
+        .run();
+    assert_ne!(malformed.code, Some(0));
+    assert!(malformed.stderr.contains("corrupt"), "{}", malformed.stderr);
+    assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), b"not-json");
+
+    let newer = newer_cache(&current);
+    write_cache(home.path(), &newer);
+    let unsupported = Ego::at(home.path(), workspace.path(), None)
+        .subcommand("models")
+        .args(["--provider", "ollama", "--json"])
+        .run();
+    assert_ne!(unsupported.code, Some(0));
+    assert!(
+        unsupported.stderr.contains("unsupported"),
+        "{}",
+        unsupported.stderr
+    );
+    assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), newer);
+}
+
+#[test]
 fn kimi_refresh_without_credential_returns_an_unavailable_snapshot_without_transport() {
     let stub = Stub::start(Plan::default());
     let result = Ego::against(&stub)
@@ -218,7 +440,7 @@ fn kimi_refresh_without_credential_returns_an_unavailable_snapshot_without_trans
     assert_eq!(result.code, Some(0));
     assert!(result.stderr.is_empty());
     let snapshot: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
-    assert_eq!(snapshot["v"], 1);
+    assert_eq!(snapshot["v"], 2);
     assert_eq!(snapshot["models"].as_array().unwrap().len(), 0);
     assert_eq!(
         snapshot["sources"],
@@ -325,7 +547,7 @@ fn builtin_rows_are_listed_as_builtin_until_a_file_overrides_one() {
         format!(
             r#"
 [model."{overridden}".capabilities]
-schema_version = 4
+schema_version = 5
 max_context_tokens = 12345
 max_output_tokens = 128000
 supports_parallel_tool_calls = true

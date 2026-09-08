@@ -38,6 +38,7 @@ fn capabilities() -> ModelCapabilities {
         cache: CacheRetention::Short,
         transport: Transport::Sse,
         image_input: ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     }
 }
 

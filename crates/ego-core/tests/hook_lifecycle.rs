@@ -582,6 +582,7 @@ impl ego_core::generation_model_source::GenerationModelSource for GeneratorSourc
                     cache: CacheRetention::Short,
                     transport: Transport::Sse,
                     image_input: ImageInputSupport::Unknown,
+                    default_reasoning_effort: None,
                 },
                 metering: Metering::Unmetered {
                     revision: MeteringRevision("regression_case".to_owned()),

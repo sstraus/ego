@@ -263,7 +263,7 @@ fn project(row: &ProviderRow, url: &url::Url, model: Model) -> Result<CurrentMod
         }
         Protocol::Value(_) => return Err(malformed("protocol must be a string".to_string())),
     };
-    let efforts = reasoning_efforts(&model).map_err(malformed)?;
+    let (efforts, default_reasoning_effort) = reasoning_efforts(&model).map_err(malformed)?;
     let _display_name = model.display_name;
     Ok(CurrentModel {
         model: model.id,
@@ -296,6 +296,7 @@ fn project(row: &ProviderRow, url: &url::Url, model: Model) -> Result<CurrentMod
             },
             reasoning_carryover,
             reasoning_efforts: efforts,
+            default_reasoning_effort,
             reasoning_state_dialect,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::None,
@@ -305,20 +306,24 @@ fn project(row: &ProviderRow, url: &url::Url, model: Model) -> Result<CurrentMod
     })
 }
 
-fn reasoning_efforts(model: &Model) -> Result<ReasoningEffortSupport, String> {
+fn reasoning_efforts(
+    model: &Model,
+) -> Result<(ReasoningEffortSupport, Option<ThinkingLevel>), String> {
     match model.supports_thinking_type.as_deref() {
-        Some("no") => return Ok(only([ThinkingLevel::Off])),
+        Some("no") => {
+            return Ok((only([ThinkingLevel::Off]), Some(ThinkingLevel::Off)));
+        }
         Some("only" | "both") | None => {}
         Some(other) => return Err(format!("unknown supports_thinking_type {other}")),
     }
     if !model.supports_reasoning {
-        return Ok(only([ThinkingLevel::Off]));
+        return Ok((only([ThinkingLevel::Off]), Some(ThinkingLevel::Off)));
     }
     let Some(efforts) = &model.think_efforts else {
-        return Ok(ReasoningEffortSupport::Any);
+        return Ok((ReasoningEffortSupport::Any, None));
     };
     if !efforts.support {
-        return Ok(only([ThinkingLevel::Off]));
+        return Ok((only([ThinkingLevel::Off]), Some(ThinkingLevel::Off)));
     }
     let mut accepted = BTreeSet::new();
     if model.supports_thinking_type.as_deref() != Some("only") {
@@ -330,13 +335,17 @@ fn reasoning_efforts(model: &Model) -> Result<ReasoningEffortSupport, String> {
     if accepted.is_empty() {
         return Err("think_efforts.support is true but valid_efforts is empty".to_string());
     }
-    if let Some(default) = &efforts.default_effort {
-        let default = parse_effort(default)?;
+    let default = efforts
+        .default_effort
+        .as_deref()
+        .map(parse_effort)
+        .transpose()?;
+    if let Some(default) = default {
         if !accepted.contains(&default) {
             return Err("default_effort is absent from valid_efforts".to_string());
         }
     }
-    Ok(ReasoningEffortSupport::Only(accepted))
+    Ok((ReasoningEffortSupport::Only(accepted), default))
 }
 
 fn only(levels: impl IntoIterator<Item = ThinkingLevel>) -> ReasoningEffortSupport {

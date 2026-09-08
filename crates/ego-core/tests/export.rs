@@ -127,6 +127,7 @@ fn generation_for(
                 cache: CacheRetention::None,
                 transport: Transport::Sse,
                 image_input: ImageInputSupport::Unknown,
+                default_reasoning_effort: None,
             },
             PricingEvidence::Unpriced {
                 source: "fixture".to_owned(),

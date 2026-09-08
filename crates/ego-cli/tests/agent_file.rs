@@ -22,7 +22,7 @@ fn png_bytes() -> Vec<u8> {
 fn supported_anthropic_facts() -> &'static str {
     r#"
 [model."anthropic/fixture-vision".capabilities]
-schema_version = 4
+schema_version = 5
 max_context_tokens = 128000
 max_output_tokens = 4096
 max_tools = 16

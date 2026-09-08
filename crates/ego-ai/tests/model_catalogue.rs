@@ -1,7 +1,7 @@
 //! RED contract for regression case: one ordered, versioned model snapshot.
 
 use ego_ai::catalogue::{
-    CachedDiscoveryModel, CachedDiscoverySlice, DiscoveryCacheV1, FactFreshness, ModelAvailability,
+    CachedDiscoveryModel, CachedDiscoverySlice, DiscoveryCacheV2, FactFreshness, ModelAvailability,
     ModelCatalogueEntry, ModelCatalogueSnapshot, ModelCatalogueSourceStatus, ModelDiscoveryEntry,
     ModelDiscoveryFailure, ModelDiscoveryReport, ModelDiscoverySource, ModelFactProvenance,
     ModelSlug, SuppliedAuthority,
@@ -30,6 +30,7 @@ fn capabilities() -> ModelCapabilities {
         cache: CacheRetention::None,
         transport: Transport::Sse,
         image_input: ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     }
 }
 
@@ -48,7 +49,7 @@ fn row(slug: &str, provenance: ModelFactProvenance, metering: MeteringKind) -> M
 }
 
 #[test]
-fn snapshot_is_v1_json_with_explicit_nulls_empty_arrays_and_full_slug_order() {
+fn snapshot_is_v2_json_with_explicit_nulls_empty_arrays_and_full_slug_order() {
     let snapshot = ModelCatalogueSnapshot::from_entries_and_sources(
         vec![
             row(
@@ -82,7 +83,7 @@ fn snapshot_is_v1_json_with_explicit_nulls_empty_arrays_and_full_slug_order() {
     assert_eq!(
         json,
         serde_json::json!({
-            "v": 1,
+            "v": 2,
             "models": [
                 {
                     "slug": "openai/gpt-5.6",
@@ -213,17 +214,21 @@ fn supplied_system_user_and_discovered_rows_use_price_free_metering() {
 }
 
 #[test]
-fn cache_codec_is_private_v1_and_round_trips_discovery_entries_only() {
-    let cache = DiscoveryCacheV1::default();
+fn cache_codec_is_v2_and_round_trips_discovery_entries_only() {
+    let cache = DiscoveryCacheV2::default();
     let bytes = cache.encode().unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["v"],
-        1
+        2
     );
-    let decoded = DiscoveryCacheV1::decode(&bytes).unwrap();
+    let decoded = DiscoveryCacheV2::decode(&bytes).unwrap();
     assert!(decoded.providers.is_empty());
-    assert!(DiscoveryCacheV1::decode(br#"{"v":99,"providers":{}}"#).is_err());
-    assert!(DiscoveryCacheV1::decode(b"not-json").is_err());
+    assert!(matches!(
+        DiscoveryCacheV2::decode(br#"{"v":1,"providers":{}}"#),
+        Err(ego_ai::catalogue::DiscoveryCacheDecodeError::ObsoleteSchema { found: 1, .. })
+    ));
+    assert!(DiscoveryCacheV2::decode(br#"{"v":99,"providers":{}}"#).is_err());
+    assert!(DiscoveryCacheV2::decode(b"not-json").is_err());
 }
 
 #[test]
@@ -313,7 +318,7 @@ fn total_failure_retains_last_known_rows_and_carries_the_unnamed_failure_per_row
 
 #[test]
 fn complete_empty_discovery_is_an_authoritative_cached_empty_slice() {
-    let mut cache = DiscoveryCacheV1::default();
+    let mut cache = DiscoveryCacheV2::default();
     let report = ModelDiscoveryReport::try_new(
         ModelDiscoverySource::Discovered {
             provider: "ollama".into(),
@@ -331,7 +336,7 @@ fn complete_empty_discovery_is_an_authoritative_cached_empty_slice() {
 
 #[test]
 fn cache_rejects_wrong_discovered_provider_and_supplied_source() {
-    let mut cache = DiscoveryCacheV1::default();
+    let mut cache = DiscoveryCacheV2::default();
     let wrong_provider = ModelDiscoveryReport::try_new(
         ModelDiscoverySource::Discovered {
             provider: "openai".into(),

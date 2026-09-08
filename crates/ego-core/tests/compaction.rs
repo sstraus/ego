@@ -157,6 +157,7 @@ fn main_checkpoint_baseline_uses_existing_gaps_and_expressibility_ports_only() {
         cache: CacheRetention::None,
         transport: Transport::Sse,
         image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     };
     assert!(capabilities.request_gaps(&request).is_empty());
     FakeGenerator::new(Vec::<Vec<_>>::new())
@@ -484,6 +485,7 @@ fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
         cache: CacheRetention::None,
         transport: Transport::Sse,
         image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
     };
     for extra_bytes in [0, 64, 256, 1_024, 4_096, 16_384] {
         let mut candidate = checkpoint();
@@ -732,6 +734,7 @@ fn compaction_profile(
                 cache: CacheRetention::None,
                 transport: Transport::Sse,
                 image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
+                default_reasoning_effort: None,
             },
             metering: Metering::Unmetered {
                 revision: MeteringRevision("regression_case".to_string()),
