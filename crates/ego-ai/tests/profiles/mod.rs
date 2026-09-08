@@ -159,13 +159,16 @@ pub const OLLAMA: Profile = Profile {
 /// `crates/ego-cli/tests/smoke.rs` is where that gap closes, on a machine that
 /// has a key and asks for it by name.
 ///
-/// **This profile is now the reason the row is unselectable rather than a
-/// footnote to it.** Until `2026-09-03-public-provider-wires-require-live-
-/// promotion.md` the gap above was tolerated on a shipping row; that ADR moved
-/// public OpenAI onto Responses and made the missing recording *binding*, so
-/// `ProviderRow::openai_at` carries `Promotion::PendingLiveEvidence`. The
-/// fixtures below still prove checks one to four against the Responses
-/// contract; nothing proves check five, and now nothing pretends to.
+/// **The gap above is stated, and the row ships anyway.**
+/// `2026-09-03-public-provider-wires-require-live-promotion.md` made the
+/// missing recording binding and `ProviderRow::openai_at` carried
+/// `Promotion::PendingLiveEvidence`;
+/// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md` amends that
+/// and the row is `Selectable`. Nothing about this profile changed — the
+/// fixtures below prove checks one to four against the published Responses
+/// contract, nothing proves check five, and nothing pretends to. What changed
+/// is that a check this repository cannot make no longer withholds the row
+/// from operators who can.
 pub const OPENAI: Profile = Profile {
     id: "openai",
     thinking: ThinkingLevel::Off,

@@ -17,6 +17,7 @@ pub(crate) const DISPLAY_NAME: &str = "εgo";
 
 pub mod a2a;
 pub mod acp;
+pub mod acp_confinement;
 pub mod acp_controls;
 pub(crate) mod agent_file;
 pub(crate) mod attachment;
@@ -38,6 +39,7 @@ pub mod metadata;
 pub mod model;
 pub mod model_picker;
 pub mod models;
+pub(crate) mod onboarding;
 pub mod output;
 pub mod prompt;
 pub mod provider_http;

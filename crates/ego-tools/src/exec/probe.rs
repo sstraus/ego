@@ -32,13 +32,6 @@ pub(crate) async fn landlock(
     limits: ExecLimits,
     log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
-    if policy.offline() {
-        let missing = policy
-            .requirements()
-            .check(ExecCaps::empty())
-            .expect_err("offline always requires no-IP-network capability");
-        return Err(ProcessError::MissingCapabilities(missing));
-    }
     let scratch = tempfile::tempdir().map_err(|error| {
         ProcessError::Backend(format!("cannot create process scratch: {error}"))
     })?;
@@ -54,7 +47,6 @@ pub(crate) async fn landlock(
         &scratch_path,
         &runtime_roots,
     )?);
-    let maximum = backend.maximum_demonstrable_caps();
     let cache_key = cache_key(policy, backend.as_ref(), &runtime_roots)?;
     let cached = cached_capabilities(cache_key);
     let measurement = cached
@@ -83,10 +75,6 @@ pub(crate) async fn landlock(
     log.extend(&measurement.records);
     let capabilities = measurement.capabilities;
     let selected = Arc::new(MeasuredBackend::new(backend, capabilities, Some(scratch))?);
-    policy
-        .requirements()
-        .check(selected.maximum_demonstrable_caps())
-        .map_err(ProcessError::MissingCapabilities)?;
     Ok((selected, runtime_roots))
 }
 
@@ -147,10 +135,6 @@ pub(crate) async fn seatbelt(
     log.extend(&measurement.records);
     let capabilities = measurement.capabilities;
     let selected = Arc::new(MeasuredBackend::new(backend, capabilities, Some(scratch))?);
-    policy
-        .requirements()
-        .check(selected.maximum_demonstrable_caps())
-        .map_err(ProcessError::MissingCapabilities)?;
     Ok((selected, runtime_roots))
 }
 

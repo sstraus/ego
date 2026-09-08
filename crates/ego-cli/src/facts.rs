@@ -98,6 +98,14 @@ pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-07";
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Facts {
+    /// Ego's explicit startup choice for each provider.
+    ///
+    /// Kept beside, rather than on, model facts because discovered providers
+    /// do not get capability rows from this file. Values remain full slugs so
+    /// the same identifier is validated here, persisted, and shown in the
+    /// operator's `--model` remedy.
+    #[serde(default)]
+    default_model: BTreeMap<String, String>,
     /// Keyed by the full `provider/model` slug, because that is what
     /// `--model` says and what `Catalogue::resolve_hosted` looks up. Keying
     /// by the model half alone would make the same name under two providers
@@ -212,18 +220,17 @@ fn builtin() -> Facts {
     toml::from_str(BUILTIN).expect("the compiled-in catalogue is valid TOML this build controls")
 }
 
-/// The three layers as one table, the strongest authority winning per slug.
+/// The three layers as one map, the strongest authority winning per key.
 ///
-/// Whole rows replace, they do not merge field by field. An operator who
-/// states `[model."anthropic/claude-opus-5"]` gets exactly what they wrote and
-/// nothing of the builtin row underneath — because a half-inherited row is one
-/// where a context window they never typed is still in effect, and the point
-/// of overriding is to be believed.
-fn merge_layers(
-    builtin: BTreeMap<String, Supplied>,
-    system: BTreeMap<String, Supplied>,
-    user: BTreeMap<String, Supplied>,
-) -> BTreeMap<String, (SuppliedAuthority, Supplied)> {
+/// For model facts, whole rows replace rather than merging field by field. For
+/// startup defaults, the key is the provider, so one user choice replaces only
+/// that provider's weaker choice. Both projections therefore express the same
+/// `Builtin < System < User` rule through this function.
+fn merge_layers<T>(
+    builtin: BTreeMap<String, T>,
+    system: BTreeMap<String, T>,
+    user: BTreeMap<String, T>,
+) -> BTreeMap<String, (SuppliedAuthority, T)> {
     let mut merged = BTreeMap::new();
     for (authority, layer) in [
         (SuppliedAuthority::Builtin, builtin),
@@ -289,12 +296,33 @@ fn override_paths() -> Vec<String> {
 /// error at any ceiling: an operator who typed a rate wrong should be told so
 /// rather than have the typo become invisible on runs that do not read it.
 pub fn supplied(ceilings: &Ceilings) -> Result<Vec<(String, HostedModel)>, UsageError> {
-    let system = read(&PathBuf::from(SYSTEM_DIR).join(MODELS_FILE))?.model;
+    supplied_with_defaults(ceilings).map(|(models, _)| models)
+}
+
+type SuppliedCatalogue = (Vec<(String, HostedModel)>, BTreeMap<String, ModelSlug>);
+
+/// Supplied model facts and ego's startup defaults from one coherent read.
+///
+/// Both projections share the same three decoded layers. Reading them through
+/// separate functions would let a concurrent file replacement pair model
+/// facts from one document with a default from another.
+pub(crate) fn supplied_with_defaults(ceilings: &Ceilings) -> Result<SuppliedCatalogue, UsageError> {
+    let builtin = builtin();
+    let system = read(&PathBuf::from(SYSTEM_DIR).join(MODELS_FILE))?;
     let user = match config::ego_home() {
-        Some(home) => read(&home.join(MODELS_FILE))?.model,
-        None => BTreeMap::new(),
+        Some(home) => read(&home.join(MODELS_FILE))?,
+        None => Facts::default(),
     };
-    project(merge_layers(builtin().model, system, user), ceilings)
+    let models = project(
+        merge_layers(builtin.model, system.model, user.model),
+        ceilings,
+    )?;
+    let defaults = project_defaults(merge_layers(
+        builtin.default_model,
+        system.default_model,
+        user.default_model,
+    ))?;
+    Ok((models, defaults))
 }
 
 /// The builtin layer alone, with both file layers explicitly empty.
@@ -345,6 +373,24 @@ fn project(
                         .map(|quote| catalogue::operator_rates(quote.into())),
                 },
             ))
+        })
+        .collect()
+}
+
+/// Validate the provider-indexed startup policy without changing its slug.
+fn project_defaults(
+    merged: BTreeMap<String, (SuppliedAuthority, String)>,
+) -> Result<BTreeMap<String, ModelSlug>, UsageError> {
+    merged
+        .into_iter()
+        .map(|(provider, (_, value))| {
+            let slug = ModelSlug::parse(&value).map_err(|error| UsageError(error.to_string()))?;
+            if slug.provider != provider {
+                return Err(UsageError(format!(
+                    "default model `{value}` is indexed by provider `{provider}`"
+                )));
+            }
+            Ok((provider, slug))
         })
         .collect()
 }

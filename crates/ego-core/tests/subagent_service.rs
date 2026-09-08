@@ -52,10 +52,9 @@ use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{
-    ChildAdmission, ChildHost, ChildJournalError, ChildRequest,
-    ChildRequestOrigin, ChildResultEvidence, ChildResultReaderError,
-    ChildRunService, ChildServicePorts,
-    ChildWait, ChildWaitResult,
+    ChildAdmission, ChildHost, ChildJournalError, ChildRequest, ChildRequestOrigin,
+    ChildResultEvidence, ChildResultReaderError, ChildRunService, ChildServicePorts, ChildWait,
+    ChildWaitResult,
 };
 use ego_core::turn::{CancelToken, Journal, SharedJournal};
 use futures::future::{self, BoxFuture};
@@ -1416,10 +1415,7 @@ impl Harness {
         results: DurableResults,
         parent_blobs: ParentBlobStore,
     ) -> TestChildService {
-        self.unlimited_service(
-            self.host()
-                .with_content(task_reader, results, parent_blobs),
-        )
+        self.unlimited_service(self.host().with_content(task_reader, results, parent_blobs))
     }
 
     fn profile_service(&self, owner: ExistingProfileOwner) -> TestChildService {
@@ -2300,7 +2296,9 @@ fn request_only_recovery_admits_once_without_executing_or_delivering() {
     assert_eq!(transactions.len(), 1);
     assert_eq!(transactions[0].run_id(), child_run);
     assert_eq!(transactions[0].origin(), recovered.origin());
-    let events = harness.journal.read_journal(invocation)
+    let events = harness
+        .journal
+        .read_journal(invocation)
         .expect("request evidence remains readable");
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].env.turn, parent_turn);
@@ -2384,8 +2382,10 @@ fn after_spawn_recovery_delegates_uncertainty_without_reexecution_or_result_io()
         drop(admission);
         child_run
     };
-    let events_before_recovery =
-        harness.journal.read_journal(invocation).expect("durable child lifecycle");
+    let events_before_recovery = harness
+        .journal
+        .read_journal(invocation)
+        .expect("durable child lifecycle");
     assert!(matches!(
         events_before_recovery.as_slice(),
         [
@@ -2977,8 +2977,10 @@ fn concurrent_background_children_return_distinct_verified_parent_blobs_and_sett
         (first_invocation, first_ref),
         (second_invocation, second_ref),
     ] {
-        let events =
-            harness.journal.read_journal(invocation).expect("durable child lifecycle");
+        let events = harness
+            .journal
+            .read_journal(invocation)
+            .expect("durable child lifecycle");
         assert!(matches!(
             events.as_slice(),
             [

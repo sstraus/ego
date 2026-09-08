@@ -7,8 +7,9 @@
 #
 # ## What may be written here
 #
-# Capabilities, and only capabilities that were read from the vendor's own
-# published contract on the date each section cites. **No prices.** A rate
+# Capability rows contain only facts read from the vendor's own published
+# contract on the date each section cites. Startup defaults are explicit ego
+# policy, documented separately below. **No prices.** A rate
 # written from memory is a number the budget gate would trust and nothing
 # could check, and `docs/decisions/2026-08-21-what-a-model-resolves-to.md` §1
 # forbids it. A run with a money ceiling and no operator rates therefore still
@@ -23,20 +24,20 @@
 #
 # ## Which providers appear
 #
-# Only the rows whose resolver is `Supplied`, because those are the only ones
-# that read this file: `openai`, `anthropic` and `openrouter`. The other seven
+# Only rows whose resolver is `Supplied` read this file: `openai`,
+# `anthropic`, `openrouter` and `gemini`. The other seven
 # rows in `ego_ai::conformance::final_provider_rows` enumerate their own models
 # from the provider (`ollama` from the daemon; `openai-codex`,
 # `github-copilot`, `xai-oauth`, `kimi-coding`, `minimax-oauth` and `nous` from
 # their subscription endpoints), so a row here would be a second answer to a
 # question the provider already answers.
 #
-# `gemini` is deliberately absent. Its mapping is complete and its fixtures are
-# deterministic, but `docs/decisions/2026-09-03-public-provider-wires-require-
-# live-promotion.md` gates selectability on a sanitized live recording that
-# does not exist, so it is not in the selectable table and facts for it would
-# describe a provider `--model gemini/…` cannot reach. Story `regression_case` owns
-# promoting it, facts and row together.
+# `gemini` is selectable under the published-contract decision in
+# `docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`.
+# Its bootstrap model facts are still pending in story `regression_case`; operator
+# facts can already reach the row. `docs/23-first-run-model-default-sources.md`
+# records the current capability and default-thinking work required before a
+# built-in Gemini row can be supplied.
 #
 # `openrouter` appears with no rows for the opposite reason: it is selectable
 # and it proxies hundreds of models from dozens of vendors, changing weekly.
@@ -51,6 +52,12 @@
 # constant would send an operator to the wrong catalogue.
 #
 # revision = 2026-09-07
+
+# First-run policy selected on 2026-09-08; availability is still observed.
+# See docs/23-first-run-model-default-sources.md and the first-run ADR.
+[default_model]
+openai = "openai/gpt-5.6-sol"
+anthropic = "anthropic/claude-opus-5"
 
 # ---------------------------------------------------------------------------
 # openai — read 2026-09-07 from https://developers.openai.com/api/docs/models,

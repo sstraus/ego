@@ -17,6 +17,7 @@ use ego_acp::controls;
 use ego_core::config::{Mode, ModelRef};
 use ego_core::control::{ControlSelect, SessionControlChange, SessionControlState};
 use ego_core::generator::types::ThinkingLevel;
+use ego_core::permit::Confinement;
 
 fn state() -> SessionControlState {
     SessionControlState {
@@ -37,6 +38,13 @@ fn state() -> SessionControlState {
             current: Mode::Default,
             chosen: None,
             available: vec![Mode::Plan, Mode::Default, Mode::Edits],
+        },
+        // A `workspace` ceiling: `off` is absent because it is weaker, and a
+        // value the state never offered is what `change` must refuse.
+        sandbox: ControlSelect {
+            current: Confinement::Workspace,
+            chosen: None,
+            available: vec![Confinement::Ro, Confinement::Workspace],
         },
     }
 }
@@ -75,13 +83,33 @@ fn values(option: &v1::SessionConfigOption) -> Vec<String> {
     }
 }
 
-/// The three controls ego can actually change between generations, each in
-/// the ACP category a host uses to decide where to render it.
+/// Every control ego offers, each in the ACP category a host uses to decide
+/// where to render it.
+///
+/// Sandbox is `Other` and the other three are named categories, because the
+/// pinned schema has no category for a confinement and the three it does name
+/// all mean something else. Calling it `Mode` to avoid `Other` would tell
+/// every connected host that confinement is a permission mode, which it is
+/// not (`2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`).
 #[test]
-fn every_generation_control_is_offered_in_its_own_acp_category() {
+fn every_control_is_offered_in_its_own_acp_category() {
     let options = controls::options(&state());
     let ids: Vec<_> = options.iter().map(|o| o.id.0.to_string()).collect();
-    assert_eq!(ids, vec![controls::MODEL, controls::EFFORT, controls::MODE]);
+    assert_eq!(
+        ids,
+        vec![
+            controls::MODEL,
+            controls::EFFORT,
+            controls::MODE,
+            controls::SANDBOX
+        ]
+    );
+    assert_eq!(
+        option(&options, controls::SANDBOX).category,
+        Some(v1::SessionConfigOptionCategory::Other(
+            controls::SANDBOX.to_owned()
+        ))
+    );
     assert_eq!(
         option(&options, controls::MODEL).category,
         Some(v1::SessionConfigOptionCategory::Model)

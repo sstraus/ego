@@ -246,7 +246,11 @@ fn kimi_refresh_without_credential_returns_an_unavailable_snapshot_without_trans
 
 #[test]
 fn unknown_provider_exits_two_before_any_transport() {
-    for provider in ["not-admitted", "xai", "gemini"] {
+    // `gemini` was in this list until
+    // `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md` put it in
+    // the inventory. `xai` stays: the API-key candidate row genuinely is not
+    // built, and `xai-oauth` is a different row on a different contract.
+    for provider in ["not-admitted", "xai"] {
         let stub = Stub::start(Plan {
             installed: vec!["qwen3".to_string()],
             ..Plan::default()
@@ -354,59 +358,64 @@ transport = "sse"
     }
 }
 
-/// The pending row is listed as unavailable even when its key is set.
+/// The `openai` row reads as available once its key is set, and its
+/// availability turns on the key alone.
 ///
-/// `2026-09-03-public-provider-wires-require-live-promotion.md` says a
-/// pre-promotion selection "returns unavailable with the missing live-evidence
-/// reason". The key is deliberately present: a row whose only problem were a
-/// missing credential would read the same way to an operator scanning this
-/// table, and the two send them to opposite places — one to a keychain, the
-/// other to `EGO_SMOKE`. So the credential is supplied and the row is *still*
-/// unavailable, which is the only way to prove the gate is not the key check
-/// wearing a different hat.
+/// This asserted the opposite until
+/// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`, which amends
+/// the live-promotion ADR: the row is offered on its published contract, and
+/// no recording exists or is claimed. The two runs below are the whole point —
+/// with the key the row is available and with it absent it is
+/// `missing_credential`. A gate that still stood would make both readings
+/// identical, so a single assertion could not tell the ADR was honoured.
 #[test]
-fn the_openai_row_reads_as_unavailable_with_its_key_set_and_names_the_mapping() {
-    let listed = Ego::nowhere()
-        .subcommand("models")
-        .env("OPENAI_API_KEY", "sk-test")
-        .arg("--json")
-        .run();
-    assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
-    let report: serde_json::Value =
-        serde_json::from_str(&listed.stdout).expect("the models report is JSON");
-    let sources = report["sources"]
-        .as_array()
-        .expect("the report carries a source table");
-    let openai = sources
-        .iter()
-        .find(|row| row["provider"] == "openai")
-        .expect("the openai row is listed at all");
+fn the_openai_row_reads_as_available_with_its_key_set_and_wants_only_that_key() {
+    let availability = |key: Option<&str>| {
+        let mut listed = Ego::nowhere().subcommand("models");
+        listed = match key {
+            Some(key) => listed.env("OPENAI_API_KEY", key),
+            None => listed,
+        };
+        let listed = listed.arg("--json").run();
+        assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
+        let report: serde_json::Value =
+            serde_json::from_str(&listed.stdout).expect("the models report is JSON");
+        report["sources"]
+            .as_array()
+            .expect("the report carries a source table")
+            .iter()
+            .find(|row| row["provider"] == "openai")
+            .expect("the openai row is listed at all")
+            .clone()
+    };
+
+    let keyed = availability(Some("sk-test"));
     assert_eq!(
-        openai["availability"]["status"], "unavailable",
-        "the openai row is offered despite the outstanding gate: {openai}"
+        keyed["availability"]["status"], "available",
+        "the openai row is withheld from an operator holding its key: {keyed}"
     );
+
+    let bare = availability(None);
     assert_eq!(
-        openai["availability"]["cause"], "mapping_unavailable",
-        "the refusal is filed under the wrong cause: {openai}"
-    );
-    let message = openai["availability"]["message"]
-        .as_str()
-        .expect("an unavailable row states why");
-    assert!(
-        message.contains("openai-responses"),
-        "the message does not name the mapping awaiting evidence: {message}"
+        bare["availability"]["cause"], "missing_credential",
+        "a row lacking only a key reports something other than the key: {bare}"
     );
 }
 
-/// The same row refuses a run, before a socket and before a credential.
+/// Selecting the row gets as far as the transport, which is the whole claim.
 ///
-/// The listing above and this refusal are the same function
-/// (`ego_ai::catalogue::live_promotion_refusal`) on purpose: a row that reads
-/// as unavailable in one surface and runs in another is worse than either.
-/// `Ego::nowhere` points every provider at a refused port, so "nothing was
-/// sent" is enforced by the harness rather than asserted about it.
+/// The listing above and this run are the same decision on two surfaces, and
+/// they used to be the same *refusal*. What proves the gate is gone is not
+/// that the run succeeds — `Ego::nowhere` points every provider at a refused
+/// port, so it cannot — but **where** it fails: at a socket rather than at a
+/// selection. A run stopped by the promotion gate never reached one, and said
+/// so by naming `EGO_SMOKE`.
+///
+/// The exit code is deliberately asserted as "not usage". `2` is the code
+/// `CLI.md` §4.3 reserves for an invocation that must change, and a model this
+/// build offers is not one.
 #[test]
-fn selecting_the_openai_row_refuses_by_name_rather_than_sending_anything() {
+fn selecting_the_openai_row_reaches_the_transport_rather_than_a_gate() {
     let refused = Ego::nowhere()
         .env("OPENAI_API_KEY", "sk-test")
         .args([
@@ -417,15 +426,15 @@ fn selecting_the_openai_row_refuses_by_name_rather_than_sending_anything() {
             "Ask",
         ])
         .run();
-    assert_eq!(refused.code, Some(2), "stdout: {}", refused.stdout);
-    assert!(
-        refused.stderr.contains("openai-responses"),
-        "the refusal does not name the mapping: {}",
+    assert_ne!(
+        refused.code,
+        Some(2),
+        "a row this build offers was refused as a usage error: {}",
         refused.stderr
     );
     assert!(
-        refused.stderr.contains("EGO_SMOKE"),
-        "the refusal does not say how the evidence is made: {}",
+        !refused.stderr.contains("EGO_SMOKE"),
+        "the run was stopped by the promotion gate: {}",
         refused.stderr
     );
 }

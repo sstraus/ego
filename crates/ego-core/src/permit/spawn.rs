@@ -418,13 +418,62 @@ pub enum Confinement {
     Off,
 }
 
-impl fmt::Display for Confinement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+impl Confinement {
+    /// Every confinement, strongest first — the order a picker renders.
+    pub const ALL: [Self; 3] = [Self::Ro, Self::Workspace, Self::Off];
+
+    /// The one spelling: what `--sandbox` takes, what the config key holds,
+    /// and what a host sends as a value id. `FromStr` reads these back.
+    pub const fn as_str(self) -> &'static str {
+        match self {
             Self::Ro => "ro",
             Self::Workspace => "workspace",
             Self::Off => "off",
-        })
+        }
+    }
+
+    /// How much this confines, for comparison only. Never stored, never sent.
+    ///
+    /// Written out rather than derived from `Ord` on the declaration order:
+    /// the variants are ordered for reading, and a derive would let somebody
+    /// reverse a security predicate by moving a line.
+    const fn strength(self) -> u8 {
+        match self {
+            Self::Ro => 2,
+            Self::Workspace => 1,
+            Self::Off => 0,
+        }
+    }
+
+    /// The guarantees a process backend must have demonstrated to enforce
+    /// this confinement.
+    ///
+    /// Lifted out of [`RunConfinement::new`] rather than copied beside it: an
+    /// offer computed from one table and a run checked against another is two
+    /// tables that can disagree, and the disagreement would be a session
+    /// offered a confinement its own spawn then refuses. Offline networking is
+    /// deliberately not here — it is a separate axis the run owns.
+    pub const fn required_caps(self) -> ExecCaps {
+        match self {
+            Self::Ro => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED),
+            Self::Workspace => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+            Self::Off => ExecCaps::empty(),
+        }
+    }
+
+    /// Whether this confines at least as much as `ceiling` does.
+    ///
+    /// The only question a ceiling is ever asked
+    /// (`docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`).
+    /// `ro` is within every ceiling; `off` is within `off` alone.
+    pub const fn within(self, ceiling: Self) -> bool {
+        self.strength() >= ceiling.strength()
+    }
+}
+
+impl fmt::Display for Confinement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -832,11 +881,7 @@ impl RunConfinement {
         if !workspace.as_path().is_absolute() {
             return Err(RunConfinementError { workspace });
         }
-        let filesystem = match level {
-            Confinement::Ro => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED),
-            Confinement::Workspace => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
-            Confinement::Off => ExecCaps::empty(),
-        };
+        let filesystem = level.required_caps();
         let required = if offline {
             filesystem.union(ExecCaps::NO_IP_NETWORK)
         } else {
@@ -918,6 +963,12 @@ pub trait ProcessExecutor: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessError {
     MissingCapabilities(MissingExecCaps),
+    /// The reconstructed backend no longer matches the facts admitted for the run.
+    /// No user effects have been constructed when this error is returned.
+    ConfinementChanged {
+        admitted: Box<ExecObservation>,
+        observed: Box<ExecObservation>,
+    },
     Backend(String),
     Invariant(String),
     Launch {
@@ -947,6 +998,18 @@ impl fmt::Display for ProcessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingCapabilities(missing) => write!(f, "{missing}"),
+            Self::ConfinementChanged { admitted, observed } => write!(
+                f,
+                "confinement changed before execution: admitted backend `{}` (revision {}) with capabilities [{}] and policy {}; observed backend `{}` (revision {}) with capabilities [{}] and policy {}; the session must be reinitialized",
+                admitted.backend().name(),
+                admitted.backend().revision(),
+                admitted.capabilities(),
+                admitted.policy_digest(),
+                observed.backend().name(),
+                observed.backend().revision(),
+                observed.capabilities(),
+                observed.policy_digest(),
+            ),
             Self::Backend(reason) => write!(f, "process backend failed: {reason}"),
             Self::Invariant(reason) => write!(f, "process invariant failed: {reason}"),
             Self::Launch { executable, reason } => {
@@ -985,5 +1048,60 @@ impl ProcessError {
                 &diagnostic,
             )));
         result
+    }
+}
+
+#[cfg(test)]
+mod confinement {
+    use super::Confinement;
+
+    /// The ceiling predicate, stated as the table it is.
+    ///
+    /// Written as every pair rather than as a few interesting ones: the whole
+    /// point of `within` is that it decides a security question, and a
+    /// spot-check would pass just as happily with the comparison inverted.
+    #[test]
+    fn a_confinement_is_within_a_ceiling_exactly_when_it_confines_at_least_as_much() {
+        use Confinement::{Off, Ro, Workspace};
+        let expected = [
+            ((Ro, Ro), true),
+            ((Ro, Workspace), true),
+            ((Ro, Off), true),
+            ((Workspace, Ro), false),
+            ((Workspace, Workspace), true),
+            ((Workspace, Off), true),
+            ((Off, Ro), false),
+            ((Off, Workspace), false),
+            ((Off, Off), true),
+        ];
+        for ((value, ceiling), within) in expected {
+            assert_eq!(
+                value.within(ceiling),
+                within,
+                "`{value}` within a `{ceiling}` ceiling"
+            );
+        }
+    }
+
+    /// `ALL` is the picker's whole offer, so a variant missing from it is a
+    /// confinement nobody can select rather than a cosmetic omission.
+    #[test]
+    fn every_confinement_is_offered_and_the_strongest_comes_first() {
+        // Named one by one, because iterating `ALL` to check `ALL` proves
+        // nothing: a variant dropped from the offer would drop out of the
+        // loop with it.
+        for confinement in [Confinement::Ro, Confinement::Workspace, Confinement::Off] {
+            assert!(
+                Confinement::ALL.contains(&confinement),
+                "`{confinement}` exists and is offered to nobody"
+            );
+        }
+        assert!(
+            Confinement::ALL
+                .windows(2)
+                .all(|pair| pair[0].within(pair[1]) && !pair[1].within(pair[0])),
+            "the offer is not ordered strongest first: {:?}",
+            Confinement::ALL
+        );
     }
 }

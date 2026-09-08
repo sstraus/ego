@@ -194,7 +194,7 @@ fn try_run_ports_with_limits_and_deadline(
         run_deadline,
         Arc::new(resolver),
     );
-    let (ports, _) = runtime.block_on(RunEffectPorts::for_run(config))?;
+    let (ports, _, _) = runtime.block_on(RunEffectPorts::for_run(config))?;
     Ok(RunFixture {
         runtime,
         _evidence_root: evidence_root,
@@ -335,6 +335,9 @@ impl SocketServer {
             loop {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted stream blocking mode");
                         let capture = handler(stream);
                         captures_for_thread.lock().expect("captures").push(capture);
                     }

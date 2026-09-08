@@ -34,6 +34,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('hooks', 'hooks', [CompletionResultType]::ParameterValue, 'Inspect the admitted system and user hook catalogue.')
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Report a read-only redacted health snapshot of this installation.')
             [CompletionResult]::new('acp', 'acp', [CompletionResultType]::ParameterValue, 'Serve the Agent Client Protocol on stdio.')
+            [CompletionResult]::new('a2a', 'a2a', [CompletionResultType]::ParameterValue, 'Serve the Agent2Agent protocol on a local or loopback endpoint.')
             [CompletionResult]::new('auth', 'auth', [CompletionResultType]::ParameterValue, 'Manage subscription credentials.')
             [CompletionResult]::new('mcp', 'mcp', [CompletionResultType]::ParameterValue, 'Manage configured MCP servers.')
             [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Manage stored user configuration.')
@@ -209,8 +210,18 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         'ego;acp' {
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
+            [CompletionResult]::new('--sandbox', '--sandbox', [CompletionResultType]::ParameterName, 'The weakest confinement a session may select: ro|workspace|off')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;a2a' {
+            [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
+            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
+            [CompletionResult]::new('--listen', '--listen', [CompletionResultType]::ParameterName, 'Where to serve: a socket path, or an address such as `127.0.0.1:8080`')
+            [CompletionResult]::new('--allow-public-bind', '--allow-public-bind', [CompletionResultType]::ParameterName, 'Serve on an address reachable from outside this machine')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             break
         }
         'ego;auth' {

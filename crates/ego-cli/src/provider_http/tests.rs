@@ -166,7 +166,7 @@ async fn run_ports(resolver: RecordingResolver) -> PortFixture {
         None,
         Arc::new(resolver),
     );
-    let (ports, _) = RunEffectPorts::for_run(config).await.expect("effect ports");
+    let (ports, _, _) = RunEffectPorts::for_run(config).await.expect("effect ports");
     PortFixture {
         ports: Arc::new(ports),
         _evidence_root: evidence_root,

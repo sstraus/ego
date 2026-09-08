@@ -7,11 +7,13 @@ use std::time::Duration;
 use agent_client_protocol::{ConnectTo, Stdio};
 use agent_client_protocol_schema::v1;
 use ego_acp::serve::{
-    AcpRunBindingsBuilder, McpSessionAdmissionError, McpSessionAdmitter, SessionMcpAdmission,
+    AcpRunBindingsBuilder, McpSessionAdmissionError, McpSessionAdmitter,
+    SessionConfinementAdmission, SessionMcpAdmission,
 };
 use ego_core::config::{
     McpConfigProvenance, McpEnvironmentName, McpHttpAuth, McpServerConfig, McpServerName, Source,
 };
+use ego_core::control::SessionControls;
 use ego_core::credentials::SecretMaterial;
 use ego_core::event::domain::CancelCause;
 use ego_core::evidence::EvidenceAdmissionService;
@@ -34,6 +36,8 @@ use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
 use ego_tools::store::OsIo;
 use futures::future::BoxFuture;
 
+use crate::acp_confinement::CliSessionConfinementAdmission;
+use crate::acp_controls::AcpSessionControls;
 use crate::cli::AcpArgs;
 use crate::host_ports::{CanonicalRoots, TokioExecutionSpawner, UuidIds};
 use crate::provider_http::{CommandHttpScope, ProviderHttpAdapter};
@@ -322,9 +326,10 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     // scope this server already opened rather than a second egress: an `ego
     // acp` invocation is online by construction, so this adds no reach it did
     // not already have.
-    let controls: Option<Arc<dyn ego_core::control::SessionControls>> =
+    let (controls, ceiling) =
         match run::protocol_effective(root.as_path(), args.session_dir.clone()) {
             Ok(effective) => {
+                crate::config::report_discarded(root.as_path(), &effective, &crate::output::Stderr);
                 let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(mcp_effects.ports())))
                     as Arc<dyn ego_ai::http::Http>;
                 let catalogue = match crate::models::build_catalogue_snapshot(
@@ -346,15 +351,35 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                         None
                     }
                 };
-                Some(Arc::new(crate::acp_controls::AcpSessionControls::new(
-                    &effective, catalogue,
-                )))
+                // The flag wins over the configuration, and the configuration
+                // over the default. A host that was started at `--sandbox ro`
+                // is capped there whatever any layer says, which is the whole
+                // reason the flag exists: the layer an operator would have
+                // reached for is the one an untrusted headless resolution
+                // discards.
+                let ceiling = args.sandbox.or(effective.sandbox).unwrap_or_default();
+                (
+                    Arc::new(AcpSessionControls::new(&effective, ceiling, catalogue)),
+                    ceiling,
+                )
             }
             Err(error) => {
-                tracing::warn!(%error, "the ACP operator seat could not be seeded");
-                None
+                return RunTermination::UsageError {
+                    message: format!(
+                        "the ACP confinement configuration could not be resolved: {error}"
+                    ),
+                };
             }
         };
+
+    let control_port: Arc<dyn SessionControls> = controls.clone();
+    let confinement_port: Arc<dyn SessionConfinementAdmission> =
+        Arc::new(CliSessionConfinementAdmission::new(
+            Arc::clone(&store),
+            controls,
+            ceiling,
+            mcp_cancel.clone(),
+        ));
 
     let agent = ego_acp::serve::durable_agent_with_compaction(
         controller,
@@ -362,10 +387,13 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         Arc::new(CanonicalRoots { base: root }),
         Arc::new(TokioExecutionSpawner),
         ids,
-        Arc::new(AcpRunBindingsBuilder::with_controls(controls.clone())),
+        Arc::new(AcpRunBindingsBuilder::with_controls(Some(Arc::clone(
+            &control_port,
+        )))),
         mcp_admitter,
         compaction,
-        controls,
+        Some(control_port),
+        Some(confinement_port),
     );
     let outcome = agent.connect_to(Stdio::new()).await;
     mcp_cancel.cancel(CancelCause::Host);

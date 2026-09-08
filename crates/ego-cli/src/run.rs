@@ -1572,6 +1572,7 @@ fn finish_rooted_settings(
     profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Settings, UsageError> {
+    config::report_discarded(&cwd, &effective, diagnostics);
     let started = std::time::Instant::now();
     let timeout = match args.timeout.as_deref() {
         Some(spec) => Some(deadline(spec)?),
@@ -1787,8 +1788,12 @@ struct Chosen {
 /// [`execute`], because foreign continuation recovery needs the replayed state.
 /// The invocation-confined MCP registry reconciles before the writer admits
 /// the run context.
-fn chosen(args: &Args, root: &Path) -> Result<Chosen, UsageError> {
-    let store_root = rooted_path(root, session::store_root(args.session_dir.as_ref())?);
+fn chosen(args: &Args, root: &Path, store_override: Option<&Path>) -> Result<Chosen, UsageError> {
+    let store_root = match store_override {
+        Some(path) => path.to_path_buf(),
+        None => session::store_root(args.session_dir.as_ref())?,
+    };
+    let store_root = rooted_path(root, store_root);
     // The same `root` that derives a named session's id below, so "the session
     // called build in this workspace" and "the sessions belonging to this
     // workspace" cannot disagree about which workspace that is.
@@ -2030,7 +2035,7 @@ async fn generation_preflight_inner(
                 message: format!("could not open the sandbox proof store: {error}"),
             },
         )?;
-    let (proof_ports, proof_observation) =
+    let (proof_ports, proof_observation, _) =
         effect_scope(confinement, &proof_evidence, cancel, run_deadline).await?;
     let http = Arc::new(ProviderHttpAdapter::new(proof_ports)) as Arc<dyn ego_ai::http::Http>;
 
@@ -2134,12 +2139,20 @@ async fn effect_scope(
     evidence: &SessionEvidenceStore,
     cancel: &CancelToken,
     run_deadline: Option<std::time::Instant>,
-) -> Result<(Arc<RunEffectPorts>, ExecObservation), RunTermination> {
+) -> Result<
+    (
+        Arc<RunEffectPorts>,
+        ExecObservation,
+        Option<ego_core::store::evidence::EvidenceRef>,
+    ),
+    RunTermination,
+> {
     run_effect_ports(
         confinement.clone(),
         evidence.clone(),
         cancel.clone(),
         run_deadline,
+        None,
     )
     .await
     .map_err(|error| process_error_termination(error, confinement, cancel))
@@ -2993,6 +3006,9 @@ async fn drive_headless_turn(
     cwd: &Path,
     confinement: &RunConfinement,
     run_deadline: Option<std::time::Instant>,
+    ports: Arc<RunEffectPorts>,
+    observation: ExecObservation,
+    probe_evidence: Option<ego_core::store::evidence::EvidenceRef>,
     elicitor: Option<Arc<dyn Elicitor>>,
     judge_available: bool,
     attachment_specs: &[String],
@@ -3003,8 +3019,6 @@ async fn drive_headless_turn(
         HeadlessInput::Answered { policy, .. } => Some(Arc::clone(policy)),
         HeadlessInput::Prompt(_) | HeadlessInput::Resumed(_) => None,
     };
-    let (ports, observation) =
-        effect_scope(confinement, active.evidence(), cancel, run_deadline).await?;
     let images = acquire_attachments(
         Attachments {
             inline: match &input {
@@ -3155,7 +3169,7 @@ async fn drive_headless_turn(
     } else {
         loop_
     }
-    .with_execution_observation(observation);
+    .with_execution_observation(observation, probe_evidence);
     let (termination, result) = match input {
         HeadlessInput::Prompt(prompt) => {
             turns
@@ -3230,6 +3244,8 @@ pub struct CliPrepared {
     root: PathBuf,
     cwd: PathBuf,
     confinement: RunConfinement,
+    /// The exact ACP session fact to compare during effect construction.
+    admitted_sandbox_observation: Option<ExecObservation>,
     effective: Effective,
     system: Option<SystemPrompt>,
     registry: Vec<RegisteredTool>,
@@ -3275,6 +3291,15 @@ fn apply_seat(
     if let Some(mode) = state.mode.chosen {
         effective.mode = Some(mode);
     }
+    // `state.sandbox` is deliberately not applied here, and the omission is
+    // the decision rather than an oversight. This runs at a generation
+    // boundary, by which point `RunConfinement` has been built and the MCP
+    // transports, the effect scope and the child authority ceiling have all
+    // been derived from it. Writing `effective.sandbox` now would move
+    // nothing and read as though it had. A host's pick travels instead as a
+    // `RunSelections` sandbox, which lands before any of that exists, and
+    // `session/set_config_option` refuses the pick outright once a run has
+    // started.
 }
 
 impl CliPrepared {
@@ -3304,6 +3329,13 @@ impl CliPrepared {
         }
         if let Some(mode) = request.selections.mode() {
             args.mode = Some(mode);
+        }
+        // Before `rooted_settings` below, which is the point: the confinement
+        // this becomes is what the MCP admission, the effect scope and the
+        // child authority ceiling are all derived from, and none of them can
+        // be re-decided once they exist.
+        if let Some(sandbox) = request.selections.sandbox() {
+            args.sandbox = Some(sandbox);
         }
         if let Some(budget) = request.selections.budget() {
             args.budget = Some(run_budget_spec(budget)?);
@@ -3381,6 +3413,7 @@ impl CliPrepared {
                 root,
                 cwd,
                 confinement,
+                admitted_sandbox_observation: request.selections.sandbox_observation().cloned(),
                 effective,
                 system,
                 registry,
@@ -3433,7 +3466,30 @@ impl CliPrepared {
             session::open(self.store.as_ref(), &self.session_id, &clock)
                 .map_err(|error| RunExecutorError::new(error.to_string()))?,
         ));
-        if let Some(note_text) = opened.repair_note() {
+        let repair_note = opened.repair_note();
+        let opening = opened.state();
+        let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
+            .map_err(|error| RunExecutorError::new(error.to_string()))?;
+        let (ports, observation, probe_evidence) = match run_effect_ports(
+            self.confinement.clone(),
+            active.evidence().clone(),
+            cancel.clone(),
+            self.run_deadline,
+            self.admitted_sandbox_observation.as_ref(),
+        )
+        .await
+        {
+            Ok(effects) => effects,
+            Err(error @ ProcessError::ConfinementChanged { .. }) => {
+                return Ok(RunSettlement::Interrupted {
+                    diagnostic: Some(error.to_string()),
+                });
+            }
+            Err(error) => {
+                return settlement(process_error_termination(error, &self.confinement, cancel));
+            }
+        };
+        if let Some(note_text) = repair_note {
             Stderr.note(&note_text);
         }
         let mut no_status = None;
@@ -3459,11 +3515,8 @@ impl CliPrepared {
         )
         .await
         .map_err(run_executor_error)?;
-        let opening = opened.state();
         drop(proof_directory);
         drop(proof_evidence);
-        let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
-            .map_err(|error| RunExecutorError::new(error.to_string()))?;
         let mcp_errors = bindings.mcp_errors().to_vec();
         let admitted_tools = bindings.admitted_tools();
         let mcp_runtime = bindings.mcp_runtime();
@@ -3552,6 +3605,9 @@ impl CliPrepared {
             &self.cwd,
             &self.confinement,
             self.run_deadline,
+            ports,
+            observation,
+            probe_evidence,
             bindings.elicitor,
             judge_available,
             &[],
@@ -3601,6 +3657,7 @@ enum InteractiveTurnInput {
 struct ExecutionPreflight {
     settings: Settings,
     ci: Option<CiInvocation>,
+    chosen: Chosen,
     refresh: ego_mcp::McpRegistryRefresh,
     ready: Option<ExecutionReady>,
 }
@@ -3623,6 +3680,108 @@ struct GenerationReady {
 
 /// Opaque result of the single direct-CI preflight pass.
 pub struct DirectPreflight(ExecutionPreflight);
+
+async fn select_startup_model(
+    args: &Args,
+    settings: &mut Settings,
+    driver: &Driver<'_>,
+    cancel: &CancelToken,
+    diagnostics: &dyn Diagnostics,
+) -> Result<(), RunTermination> {
+    if args.model.is_some() || settings.effective.model.is_some() {
+        return Ok(());
+    }
+    let home = config::ego_home();
+    let observed = match home.as_ref() {
+        Some(home) => crate::auth::AuthStore::new(home)
+            .observed_provider_ids()
+            .map_err(|error| RunTermination::UsageError {
+                message: error.to_string(),
+            })?,
+        None => Default::default(),
+    };
+    let scope = crate::provider_http::CommandHttpScope::confined(
+        settings.confinement.clone(),
+        cancel.clone(),
+        settings.run_deadline,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::provider_http::McpProcessScopeError::Effects(error) => {
+            process_error_termination(error, &settings.confinement, cancel)
+        }
+        crate::provider_http::McpProcessScopeError::Setup(message) => {
+            RunTermination::Failed { message }
+        }
+    })?;
+    let (snapshot, defaults) = models::build_startup_catalogue_snapshot(
+        scope.http(),
+        &crate::onboarding::ProcessEnvironment,
+        &observed,
+    )
+    .await?;
+    let usable = snapshot
+        .models
+        .iter()
+        .filter(|entry| entry.availability == ego_ai::catalogue::ModelAvailability::Available)
+        .map(|entry| entry.slug.provider.clone())
+        .collect();
+    let seat = match driver {
+        Driver::Interactive { seat, .. } if seat.has_human() => Some(seat),
+        Driver::Once | Driver::Interactive { .. } => None,
+    };
+    let decision = crate::onboarding::decide_missing_model(
+        Arc::new(snapshot),
+        &defaults,
+        &usable,
+        settings.effective.thinking.unwrap_or(ThinkingLevel::Off),
+        seat.is_some(),
+    );
+    let (request, automatic) = match decision {
+        crate::onboarding::StartupDecision::Headless(error) => {
+            return Err(RunTermination::UsageError {
+                message: error.to_string(),
+            });
+        }
+        crate::onboarding::StartupDecision::AutoSelect(request) => (request, true),
+        crate::onboarding::StartupDecision::Pick(snapshot, notice) => {
+            let picker = Arc::new(Mutex::new(ModelPicker::for_startup(snapshot)));
+            match seat
+                .expect("an interactive decision has a human seat")
+                .read_startup_model(picker, notice.map(|error| error.to_string()))
+            {
+                crate::model_picker::PickerOutcome::ModelSwitch(request) => (request, false),
+                crate::model_picker::PickerOutcome::Cancelled => {
+                    cancel.cancel(CancelCause::User);
+                    return Err(cancelled_termination(cancel));
+                }
+            }
+        }
+    };
+    let home = home.ok_or_else(|| RunTermination::UsageError {
+        message: "the startup model selection needs EGO_HOME or HOME for persistent configuration"
+            .to_owned(),
+    })?;
+    let config_store = OsUserConfigStore::new(Arc::new(OsIo), home.join("config.toml"));
+    let publication = crate::onboarding::persist_startup_selection(&config_store, &request)
+        .map_err(|error| RunTermination::UsageError {
+            message: format!("could not persist the startup model configuration: {error}"),
+        })?;
+    if let UserConfigPublication::PublishedDurabilityUncertain { diagnostic } = publication {
+        diagnostics.note(&format!(
+            "model defaults are authoritative with a durability warning: {diagnostic}"
+        ));
+    }
+    if automatic {
+        diagnostics.note(&format!(
+            "selected {} as the default model and saved it to user configuration",
+            request.target().0
+        ));
+    }
+    settings.effective.model = Some(request.target());
+    settings.effective.thinking = Some(request.thinking());
+    Ok(())
+}
 
 /// Complete direct-CI preflight before the process opens its MCP journals or
 /// any durable session. Resume answers retain only settings and MCP selection
@@ -3650,13 +3809,22 @@ async fn execution_preflight(
         message: err.to_string(),
     };
     let home = config::ego_home();
-    let settings = settings(
+    let mut settings = settings(
         args,
         |root| run_trust(args, driver, root, home.as_deref(), diagnostics),
         diagnostics,
     )
     .map_err(usage)?;
     let ci = ci_invocation(args, &settings, driver).map_err(usage)?;
+    let chosen = chosen(
+        args,
+        &settings.root,
+        ci.as_ref().map(|ci| ci.session_root.as_path()),
+    )
+    .map_err(usage)?;
+    if args.answers.is_empty() {
+        select_startup_model(args, &mut settings, driver, cancel, diagnostics).await?;
+    }
     let selected_mcp =
         config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
     admit_mcp_transports(&settings.confinement, &selected_mcp).map_err(usage)?;
@@ -3673,6 +3841,7 @@ async fn execution_preflight(
         return Ok(ExecutionPreflight {
             settings,
             ci,
+            chosen,
             refresh,
             ready: None,
         });
@@ -3718,6 +3887,7 @@ async fn execution_preflight(
     Ok(ExecutionPreflight {
         settings,
         ci,
+        chosen,
         refresh,
         ready: Some(ExecutionReady {
             system,
@@ -3765,8 +3935,8 @@ fn admit_mcp_transports(
 /// Everything before the first turn.
 ///
 /// What is left here after the four steps above is the *order* they happen in,
-/// which is the part that is genuinely this function's: settings, explicit CI
-/// posture and MCP selection are established before a session is chosen. A
+/// which is the part that is genuinely this function's: settings and explicit CI
+/// posture precede the read-only session choice, then onboarding and MCP selection. A
 /// direct CI token without answers already contains material and generation
 /// readiness. Every prompt or resume reconciles the invocation-confined MCP
 /// registry before admitting its run context. A foreign resume additionally
@@ -3789,16 +3959,17 @@ async fn execute<S: EventSink>(
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
-    let (settings, ci, refresh, ready, auto_preflight) = match preflight {
+    let (settings, ci, refresh, ready, auto_preflight, chosen_session) = match preflight {
         Some(ExecutionPreflight {
             settings,
             ci,
             refresh,
             ready,
-        }) => (settings, ci, refresh, ready, None),
+            chosen,
+        }) => (settings, ci, refresh, ready, None, chosen),
         None => {
             let home = config::ego_home();
-            let settings = settings(
+            let mut settings = settings(
                 &args,
                 |root| run_trust(&args, &driver, root, home.as_deref(), diagnostics),
                 diagnostics,
@@ -3814,6 +3985,8 @@ async fn execute<S: EventSink>(
                     message: "direct CI execution is missing its preflight token".to_owned(),
                 });
             }
+            let chosen_session = chosen(&args, &settings.root, None).map_err(usage)?;
+            select_startup_model(&args, &mut settings, &driver, &cancel, diagnostics).await?;
             let selected_mcp =
                 config::selected_mcp(&args, &settings.effective, &settings.cwd).map_err(usage)?;
             admit_mcp_transports(&settings.confinement, &selected_mcp).map_err(usage)?;
@@ -3829,9 +4002,31 @@ async fn execute<S: EventSink>(
             if settings.effective.mode.unwrap_or(Mode::Default) == Mode::Auto {
                 auto_preflight.validate_startup()?;
             }
-            (settings, ci, refresh, None, Some(auto_preflight))
+            (
+                settings,
+                ci,
+                refresh,
+                None,
+                Some(auto_preflight),
+                chosen_session,
+            )
         }
     };
+    if !args.quiet
+        && matches!(&driver, Driver::Interactive { seat, .. } if seat.has_human())
+        && let Some(model) = args.model.as_deref().or_else(|| {
+            settings
+                .effective
+                .model
+                .as_ref()
+                .map(|model| model.0.as_str())
+        })
+    {
+        diagnostics.note(&format!(
+            "ego {} · model {model} · /help for commands · Alt-P for the model picker",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
     let mcp_scope = crate::provider_http::McpProcessScope::for_run(
         settings.confinement.clone(),
         cancel.clone(),
@@ -3857,7 +4052,7 @@ async fn execute<S: EventSink>(
     let Chosen {
         store: jsonl_store,
         id: session_id,
-    } = chosen(&args, &settings.root).map_err(usage)?;
+    } = chosen_session;
     let jsonl_store = Arc::new(jsonl_store);
     let clock = SystemClock;
     let direct_ci_ready = ready.is_some();
@@ -4284,7 +4479,7 @@ async fn execute<S: EventSink>(
     // A macro and not a closure: the loop borrows from this function's locals,
     // and a closure cannot name the lifetimes of a `TurnLoop<'_, '_>` it returns.
     macro_rules! build {
-        ($active:expr, $cancel:expr, $ports:expr, $observation:expr, $hooks:expr, $journal:expr, $skill_owner:expr) => {{
+        ($active:expr, $cancel:expr, $ports:expr, $observation:expr, $probe_evidence:expr, $hooks:expr, $journal:expr, $skill_owner:expr) => {{
             let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&$ports)))
                 as Arc<dyn ego_ai::http::Http>;
             let runtime = GenerationRuntime {
@@ -4356,7 +4551,7 @@ async fn execute<S: EventSink>(
             } else {
                 loop_
             };
-            loop_.with_execution_observation($observation)
+            loop_.with_execution_observation($observation, $probe_evidence)
         }};
     }
 
@@ -4434,6 +4629,8 @@ async fn execute<S: EventSink>(
                 },
                 None => HeadlessInput::Prompt(&RunPrompt::from(text.clone())),
             };
+            let (ports, observation, probe_evidence) =
+                effect_scope(&confinement, active.evidence(), &cancel, run_deadline).await?;
             let driven = drive_headless_turn(
                 &mut active,
                 opening,
@@ -4461,6 +4658,9 @@ async fn execute<S: EventSink>(
                 &cwd,
                 &confinement,
                 run_deadline,
+                ports,
+                observation,
+                probe_evidence,
                 elicitor,
                 judge_available,
                 &args.attach,
@@ -4562,7 +4762,7 @@ async fn execute<S: EventSink>(
             // replaceable ActiveSession is mutated or replaced.
             'sessions: loop {
                 let (transition, source_state, session_end) = {
-                    let (session_hook_ports, _) =
+                    let (session_hook_ports, _, _) =
                         effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
                             .await?;
                     let recovered_epoch_policy = match resumed.as_ref() {
@@ -5403,14 +5603,15 @@ async fn execute<S: EventSink>(
                                                 .iter()
                                                 .map(RegisteredTool::descriptor)
                                                 .collect();
-                                            let (ports, observation) = effect_scope(
-                                                &confinement,
-                                                active.evidence(),
-                                                &compaction_cancel,
-                                                run_deadline,
-                                            )
-                                            .await
-                                            .map_err(compaction_termination)?;
+                                            let (ports, observation, probe_evidence) =
+                                                effect_scope(
+                                                    &confinement,
+                                                    active.evidence(),
+                                                    &compaction_cancel,
+                                                    run_deadline,
+                                                )
+                                                .await
+                                                .map_err(compaction_termination)?;
                                             let http = Arc::new(ProviderHttpAdapter::new(
                                                 Arc::clone(&ports),
                                             ))
@@ -5492,7 +5693,10 @@ async fn execute<S: EventSink>(
                                                 });
                                             }
                                             let mut compaction = compaction
-                                                .with_execution_observation(observation)
+                                                .with_execution_observation(
+                                                    observation,
+                                                    probe_evidence,
+                                                )
                                                 .with_interactive_control(&mut control);
                                             let prepared = compaction
                                                 .prepare_compaction(
@@ -5612,7 +5816,7 @@ async fn execute<S: EventSink>(
                             // Per turn, for the reason `build` documents.
                             seat.busy();
                             let turn_cancel = CancelToken::new();
-                            let (ports, observation) = effect_scope(
+                            let (ports, observation, probe_evidence) = effect_scope(
                                 &confinement,
                                 active.evidence(),
                                 &turn_cancel,
@@ -5649,6 +5853,7 @@ async fn execute<S: EventSink>(
                                 &turn_cancel,
                                 ports,
                                 observation,
+                                probe_evidence,
                                 session_hooks,
                                 session_journal,
                                 skill_owner
@@ -6661,6 +6866,14 @@ mod tests {
             true
         }
 
+        fn read_startup_model(
+            &self,
+            _picker: Arc<Mutex<ModelPicker>>,
+            _notice: Option<String>,
+        ) -> crate::model_picker::PickerOutcome {
+            panic!("compaction fixture must not ask for startup model selection");
+        }
+
         fn trust(&self, _workspace: &Path) -> Trust {
             Trust::Trusted
         }
@@ -6715,6 +6928,14 @@ mod tests {
     impl InteractiveSeat for TrustingSeat {
         fn has_human(&self) -> bool {
             true
+        }
+
+        fn read_startup_model(
+            &self,
+            _picker: Arc<Mutex<ModelPicker>>,
+            _notice: Option<String>,
+        ) -> crate::model_picker::PickerOutcome {
+            panic!("trust fixture must not ask for startup model selection");
         }
 
         fn trust(&self, _workspace: &Path) -> Trust {
@@ -7611,6 +7832,11 @@ mod tests {
                 chosen: Some(Mode::Plan),
                 available: Vec::new(),
             },
+            sandbox: ControlSelect {
+                current: ego_core::permit::Confinement::Workspace,
+                chosen: None,
+                available: Vec::new(),
+            },
         };
 
         apply_seat(&state, &mut effective, &mut slug);
@@ -7646,6 +7872,11 @@ mod tests {
             },
             mode: ControlSelect {
                 current: Mode::Default,
+                chosen: None,
+                available: Vec::new(),
+            },
+            sandbox: ControlSelect {
+                current: ego_core::permit::Confinement::Workspace,
                 chosen: None,
                 available: Vec::new(),
             },

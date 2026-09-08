@@ -1,9 +1,11 @@
 # nothing-to-trust: first launch
+εgo: ego 0.1.0 · model ollama/qwen3 · /help for commands · Alt-P for the model picker
 hello
 a launch transcript
 εgo: 0 unsent drafts, 0 accepted inputs
 
 # nothing-to-trust: next launch
+εgo: ego 0.1.0 · model ollama/qwen3 · /help for commands · Alt-P for the model picker
 hello
 a launch transcript
 εgo: 0 unsent drafts, 0 accepted inputs

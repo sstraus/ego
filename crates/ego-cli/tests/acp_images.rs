@@ -16,6 +16,53 @@ mod support;
 
 use support::{Ego, Plan, Stub, text};
 
+fn persisted_probe(ego: &Ego, answered: &serde_json::Value) -> String {
+    let Some(message) = answered["error"]["message"].as_str() else {
+        return "probe transcript reference is absent from the refusal".to_owned();
+    };
+    let Some((_, suffix)) = message.split_once("stored as run evidence ") else {
+        return "probe transcript reference is absent from the refusal".to_owned();
+    };
+    let hash = suffix.chars().take(64).collect::<String>();
+    if hash.len() != 64 || !hash.chars().all(|character| character.is_ascii_hexdigit()) {
+        return "probe transcript reference is invalid in the refusal".to_owned();
+    }
+    let sessions = ego.home_path().join("sessions");
+    let Ok(entries) = std::fs::read_dir(&sessions) else {
+        return format!("sessions directory absent: {}", sessions.display());
+    };
+    for entry in entries.flatten() {
+        let Ok(session) = entry.file_name().to_string_lossy().parse() else {
+            continue;
+        };
+        let blob = entry.path().join("evidence").join(format!("{hash}.blob"));
+        let Ok(bytes) = std::fs::metadata(&blob).map(|meta| meta.len()) else {
+            continue;
+        };
+        let Ok(id) = ego_core::store::blob::BlobId::parse(hash.to_owned()) else {
+            return format!("invalid probe hash {hash}");
+        };
+        let reference = ego_core::store::blob::BlobRef::new(id, bytes);
+        let Ok(store) = ego_tools::store::SessionEvidenceStore::open(&sessions, session, 64 * 1024)
+        else {
+            return format!("could not open evidence store for {hash}");
+        };
+        let Ok(bytes) = ego_core::store::blob::BlobStore::read(&store, &reference) else {
+            return format!("could not read probe transcript {hash}");
+        };
+        let mut transcript = String::from_utf8_lossy(&bytes).into_owned();
+        if transcript.len() > 64 * 1024 {
+            transcript.truncate(64 * 1024);
+            transcript.push_str("\n[probe transcript truncated]");
+        }
+        return format!("probe transcript {hash}:\n{transcript}");
+    }
+    format!(
+        "probe transcript {hash} not found under {}",
+        sessions.display()
+    )
+}
+
 /// The 1×1 PNG the attachment tests use, so both paths are measured on one
 /// fixture rather than on two pictures that could differ in what they prove.
 const PNG_1X1: &[u8] = &[
@@ -138,10 +185,12 @@ fn an_acp_image_block_reaches_the_provider_through_the_blob_path() {
         }),
     );
     let stderr = host.finish();
-    assert_eq!(
-        answered["result"]["stopReason"], "end_turn",
-        "the turn did not end normally: {answered} / stderr: {stderr}"
-    );
+    if answered["result"]["stopReason"] != "end_turn" {
+        panic!(
+            "the turn did not end normally: {answered} / stderr: {stderr} / persisted probe: {}",
+            persisted_probe(&ego, &answered)
+        );
+    }
 
     let body = stub
         .generations()

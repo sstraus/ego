@@ -254,6 +254,7 @@ pub enum ExportEvent {
     },
     ExecutionObserved {
         observation: ExecObservation,
+        probe_evidence: Option<crate::store::evidence::EvidenceRef>,
     },
     AttemptSettled {
         attempt: AttemptRef,
@@ -896,8 +897,9 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 decision,
             }
         }
-        EventKind::ExecutionObserved { observation } => ExportEvent::ExecutionObserved {
+        EventKind::ExecutionObserved { observation, probe_evidence } => ExportEvent::ExecutionObserved {
             observation: observation.clone(),
+            probe_evidence: probe_evidence.clone(),
         },
         EventKind::AttemptSettled { attempt, outcome } => ExportEvent::AttemptSettled {
             attempt: *attempt,

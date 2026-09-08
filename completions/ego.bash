@@ -16,6 +16,9 @@ _ego() {
             ",$1")
                 cmd="ego"
                 ;;
+            ego,a2a)
+                cmd="ego__subcmd__a2a"
+                ;;
             ego,acp)
                 cmd="ego__subcmd__acp"
                 ;;
@@ -131,7 +134,7 @@ _ego() {
 
     case "${cmd}" in
         ego)
-            opts="-h --help run resume fork compact export ls usage models hooks doctor acp auth mcp config rules mcp-server"
+            opts="-h --help run resume fork compact export ls usage models hooks doctor acp a2a auth mcp config rules mcp-server"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -144,8 +147,8 @@ _ego() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        ego__subcmd__acp)
-            opts="-C -h --session-dir --help"
+        ego__subcmd__a2a)
+            opts="-C -h --session-dir --listen --allow-public-bind --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -156,6 +159,36 @@ _ego() {
                     return 0
                     ;;
                 -C)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --listen)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__acp)
+            opts="-C -h --session-dir --sandbox --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --session-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -C)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --sandbox)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

@@ -884,7 +884,7 @@ pub struct TurnLoop<'session, 'turn> {
     settlement_currency: crate::cost::CurrencyCode,
     config: TurnConfig,
     judge: Option<JudgeContext>,
-    execution_observation: Option<ExecObservation>,
+    execution_observation: Option<(ExecObservation, Option<crate::store::evidence::EvidenceRef>)>,
     tools: Tools<'turn>,
     ancestor: Option<Conversation>,
     cancel: CancelToken,
@@ -1037,8 +1037,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     }
 
     /// Attach one run observation, consumed before the first public turn event.
-    pub fn with_execution_observation(mut self, observation: ExecObservation) -> Self {
-        self.execution_observation = Some(observation);
+    pub fn with_execution_observation(mut self, observation: ExecObservation, probe_evidence: Option<crate::store::evidence::EvidenceRef>) -> Self {
+        self.execution_observation = Some((observation, probe_evidence));
         self
     }
 
@@ -1913,12 +1913,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Ok(None) => {}
             Err(cause) => return Err(self.abandon(turn, cause)),
         }
-        if let Some(observation) = self.execution_observation.take()
+        if let Some((observation, probe_evidence)) = self.execution_observation.take()
             && let Err(cause) = self.journal.append(
                 turn,
                 None,
                 None,
-                EventKind::ExecutionObserved { observation },
+                EventKind::ExecutionObserved { observation, probe_evidence },
             )
         {
             return Err(self.abandon(turn, cause));
@@ -2300,12 +2300,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
     fn begin_turn(&mut self, turn: TurnId) -> Result<(), StoreError> {
         self.deactivate_skill_hooks(turn)?;
-        if let Some(observation) = self.execution_observation.take() {
+        if let Some((observation, probe_evidence)) = self.execution_observation.take() {
             self.journal.append(
                 turn,
                 None,
                 None,
-                EventKind::ExecutionObserved { observation },
+                EventKind::ExecutionObserved { observation, probe_evidence },
             )?;
         }
         // `turn.started` of `CLI.md` §4.2. Published rather than appended:

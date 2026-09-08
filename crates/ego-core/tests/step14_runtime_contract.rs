@@ -377,6 +377,7 @@ fn execution_observed_is_additive_internal_noop_and_has_no_public_projection() {
     );
     let kind = EventKind::ExecutionObserved {
         observation: observation.clone(),
+        probe_evidence: None,
     };
     assert_eq!(kind.name(), "execution_observed");
     assert_eq!(
@@ -715,7 +716,9 @@ mod turn_execution_observation {
             vec![AiEvent::Stop(StopReason::Stop)],
         ]);
         {
-            let mut loop_ = fixture.loop_().with_execution_observation(observation());
+            let mut loop_ = fixture
+                .loop_()
+                .with_execution_observation(observation(), None);
             futures::executor::block_on(loop_.run("first")).expect("first turn");
             futures::executor::block_on(loop_.run("second")).expect("second turn");
         }
@@ -760,7 +763,9 @@ mod turn_execution_observation {
         let mut fixture = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
         fixture.store.fail_at(1);
         let abandoned = {
-            let mut loop_ = fixture.loop_().with_execution_observation(observation());
+            let mut loop_ = fixture
+                .loop_()
+                .with_execution_observation(observation(), None);
             futures::executor::block_on(loop_.run("must not publish"))
                 .expect_err("observation append must be fatal before the turn")
         };

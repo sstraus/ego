@@ -180,6 +180,17 @@ Serve the Agent Client Protocol on stdio.
 
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help
+- `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|off
+- `--session-dir <SESSION_DIR>` — Override the store location
+
+## `ego a2a`
+
+Serve the Agent2Agent protocol on a local or loopback endpoint.
+
+- `--allow-public-bind` — Serve on an address reachable from outside this machine
+- `-C <DIR>` — Run as if started in DIR
+- `-h, --help` — Print help (see more with '--help')
+- `--listen <LISTEN>` — Where to serve: a socket path, or an address such as `127.0.0.1:8080`
 - `--session-dir <SESSION_DIR>` — Override the store location
 
 ## `ego auth`

@@ -22,8 +22,9 @@ use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
 use ego_core::permit::{
-    CanonPath, Classification, Confinement, EnvPolicy, ExecCaps, ExecObservation, Op, PolicyDenied,
-    RunConfinement, SpawnSpec, StreamProvenance, ToolOutputProvenance, ToolResult,
+    BackendIdentity, CanonPath, Classification, Confinement, EnvPolicy, ExecCaps, ExecObservation,
+    Op, PolicyDenied, PolicyDigest, RunConfinement, SpawnSpec, StreamProvenance,
+    ToolOutputProvenance, ToolResult,
 };
 use ego_core::store::evidence::{EvidenceRef, EvidenceStore as _};
 use ego_core::turn::CancelToken;
@@ -96,7 +97,55 @@ struct Attempt {
     evidence_root: tempfile::TempDir,
     evidence: SessionEvidenceStore,
     cancel: CancelToken,
-    outcome: Result<(RunEffectPorts, ExecObservation), ProcessError>,
+    outcome: Result<
+        (
+            RunEffectPorts,
+            ExecObservation,
+            Option<ego_core::store::evidence::EvidenceRef>,
+        ),
+        ProcessError,
+    >,
+}
+
+struct ConfigFixture {
+    evidence_root: tempfile::TempDir,
+    session: SessionId,
+    evidence: SessionEvidenceStore,
+    cancel: CancelToken,
+    config: ExecRunConfig,
+}
+
+fn config_fixture(
+    level: Confinement,
+    offline: bool,
+    workspace: CanonPath,
+    hard_cap: u64,
+    preview: usize,
+) -> ConfigFixture {
+    let evidence_root = tempfile::tempdir().expect("evidence root");
+    let session = SessionId::new();
+    let evidence = SessionEvidenceStore::open(evidence_root.path(), session, hard_cap)
+        .expect("session evidence store");
+    let cancel = CancelToken::new();
+    let limits = ExecLimits::new(preview, Duration::from_millis(250)).expect("exec limits");
+    let http_call_timeout =
+        HttpCallTimeout::new(Duration::from_secs(1)).expect("HTTP call timeout");
+    let config = ExecRunConfig::new(
+        run_confinement(level, offline, workspace),
+        evidence.clone(),
+        cancel.clone(),
+        limits,
+        http_call_timeout,
+        None,
+        Arc::new(SystemResolver::new()),
+    );
+    ConfigFixture {
+        evidence_root,
+        session,
+        evidence,
+        cancel,
+        config,
+    }
 }
 
 fn attempt_run(
@@ -106,28 +155,12 @@ fn attempt_run(
     hard_cap: u64,
     preview: usize,
 ) -> Attempt {
-    let evidence_root = tempfile::tempdir().expect("evidence root");
-    let evidence = SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), hard_cap)
-        .expect("session evidence store");
-    let cancel = CancelToken::new();
-    let outcome = (|| {
-        let limits = ExecLimits::new(preview, Duration::from_millis(250))?;
-        let http_call_timeout = HttpCallTimeout::new(Duration::from_secs(1))?;
-        let config = ExecRunConfig::new(
-            run_confinement(level, offline, workspace),
-            evidence.clone(),
-            cancel.clone(),
-            limits,
-            http_call_timeout,
-            None,
-            Arc::new(SystemResolver::new()),
-        );
-        block_on(RunEffectPorts::for_run(config))
-    })();
+    let fixture = config_fixture(level, offline, workspace, hard_cap, preview);
+    let outcome = block_on(RunEffectPorts::for_run(fixture.config));
     Attempt {
-        evidence_root,
-        evidence,
-        cancel,
+        evidence_root: fixture.evidence_root,
+        evidence: fixture.evidence,
+        cancel: fixture.cancel,
         outcome,
     }
 }
@@ -140,7 +173,7 @@ fn open_run(
     preview: usize,
 ) -> Result<Run, ProcessError> {
     let attempt = attempt_run(level, offline, workspace, hard_cap, preview);
-    let (ports, observation) = attempt.outcome?;
+    let (ports, observation, _) = attempt.outcome?;
     Ok(Run {
         _evidence_root: attempt.evidence_root,
         evidence: attempt.evidence,
@@ -1650,6 +1683,240 @@ fn observation_reports_capabilities_and_audit_identity_without_granting_them() {
         ExecCaps::empty(),
         "sandbox off must not claim confinement or offline capabilities"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn observe_returns_the_measured_fact_before_an_unsupported_run_is_refused() {
+    let fixture = config_fixture(Confinement::Off, true, cwd(), 1024 * 1024, 1024);
+    let (observation, _probe_evidence) = block_on(RunEffectPorts::observe(&fixture.config))
+        .expect("observation must not apply the run requirements");
+    assert_eq!(observation.capabilities(), ExecCaps::empty());
+    assert!(!observation.backend().name().is_empty());
+    assert!(!observation.backend().revision().is_empty());
+
+    let error = match block_on(RunEffectPorts::for_run(fixture.config)) {
+        Ok(_) => panic!("the ordinary run must still refuse unsupported offline execution"),
+        Err(error) => error,
+    };
+    let ProcessError::MissingCapabilities(missing) = error else {
+        panic!("unsupported offline execution failed without a typed capability refusal");
+    };
+    assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+}
+
+#[test]
+fn observation_and_effect_construction_retain_one_measured_policy_fact() {
+    let fixture = config_fixture(Confinement::Off, false, cwd(), 1024 * 1024, 1024);
+    let (admitted, _probe_evidence) = block_on(RunEffectPorts::observe(&fixture.config))
+        .expect("the off policy must be observable");
+    let (_ports, constructed, _) = block_on(RunEffectPorts::for_run(fixture.config))
+        .expect("the same admitted off policy must construct effects");
+    assert_eq!(
+        admitted, constructed,
+        "effects drifted from the admitted observation"
+    );
+}
+
+#[test]
+fn admitted_observation_drift_is_refused_before_effect_construction() {
+    let cases = ["backend", "revision", "capabilities", "policy digest"];
+
+    for changed in cases {
+        let fixture = config_fixture(Confinement::Off, false, cwd(), 1024 * 1024, 1024);
+        let (observed, _) = block_on(RunEffectPorts::observe(&fixture.config))
+            .expect("the off policy must be observable");
+        let admitted = match changed {
+            "backend" => ExecObservation::new(
+                BackendIdentity::new(
+                    format!("{}-changed", observed.backend().name()),
+                    observed.backend().revision(),
+                ),
+                observed.capabilities(),
+                observed.policy_digest().clone(),
+            ),
+            "revision" => ExecObservation::new(
+                BackendIdentity::new(
+                    observed.backend().name(),
+                    format!("{}-changed", observed.backend().revision()),
+                ),
+                observed.capabilities(),
+                observed.policy_digest().clone(),
+            ),
+            "capabilities" => {
+                let capabilities = if observed.capabilities() == ExecCaps::empty() {
+                    ExecCaps::READ_SCOPED
+                } else {
+                    ExecCaps::empty()
+                };
+                ExecObservation::new(
+                    observed.backend().clone(),
+                    capabilities,
+                    observed.policy_digest().clone(),
+                )
+            }
+            "policy digest" => {
+                let digest = if observed.policy_digest().as_str() == "0".repeat(64) {
+                    "f".repeat(64)
+                } else {
+                    "0".repeat(64)
+                };
+                ExecObservation::new(
+                    observed.backend().clone(),
+                    observed.capabilities(),
+                    PolicyDigest::try_from(digest).expect("changed digest is a SHA-256 value"),
+                )
+            }
+            _ => unreachable!("all drift dimensions are covered"),
+        };
+        let config = fixture.config.with_admitted_observation(admitted.clone());
+        let error = match block_on(RunEffectPorts::for_run(config)) {
+            Ok(_) => panic!("{changed} drift was admitted and constructed effects"),
+            Err(error) => error,
+        };
+        match error {
+            ProcessError::ConfinementChanged {
+                admitted: actual_admitted,
+                observed: actual_observed,
+            } => {
+                assert_eq!(
+                    *actual_admitted, admitted,
+                    "admitted {changed} fact changed"
+                );
+                assert_eq!(
+                    *actual_observed, observed,
+                    "observed {changed} fact changed"
+                );
+            }
+            other => panic!("{changed} drift returned the wrong refusal: {other:?}"),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn observation_persists_supported_measurement_transcript_in_the_session_store() {
+    let workspace = cwd();
+    let Some(_) = open_confined_run(
+        Confinement::Workspace,
+        false,
+        workspace.clone(),
+        1024 * 1024,
+        1024,
+    ) else {
+        return;
+    };
+    let fixture = config_fixture(Confinement::Workspace, false, workspace, 1024 * 1024, 1024);
+    let (observation, probe_evidence) =
+        block_on(RunEffectPorts::observe(&fixture.config)).expect("workspace observation");
+    assert!(
+        observation
+            .capabilities()
+            .contains(required_caps(Confinement::Workspace, false)),
+        "a supported observation must satisfy its policy requirements"
+    );
+    let reference = probe_evidence.expect("supported measurement must commit its transcript");
+    let live = read_evidence_pages(&fixture.evidence, &reference);
+    assert!(
+        !live.is_empty(),
+        "the committed transcript must not be empty"
+    );
+
+    let reopened = SessionEvidenceStore::open(
+        fixture.evidence_root.path(),
+        fixture.session,
+        fixture.evidence.hard_cap(),
+    )
+    .expect("session evidence store reopens");
+    assert_eq!(
+        read_evidence_pages(&reopened, &reference),
+        live,
+        "the observation transcript must survive reopening its session store"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn observation_persists_workspace_measurement_in_a_fresh_subprocess() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "workspace_observation_child",
+        ])
+        .env("EGO_WORKSPACE_OBSERVATION_CHILD", "1")
+        .output()
+        .expect("workspace observation child starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    print!("workspace observation child stdout:\n{stdout}");
+    eprint!("workspace observation child stderr:\n{stderr}");
+    assert!(output.status.success(), "child failed: {stderr}");
+    let record: serde_json::Value = stdout
+        .lines()
+        .find_map(|line| serde_json::from_str(line).ok())
+        .expect("child emits a JSON observation record");
+    assert_eq!(record["status"], "observed");
+    assert_eq!(record["confinement"], "workspace");
+    let reference: EvidenceRef = serde_json::from_value(record["probe_reference"].clone())
+        .expect("child emits the EvidenceRef string accepted by serde");
+    let transcript_bytes = record["probe_bytes_len"]
+        .as_u64()
+        .expect("child emits the exact transcript byte count");
+    assert_eq!(reference.bytes, transcript_bytes);
+    assert!(transcript_bytes > 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "fresh subprocess entry point for workspace observation proof"]
+fn workspace_observation_child() {
+    if std::env::var_os("EGO_WORKSPACE_OBSERVATION_CHILD").is_none() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("writable workspace");
+    let canonical = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+    let fixture = config_fixture(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(canonical),
+        1024 * 1024,
+        1024,
+    );
+    let result = block_on(RunEffectPorts::observe(&fixture.config));
+    let (observation, reference, bytes, error) = match result {
+        Ok((observation, reference)) => {
+            let bytes = reference
+                .as_ref()
+                .map(|reference| read_evidence_pages(&fixture.evidence, reference));
+            (Some(observation), reference, bytes, None)
+        }
+        Err(error) => (None, None, None, Some(error.to_string())),
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": if error.is_some() { "error" } else { "observed" },
+            "confinement": "workspace",
+            "observation": observation,
+            "probe_reference": reference,
+            "probe_bytes": bytes.as_ref().map(|bytes| String::from_utf8_lossy(bytes)),
+            "probe_bytes_len": bytes.as_ref().map(Vec::len),
+            "error": error,
+        })
+    );
+    let observation = observation.expect("workspace observation was unavailable");
+    let reference = reference.expect("workspace observation probe reference");
+    let bytes = bytes.expect("workspace probe transcript");
+    assert!(
+        observation
+            .capabilities()
+            .contains(required_caps(Confinement::Workspace, false)),
+        "workspace observation lacks required capabilities: {observation:?}"
+    );
+    assert!(!bytes.is_empty(), "workspace probe transcript is empty");
+    let _ = reference;
 }
 
 #[cfg(target_os = "linux")]

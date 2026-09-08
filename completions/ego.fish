@@ -36,6 +36,7 @@ complete -c ego -n "__fish_ego_needs_command" -f -a "models" -d 'List the shared
 complete -c ego -n "__fish_ego_needs_command" -f -a "hooks" -d 'Inspect the admitted system and user hook catalogue.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "doctor" -d 'Report a read-only redacted health snapshot of this installation.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "acp" -d 'Serve the Agent Client Protocol on stdio.'
+complete -c ego -n "__fish_ego_needs_command" -f -a "a2a" -d 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "auth" -d 'Manage subscription credentials.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "mcp" -d 'Manage configured MCP servers.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "config" -d 'Manage stored user configuration.'
@@ -168,7 +169,13 @@ complete -c ego -n "__fish_ego_using_subcommand doctor" -l json -d 'Emit the exa
 complete -c ego -n "__fish_ego_using_subcommand doctor" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -s C -d 'Run as if started in DIR' -r -F
+complete -c ego -n "__fish_ego_using_subcommand acp" -l sandbox -d 'The weakest confinement a session may select: ro|workspace|off' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand a2a" -l session-dir -d 'Override the store location' -r -F
+complete -c ego -n "__fish_ego_using_subcommand a2a" -s C -d 'Run as if started in DIR' -r -F
+complete -c ego -n "__fish_ego_using_subcommand a2a" -l listen -d 'Where to serve: a socket path, or an address such as `127.0.0.1:8080`' -r
+complete -c ego -n "__fish_ego_using_subcommand a2a" -l allow-public-bind -d 'Serve on an address reachable from outside this machine'
+complete -c ego -n "__fish_ego_using_subcommand a2a" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c ego -n "__fish_ego_using_subcommand auth; and not __fish_seen_subcommand_from login logout status" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand auth; and not __fish_seen_subcommand_from login logout status" -f -a "login" -d 'Authenticate and store a provider credential'
 complete -c ego -n "__fish_ego_using_subcommand auth; and not __fish_seen_subcommand_from login logout status" -f -a "logout" -d 'Remove a stored provider credential'

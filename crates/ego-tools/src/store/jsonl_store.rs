@@ -416,7 +416,7 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                     EventKind::Forked { source, at_seq } => {
                         lineage = Some(SessionLineage::Fork { source, at_seq })
                     }
-                    EventKind::ExecutionObserved { observation } => execution = Some(observation),
+                    EventKind::ExecutionObserved { observation, .. } => execution = Some(observation),
                     EventKind::HookCatalogueAdmitted { descriptors } => hooks = descriptors,
                     _ => {}
                 }
@@ -1124,7 +1124,7 @@ impl JsonlStore {
             },
         };
         let execution = match &ev.kind {
-            EventKind::ExecutionObserved { observation } => Some(observation.clone()),
+            EventKind::ExecutionObserved { observation, .. } => Some(observation.clone()),
             _ => previous
                 .as_ref()
                 .and_then(|manifest| manifest.execution.clone())

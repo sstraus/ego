@@ -18,6 +18,7 @@ use std::fmt;
 use crate::config::{Mode, ModelRef};
 use crate::event::id::SessionId;
 use crate::generator::types::ThinkingLevel;
+use crate::permit::{Confinement, MissingExecCaps};
 
 /// One control's current value and every value it will accept right now.
 ///
@@ -45,6 +46,13 @@ pub struct SessionControlState {
     pub model: ControlSelect<ModelRef>,
     pub effort: ControlSelect<ThinkingLevel>,
     pub mode: ControlSelect<Mode>,
+    /// Filesystem confinement, which is here for the same reason the other
+    /// three are — a person changes it while the session is alive — and is
+    /// unlike them in one way that the type cannot express: its `available`
+    /// list is a ceiling the seat may narrow and never widen.
+    ///
+    /// `docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`
+    pub sandbox: ControlSelect<Confinement>,
 }
 
 /// One change an operator seat asked for.
@@ -53,6 +61,7 @@ pub enum SessionControlChange {
     Model(ModelRef),
     Effort(ThinkingLevel),
     Mode(Mode),
+    Sandbox(Confinement),
 }
 
 impl SessionControlChange {
@@ -62,6 +71,7 @@ impl SessionControlChange {
             Self::Model(_) => "model",
             Self::Effort(_) => "effort",
             Self::Mode(_) => "mode",
+            Self::Sandbox(_) => "sandbox",
         }
     }
 }
@@ -81,6 +91,16 @@ pub enum ControlError {
     /// seat cannot do that at all", and collapsing them would hide the
     /// second behind a list that looks merely incomplete.
     Refused { control: &'static str, why: String },
+    /// A real control value whose measured backend cannot enforce it.
+    ///
+    /// Keep the typed refusal intact so an adapter can name the exact missing
+    /// guarantees, backend and probe transcript instead of reducing the
+    /// evidence to an unavailable picker value.
+    MissingCapabilities {
+        control: &'static str,
+        value: String,
+        missing: Box<MissingExecCaps>,
+    },
     /// The controls could not be read or written.
     Internal(String),
 }
@@ -92,6 +112,11 @@ impl fmt::Display for ControlError {
                 write!(f, "`{value}` is not an available {control}")
             }
             Self::Refused { control, why } => write!(f, "the {control} was refused: {why}"),
+            Self::MissingCapabilities {
+                control,
+                value,
+                missing,
+            } => write!(f, "the {control} value `{value}` was refused: {missing}"),
             Self::Internal(message) => f.write_str(message),
         }
     }

@@ -1,0 +1,31 @@
+[package]
+name = "ego-listen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The admission policy this crate enforces. `ego-core` decides which endpoint
+# kinds exist and which authentication each compels; this crate only binds what
+# it is handed. Nothing else is taken: a listener that owns no protocol must not
+# be able to reach one, and `ego-acp` and `ego-a2a` both sit above it.
+ego-core.workspace = true
+# `net` for the listeners, `io-util` for the `AsyncRead`/`AsyncWrite` the
+# protocols above consume. The peer's uid comes from tokio's own `peer_cred`
+# and the socket owner's from `std::os::unix::fs::MetadataExt`; rustix also
+# supplies the current euid and no-follow lease open.
+tokio = { version = "1", features = ["net", "io-util", "rt", "time"] }
+tracing = "0.1.44"
+
+[target.'cfg(unix)'.dependencies]
+fd-lock = "4.0.4"
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "io-util"] }

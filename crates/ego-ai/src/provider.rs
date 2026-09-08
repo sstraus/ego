@@ -160,6 +160,31 @@ impl CredentialStrategy {
             base_override,
         })
     }
+
+    /// The environment variable a key may be supplied in, if this strategy
+    /// reads one.
+    ///
+    /// It exists so a *refusal* can name the variable the row already names.
+    /// `ego auth login openai` used to answer "configure
+    /// auth.openai.credential_command or install ego-auth-openai" — two
+    /// remedies, neither of them the one that works, because the login path
+    /// had no way to learn that this row reads `OPENAI_API_KEY`. A row that
+    /// knows which variable it reads and a message that cannot say so is the
+    /// fact and the sentence being kept in different places.
+    ///
+    /// The two OAuth-backed strategies report their variable too. That is not
+    /// a claim login is pointless for them — it is the fallback the strategy
+    /// itself already tries, so an operator who has a key and no browser has
+    /// somewhere to put it.
+    pub fn environment_var(&self) -> Option<&str> {
+        match self {
+            CredentialStrategy::None | CredentialStrategy::OAuth { .. } => None,
+            CredentialStrategy::BearerFromEnv { var }
+            | CredentialStrategy::HeaderFromEnv { var, .. }
+            | CredentialStrategy::OAuthOrEnv { var, .. } => Some(var),
+            CredentialStrategy::Anthropic { api_key_var, .. } => Some(api_key_var),
+        }
+    }
 }
 
 fn oauth_headers(provider: &str, secret: &Secret) -> Result<Vec<HttpHeader>, MissingCredential> {
@@ -556,16 +581,16 @@ impl ProviderRow {
             // (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §6), so
             // this row is priced from a supplied table or not at all.
             cost: None,
-            // Not selectable, and this is the whole cost of the ADR being
-            // honoured rather than argued with. The Responses mapping beside
-            // it is complete and its deterministic fixtures pass, but this
-            // repository holds no OpenAI key, so nothing here has ever been
-            // sent to OpenAI and check five has not been made. Leaving the row
-            // selectable would send a never-validated body to a billed
-            // endpoint under an operator's own key.
-            promotion: Promotion::PendingLiveEvidence {
-                mapping: "openai-responses",
-            },
+            // Selectable on a published contract, which
+            // `docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`
+            // amends the 2026-09-03 ADR to allow. Nothing here has been sent to
+            // OpenAI and the deterministic fixtures still only establish checks
+            // one to four — what changed is where the missing fifth check is
+            // paid for. Withholding the row made every operator's key useless
+            // against a documented endpoint to avoid an error that announces
+            // itself: a wrong Responses body comes back a 400 from OpenAI, on
+            // the first call, with OpenAI's own text.
+            promotion: Promotion::Selectable,
         }
     }
 

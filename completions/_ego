@@ -223,8 +223,19 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
+'--sandbox=[The weakest confinement a session may select\: ro|workspace|off]:SANDBOX:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
+&& ret=0
+;;
+(a2a)
+_arguments "${_arguments_options[@]}" : \
+'--session-dir=[Override the store location]:SESSION_DIR:_files' \
+'-C+[Run as if started in DIR]:DIR:_files' \
+'--listen=[Where to serve\: a socket path, or an address such as \`127.0.0.1\:8080\`]:LISTEN:_default' \
+'--allow-public-bind[Serve on an address reachable from outside this machine]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (auth)
@@ -486,6 +497,7 @@ _ego_commands() {
 'hooks:Inspect the admitted system and user hook catalogue.' \
 'doctor:Report a read-only redacted health snapshot of this installation.' \
 'acp:Serve the Agent Client Protocol on stdio.' \
+'a2a:Serve the Agent2Agent protocol on a local or loopback endpoint.' \
 'auth:Manage subscription credentials.' \
 'mcp:Manage configured MCP servers.' \
 'config:Manage stored user configuration.' \
@@ -493,6 +505,11 @@ _ego_commands() {
 'mcp-server:Serve scoped ego runs over MCP on stdio.' \
     )
     _describe -t commands 'ego commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__a2a_commands] )) ||
+_ego__subcmd__a2a_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego a2a commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__acp_commands] )) ||
 _ego__subcmd__acp_commands() {

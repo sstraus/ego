@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -325,6 +325,7 @@ struct TerminalOwner {
     asked_for_image: Arc<AtomicBool>,
     ingress: InteractiveIngress,
     cancel: CancelToken,
+    startup_output: Receiver<String>,
 }
 
 struct ComposerDraft {
@@ -519,6 +520,11 @@ enum Control {
         request: QuestionRequest,
         reply: oneshot::Sender<QuestionOutcome>,
     },
+    StartupModel {
+        picker: Arc<Mutex<ModelPicker>>,
+        notice: Option<String>,
+        reply: Sender<PickerOutcome>,
+    },
     Shutdown,
 }
 
@@ -640,6 +646,7 @@ impl Seat {
         }
         let printer = ExternalPrinter::new(CHANNEL_CAPACITY);
         let output = SurfaceOutput::new(printer.sender(), cancel.clone());
+        let startup_output = printer.receiver().clone();
         let break_signal = Arc::new(AtomicBool::new(false));
         let (input_sender, input) = bounded(CHANNEL_CAPACITY);
         let (seat_control, control_receiver) = bounded(CHANNEL_CAPACITY);
@@ -661,6 +668,7 @@ impl Seat {
                         asked_for_image,
                         ingress,
                         cancel,
+                        startup_output,
                     },
                 );
             })?;
@@ -1057,6 +1065,22 @@ impl Seat {
         )
     }
 
+    /// Let the terminal owner collect one persistent first-run model choice.
+    pub(crate) fn read_startup_model(
+        &self,
+        picker: Arc<Mutex<ModelPicker>>,
+        notice: Option<String>,
+    ) -> PickerOutcome {
+        self.request(
+            |reply| Control::StartupModel {
+                picker,
+                notice,
+                reply,
+            },
+            PickerOutcome::Cancelled,
+        )
+    }
+
     fn request<R>(&self, control: impl FnOnce(Sender<R>) -> Control, fallback: R) -> R {
         let SeatKind::Live(live) = &self.kind else {
             return fallback;
@@ -1085,6 +1109,14 @@ impl crate::run::Reads for Seat {
 impl crate::run::InteractiveSeat for Seat {
     fn has_human(&self) -> bool {
         self.terminal
+    }
+
+    fn read_startup_model(
+        &self,
+        picker: Arc<Mutex<ModelPicker>>,
+        notice: Option<String>,
+    ) -> PickerOutcome {
+        Seat::read_startup_model(self, picker, notice)
     }
 
     fn busy(&self) {
@@ -1220,6 +1252,7 @@ fn own_terminal(
         asked_for_image,
         ingress,
         cancel,
+        startup_output,
     } = owner;
     let mut pending_control = None;
     let mut active = false;
@@ -1234,7 +1267,21 @@ fn own_terminal(
             continue;
         }
         if !active && pending_control.is_none() {
-            match control.recv() {
+            // Before activation Reedline is not reading, so this same owner
+            // drains its bounded printer queue without opening an input prompt.
+            let request = crossbeam::channel::select_biased! {
+                recv(startup_output) -> row => {
+                    let Ok(row) = row else { break };
+                    let mut output = std::io::stdout().lock();
+                    if output.write_all(row.as_bytes()).and_then(|()| output.flush()).is_err() {
+                        cancel.cancel(CancelCause::Host);
+                        break;
+                    }
+                    continue;
+                }
+                recv(control) -> request => request,
+            };
+            match request {
                 Ok(Control::Activate { session }) => {
                     drafts.activate(session);
                     active = true;
@@ -1692,7 +1739,7 @@ fn execute_action_and_modal(
     }
     (
         handled,
-        run_model_picker(editor, phase, status, picker, busy),
+        run_model_picker(editor, phase, status, picker, busy, None),
     )
 }
 
@@ -2646,6 +2693,7 @@ fn run_model_picker(
     status: &SharedStatus,
     picker: Arc<Mutex<ModelPicker>>,
     busy: bool,
+    notice: Option<String>,
 ) -> Option<Line> {
     let after = if busy {
         EditPhase::Busy
@@ -2653,6 +2701,10 @@ fn run_model_picker(
         EditPhase::Idle
     };
     let saved = enter_modal(editor, phase, status);
+    if notice.is_some() {
+        status.lock().expect("surface status lock").notice = notice;
+        repaint_status(status);
+    }
     let result = loop {
         let view = picker.lock().expect("model picker lock").view();
         let prompt = Question::new(model_picker_prompt(&view), Arc::clone(status));
@@ -2746,10 +2798,12 @@ fn model_picker_prompt(view: &ModelPickerView) -> String {
                 };
                 format!("{marker} {}. {reasoning:?}", index + 1)
             }));
-            rows.push(
+            rows.push(if view.persistent_only {
+                "Up/Down or number selects; Enter saves the default; Esc cancels. ".to_string()
+            } else {
                 "Up/Down or number selects; Enter saves defaults; s uses this session; Esc cancels. "
-                    .to_string(),
-            );
+                    .to_string()
+            });
         }
     }
     rows.join("\n")
@@ -2830,6 +2884,24 @@ fn answer_control(
             }
             repaint_status(surface.status);
             let _ = reply.send(true);
+            return true;
+        }
+        control => control,
+    };
+    let control = match control {
+        Control::StartupModel {
+            picker,
+            notice,
+            reply,
+        } => {
+            let result = run_model_picker(editor, phase, surface.status, picker, false, notice);
+            let outcome = match result {
+                Some(Line::HostCommand(HostCommand::ModelSwitch(request))) => {
+                    PickerOutcome::ModelSwitch(request)
+                }
+                _ => PickerOutcome::Cancelled,
+            };
+            let _ = reply.send(outcome);
             return true;
         }
         control => control,
@@ -2958,6 +3030,9 @@ fn answer_control(
         Control::Activate { .. } => unreachable!("activation is handled before modal entry"),
         Control::ConfirmRemember { .. } => {
             unreachable!("remember confirmation is handled before modal entry")
+        }
+        Control::StartupModel { .. } => {
+            unreachable!("startup model selection is handled before modal entry")
         }
     };
     match controls.try_recv() {

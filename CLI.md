@@ -58,6 +58,14 @@ ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               canonical intent + matching rule, dry)
 ego usage  [--period P] [--all-roles] [--json] cost and token report
 ego acp                       serve ACP on stdio (the embedding surface)
+ego a2a --listen ENDPOINT [--allow-public-bind]
+                              serve Agent2Agent discovery information.
+                              ENDPOINT is a socket path —
+                              authenticated by the operating system, the
+                              preferred form — or an address, which requires a
+                              credential in EGO_A2A_TOKEN. An address reachable
+                              from outside this machine is refused by name
+                              unless the operator asks for it
 ego doctor [--json]           read-only redacted health snapshot
 ```
 
@@ -1232,6 +1240,27 @@ about the others, and the `SOURCE` column of `ego models` names which of the
 three won for every row — so a surprising capability is one command away from
 its origin.
 
+The same files can contain explicit first-run defaults. These merge per
+provider, independently of capability rows:
+
+```toml
+[default_model]
+openai = "openai/gpt-5.6-sol"
+anthropic = "anthropic/claude-opus-5"
+```
+
+The builtin choices above are ego policy. A stronger layer replaces only the
+provider keys it names; omitting a key does not delete an inherited default.
+Each value must be a full model slug belonging to its provider key.
+
+When configuration has no selected model, interactive startup observes
+credential presence and performs bounded Ollama discovery. Exactly one usable
+provider with an available mapped default is selected and saved atomically
+before execution. Otherwise startup opens the shared model picker. An explicit
+or configured model bypasses this first-run selection. Headless startup never
+chooses or persists a model; its refusal names detected providers and remedies
+using `--model` or `ego config set model`.
+
 The builtin layer exists so that a machine with an API key and no files can
 run. It carries only what each vendor publishes, cites the source and read
 date beside every provider's rows, and **states no prices**: a rate is the one
@@ -1243,16 +1272,18 @@ resolver reads this file at all — `openai` and `anthropic`.  `openrouter` is
 selectable but stays operator-supplied: it proxies hundreds of third-party
 models under no citable contract. Everything else enumerates its own models.
 
-The `openai` rows are shipped and *not* selectable. The row moved to the public
+The `openai` rows are shipped and selectable. The row speaks the public
 Responses contract, and
-`docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`
-does not admit a public row on published schema alone: it needs a sanitized
-recording of a live call to a current entitled model, which only an operator's
-own key can make. Until one exists, `ego models` lists the row as unavailable
-with cause `mapping_unavailable`, and `-m openai/…` refuses before reading a
-credential or opening a socket, naming `openai-responses` and the `EGO_SMOKE`
-run that closes the gap. The facts are shipped anyway so that promotion is one
-recording rather than a recording plus a table.
+`docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`
+admits a public row on a published contract with passing deterministic
+fixtures. It amends
+`docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`,
+which required a sanitized recording of a live call first: no such recording
+exists, and withholding the row made every operator's key useless against a
+documented endpoint to avoid an error that announces itself — a wrong Responses
+body is a `400` from OpenAI on the first call. `ego models` lists the row as
+available once `OPENAI_API_KEY` resolves and as `missing_credential` when it
+does not.
 See `docs/decisions/2026-09-07-a-builtin-catalogue-layer-below-system-and-user.md`.
 
 A full entry, with every field the schema accepts:

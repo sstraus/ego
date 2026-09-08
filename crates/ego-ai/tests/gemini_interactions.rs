@@ -35,10 +35,10 @@
 
 use base64::Engine as _;
 use ego_ai::http::HttpResponse;
-use ego_ai::wire::RequestTarget;
 use ego_ai::wire::gemini_interactions::{
-    DIALECT, Inexpressible, StreamDecoder, build_request, request_body,
+    build_request, request_body, Inexpressible, StreamDecoder, DIALECT,
 };
+use ego_ai::wire::RequestTarget;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     ContentBlock, Conversation, ErrorKind, GenRequest, Image, ImageMediaType, Message,
@@ -564,6 +564,254 @@ fn decode_whole(transcript: &[u8]) -> Vec<AiEvent> {
     decode_at(transcript, transcript.len())
 }
 
+fn decode_interaction(steps: &str) -> Vec<AiEvent> {
+    let transcript = format!(
+        "{steps}event: interaction.completed\ndata: {{\"interaction\":{{\"status\":\"completed\"}},\"event_type\":\"interaction.completed\"}}\n\ndata: [DONE]\n\n"
+    );
+    decode_whole(transcript.as_bytes())
+}
+
+fn reasoning_states(events: &[AiEvent]) -> Vec<ReasoningState> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AiEvent::ReasoningState(state) => Some(state.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn state_json(state: &ReasoningState) -> serde_json::Value {
+    serde_json::from_str(&state.blob).expect("the provider thought is JSON")
+}
+
+/// The current thinking guide's stream starts a thought with its summary and
+/// an empty signature, then updates the signature in the final delta.
+#[test]
+fn step_start_keeps_initial_thought_summary_before_signature_update() {
+    let events = decode_interaction(
+        r#"event: step.start
+data: {"index":0,"step":{"signature":"","summary":[{"text":"**Evaluating the clues**\n\nI'm considering...","type":"text"}],"type":"thought"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":0,"delta":{"signature":"EpoGCpcGAXLI2nx/...","type":"thought_signature"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+"#,
+    );
+
+    assert_eq!(
+        events[0],
+        AiEvent::ReasoningDelta {
+            text: "**Evaluating the clues**\n\nI'm considering...".to_string()
+        }
+    );
+    assert_eq!(
+        state_json(&reasoning_states(&events)[0]),
+        serde_json::json!({
+            "type": "thought",
+            "signature": "EpoGCpcGAXLI2nx/...",
+            "summary": [{"text": "**Evaluating the clues**\n\nI'm considering...", "type": "text"}],
+        })
+    );
+    assert_eq!(events.len(), 3, "reasoning delta, state, and terminal stop");
+}
+
+/// The same official `step.start` shape carries the first model-output text;
+/// it must be emitted once before later `text` deltas for that step.
+#[test]
+fn model_output_step_start_text_precedes_later_text_delta() {
+    let events = decode_interaction(
+        r#"event: step.start
+data: {"index":0,"step":{"content":[{"text":"Based on the clues provided, here","type":"text"}],"type":"model_output"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":0,"delta":{"text":" is the answer to your question...","type":"text"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+"#,
+    );
+
+    assert_eq!(
+        events,
+        vec![
+            AiEvent::TextDelta {
+                text: "Based on the clues provided, here".to_string()
+            },
+            AiEvent::TextDelta {
+                text: " is the answer to your question...".to_string()
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]
+    );
+}
+
+/// Thought-summary content is an open text/image union. Text is visible to
+/// the caller, while image and an as-yet-unknown union arm remain opaque in the
+/// replay block instead of being dropped or guessed into text.
+#[test]
+fn thought_summary_deltas_retain_text_image_and_unknown_union_members() {
+    let events = decode_interaction(
+        r#"event: step.start
+data: {"index":0,"step":{"signature":"","summary":[],"type":"thought"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":0,"delta":{"content":{"text":"text summary","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}
+
+event: step.delta
+data: {"index":0,"delta":{"content":{"data":"AQID","mime_type":"image/jpeg","type":"image"},"type":"thought_summary"},"event_type":"step.delta"}
+
+event: step.delta
+data: {"index":0,"delta":{"content":{"payload":{"kept":true},"type":"future_summary"},"type":"thought_summary"},"event_type":"step.delta"}
+
+event: step.delta
+data: {"index":0,"delta":{"signature":"sig-with-summary","type":"thought_signature"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+"#,
+    );
+
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AiEvent::ReasoningDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["text summary"]
+    );
+    assert_eq!(
+        state_json(&reasoning_states(&events)[0]),
+        serde_json::json!({
+            "type": "thought",
+            "signature": "sig-with-summary",
+            "summary": [
+                {"text": "text summary", "type": "text"},
+                {"data": "AQID", "mime_type": "image/jpeg", "type": "image"},
+                {"payload": {"kept": true}, "type": "future_summary"},
+            ],
+        })
+    );
+}
+
+/// A signature-only thought is a valid provider response and must stay
+/// signature-only when replayed; no summary field may be invented.
+#[test]
+fn signature_only_thoughts_replay_without_a_synthetic_summary() {
+    let events = decode_interaction(
+        r#"event: step.start
+data: {"index":0,"step":{"signature":"","type":"thought"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":0,"delta":{"signature":"signature-only","type":"thought_signature"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+"#,
+    );
+
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, AiEvent::ReasoningDelta { .. })));
+    assert_eq!(
+        state_json(&reasoning_states(&events)[0]),
+        serde_json::json!({"type": "thought", "signature": "signature-only"})
+    );
+}
+
+/// Step indices correlate deltas, but they do not permit the adapter to sort
+/// completed thought blocks out of stream order.
+#[test]
+fn multiple_thought_steps_keep_their_summary_and_completion_order() {
+    let events = decode_interaction(
+        r#"event: step.start
+data: {"index":0,"step":{"signature":"","summary":[{"text":"first","type":"text"}],"type":"thought"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":0,"delta":{"signature":"first-signature","type":"thought_signature"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+event: step.start
+data: {"index":1,"step":{"signature":"","summary":[{"text":"second","type":"text"}],"type":"thought"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":1,"delta":{"signature":"second-signature","type":"thought_signature"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":1,"event_type":"step.stop"}
+
+"#,
+    );
+
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AiEvent::ReasoningDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["first", "second"]
+    );
+    let states = reasoning_states(&events);
+    assert_eq!(state_json(&states[0])["signature"], "first-signature");
+    assert_eq!(state_json(&states[0])["summary"][0]["text"], "first");
+    assert_eq!(state_json(&states[1])["signature"], "second-signature");
+    assert_eq!(state_json(&states[1])["summary"][0]["text"], "second");
+}
+
+/// The opaque state emitted by decoding is the same complete thought step the
+/// next stateless request sends back, including the summary received at start.
+#[test]
+fn decoded_thought_state_replays_the_complete_provider_json() {
+    let events = decode_interaction(
+        r#"event: step.start
+data: {"index":0,"step":{"signature":"","summary":[{"text":"keep this summary","type":"text"}],"type":"thought"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":0,"delta":{"signature":"replay-signature","type":"thought_signature"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+"#,
+    );
+    let state = reasoning_states(&events)
+        .into_iter()
+        .next()
+        .expect("the thought closes with replayable state");
+    let req = GenRequest {
+        messages: conversation(vec![
+            Message::text(Role::User, "think"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Reasoning { state }],
+            },
+            Message::text(Role::User, "continue"),
+        ]),
+        ..wide_request()
+    };
+
+    assert_eq!(
+        body_of(&req)["input"][1],
+        serde_json::json!({
+            "type": "thought",
+            "signature": "replay-signature",
+            "summary": [{"text": "keep this summary", "type": "text"}],
+        })
+    );
+}
+
 /// The golden decodes to an exact sequence, reasoning state and all.
 #[test]
 fn a_golden_transcript_decodes_to_an_exact_event_sequence() {
@@ -580,7 +828,7 @@ fn a_golden_transcript_decodes_to_an_exact_event_sequence() {
             },
             AiEvent::ReasoningState(ReasoningState {
                 dialect: DIALECT.to_string(),
-                blob: r#"{"type":"thought","signature":"EpoGCpcGAdHtim9"}"#.to_string(),
+                blob: r#"{"type":"thought","signature":"EpoGCpcGAdHtim9","summary":[{"type":"text","text":"The file listing "},{"type":"text","text":"is short."}]}"#.to_string(),
             }),
             AiEvent::TextDelta {
                 text: "main.rs".to_string()
@@ -835,20 +1083,23 @@ async fn a_refused_request_relays_the_sentence_the_provider_wrote() {
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
 }
 
-/// Gemini is not a selectable provider, and that is a decision with a
-/// condition attached rather than an oversight.
+/// Gemini is a selectable provider, and that is a decision rather than a
+/// consequence of the count.
 ///
-/// regression case promotes it only after the conformance rule includes an opt-in
-/// sanitized live recording on a current entitled model. No such recording
-/// exists, so `--model gemini/…` must not resolve — the mapping being complete
-/// and its fixtures deterministic is exactly the state that makes promoting it
-/// look harmless.
+/// This asserted the negative until
+/// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`. The old
+/// reasoning was that regression case promotes the row only after an opt-in
+/// sanitized live recording, and that the mapping being complete with
+/// deterministic fixtures "is exactly the state that makes promoting it look
+/// harmless". The ADR answers that: no recording exists for `openai` either,
+/// and a row absent from this array is worse off than a refused one, because
+/// it produces "unknown provider" instead of a reason.
 ///
-/// `FINAL_PROFILE_COUNT` alone does not hold this: it is a constant, so adding
-/// the row and bumping the number keeps every existing assertion green. This
-/// names the row, so opening the gate has to be deliberate.
+/// Still asserted by name rather than left to `FINAL_PROFILE_COUNT`, and for
+/// the reason the original test gave: the count is a constant, so a row that
+/// silently fell out again would keep every other assertion green.
 #[test]
-fn gemini_is_not_among_the_providers_a_model_can_be_selected_from() {
+fn gemini_is_among_the_providers_a_model_can_be_selected_from() {
     let rows = ego_ai::conformance::final_provider_rows(
         ego_ai::provider::ProviderRow::ollama_default(),
         ego_ai::provider::ProviderRow::openai_at(
@@ -858,8 +1109,8 @@ fn gemini_is_not_among_the_providers_a_model_can_be_selected_from() {
     );
     let ids: Vec<_> = rows.iter().map(ego_ai::provider::ProviderRow::id).collect();
     assert!(
-        !ids.contains(&"gemini"),
-        "gemini was promoted to selectable without the entitled live recording \
-         regression case gates it on: {ids:?}"
+        ids.contains(&"gemini"),
+        "a shipped mapping with passing fixtures is absent from the inventory, \
+         so `-m gemini/…` answers `unknown provider`: {ids:?}"
     );
 }

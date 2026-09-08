@@ -80,6 +80,12 @@ pub trait Reads {
 /// The two explicit decisions only a human-driven run may make.
 pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn has_human(&self) -> bool;
+    /// Collect a persistent model choice before the first run is materialized.
+    fn read_startup_model(
+        &self,
+        picker: Arc<Mutex<ModelPicker>>,
+        notice: Option<String>,
+    ) -> crate::model_picker::PickerOutcome;
     fn busy(&self) {}
     fn idle(&self) {}
     /// Hand the session-long core control endpoint to the turn coordinator.

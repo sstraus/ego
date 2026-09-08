@@ -1,0 +1,45 @@
+[package]
+name = "ego-a2a"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The A2A v1 contract, pinned exact for the reason `agent-client-protocol-schema`
+# and `rmcp` are: an interoperability protocol's value is being byte-compatible
+# with the other implementations, and a silent minor bump is how that stops
+# being true without a test going red. `a2a-lf` is a pure data crate — six
+# modules of serde types, no async and no transport — which is exactly the layer
+# worth borrowing. The bytes are ours; see `serve.rs`.
+# Renamed because the package is `a2a-lf` but its `[lib] name` is `a2a`, and a
+# `use a2a::` that does not match anything in this manifest is a reader's dead
+# end. The alias keeps the registry name visible at the one place a version is
+# ever chased.
+a2a_lf = { package = "a2a-lf", version = "=0.3.0" }
+ego-core.workspace = true
+# The shared inbound seam. This crate serves a protocol; it does not bind.
+ego-listen.workspace = true
+http-body-util = "0.1.5"
+# `hyper` directly, without `axum` or `tower`. Both are avoidable: this surface
+# is three routes, while a web framework brings its own error, extraction and
+# auth models into a process whose whole design is that those decisions are
+# made once, explicitly, at a port. `hyper` and `hyper-util` are already
+# compiled in this workspace via `reqwest`, so this costs no build time.
+hyper = { version = "1.11.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+serde_json = "1.0.151"
+# `macros` is not test-only: the accept loop selects between the socket and the
+# shutdown future. Declaring it only in dev-dependencies compiled by accident,
+# through feature unification with `ego-cli`, and would have broken the first
+# build that did not include that crate.
+tokio = { version = "1", features = ["net", "rt", "io-util", "macros"] }
+tracing = "0.1.44"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+ego-listen.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }

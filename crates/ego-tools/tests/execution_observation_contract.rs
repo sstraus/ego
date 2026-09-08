@@ -11,8 +11,11 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::permit::{BackendIdentity, ExecCaps, ExecObservation, PolicyDigest};
+use ego_core::store::evidence::{EvidenceRead, EvidenceStore};
 use ego_core::store::session_store::SessionStore;
-use ego_tools::store::{JsonlStore, OsIo, StoreIo};
+use ego_tools::store::{JsonlStore, LeaseInputs, OsIo, SessionEvidenceStore, StoreIo};
+use futures::executor::block_on;
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn observation(backend: &str, revision: &str) -> ExecObservation {
@@ -56,6 +59,89 @@ fn event_log_lines(root: &Path, id: &SessionId) -> Vec<String> {
         .lines()
         .map(str::to_owned)
         .collect()
+}
+
+fn append_evidence(
+    store: &SessionEvidenceStore,
+    bytes: &[u8],
+) -> ego_core::store::evidence::EvidenceRef {
+    let mut writer = store.begin().expect("evidence writer");
+    writer.append(bytes).expect("probe bytes");
+    writer.commit().expect("probe evidence commit")
+}
+
+#[test]
+fn execution_observation_retains_probe_evidence_across_writer_reopen_gc() {
+    let root = tempdir().expect("store root");
+    let workspace = std::fs::canonicalize(root.path()).expect("canonical workspace");
+    let store = JsonlStore::new(root.path(), workspace, Box::new(OsIo));
+    let id = SessionId::new();
+    let mut seq = Seq::default();
+    let turn = TurnId::new();
+    const ALIVE: &dyn Fn(u32) -> bool = &|_| true;
+    let retained;
+    let garbage;
+    {
+        let opened = store
+            .open_writer(
+                &id,
+                LeaseInputs {
+                    pid: std::process::id(),
+                    now: Timestamp::from_millis(1),
+                    stale_after: Duration::from_secs(30),
+                    is_alive: ALIVE,
+                },
+            )
+            .expect("writer lease");
+        let evidence = opened
+            .writer
+            .evidence_store(1024 * 1024)
+            .expect("evidence store");
+        retained = append_evidence(&evidence, b"retained probe transcript");
+        garbage = append_evidence(&evidence, b"unreferenced garbage");
+        let kind = EventKind::ExecutionObserved {
+            observation: observation("seatbelt", "probe-test"),
+            probe_evidence: Some(retained.clone()),
+        };
+        assert_eq!(
+            kind.blob_references(),
+            vec![retained.blob_ref()],
+            "ExecutionObserved must make its probe transcript reachable"
+        );
+        opened
+            .writer
+            .append(&id, &event(&mut seq, turn, 1, kind))
+            .expect("observation event append");
+    }
+
+    let reopened = store
+        .open_writer(
+            &id,
+            LeaseInputs {
+                pid: std::process::id(),
+                now: Timestamp::from_millis(2),
+                stale_after: Duration::from_secs(30),
+                is_alive: ALIVE,
+            },
+        )
+        .expect("writer reopens and repairs no data");
+    let evidence = reopened
+        .writer
+        .evidence_store(1024 * 1024)
+        .expect("reopened evidence store");
+    let retained_page = block_on(
+        evidence
+            .read_page(&EvidenceRead::new(retained.clone(), 0).expect("retained reference offset")),
+    )
+    .expect("referenced probe survives writer-owned GC");
+    assert_eq!(retained_page.bytes, b"retained probe transcript");
+    let garbage_result = block_on(
+        evidence.read_page(&EvidenceRead::new(garbage, 0).expect("garbage reference offset")),
+    );
+    assert!(
+        garbage_result.is_err(),
+        "unreferenced evidence must remain collectible"
+    );
 }
 
 #[test]
@@ -122,6 +208,7 @@ fn execution_observation_fsyncs_the_log_before_replacing_the_manifest() {
                 1,
                 EventKind::ExecutionObserved {
                     observation: observation("null", "test"),
+                    probe_evidence: None,
                 },
             ),
         )
@@ -157,6 +244,7 @@ fn normal_manifest_cadence_preserves_the_latest_execution_observation() {
                 1,
                 EventKind::ExecutionObserved {
                     observation: observation("landlock", "v1"),
+                    probe_evidence: None,
                 },
             ),
         )
@@ -241,6 +329,7 @@ fn recovery_clears_a_stale_manifest_observation_when_the_event_is_not_in_valid_l
                 2,
                 EventKind::ExecutionObserved {
                     observation: observation("landlock", "v1"),
+                    probe_evidence: None,
                 },
             ),
         )
@@ -280,6 +369,7 @@ fn recovery_rebuilds_the_latest_observation_from_a_valid_log_when_manifest_is_mi
                 1,
                 EventKind::ExecutionObserved {
                     observation: observation("landlock", "v1"),
+                    probe_evidence: None,
                 },
             ),
         )
@@ -293,6 +383,7 @@ fn recovery_rebuilds_the_latest_observation_from_a_valid_log_when_manifest_is_mi
                 2,
                 EventKind::ExecutionObserved {
                     observation: observation("seatbelt", "v2"),
+                    probe_evidence: None,
                 },
             ),
         )

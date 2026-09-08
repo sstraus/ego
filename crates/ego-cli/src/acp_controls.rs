@@ -1,13 +1,13 @@
-//! The ACP connection's operator seat for model, effort and mode.
+//! The ACP connection's operator seat for model, effort, mode and sandbox.
 //!
 //! `2026-09-03-acp-host-control-is-negotiated-per-session.md` makes the
 //! connected client the person in an ACP-owned turn. This is the other half
 //! of that: the picker that person is offered, and what a pick actually does.
 //!
-//! Everything is answered from the same two sources the terminal picker uses
-//! — the discovered model catalogue and the workspace's resolved
-//! configuration — so a host cannot be offered a model `ego models` calls
-//! unavailable, or an effort the provider would reject.
+//! Model, effort and mode are answered from the same two sources the terminal
+//! picker uses — the discovered model catalogue and the workspace's resolved
+//! configuration. Sandbox choices come from the process observations the ACP
+//! initializer pins before this seat is exposed.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -19,6 +19,7 @@ use ego_core::control::{
 };
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
+use ego_core::permit::{Confinement, ExecObservation, MissingExecCaps};
 
 use crate::model_picker::reasoning_levels;
 
@@ -38,6 +39,35 @@ struct Chosen {
     model: Option<ModelRef>,
     effort: Option<ThinkingLevel>,
     mode: Option<Mode>,
+    sandbox: Option<Confinement>,
+}
+
+/// The measured confinement facts pinned before this session's picker exists.
+#[derive(Debug, Clone)]
+struct ConfinementMeasurements {
+    supported: Vec<(Confinement, ExecObservation)>,
+    unsupported: Vec<(Confinement, MissingExecCaps)>,
+}
+
+impl ConfinementMeasurements {
+    fn observation(&self, confinement: Confinement) -> Option<&ExecObservation> {
+        self.supported
+            .iter()
+            .find_map(|(candidate, observation)| (*candidate == confinement).then_some(observation))
+    }
+
+    fn refusal(&self, confinement: Confinement) -> Option<&MissingExecCaps> {
+        self.unsupported
+            .iter()
+            .find_map(|(candidate, refusal)| (*candidate == confinement).then_some(refusal))
+    }
+}
+
+/// Everything one connection knows and may change for one session.
+#[derive(Debug, Clone, Default)]
+struct SessionSeat {
+    chosen: Chosen,
+    confinement: Option<ConfinementMeasurements>,
 }
 
 /// One ACP connection's generation controls.
@@ -47,8 +77,16 @@ pub struct AcpSessionControls {
     effort: ThinkingLevel,
     mode: Mode,
     judge: bool,
+    /// The weakest confinement this connection may run at, and the value a
+    /// session starts on.
+    ///
+    /// A ceiling rather than a default:
+    /// `docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`.
+    /// The operator who spawned the process set it, and no message on this
+    /// connection can move it.
+    sandbox_ceiling: Confinement,
     catalogue: Option<ModelCatalogueSnapshot>,
-    sessions: Mutex<HashMap<SessionId, Chosen>>,
+    sessions: Mutex<HashMap<SessionId, SessionSeat>>,
 }
 
 impl AcpSessionControls {
@@ -58,24 +96,34 @@ impl AcpSessionControls {
     /// fail: a connection that could not enumerate models still offers mode,
     /// and offers exactly one model — the configured one — rather than a list
     /// it cannot vouch for.
-    pub fn new(effective: &Effective, catalogue: Option<ModelCatalogueSnapshot>) -> Self {
+    /// `ceiling` is the operator's, not the configuration's. It comes from
+    /// `ego acp --sandbox`, and where that was not given it is the resolved
+    /// `sandbox` — which for a headless untrusted resolution means the user
+    /// layer, since Project and Local were discarded before this was read.
+    pub fn new(
+        effective: &Effective,
+        ceiling: Confinement,
+        catalogue: Option<ModelCatalogueSnapshot>,
+    ) -> Self {
         Self::seeded(
             effective.model.clone().unwrap_or(ModelRef(String::new())),
             effective.thinking.unwrap_or(ThinkingLevel::Off),
             effective.mode.unwrap_or(Mode::Default),
             effective.judge.is_some(),
+            ceiling,
             catalogue,
         )
     }
 
-    /// The three resolved values and whether a judge exists, without the
-    /// rest of the configuration. This is the whole of what the seat needs,
-    /// and saying so is what lets it be tested without building a workspace.
+    /// The resolved values and whether a judge exists, without the rest of
+    /// the configuration. This is the whole of what the seat needs, and
+    /// saying so is what lets it be tested without building a workspace.
     pub fn seeded(
         model: ModelRef,
         effort: ThinkingLevel,
         mode: Mode,
         judge: bool,
+        sandbox_ceiling: Confinement,
         catalogue: Option<ModelCatalogueSnapshot>,
     ) -> Self {
         Self {
@@ -83,19 +131,121 @@ impl AcpSessionControls {
             effort,
             mode,
             judge,
+            sandbox_ceiling,
             catalogue,
             sessions: Mutex::new(HashMap::new()),
         }
     }
 
-    fn chosen(&self, session: SessionId) -> Result<Chosen, ControlError> {
-        Ok(self
-            .sessions
+    fn lock_sessions(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<SessionId, SessionSeat>>, ControlError> {
+        self.sessions
             .lock()
-            .map_err(|_| ControlError::Internal("the ACP control lock is poisoned".to_owned()))?
+            .map_err(|_| ControlError::Internal("the ACP control lock is poisoned".to_owned()))
+    }
+
+    fn uninitialized() -> ControlError {
+        ControlError::Internal(
+            "the ACP sandbox options were read before confinement initialization completed"
+                .to_owned(),
+        )
+    }
+
+    /// Install the complete measured offer exactly once.
+    ///
+    /// Validation happens before the session map is touched, so duplicate or
+    /// contradictory rows cannot leave a partial offer behind. The adapter
+    /// calls this only after every corresponding observation event is durable.
+    pub fn seed_confinement(
+        &self,
+        session: SessionId,
+        supported: Vec<(Confinement, ExecObservation)>,
+        unsupported: Vec<(Confinement, MissingExecCaps)>,
+    ) -> Result<(), ControlError> {
+        let mut seen = Vec::new();
+        for confinement in supported
+            .iter()
+            .map(|(confinement, _)| *confinement)
+            .chain(unsupported.iter().map(|(confinement, _)| *confinement))
+        {
+            if seen.contains(&confinement) {
+                return Err(ControlError::Internal(format!(
+                    "the ACP confinement measurement contains duplicate `{confinement}` rows"
+                )));
+            }
+            seen.push(confinement);
+        }
+
+        let measurements = ConfinementMeasurements {
+            supported: Confinement::ALL
+                .into_iter()
+                .filter_map(|candidate| {
+                    supported
+                        .iter()
+                        .find(|(confinement, _)| *confinement == candidate)
+                        .cloned()
+                })
+                .collect(),
+            unsupported: Confinement::ALL
+                .into_iter()
+                .filter_map(|candidate| {
+                    unsupported
+                        .iter()
+                        .find(|(confinement, _)| *confinement == candidate)
+                        .cloned()
+                })
+                .collect(),
+        };
+        let mut sessions = self.lock_sessions()?;
+        let seat = sessions.entry(session).or_default();
+        if seat.confinement.is_some() {
+            return Err(ControlError::Internal(
+                "the ACP confinement measurements for this session are already pinned".to_owned(),
+            ));
+        }
+        seat.confinement = Some(measurements);
+        Ok(())
+    }
+
+    /// Read the immutable observation paired with one supported picker value.
+    pub fn observation(
+        &self,
+        session: SessionId,
+        confinement: Confinement,
+    ) -> Result<ExecObservation, ControlError> {
+        if !confinement.within(self.sandbox_ceiling) {
+            return Err(self.ceiling_refusal());
+        }
+        let sessions = self.lock_sessions()?;
+        let measurements = sessions
             .get(&session)
-            .cloned()
-            .unwrap_or_default())
+            .and_then(|seat| seat.confinement.as_ref())
+            .ok_or_else(Self::uninitialized)?;
+        if let Some(observation) = measurements.observation(confinement) {
+            return Ok(observation.clone());
+        }
+        if let Some(missing) = measurements.refusal(confinement) {
+            return Err(ControlError::MissingCapabilities {
+                control: "sandbox",
+                value: confinement.as_str().to_owned(),
+                missing: Box::new(missing.clone()),
+            });
+        }
+        Err(ControlError::Unavailable {
+            control: "sandbox",
+            value: confinement.as_str().to_owned(),
+        })
+    }
+
+    fn ceiling_refusal(&self) -> ControlError {
+        ControlError::Refused {
+            control: "sandbox",
+            why: format!(
+                "this connection was started at `{}`, and a session can only be confined further than that, never less",
+                self.sandbox_ceiling
+            ),
+        }
     }
 
     /// Every model this connection can actually run, current one included.
@@ -149,15 +299,17 @@ impl AcpSessionControls {
         efforts
     }
 
-    fn compose(&self, chosen: Chosen) -> SessionControlState {
+    fn compose(&self, seat: &SessionSeat) -> Result<SessionControlState, ControlError> {
+        let measured = seat.confinement.as_ref().ok_or_else(Self::uninitialized)?;
+        let chosen = &seat.chosen;
         let model = chosen.model.clone().unwrap_or_else(|| self.model.clone());
         let effort = chosen.effort.unwrap_or(self.effort);
         let mode = chosen.mode.unwrap_or(self.mode);
-        SessionControlState {
+        Ok(SessionControlState {
             model: ControlSelect {
                 available: self.models(&model),
                 current: model.clone(),
-                chosen: chosen.model,
+                chosen: chosen.model.clone(),
             },
             effort: ControlSelect {
                 available: self.efforts(&model, effort),
@@ -169,7 +321,27 @@ impl AcpSessionControls {
                 current: mode,
                 chosen: chosen.mode,
             },
-        }
+            sandbox: ControlSelect {
+                available: self.sandboxes(measured),
+                current: chosen.sandbox.unwrap_or(self.sandbox_ceiling),
+                chosen: chosen.sandbox,
+            },
+        })
+    }
+
+    /// Every measured confinement at least as strong as the ceiling.
+    ///
+    /// An unsupported configured ceiling remains the effective current value
+    /// so the next prompt can refuse it with its typed measurement. It is not
+    /// silently replaced by a different sandbox merely to keep the current
+    /// value inside the picker offer.
+    fn sandboxes(&self, measured: &ConfinementMeasurements) -> Vec<Confinement> {
+        measured
+            .supported
+            .iter()
+            .map(|(confinement, _)| *confinement)
+            .filter(|confinement| confinement.within(self.sandbox_ceiling))
+            .collect()
     }
 
     /// Auto is offered only where it can work: it delegates to a judge model,
@@ -184,7 +356,9 @@ impl AcpSessionControls {
 
 impl SessionControls for AcpSessionControls {
     fn state(&self, session: SessionId) -> Result<SessionControlState, ControlError> {
-        Ok(self.compose(self.chosen(session)?))
+        let sessions = self.lock_sessions()?;
+        let seat = sessions.get(&session).ok_or_else(Self::uninitialized)?;
+        self.compose(seat)
     }
 
     fn stage(
@@ -192,7 +366,10 @@ impl SessionControls for AcpSessionControls {
         session: SessionId,
         change: SessionControlChange,
     ) -> Result<SessionControlState, ControlError> {
-        let mut chosen = self.chosen(session)?;
+        let mut sessions = self.lock_sessions()?;
+        let seat = sessions.get_mut(&session).ok_or_else(Self::uninitialized)?;
+        let measured = seat.confinement.as_ref().ok_or_else(Self::uninitialized)?;
+        let chosen = &mut seat.chosen;
         match change {
             SessionControlChange::Model(model) => {
                 // Re-validating here is not distrust of the adapter: the seat
@@ -243,11 +420,30 @@ impl SessionControls for AcpSessionControls {
                 }
                 chosen.mode = Some(mode);
             }
+            SessionControlChange::Sandbox(confinement) => {
+                // `Refused`, not `Unavailable`. A weaker confinement is a real
+                // value that this connection may not reach, and telling the
+                // host to "pick from the list" would suggest the list is
+                // merely incomplete rather than deliberately capped.
+                if !confinement.within(self.sandbox_ceiling) {
+                    return Err(self.ceiling_refusal());
+                }
+                if let Some(missing) = measured.refusal(confinement) {
+                    return Err(ControlError::MissingCapabilities {
+                        control: "sandbox",
+                        value: confinement.as_str().to_owned(),
+                        missing: Box::new(missing.clone()),
+                    });
+                }
+                if measured.observation(confinement).is_none() {
+                    return Err(ControlError::Unavailable {
+                        control: "sandbox",
+                        value: confinement.as_str().to_owned(),
+                    });
+                }
+                chosen.sandbox = Some(confinement);
+            }
         }
-        self.sessions
-            .lock()
-            .map_err(|_| ControlError::Internal("the ACP control lock is poisoned".to_owned()))?
-            .insert(session, chosen.clone());
-        Ok(self.compose(chosen))
+        self.compose(seat)
     }
 }

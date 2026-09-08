@@ -104,6 +104,7 @@ pub struct ExecRunConfig {
     http_call_timeout: HttpCallTimeout,
     run_deadline: Option<Instant>,
     resolver: Arc<dyn Resolver>,
+    admitted_observation: Option<ExecObservation>,
 }
 
 impl ExecRunConfig {
@@ -124,7 +125,15 @@ impl ExecRunConfig {
             http_call_timeout,
             run_deadline,
             resolver,
+            admitted_observation: None,
         }
+    }
+
+    /// Require the reconstructed effects to match the session's admitted facts.
+    #[must_use]
+    pub fn with_admitted_observation(mut self, observation: ExecObservation) -> Self {
+        self.admitted_observation = Some(observation);
+        self
     }
 }
 
@@ -299,8 +308,18 @@ pub struct RunEffectPorts {
     duplex: Arc<crate::stdio::GuardedDuplex>,
 }
 
+/// One reconstructed backend and the measured facts it produced.
+///
+/// Private because the backend and its scratch are run mechanisms, while only
+/// the observation and evidence reference cross the session admission port.
+struct ExecMeasurement {
+    backend: Arc<MeasuredBackend>,
+    observation: ExecObservation,
+    evidence: Option<ego_core::store::evidence::EvidenceRef>,
+}
+
 impl RunEffectPorts {
-    pub async fn for_run(config: ExecRunConfig) -> Result<(Self, ExecObservation), ProcessError> {
+    async fn measure(config: &ExecRunConfig) -> Result<ExecMeasurement, ProcessError> {
         let measurement = ProbeLog::default();
         let (selected, runtime_roots) = select_backend(
             &config.policy,
@@ -315,6 +334,56 @@ impl RunEffectPorts {
         // it, so an operator can read what was measured rather than infer it
         // from a capability that is merely absent.
         let transcript = commit_probe_transcript(&config.evidence, &measurement)?;
+        let observation = ExecObservation::new(
+            selected.identity(),
+            capabilities,
+            policy_digest_with_runtime_roots(&config.policy, selected.as_ref(), &runtime_roots)?,
+        );
+        Ok(ExecMeasurement {
+            backend: selected,
+            observation,
+            evidence: transcript,
+        })
+    }
+
+    /// Measure one policy and commit its transcript without constructing effects.
+    ///
+    /// Capability requirements are deliberately not applied here: a session
+    /// offer needs the completed observation in order to explain why a real
+    /// confinement is unsupported.
+    pub async fn observe(
+        config: &ExecRunConfig,
+    ) -> Result<
+        (
+            ExecObservation,
+            Option<ego_core::store::evidence::EvidenceRef>,
+        ),
+        ProcessError,
+    > {
+        let measured = Self::measure(config).await?;
+        Ok((measured.observation, measured.evidence))
+    }
+
+    pub async fn for_run(
+        config: ExecRunConfig,
+    ) -> Result<
+        (
+            Self,
+            ExecObservation,
+            Option<ego_core::store::evidence::EvidenceRef>,
+        ),
+        ProcessError,
+    > {
+        let measured = Self::measure(&config).await?;
+        if let Some(admitted) = config.admitted_observation.as_ref()
+            && admitted != &measured.observation
+        {
+            return Err(ProcessError::ConfinementChanged {
+                admitted: Box::new(admitted.clone()),
+                observed: Box::new(measured.observation),
+            });
+        }
+        let capabilities = measured.observation.capabilities();
         config
             .policy
             .requirements()
@@ -322,17 +391,16 @@ impl RunEffectPorts {
             .map_err(|missing| {
                 ProcessError::MissingCapabilities(
                     missing
-                        .with_probe_evidence(transcript)
-                        .from_backend(selected.identity()),
+                        .with_probe_evidence(measured.evidence.clone())
+                        .from_backend(measured.observation.backend().clone()),
                 )
             })?;
-        let observation = ExecObservation::new(
-            selected.identity(),
-            capabilities,
-            policy_digest_with_runtime_roots(&config.policy, selected.as_ref(), &runtime_roots)?,
-        );
-        let backend: Arc<dyn Backend> = selected;
-        Ok((Self::build(config, backend, capabilities), observation))
+        let backend: Arc<dyn Backend> = measured.backend;
+        Ok((
+            Self::build(config, backend, capabilities),
+            measured.observation,
+            measured.evidence,
+        ))
     }
 
     fn build(config: ExecRunConfig, backend: Arc<dyn Backend>, capabilities: ExecCaps) -> Self {
@@ -407,12 +475,7 @@ async fn select_backend(
         return MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
             .map(|backend| (Arc::new(backend), Vec::new()));
     }
-    match probe::landlock(policy, cancel, limits, log).await {
-        Ok(backend) => Ok(backend),
-        Err(ProcessError::Cancelled) => Err(ProcessError::Cancelled),
-        Err(_) => MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
-            .map(|backend| (Arc::new(backend), Vec::new())),
-    }
+    probe::landlock(policy, cancel, limits, log).await
 }
 
 #[cfg(target_os = "macos")]
@@ -423,12 +486,7 @@ async fn select_backend(
     log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
     if policy.level() != ego_core::permit::Confinement::Off || policy.offline() {
-        return match probe::seatbelt(policy, cancel, limits, log).await {
-            Ok(backend) => Ok(backend),
-            Err(ProcessError::Cancelled) => Err(ProcessError::Cancelled),
-            Err(_) => MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
-                .map(|backend| (Arc::new(backend), Vec::new())),
-        };
+        return probe::seatbelt(policy, cancel, limits, log).await;
     }
     // Restricted platform backends plug into this private selection point.
     // The null backend is permanent and truthful: its empty capability set

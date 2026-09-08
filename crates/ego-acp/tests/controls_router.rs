@@ -15,6 +15,7 @@ use ego_core::control::{
 };
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
+use ego_core::permit::Confinement;
 
 mod support;
 
@@ -48,6 +49,11 @@ impl Seat {
                 current: mode.unwrap_or(Mode::Default),
                 chosen: mode,
                 available: vec![Mode::Plan, Mode::Default],
+            },
+            sandbox: ControlSelect {
+                current: Confinement::Workspace,
+                chosen: None,
+                available: vec![Confinement::Ro, Confinement::Workspace],
             },
         }
     }

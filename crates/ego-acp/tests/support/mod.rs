@@ -137,6 +137,44 @@ impl DurableAcpFixture {
         )
     }
 
+    pub fn router_with_confinement(
+        &self,
+        confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+    ) -> agent_client_protocol::AgentProtocolRouter {
+        self.router_with_confinement_and_controls(None, confinement)
+    }
+
+    pub fn router_with_confinement_and_controls(
+        &self,
+        controls: Option<Arc<dyn ego_core::control::SessionControls>>,
+        confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+    ) -> agent_client_protocol::AgentProtocolRouter {
+        let clock = Arc::new(TestClock);
+        let controller = Arc::new(RunController::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.executor),
+            Arc::clone(&clock),
+            Arc::clone(&self.ids),
+            RunRetention::new(std::num::NonZeroUsize::new(2).unwrap()).unwrap(),
+        ));
+        let runs: Arc<dyn SessionRunLifecycle> = controller.clone();
+        let lifecycle = Arc::new(SessionLifecycle::new(Arc::clone(&self.store), runs, clock));
+        ego_acp::serve::durable_agent_with_compaction(
+            controller,
+            lifecycle,
+            Arc::new(TestRoots::with_effects(Arc::clone(&self.effects))),
+            self.spawner.clone(),
+            self.ids.clone(),
+            Arc::new(AcpRunBindingsBuilder::default()),
+            Arc::new(RejectingMcpAdmitter::with_effects(Arc::clone(
+                &self.effects,
+            ))),
+            Arc::new(CompactionCommandFixture),
+            controls,
+            confinement,
+        )
+    }
+
     pub fn seed_sessions(&self, root: &str, count: usize) {
         let runs: Arc<dyn SessionRunLifecycle> = Arc::new(InactiveRuns);
         let lifecycle = SessionLifecycle::new(Arc::clone(&self.store), runs, Arc::new(TestClock));
@@ -355,6 +393,10 @@ impl DurableAcpFixture {
             self.executor.submit_calls.load(Ordering::SeqCst),
             self.executor.observe_calls.load(Ordering::SeqCst),
         )
+    }
+
+    pub fn prepared_selections(&self) -> Option<ego_core::run::RunSelections> {
+        self.executor.prepared_selections()
     }
 
     pub fn has_run(&self, session: &str) -> bool {
@@ -835,10 +877,35 @@ pub struct Executor {
     release: Notify,
     observe_started: Notify,
     observe_release: Notify,
+    block_prepare: AtomicBool,
+    prepare_started: Notify,
+    prepare_release: Notify,
+    prepared_selections: Mutex<Option<ego_core::run::RunSelections>>,
 }
 
 #[allow(dead_code)]
 pub struct Prepared;
+
+impl Executor {
+    pub fn block_preparation(&self) {
+        self.block_prepare.store(true, Ordering::SeqCst);
+    }
+
+    pub async fn preparation_started(&self) {
+        self.prepare_started.notified().await;
+    }
+
+    pub fn release_preparation(&self) {
+        self.prepare_release.notify_one();
+    }
+
+    pub fn prepared_selections(&self) -> Option<ego_core::run::RunSelections> {
+        self.prepared_selections
+            .lock()
+            .expect("prepare selections")
+            .clone()
+    }
+}
 
 #[derive(Default)]
 pub struct CompactionCommandFixture;
@@ -863,8 +930,20 @@ impl RunExecutor for Executor {
 
     fn prepare<'a>(
         &'a self,
-        _request: &'a RunPreparation,
+        request: &'a RunPreparation,
     ) -> BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
+        *self.prepared_selections.lock().expect("prepare selections") =
+            Some(request.selections.clone());
+        if self.block_prepare.swap(false, Ordering::SeqCst) {
+            self.prepare_started.notify_one();
+            return Box::pin(async move {
+                self.prepare_release.notified().await;
+                Ok(RunPrepared::new(
+                    ModelRef("model/test".to_owned()),
+                    Prepared,
+                ))
+            });
+        }
         Box::pin(future::ready(Ok(RunPrepared::new(
             ModelRef("model/test".to_owned()),
             Prepared,
@@ -1112,6 +1191,25 @@ where
     C: Clock + 'static,
     I: IdSource + 'static,
 {
+    agent_with_compaction_and_confinement(store, executor, clock, ids, compaction, controls, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn agent_with_compaction_and_confinement<S, E, C, I>(
+    store: Arc<S>,
+    executor: Arc<E>,
+    clock: Arc<C>,
+    ids: Arc<I>,
+    compaction: Arc<dyn CompactionCommand>,
+    controls: Option<Arc<dyn ego_core::control::SessionControls>>,
+    confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+) -> agent_client_protocol::AgentProtocolRouter
+where
+    S: SessionStore + 'static,
+    E: RunExecutor + 'static,
+    C: Clock + 'static,
+    I: IdSource + 'static,
+{
     let controller = Arc::new(RunController::new(
         store,
         executor,
@@ -1128,6 +1226,7 @@ where
         Arc::new(RejectingMcpAdmitter::default()),
         compaction,
         controls,
+        confinement,
     )
 }
 
@@ -1221,6 +1320,11 @@ impl Connected {
         method: &str,
         params: serde_json::Value,
     ) -> (serde_json::Value, Vec<serde_json::Value>) {
+        let id = self.send_request(method, params).await;
+        self.response(id).await
+    }
+
+    pub async fn send_request(&mut self, method: &str, params: serde_json::Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.to_agent
@@ -1235,6 +1339,10 @@ impl Connected {
             )
             .await
             .expect("the ACP agent is listening");
+        id
+    }
+
+    pub async fn response(&mut self, id: u64) -> (serde_json::Value, Vec<serde_json::Value>) {
         let mut notifications = Vec::new();
         loop {
             let line = self
@@ -1249,6 +1357,13 @@ impl Connected {
             }
             notifications.push(message);
         }
+    }
+
+    pub async fn announced(&mut self, root: &str) -> Vec<serde_json::Value> {
+        let fence = self
+            .send_request("session/list", serde_json::json!({"cwd": root}))
+            .await;
+        self.response(fence).await.1
     }
 
     pub async fn initialize(&mut self) -> serde_json::Value {

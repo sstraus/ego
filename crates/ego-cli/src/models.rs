@@ -21,6 +21,7 @@ use ego_tools::store::OsIo;
 
 use crate::auth::StoreCredentials;
 use crate::cli::ModelsArgs;
+use crate::onboarding::{EnvironmentPresence, credential_present, discover_ollama};
 use crate::{config, facts, model};
 
 /// Build and render the one snapshot consumed by every model-listing surface.
@@ -225,6 +226,147 @@ pub async fn build_catalogue_snapshot(
     ))
 }
 
+/// Project existing facts without resolving secrets or publishing a cache.
+/// Only Ollama may perform discovery during first-run observation.
+pub(crate) async fn build_startup_catalogue_snapshot(
+    http: &std::sync::Arc<dyn ego_ai::http::Http>,
+    environment: &dyn EnvironmentPresence,
+    observed: &BTreeSet<String>,
+) -> Result<
+    (
+        ModelCatalogueSnapshot,
+        BTreeMap<String, ego_ai::catalogue::ModelSlug>,
+    ),
+    RunTermination,
+> {
+    let auth = config::auth().map_err(usage)?;
+    let rows = model::rows(&auth).map_err(|error| usage_message(error.to_string()))?;
+    let admitted = rows
+        .iter()
+        .map(|row| row.id().to_owned())
+        .collect::<BTreeSet<_>>();
+    let (hosted, defaults) = facts::supplied_with_defaults(&Ceilings::default()).map_err(usage)?;
+    let supplied_providers = hosted
+        .iter()
+        .filter_map(|(slug, _)| {
+            slug.split_once('/')
+                .map(|(provider, _)| provider.to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut sources = unsupported_supplied_sources(&hosted, &admitted, None);
+    let mut catalogue = ego_ai::catalogue::Catalogue::new(rows.iter().cloned());
+    for (slug, facts) in hosted {
+        catalogue = catalogue.with_hosted(&slug, facts);
+    }
+    let unavailable = |row: &ProviderRow| {
+        mapping_unavailability(row).or_else(|| {
+            (!credential_present(&row.credential, environment, observed)).then(|| {
+                missing_credential(format!("no credential is configured for provider `{}`; run `ego auth login {}` for setup instructions", row.id(), row.id()))
+            })
+        })
+    };
+    let mut models = Vec::new();
+    for row in &rows {
+        // Ollama's resolver is the one credential-free network enumerator;
+        // it is observed only through the bounded boundary below.
+        if row.id() == ego_ai::catalogue::OLLAMA
+            || !supplied_providers.contains(row.id())
+            || row.resolver.enumeration_credential() != ResolverCredentialRequirement::None
+        {
+            continue;
+        }
+        let report = row
+            .resolver
+            .enumerate(&Enumeration {
+                catalogue: &catalogue,
+                row,
+                http,
+                credential: None,
+            })
+            .await
+            .map_err(|message| RunTermination::Failed { message })?;
+        if report.source() == &ModelDiscoverySource::Supplied {
+            project_supplied_with_availability(
+                row,
+                report.models(),
+                unavailable(row).unwrap_or(ModelAvailability::Available),
+                &mut models,
+                &mut sources,
+            );
+        }
+    }
+    let mut cache = match config::ego_home() {
+        Some(home) => read_cache(&ModelCatalogueCache::new(&OsIo, &home))?,
+        None => DiscoveryCacheV1::default(),
+    };
+    let mut current = BTreeSet::new();
+    let mut current_sources = BTreeSet::new();
+    let mut source_failures = BTreeMap::new();
+    if let Ok(row) = catalogue.row(ego_ai::catalogue::OLLAMA) {
+        let report = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            discover_ollama(row, http, environment.is_set(model::OLLAMA_HOST)),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err("startup Ollama discovery exceeded its two-second deadline".to_owned())
+        });
+        let report = match report {
+            Ok(report) => report,
+            Err(message) => ego_ai::catalogue::ModelDiscoveryReport::try_new(
+                ModelDiscoverySource::Discovered {
+                    provider: row.id().to_owned(),
+                },
+                Vec::new(),
+                vec![ModelDiscoveryFailure::source("source_unreachable", message)],
+                false,
+            )
+            .map_err(|message| RunTermination::Failed { message })?,
+        };
+        current.extend(report.models().iter().map(|entry| entry.slug.clone()));
+        current_sources.insert(row.id().to_owned());
+        if let Some(failure) = report
+            .failures()
+            .iter()
+            .find(|failure| failure.model.is_none())
+        {
+            source_failures.insert(row.id().to_owned(), failure.clone());
+        }
+        cache
+            .merge_provider(row.id(), report)
+            .map_err(|message| RunTermination::Failed { message })?;
+    }
+    for row in &rows {
+        let observed_unavailability = unavailable(row);
+        if let Some(slice) = cache.providers.get(row.id()) {
+            project_cached(
+                row,
+                slice,
+                &current,
+                &current_sources,
+                source_failures.get(row.id()),
+                observed_unavailability.as_ref(),
+                &mut models,
+                &mut sources,
+            );
+        } else if row.resolver.enumeration_credential() == ResolverCredentialRequirement::Required {
+            sources.push(ModelCatalogueSourceStatus {
+                provider: row.id().to_owned(),
+                provenance: ModelFactProvenance::discovered(row.id().to_owned()),
+                freshness: FactFreshness::Current,
+                availability: observed_unavailability.unwrap_or_else(|| ModelAvailability::Unavailable {
+                    cause: ModelAvailabilityCause::IncompleteFacts,
+                    message: format!("provider `{}` has no observed model inventory; run `ego models --provider {} --refresh` to populate it", row.id(), row.id()),
+                }),
+            });
+        }
+    }
+    Ok((
+        ModelCatalogueSnapshot::from_entries_and_sources(models, sources),
+        defaults,
+    ))
+}
+
 fn unsupported_supplied_sources(
     hosted: &[(String, facts::Hosted)],
     admitted: &BTreeSet<String>,
@@ -285,6 +427,13 @@ fn read_cache(cache: &ModelCatalogueCache<'_>) -> Result<DiscoveryCacheV1, RunTe
     }
 }
 
+fn mapping_unavailability(row: &ProviderRow) -> Option<ModelAvailability> {
+    ego_ai::catalogue::live_promotion_refusal(row).map(|refusal| ModelAvailability::Unavailable {
+        cause: ModelAvailabilityCause::MappingUnavailable,
+        message: refusal.to_string(),
+    })
+}
+
 fn project_supplied(
     row: &ProviderRow,
     entries: &[ego_ai::catalogue::ModelDiscoveryEntry],
@@ -296,13 +445,17 @@ fn project_supplied(
     // would name a fix that does not work — and reading the credential to
     // find that out would run an operator's `credential_command` for a row
     // nothing may select.
-    let credential = match ego_ai::catalogue::live_promotion_refusal(row) {
-        Some(refusal) => ModelAvailability::Unavailable {
-            cause: ModelAvailabilityCause::MappingUnavailable,
-            message: refusal.to_string(),
-        },
-        None => credential_for(row),
-    };
+    let credential = mapping_unavailability(row).unwrap_or_else(|| credential_for(row));
+    project_supplied_with_availability(row, entries, credential, models, sources);
+}
+
+fn project_supplied_with_availability(
+    row: &ProviderRow,
+    entries: &[ego_ai::catalogue::ModelDiscoveryEntry],
+    credential: ModelAvailability,
+    models: &mut Vec<ModelCatalogueEntry>,
+    sources: &mut Vec<ModelCatalogueSourceStatus>,
+) {
     for entry in entries {
         models.push(ModelCatalogueEntry {
             slug: entry.slug.clone(),

@@ -20,7 +20,7 @@ pub enum PickerOutcome {
     ModelSwitch(ModelSwitchRequest),
 }
 
-/// A validated active-session selection staged for the asynchronous run owner.
+/// A validated selection staged for the startup or asynchronous run owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSwitchRequest {
     target: ModelRef,
@@ -29,6 +29,15 @@ pub struct ModelSwitchRequest {
 }
 
 impl ModelSwitchRequest {
+    /// A startup selection that must become the next user default.
+    pub(crate) fn persistent(target: ModelRef, thinking: ThinkingLevel) -> Self {
+        Self {
+            target,
+            thinking,
+            persistent: true,
+        }
+    }
+
     pub fn target(&self) -> ModelRef {
         self.target.clone()
     }
@@ -73,6 +82,8 @@ pub struct ModelPickerView {
     pub selected_model: Option<String>,
     pub models: Vec<ModelPickerRow>,
     pub reasoning: Vec<ThinkingLevel>,
+    /// Startup has no active session to scope a selection to.
+    pub(crate) persistent_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +114,7 @@ pub enum PickerError {
     },
     NoSelection,
     NoSession,
+    PersistenceRequired,
     SelectionRead(String),
 }
 
@@ -126,6 +138,9 @@ impl std::fmt::Display for PickerError {
             }
             Self::NoSelection => f.write_str("no model selection was made"),
             Self::NoSession => f.write_str("the model picker has no active session"),
+            Self::PersistenceRequired => {
+                f.write_str("the startup model selection must be saved as the user default")
+            }
             Self::SelectionRead(message) => {
                 write!(
                     f,
@@ -154,6 +169,7 @@ pub struct ModelPicker {
     snapshot: Arc<ModelCatalogueSnapshot>,
     selection: Option<Arc<GenerationSelection>>,
     config_store: Option<Arc<dyn UserConfigStore>>,
+    startup: bool,
     chosen: Option<Chosen>,
     open: bool,
     modal: Option<ModalState>,
@@ -166,9 +182,24 @@ impl ModelPicker {
             snapshot,
             selection: None,
             config_store: None,
+            startup: false,
             chosen: None,
             open: false,
             modal: None,
+            diagnostic: None,
+        }
+    }
+
+    /// An already-open picker whose result establishes the first user default.
+    pub(crate) fn for_startup(snapshot: Arc<ModelCatalogueSnapshot>) -> Self {
+        Self {
+            modal: Some(ModalState::Model(model_selector(&snapshot))),
+            snapshot,
+            selection: None,
+            config_store: None,
+            startup: true,
+            chosen: None,
+            open: true,
             diagnostic: None,
         }
     }
@@ -182,6 +213,7 @@ impl ModelPicker {
             snapshot,
             selection: Some(selection),
             config_store: Some(config_store),
+            startup: false,
             chosen: None,
             open: false,
             modal: None,
@@ -255,9 +287,8 @@ impl ModelPicker {
             current_id: selector.and_then(Selector::current_id).map(str::to_owned),
             selected_model,
             models: self
-                .snapshot
-                .models
-                .iter()
+                .ordered_rows()
+                .into_iter()
                 .map(|row| ModelPickerRow {
                     slug: row.slug.clone(),
                     max_context_tokens: row.capabilities.max_context_tokens,
@@ -266,6 +297,7 @@ impl ModelPicker {
                 })
                 .collect(),
             reasoning,
+            persistent_only: self.startup,
         }
     }
 
@@ -352,7 +384,10 @@ impl ModelPicker {
 
     fn commit(&mut self, persist: bool) -> Result<PickerOutcome, PickerError> {
         let chosen = self.chosen.clone().ok_or(PickerError::NoSelection)?;
-        if self.selection.is_none() || persist && self.config_store.is_none() {
+        if self.startup && !persist {
+            return Err(PickerError::PersistenceRequired);
+        }
+        if !self.startup && (self.selection.is_none() || persist && self.config_store.is_none()) {
             return Err(PickerError::NoSession);
         }
         let request = ModelSwitchRequest {
@@ -425,6 +460,10 @@ impl ModelPicker {
             });
         }
         Ok(())
+    }
+
+    fn ordered_rows(&self) -> Vec<&ModelCatalogueEntry> {
+        ordered_rows(&self.snapshot)
     }
 }
 
@@ -516,11 +555,28 @@ const ALL_THINKING: [ThinkingLevel; 7] = [
 fn model_selector(snapshot: &ModelCatalogueSnapshot) -> Selector {
     Selector::with_options(
         SelectorKind::Single,
-        snapshot.models.iter().map(|row| {
+        ordered_rows(snapshot).into_iter().map(|row| {
             let slug = row.slug.to_string();
             SelectorOption::new(slug.clone(), slug)
         }),
     )
+}
+
+fn ordered_rows(snapshot: &ModelCatalogueSnapshot) -> Vec<&ModelCatalogueEntry> {
+    let mut rows = snapshot.models.iter().collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        availability_order(&left.availability)
+            .cmp(&availability_order(&right.availability))
+            .then_with(|| left.slug.cmp(&right.slug))
+    });
+    rows
+}
+
+fn availability_order(availability: &ModelAvailability) -> u8 {
+    match availability {
+        ModelAvailability::Available => 0,
+        ModelAvailability::Unavailable { .. } => 1,
+    }
 }
 
 fn reasoning_selector(levels: &[ThinkingLevel]) -> Selector {

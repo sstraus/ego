@@ -430,24 +430,18 @@ pub fn build_request(
 ///
 /// Keyed off `event_type` and not the `event:` line: the doc's own examples
 /// carry both and the body is the one a non-SSE transport would still have.
-#[derive(Deserialize)]
-#[serde(tag = "event_type", rename_all = "snake_case")]
 enum Frame {
-    #[serde(rename = "step.start")]
     StepStart {
         index: u32,
         step: StartStep,
     },
-    #[serde(rename = "step.delta")]
     StepDelta {
         index: u32,
         delta: Delta,
     },
-    #[serde(rename = "step.stop")]
     StepStop {
         index: u32,
     },
-    #[serde(rename = "interaction.completed")]
     Completed {
         interaction: Interaction,
     },
@@ -459,26 +453,30 @@ enum Frame {
     /// vocabulary is open — the generated types carry an `UNKNOWN` arm — so an
     /// unrecognised *event* is ignored while an unrecognised *status* is not.
     /// The difference is that a status is terminal and an event is not.
-    #[serde(other)]
     Ignored,
 }
 
 #[derive(Deserialize)]
-struct StartStep {
-    #[serde(rename = "type")]
-    kind: String,
-    id: Option<String>,
-    name: Option<String>,
+struct FrameEnvelope {
+    event_type: String,
+    index: Option<u32>,
+    step: Option<Box<RawValue>>,
+    delta: Option<Box<RawValue>>,
+    interaction: Option<Interaction>,
+    error: Option<WireError>,
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+struct StartStep {
+    kind: String,
+    fields: BTreeMap<String, Box<RawValue>>,
+}
+
 enum Delta {
     Text {
         text: String,
     },
     ThoughtSummary {
-        content: SummaryContent,
+        content: Box<RawValue>,
     },
     ThoughtSignature {
         signature: String,
@@ -486,17 +484,82 @@ enum Delta {
     /// The wire calls this `arguments_delta`; the variant drops the suffix
     /// because every arm of this enum is a delta and repeating it in one name
     /// says nothing the enum has not said already.
-    #[serde(rename = "arguments_delta")]
     Arguments {
         arguments: String,
     },
-    #[serde(other)]
     Ignored,
 }
 
 #[derive(Deserialize)]
+struct DeltaEnvelope {
+    #[serde(rename = "type")]
+    kind: String,
+    text: Option<String>,
+    content: Option<Box<RawValue>>,
+    signature: Option<String>,
+    arguments: Option<String>,
+}
+
+impl Frame {
+    fn decode(text: &str) -> Option<Self> {
+        // Internally tagged serde enums buffer their contents, which prevents
+        // RawValue from retaining opaque provider JSON. Decode each envelope
+        // directly from its original JSON slice instead.
+        let frame: FrameEnvelope = serde_json::from_str(text).ok()?;
+        Some(match frame.event_type.as_str() {
+            "step.start" => {
+                let mut fields: BTreeMap<String, Box<RawValue>> =
+                    serde_json::from_str(frame.step?.get()).ok()?;
+                let kind = serde_json::from_str(fields.remove("type")?.get()).ok()?;
+                Self::StepStart {
+                    index: frame.index?,
+                    step: StartStep { kind, fields },
+                }
+            }
+            "step.delta" => {
+                let delta: DeltaEnvelope = serde_json::from_str(frame.delta?.get()).ok()?;
+                let delta = match delta.kind.as_str() {
+                    "text" => Delta::Text { text: delta.text? },
+                    "thought_summary" => Delta::ThoughtSummary {
+                        content: delta.content?,
+                    },
+                    "thought_signature" => Delta::ThoughtSignature {
+                        signature: delta.signature?,
+                    },
+                    "arguments_delta" => Delta::Arguments {
+                        arguments: delta.arguments?,
+                    },
+                    _ => Delta::Ignored,
+                };
+                Self::StepDelta {
+                    index: frame.index?,
+                    delta,
+                }
+            }
+            "step.stop" => Self::StepStop {
+                index: frame.index?,
+            },
+            "interaction.completed" => Self::Completed {
+                interaction: frame.interaction?,
+            },
+            "error" => Self::Error {
+                error: frame.error?,
+            },
+            _ => Self::Ignored,
+        })
+    }
+}
+
+#[derive(Deserialize)]
 struct SummaryContent {
-    text: String,
+    #[serde(rename = "type")]
+    kind: String,
+    text: Option<String>,
+}
+
+fn summary_text(content: &RawValue) -> Option<String> {
+    let content = serde_json::from_str::<SummaryContent>(content.get()).ok()?;
+    (content.kind == "text").then_some(content.text).flatten()
 }
 
 #[derive(Deserialize)]
@@ -526,25 +589,22 @@ struct WireError {
     code: String,
 }
 
-/// The `thought` step a [`ReasoningState`] blob replays as.
-///
-/// A struct and not `serde_json::json!`, because that macro builds a map that
-/// orders its keys alphabetically and would mint `{"signature":…,"type":…}`.
-/// The blob is bytes ego stores and sends back unread, so the order it is
-/// written in is the order the provider will be handed — and a `type`
-/// discriminator that follows the field it discriminates is a needless way to
-/// differ from every example Google publishes.
+/// Preserve provider fields while keeping the step discriminator first.
 #[derive(Serialize)]
 struct ThoughtBlob<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
-    signature: &'a str,
+    #[serde(flatten)]
+    fields: &'a BTreeMap<String, Box<RawValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: &'a Option<Vec<Box<RawValue>>>,
 }
 
 /// What a step was, and what it accumulated before it stopped.
 enum StepState {
     Thought {
-        signature: Option<String>,
+        fields: BTreeMap<String, Box<RawValue>>,
+        summary: Option<Vec<Box<RawValue>>>,
     },
     Call {
         id: String,
@@ -592,23 +652,68 @@ impl StreamDecoder {
     }
 
     fn consume(&mut self, frame: &str, out: &mut Vec<AiEvent>) {
-        let Ok(frame) = serde_json::from_str::<Frame>(frame) else {
+        let Some(frame) = Frame::decode(frame) else {
             // A frame this mapping cannot parse is not a frame it may guess
             // at. Ignoring it keeps the stream's other events intact, and the
             // absence of a terminal status is what will end the turn.
             return;
         };
         match frame {
-            Frame::StepStart { index, step } => {
+            Frame::StepStart { index, mut step } => {
                 let state = match step.kind.as_str() {
-                    "thought" => StepState::Thought { signature: None },
+                    "thought" => {
+                        let summary = match step.fields.remove("summary") {
+                            Some(raw) => {
+                                match serde_json::from_str::<Vec<Box<RawValue>>>(raw.get()) {
+                                    Ok(summary) => Some(summary),
+                                    Err(_) => {
+                                        // Preserve a provider field we cannot project rather
+                                        // than replacing it with an invented empty array.
+                                        step.fields.insert("summary".to_owned(), raw);
+                                        None
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
+                        for content in summary.iter().flatten() {
+                            if let Some(text) = summary_text(content) {
+                                out.push(AiEvent::ReasoningDelta { text });
+                            }
+                        }
+                        StepState::Thought {
+                            fields: step.fields,
+                            summary,
+                        }
+                    }
                     "function_call" => StepState::Call {
                         // The id and name arrive whole here; only the
                         // arguments stream.
-                        id: step.id.unwrap_or_default(),
-                        name: step.name.unwrap_or_default(),
+                        id: step
+                            .fields
+                            .get("id")
+                            .and_then(|raw| serde_json::from_str(raw.get()).ok())
+                            .unwrap_or_default(),
+                        name: step
+                            .fields
+                            .get("name")
+                            .and_then(|raw| serde_json::from_str(raw.get()).ok())
+                            .unwrap_or_default(),
                         args: String::new(),
                     },
+                    "model_output" => {
+                        if let Some(content) = step.fields.get("content")
+                            && let Ok(contents) =
+                                serde_json::from_str::<Vec<Box<RawValue>>>(content.get())
+                        {
+                            for content in contents {
+                                if let Some(text) = summary_text(&content) {
+                                    out.push(AiEvent::TextDelta { text });
+                                }
+                            }
+                        }
+                        StepState::Other
+                    }
                     _ => StepState::Other,
                 };
                 self.steps.insert(index, state);
@@ -616,12 +721,25 @@ impl StreamDecoder {
             Frame::StepDelta { index, delta } => match delta {
                 Delta::Text { text } => out.push(AiEvent::TextDelta { text }),
                 Delta::ThoughtSummary { content } => {
-                    out.push(AiEvent::ReasoningDelta { text: content.text })
+                    if let Some(StepState::Thought { fields, summary }) = self.steps.get_mut(&index)
+                    {
+                        if let Some(text) = summary_text(&content) {
+                            out.push(AiEvent::ReasoningDelta { text });
+                        }
+                        // A malformed initial summary remains opaque; do not
+                        // create two fields with the same name on replay.
+                        if !fields.contains_key("summary") {
+                            summary.get_or_insert_with(Vec::new).push(content);
+                        }
+                    }
                 }
                 Delta::ThoughtSignature { signature } => {
-                    if let Some(StepState::Thought { signature: held }) = self.steps.get_mut(&index)
-                    {
-                        *held = Some(signature);
+                    if let Some(StepState::Thought { fields, .. }) = self.steps.get_mut(&index) {
+                        fields.insert(
+                            "signature".to_owned(),
+                            serde_json::value::to_raw_value(&signature)
+                                .expect("a string serialises"),
+                        );
                     }
                 }
                 Delta::Arguments { arguments } => {
@@ -635,16 +753,22 @@ impl StreamDecoder {
                 // The signature is the last delta before the stop, so the
                 // step's own boundary is the state's boundary — no heuristic
                 // decides when a thought is complete.
-                Some(StepState::Thought {
-                    signature: Some(signature),
-                }) => out.push(AiEvent::ReasoningState(ReasoningState {
-                    dialect: DIALECT.to_string(),
-                    blob: serde_json::to_string(&ThoughtBlob {
-                        kind: "thought",
-                        signature: &signature,
-                    })
-                    .expect("two strings serialise"),
-                })),
+                Some(StepState::Thought { fields, summary }) => {
+                    if fields.get("signature").is_some_and(|raw| {
+                        serde_json::from_str::<String>(raw.get())
+                            .is_ok_and(|signature| !signature.is_empty())
+                    }) {
+                        out.push(AiEvent::ReasoningState(ReasoningState {
+                            dialect: DIALECT.to_string(),
+                            blob: serde_json::to_string(&ThoughtBlob {
+                                kind: "thought",
+                                fields: &fields,
+                                summary: &summary,
+                            })
+                            .expect("raw provider JSON serialises"),
+                        }));
+                    }
+                }
                 Some(StepState::Call { id, name, args }) => out.push(AiEvent::ToolCall {
                     call_id: id,
                     name,
@@ -653,7 +777,7 @@ impl StreamDecoder {
                 // A thought that closed with no signature minted nothing
                 // replayable, and inventing one would be worse than replaying
                 // none.
-                Some(StepState::Thought { signature: None }) | Some(StepState::Other) | None => {}
+                Some(StepState::Other) | None => {}
             },
             Frame::Completed { interaction } => {
                 // The last word wins: `step.stop` may restate the running

@@ -66,7 +66,7 @@ fn open_run() -> Result<Run, ProcessError> {
         None,
         Arc::new(SystemResolver::new()),
     );
-    let (ports, _) = block_on(RunEffectPorts::for_run(config))?;
+    let (ports, _, _) = block_on(RunEffectPorts::for_run(config))?;
     Ok(Run {
         _evidence_root: evidence_root,
         evidence,

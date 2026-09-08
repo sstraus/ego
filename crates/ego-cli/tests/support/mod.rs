@@ -28,7 +28,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use portable_pty::{NativePtySystem, PtySize, PtySystem};
 
@@ -999,6 +999,140 @@ impl Ego {
         }
     }
 
+    /// Observe an early interactive surface through the same PTY owner as
+    /// [`Self::run_pty`], without waiting for the idle prompt.  Startup model
+    /// selection and refusal happen before reedline draws that prompt, so the
+    /// ordinary scripted-input helper cannot prove either path safely.
+    pub fn run_pty_until(self, needle: &str) -> Finished {
+        self.run_pty_probe("yes", Some(needle))
+    }
+
+    /// Observe an interactive process that must refuse before opening a
+    /// prompt.  A bounded kill is returned as a failed `Finished` result on a
+    /// genuine hang, keeping a broken startup test from leaking a child.
+    pub fn run_pty_to_exit(self) -> Finished {
+        self.run_pty_probe("yes", None)
+    }
+
+    fn run_pty_probe(self, trust_answer: &str, needle: Option<&str>) -> Finished {
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty");
+        let mut child = pair.slave.spawn_command(self.pty_command()).expect("spawn");
+        let mut killer = child.clone_killer();
+        let (status_sender, status_receiver) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let status = child.wait();
+            status_sender.send(status).expect("child status receiver");
+        });
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("writer")));
+        let reader = pair.master.try_clone_reader().expect("reader");
+        let (chunks, received) = std::sync::mpsc::channel();
+        let responder = Arc::clone(&writer);
+        let reader = std::thread::spawn(move || {
+            const DSR_QUERY: &[u8] = b"\x1b[6n";
+            const DSR_RESPONSE: &[u8] = b"\x1b[4;1R";
+            let mut reader = reader;
+            let mut output = Vec::new();
+            let mut chunk = [0; 1024];
+            let mut responses = 0;
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(length) => {
+                        output.extend_from_slice(&chunk[..length]);
+                        let queries = output
+                            .windows(DSR_QUERY.len())
+                            .filter(|window| *window == DSR_QUERY)
+                            .count();
+                        while responses < queries {
+                            let mut writer = responder.lock().expect("pty writer lock");
+                            writer.write_all(DSR_RESPONSE).expect("DSR response");
+                            writer.flush().expect("DSR response flush");
+                            responses += 1;
+                        }
+                        if chunks.send(chunk[..length].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            output
+        });
+
+        let mut output = Vec::new();
+        let mut trust_answered = false;
+        let deadline = Instant::now() + Self::QUIET_DEADLINE;
+        let mut timed_out = false;
+        let mut status = None;
+        loop {
+            if let Ok(child_status) = status_receiver.try_recv() {
+                status = Some(child_status);
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                killer.kill().expect("stop stalled PTY child");
+                timed_out = true;
+                break;
+            }
+            match received.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok(chunk) => {
+                    output.extend_from_slice(&chunk);
+                    if !trust_answered
+                        && output
+                            .windows(b"Trust project files".len())
+                            .any(|window| window == b"Trust project files")
+                    {
+                        let mut writer = writer.lock().expect("pty writer lock");
+                        writer
+                            .write_all(format!("{trust_answer}\r").as_bytes())
+                            .expect("trust answer");
+                        writer.flush().expect("trust answer flush");
+                        trust_answered = true;
+                    }
+                    if needle.is_some_and(|needle| {
+                        output
+                            .windows(needle.len())
+                            .any(|window| window == needle.as_bytes())
+                    }) {
+                        killer.kill().expect("stop observed PTY child");
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        drop(writer);
+        drop(pair);
+        let status = status
+            .unwrap_or_else(|| status_receiver.recv().expect("child status"))
+            .expect("child ran");
+        waiter.join().expect("child waiter thread panicked");
+        output = reader.join().expect("pty reader thread");
+        Finished {
+            code: Some(status.exit_code() as i32),
+            stdout: String::from_utf8_lossy(&output).into_owned(),
+            stderr: if timed_out {
+                format!(
+                    "PTY probe timed out after {:?} waiting for {:?}; child exit code {}",
+                    Self::QUIET_DEADLINE,
+                    needle,
+                    status.exit_code()
+                )
+            } else {
+                String::new()
+            },
+            _keep: self.keep,
+        }
+    }
+
     /// Write a file into the workspace and return its path.
     pub fn file(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.workspace.join(name);
@@ -1187,9 +1321,8 @@ impl AcpHost {
                 .read_line(&mut line)
                 .expect("the agent is writing");
             assert!(read > 0, "the agent closed without answering {method}");
-            let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
+            let message: serde_json::Value = serde_json::from_str(&line)
+                .unwrap_or_else(|error| panic!("ACP stdout was not JSON-RPC ({error}): {line}"));
             if message.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
                 return message;
             }

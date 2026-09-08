@@ -21,6 +21,7 @@ use ego_core::budget::Ledger;
 use ego_core::ceiling::Ceilings;
 use ego_core::config::{Mode, ModelRef};
 use ego_core::cost::{Amount, CurrencyCode, Money};
+use ego_core::permit::Confinement;
 use ego_core::permit::rule::Head;
 
 fn argv<const N: usize>(args: [&str; N]) -> Vec<String> {
@@ -842,6 +843,52 @@ fn acp_needs_nothing_to_serve() {
     let args = served(["acp"]);
     assert_eq!(args.session_dir, None);
     assert_eq!(args.directory, None);
+    assert_eq!(
+        args.sandbox, None,
+        "no ceiling was named, so the resolved configuration must stand \
+         rather than a default invented at the parser"
+    );
+}
+
+/// `--sandbox` names the weakest confinement a host may select.
+///
+/// The flag is why this story exists: `ego acp` is headless, headless resolves
+/// untrusted, and an untrusted resolution discards the Project and Local
+/// layers, so the config file an operator would have written the key into is
+/// read by nobody. See
+/// `docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`.
+#[test]
+fn acp_takes_a_confinement_ceiling_by_name() {
+    for (spelling, expected) in [
+        ("ro", Confinement::Ro),
+        ("workspace", Confinement::Workspace),
+        ("off", Confinement::Off),
+    ] {
+        assert_eq!(
+            served(["acp", "--sandbox", spelling]).sandbox,
+            Some(expected),
+            "`--sandbox {spelling}`"
+        );
+    }
+}
+
+/// An unknown confinement is refused by name, with the three that would work.
+///
+/// The value and the alternatives both, because a refusal that says only
+/// "invalid" leaves the operator guessing at a closed set of three words.
+#[test]
+fn acp_refuses_a_confinement_it_does_not_have() {
+    let refusal = refused(["acp", "--sandbox", "readonly"]);
+    assert!(
+        refusal.contains("readonly"),
+        "the refusal does not say what was rejected: {refusal}"
+    );
+    for spelling in ["ro", "workspace", "off"] {
+        assert!(
+            refusal.contains(spelling),
+            "the refusal omits `{spelling}`, which would have worked: {refusal}"
+        );
+    }
 }
 
 /// It shares `--session-dir` and `-C` with every other command, from the same

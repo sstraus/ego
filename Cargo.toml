@@ -4,6 +4,8 @@ members = [
     "crates/ego-ai",
     "crates/ego-tools",
     "crates/ego-acp",
+    "crates/ego-a2a",
+    "crates/ego-listen",
     "crates/ego-mcp",
     "crates/ego-cli",
 ]
@@ -39,6 +41,7 @@ publish = false
 
 [workspace.dependencies]
 ego-core = { path = "crates/ego-core" }
+ego-listen = { path = "crates/ego-listen" }
 ego-mcp = { path = "crates/ego-mcp" }
 yaml-rust2 = "0.12.0"
 

@@ -19,12 +19,13 @@ use agent_client_protocol_schema::v1;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ego_core::compact::{CompactionCommand, CompactionReceipt, CompactionTransitionRequest};
-use ego_core::control::{ControlError, SessionControls};
+use ego_core::control::{ControlError, SessionControlChange, SessionControlState, SessionControls};
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::types::{Image, ImageMediaType};
 use ego_core::mcp::McpRuntimeBinding;
+use ego_core::permit::{Confinement, ExecObservation};
 use ego_core::run::{
     CancelKey, ContinueRequest, EventSinkFactory, IdSource, RequestDigest, RequestId,
     RunCommandOutcome, RunController, RunError, RunExecution, RunExecutionBindings, RunExecutor,
@@ -105,6 +106,25 @@ pub type McpSessionAdmissionFuture = Pin<
 /// Consumer-owned boundary that atomically admits one ACP session's servers.
 pub trait McpSessionAdmitter: Send + Sync {
     fn admit(&self, servers: Vec<v1::McpServer>) -> McpSessionAdmissionFuture;
+}
+
+/// Completion of one session's confinement measurement and evidence write.
+pub type SessionConfinementFuture =
+    Pin<Box<dyn Future<Output = Result<(), ControlError>> + Send + 'static>>;
+
+/// Consumer-owned boundary for measuring and pinning one ACP session's sandbox.
+///
+/// Initialization is asynchronous because the outer adapter probes a process
+/// backend and commits evidence. Observation lookup reads the immutable
+/// snapshot installed before this session's options were published.
+pub trait SessionConfinementAdmission: Send + Sync {
+    fn initialize(&self, session: SessionId, root: RunRoot) -> SessionConfinementFuture;
+
+    fn observation(
+        &self,
+        session: SessionId,
+        confinement: Confinement,
+    ) -> Result<ExecObservation, ControlError>;
 }
 
 /// Builds live execution bindings from the connection that accepted a prompt.
@@ -471,6 +491,32 @@ impl Sessions {
             },
         );
         Some(generation)
+    }
+
+    /// Serialize the confinement pick with first-prompt admission.
+    fn stage_confinement(
+        &self,
+        id: &v1::SessionId,
+        session: SessionId,
+        controls: &dyn SessionControls,
+        change: SessionControlChange,
+    ) -> Result<SessionControlState, Error> {
+        let registrations = self.lock();
+        let registered = registrations.sessions.get(id).ok_or_else(|| {
+            refused_params(format!("there is no open session {id}: create one first"))
+        })?;
+        if registered.busy || registered.run.is_some() {
+            return Err(refused_params(
+                "this session has already started preparing a run: pick the sandbox \
+                 before the first prompt, or start a new session",
+            ));
+        }
+        // Keep the registration lock until the synchronous pick has landed.
+        // `begin` cannot publish busy and read a different selection between
+        // the eligibility check and this write.
+        controls
+            .stage(session, change)
+            .map_err(|error| control_error(&error))
     }
 
     fn begin(
@@ -1120,12 +1166,61 @@ fn config_options(
     }
 }
 
+/// Establish the session's measured offer before any option can expose it.
+async fn initialize_confinement(
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
+    session: SessionId,
+    root: &RunRoot,
+) -> Result<(), Error> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    admission
+        .initialize(session, root.clone())
+        .await
+        .map_err(|error| control_error(&error))
+}
+
+/// The confinement this session's seat holds, as a run selection.
+///
+/// Read on the prompt that *starts* the run and nowhere else. Unlike model,
+/// effort and mode — which the seat re-applies at every generation boundary —
+/// confinement is admitted once: the MCP transports this run may open, the
+/// effect scope it runs inside and its child authority ceiling are all derived
+/// from it during preparation, and none of them can be re-decided afterwards.
+///
+/// Carry the effective value even when the host has not made an explicit pick:
+/// the process ceiling is authority, while `chosen` only records UI intent.
+fn selected_confinement(
+    controls: Option<&Arc<dyn SessionControls>>,
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
+    session: SessionId,
+) -> Result<RunSelections, Error> {
+    let Some(controls) = controls else {
+        return Ok(RunSelections::empty());
+    };
+    let state = controls
+        .state(session)
+        .map_err(|error| control_error(&error))?;
+    let sandbox = state.sandbox.current;
+    let selections = RunSelections::empty().with_sandbox(sandbox);
+    let Some(admission) = admission else {
+        return Ok(selections);
+    };
+    let observation = admission
+        .observation(session, sandbox)
+        .map_err(|error| control_error(&error))?;
+    Ok(selections.with_sandbox_observation(sandbox, observation))
+}
+
 fn control_error(error: &ControlError) -> Error {
     match error {
         // Both name a value the caller sent, so both are the caller's
         // parameters being wrong rather than ego failing.
-        ControlError::Unavailable { .. } | ControlError::Refused { .. } => {
-            Error::invalid_params().data(error.to_string())
+        ControlError::Unavailable { .. }
+        | ControlError::Refused { .. }
+        | ControlError::MissingCapabilities { .. } => {
+            Error::new(i32::from(ErrorCode::InvalidParams), error.to_string())
         }
         ControlError::Internal(message) => Error::internal_error().data(message.clone()),
     }
@@ -1264,6 +1359,7 @@ where
         None,
         None,
         None,
+        None,
     ))
 }
 
@@ -1293,6 +1389,7 @@ where
         None,
         Some(lifecycle),
         None,
+        None,
     ))
 }
 
@@ -1307,6 +1404,7 @@ pub fn agent_with_compaction<S, E, C, I>(
     mcp_admitter: Arc<dyn McpSessionAdmitter>,
     compaction: Arc<dyn CompactionCommand>,
     controls: Option<Arc<dyn SessionControls>>,
+    confinement: Option<Arc<dyn SessionConfinementAdmission>>,
 ) -> AgentProtocolRouter
 where
     S: SessionStore + 'static,
@@ -1324,6 +1422,7 @@ where
         Some(compaction),
         None,
         controls,
+        confinement,
     ))
 }
 
@@ -1339,6 +1438,7 @@ pub fn durable_agent_with_compaction<S, E, C, I>(
     mcp_admitter: Arc<dyn McpSessionAdmitter>,
     compaction: Arc<dyn CompactionCommand>,
     controls: Option<Arc<dyn SessionControls>>,
+    confinement: Option<Arc<dyn SessionConfinementAdmission>>,
 ) -> AgentProtocolRouter
 where
     S: SessionLifecycleStore + 'static,
@@ -1356,6 +1456,7 @@ where
         Some(compaction),
         Some(lifecycle),
         controls,
+        confinement,
     ))
 }
 
@@ -1370,6 +1471,7 @@ fn v1_agent<S, E, C, I>(
     compaction: Option<Arc<dyn CompactionCommand>>,
     lifecycle: Option<Arc<dyn LifecycleOperations>>,
     controls: Option<Arc<dyn SessionControls>>,
+    confinement: Option<Arc<dyn SessionConfinementAdmission>>,
 ) -> impl agent_client_protocol::ConnectTo<Client>
 where
     S: SessionStore + 'static,
@@ -1423,6 +1525,7 @@ where
                 let mcp_admitter = Arc::clone(&mcp_admitter);
                 let lifecycle = lifecycle.clone();
                 let controls = controls.clone();
+                let confinement = confinement.clone();
                 async move |request: v1::NewSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
@@ -1449,6 +1552,11 @@ where
                             lifecycle.create_with_id(session, root.as_path().to_path_buf())
                     {
                         return responder.respond_with_error(lifecycle_error(&error));
+                    }
+                    if let Err(error) =
+                        initialize_confinement(confinement.as_ref(), session, &root).await
+                    {
+                        return responder.respond_with_error(error);
                     }
                     let attachment_root = root.clone();
                     let _ = sessions.open(id.clone(), root, Some(start_request), None, mcp);
@@ -1522,6 +1630,7 @@ where
                 let bindings_builder = Arc::clone(&bindings_builder);
                 let client_capabilities = Arc::clone(&client_capabilities);
                 let controls = controls.clone();
+                let confinement = confinement.clone();
                 async move |request: v1::LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
@@ -1548,6 +1657,11 @@ where
                         Ok(attachment) => attachment,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
+                    if let Err(error) =
+                        initialize_confinement(confinement.as_ref(), id, &root).await
+                    {
+                        return responder.respond_with_error(error);
+                    }
                     let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
                         Ok(mcp) => mcp,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
@@ -1625,6 +1739,7 @@ where
                 let bindings_builder = Arc::clone(&bindings_builder);
                 let client_capabilities = Arc::clone(&client_capabilities);
                 let controls = controls.clone();
+                let confinement = confinement.clone();
                 async move |request: v1::ResumeSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
@@ -1651,6 +1766,11 @@ where
                         Ok(attachment) => attachment,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
+                    if let Err(error) =
+                        initialize_confinement(confinement.as_ref(), id, &root).await
+                    {
+                        return responder.respond_with_error(error);
+                    }
                     let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
                         Ok(mcp) => mcp,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
@@ -1719,6 +1839,7 @@ where
                 let ids = Arc::clone(&ids);
                 let mcp_admitter = Arc::clone(&mcp_admitter);
                 let controls = controls.clone();
+                let confinement = confinement.clone();
                 async move |request: v1::ForkSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
@@ -1755,6 +1876,11 @@ where
                         Ok(attachment) => attachment,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
+                    if let Err(error) =
+                        initialize_confinement(confinement.as_ref(), child, &root).await
+                    {
+                        return responder.respond_with_error(error);
+                    }
                     let child_id = v1::SessionId::new(child.to_string());
                     let _ = sessions.open(
                         child_id.clone(),
@@ -1848,6 +1974,8 @@ where
                 let ids = Arc::clone(&ids);
                 let bindings_builder = Arc::clone(&bindings_builder);
                 let client_capabilities = Arc::clone(&client_capabilities);
+                let controls = controls.clone();
+                let confinement = confinement.clone();
                 async move |request: v1::PromptRequest, responder, cx: ConnectionTo<Client>| {
                     let id = request.session_id.clone();
                     let durable_session = match parse_session(&id) {
@@ -1913,6 +2041,17 @@ where
                     };
                     let outcome = match correlation.run {
                         None => {
+                            let selections = match selected_confinement(
+                                controls.as_ref(),
+                                confinement.as_ref(),
+                                durable_session,
+                            ) {
+                                Ok(selections) => selections,
+                                Err(error) => {
+                                    sessions.refuse(&id, correlation.generation);
+                                    return responder.respond_with_error(error);
+                                }
+                            };
                             controller
                                 .start(
                                     StartRequest::new(
@@ -1920,7 +2059,7 @@ where
                                         correlation.root,
                                         correlation.request_id,
                                         digest,
-                                        RunSelections::empty(),
+                                        selections,
                                         prompt,
                                     ),
                                     bindings,
@@ -2085,6 +2224,8 @@ where
         .on_receive_request(
             {
                 let controls = controls.clone();
+                let sessions = sessions.clone();
+                let confinement = confinement.clone();
                 async move |request: v1::SetSessionConfigOptionRequest, responder, _cx| {
                     // Absent controls are unavailable, not partially emulated:
                     // the same rule that makes an unadvertised lifecycle method
@@ -2108,13 +2249,35 @@ where
                     };
                     let change = match crate::controls::change(&state, &request) {
                         Ok(change) => change,
-                        Err(error) => return responder.respond_with_error(error),
+                        Err(error) => {
+                            if let (Some(admission), Some(candidate)) = (
+                                confinement.as_ref(),
+                                crate::controls::requested_confinement(&request),
+                            ) && let Err(refusal) =
+                                admission.observation(session, candidate)
+                            {
+                                return responder
+                                    .respond_with_error(control_error(&refusal));
+                            }
+                            return responder.respond_with_error(error);
+                        }
                     };
-                    match controls.stage(session, change) {
+                    // Refused rather than staged. Staging it would leave the
+                    // picker showing a confinement the run does not have, and
+                    // a host reading its own selection back would be told the
+                    // change landed when nothing downstream had moved.
+                    let staged = if matches!(change, SessionControlChange::Sandbox(_)) {
+                        sessions.stage_confinement(
+                            &request.session_id, session, controls.as_ref(), change,
+                        )
+                    } else {
+                        controls.stage(session, change).map_err(|error| control_error(&error))
+                    };
+                    match staged {
                         Ok(state) => responder.respond(v1::SetSessionConfigOptionResponse::new(
                             crate::controls::options(&state),
                         )),
-                        Err(error) => responder.respond_with_error(control_error(&error)),
+                        Err(error) => responder.respond_with_error(error),
                     }
                 }
             },

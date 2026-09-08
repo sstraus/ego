@@ -257,7 +257,7 @@ impl SmokeTransport {
             None,
             Arc::new(SystemResolver::new()),
         );
-        let (ports, _) = RunEffectPorts::for_run(config).await.expect("effect ports");
+        let (ports, _, _) = RunEffectPorts::for_run(config).await.expect("effect ports");
         let http = Arc::new(ProviderHttpAdapter::new(Arc::new(ports))) as Arc<dyn Http>;
         SmokeTransport {
             _evidence_root: evidence_root,

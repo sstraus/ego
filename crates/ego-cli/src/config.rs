@@ -47,6 +47,47 @@ const EGO_HOME: &str = "EGO_HOME";
 const ENV_MODEL: &str = "EGO_MODEL";
 const ENV_PROFILE: &str = "EGO_PROFILE";
 
+/// Report discarded source names and setting keys through the caller's output
+/// boundary. Values stay out of diagnostics, and protocol stdout stays clean.
+pub(crate) fn report_discarded(
+    workspace: &Path,
+    effective: &Effective,
+    diagnostics: &dyn Diagnostics,
+) {
+    for discarded in &effective.discarded {
+        diagnostics.note(&discarded.to_string());
+    }
+    if effective.posture != ego_core::config::Posture::Bare {
+        return;
+    }
+    for (source, path) in project_layer_paths(workspace) {
+        if effective
+            .discarded
+            .iter()
+            .any(|layer| layer.source == source)
+        {
+            continue;
+        }
+        // Inspect the path, never the untrusted contents or a symlink target.
+        // Empty regular files contain no settings and need no diagnostic.
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {}
+            Ok(_) => diagnostics.note(&format!(
+                "the {source} configuration at {} is not applied in the bare posture; \
+                 any model or sandbox settings in that file have no effect. \
+                 Use the user configuration or --sandbox for confinement",
+                path.display(),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => diagnostics.note(&format!(
+                "the ignored {source} configuration path {} could not be inspected: \
+                 {error}; project configuration does not apply in the bare posture",
+                path.display(),
+            )),
+        }
+    }
+}
+
 /// Execute the user-scoped configuration management surface.
 pub async fn execute(args: &ConfigArgs, out: &Stdout, cancel: &CancelToken) -> RunTermination {
     match execute_inner(args, out, cancel).await {
@@ -636,10 +677,9 @@ fn layer(source: Source, path: &Path) -> Result<Option<Sourced<ConfigLayer>>, Us
 /// `resolve` sorts them by rank itself, and depending on this order would be
 /// a second, silent precedence rule.
 ///
-/// The project and local layers are gathered even when the posture will drop
-/// them. That is not wasted work: `resolve` is what applies the trust gate,
-/// and a caller that pre-filtered would be a second implementation of the gate
-/// with no test holding it to the first.
+/// Untrusted project and local files are never opened. The resolver also applies
+/// the trust gate to injected layers; diagnostics can inspect excluded paths'
+/// metadata without opening their contents.
 pub fn layers(
     workspace: &Path,
     args: &Args,
@@ -892,6 +932,13 @@ impl InvocationMcpServer {
     }
 }
 
+fn project_layer_paths(workspace: &Path) -> [(Source, PathBuf); 2] {
+    [
+        (Source::Project, workspace.join(".ego/config.toml")),
+        (Source::Local, workspace.join(".ego/config.local.toml")),
+    ]
+}
+
 fn base_layers(workspace: &Path, trust: Trust) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
     // Which files this invocation is subject to, decided before any of them is
     // opened: whether a layer is *eligible* is a question about the posture and
@@ -901,13 +948,10 @@ fn base_layers(workspace: &Path, trust: Trust) -> Result<Vec<Sourced<ConfigLayer
     if let Some(home) = ego_home() {
         files.push((Source::User, home.join("config.toml")));
     }
-    // Read only in a trusted workspace. `resolve` would drop them anyway, but
-    // "an untrusted workspace is never even looked at" is the stronger claim
-    // and the one a headless run depends on — the same rule the instruction
-    // loader keeps.
+    // Open configuration only in a trusted workspace. Diagnostics may inspect
+    // metadata for excluded paths, but never read or parse their contents.
     if trust == Trust::Trusted {
-        files.push((Source::Project, workspace.join(".ego/config.toml")));
-        files.push((Source::Local, workspace.join(".ego/config.local.toml")));
+        files.extend(project_layer_paths(workspace));
     }
 
     let mut found = Vec::new();

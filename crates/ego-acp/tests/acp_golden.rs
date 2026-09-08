@@ -536,6 +536,7 @@ mod acp_golden {
                         .try_into()
                         .unwrap(),
                 ),
+                probe_evidence: None,
             },
             EventKind::AttemptSettled {
                 attempt: AttemptRef::first(GenerationId::new()),

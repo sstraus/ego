@@ -541,7 +541,7 @@ impl CliCompactionCommand {
             retry: 0,
             fallbacks: Vec::new(),
         };
-        let (ports, observation) =
+        let (ports, observation, probe_evidence) =
             effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
                 .await
                 .map_err(compaction_termination)?;
@@ -586,7 +586,7 @@ impl CliCompactionCommand {
                 exec_caps: observation.capabilities(),
             });
         }
-        loop_ = loop_.with_execution_observation(observation);
+        loop_ = loop_.with_execution_observation(observation, probe_evidence);
         let target_tools = registry.iter().map(RegisteredTool::descriptor).collect();
         let prepared = loop_.prepare_compaction(system, target_tools).await?;
         let state = loop_

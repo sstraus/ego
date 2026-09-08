@@ -16,6 +16,7 @@ pub mod control;
 pub mod cost;
 pub mod credentials;
 pub mod digest;
+pub mod endpoint;
 pub mod event;
 pub mod evidence;
 pub mod export;

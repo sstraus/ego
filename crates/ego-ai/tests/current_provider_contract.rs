@@ -280,18 +280,22 @@ fn kimi_anthropic_fixture_decodes_usage_on_the_beta_messages_stream() {
     );
 }
 
-/// The public `openai` row is absent from the table above because it cannot
-/// be resolved at all, and this is the test that says so rather than letting
-/// the omission look like an oversight.
+/// The public `openai` row resolves, and this is the test that says so rather
+/// than letting its absence from the table above look like a decision.
 ///
-/// `2026-09-03-public-provider-wires-require-live-promotion.md` makes the row
-/// unselectable until conformance check five is recorded against a live
-/// entitled model, and the catalogue owns that gate — so `resolve` refuses
-/// before a resolver is chosen, and the refusal names the mapping whose
-/// evidence is outstanding. Its endpoint is pinned in `request_target.rs`,
-/// which needs no resolution to make the claim.
+/// It used to assert the opposite. `2026-09-03-public-provider-wires-require-
+/// live-promotion.md` withheld the row until conformance check five was
+/// recorded against a live entitled model;
+/// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md` amends that,
+/// because the remedy the refusal named needed a source checkout the operator
+/// it addressed may not have. Nothing about the evidence changed — no
+/// recording exists — only where the missing check is paid for.
+///
+/// The claim is that no gate stands in front of resolution, so it is made
+/// against `unasked_http()`: resolving this row must reach a wire without
+/// asking anything of the network.
 #[test]
-fn the_public_openai_row_refuses_to_resolve_and_names_the_mapping_it_awaits() {
+fn the_public_openai_row_resolves_onto_its_published_responses_mapping() {
     let slug = "openai/gpt-5.6";
     let catalogue = Catalogue::new([ProviderRow::openai()]).with_hosted(
         slug,
@@ -302,21 +306,13 @@ fn the_public_openai_row_refuses_to_resolve_and_names_the_mapping_it_awaits() {
             rates: None,
         },
     );
-    let refused = block_on(catalogue.resolve(
+    let resolved = block_on(catalogue.resolve(
         &ModelSlug::parse(slug).unwrap(),
         &unasked_http(),
         &credential(),
     ))
-    .expect_err("the public openai row is not selectable yet");
-    let said = refused.to_string();
-    assert!(
-        said.contains("openai-responses"),
-        "the refusal does not name the mapping awaiting evidence: {said}"
-    );
-    assert!(
-        said.contains("EGO_SMOKE"),
-        "the refusal does not say how the evidence is made: {said}"
-    );
+    .expect("a published contract is enough to offer the row");
+    assert_eq!(resolved.model, "gpt-5.6");
 }
 
 #[test]

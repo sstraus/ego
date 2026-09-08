@@ -1,5 +1,5 @@
-//! ACP v1 session config options: the host's picker for the three generation
-//! controls.
+//! ACP v1 session config options: the host's picker for the generation
+//! controls and the run's confinement.
 //!
 //! `docs/06-acp.md` §2 selects `session/set_config_option` and its
 //! model-category options as the projection for model and config control.
@@ -21,12 +21,14 @@ use agent_client_protocol_schema::v1;
 use ego_core::config::{Mode, ModelRef};
 use ego_core::control::{ControlSelect, SessionControlChange, SessionControlState};
 use ego_core::generator::types::ThinkingLevel;
+use ego_core::permit::Confinement;
 
-/// The config ids ego advertises. They are the wire spelling of the three
-/// controls and nothing else answers to them.
+/// The config ids ego advertises. They are the wire spelling of the controls
+/// and nothing else answers to them.
 pub const MODEL: &str = "model";
 pub const EFFORT: &str = "effort";
 pub const MODE: &str = "mode";
+pub const SANDBOX: &str = "sandbox";
 
 /// Every control, in the order a host should render them.
 pub fn options(state: &SessionControlState) -> Vec<v1::SessionConfigOption> {
@@ -54,6 +56,26 @@ pub fn options(state: &SessionControlState) -> Vec<v1::SessionConfigOption> {
             v1::SessionConfigOptionCategory::Mode,
             &state.mode,
             |mode: &Mode| (mode.as_str().to_owned(), mode.as_str().to_owned()),
+        ),
+        // `Other` rather than `Mode`. The pinned schema names `Mode`,
+        // `Model`, `ModelConfig` and `ThoughtLevel`, and offers `Other` for a
+        // selector it does not name. Confinement is not a permission mode,
+        // and labelling it one to fit the enum would tell every host
+        // something false about what it is.
+        select(
+            SANDBOX,
+            "Sandbox",
+            "How much of the filesystem a command this session runs can reach. \
+             The list is what the operator who started this process allowed and \
+             this machine can enforce; it can be narrowed here and not widened.",
+            v1::SessionConfigOptionCategory::Other(SANDBOX.to_owned()),
+            &state.sandbox,
+            |confinement: &Confinement| {
+                (
+                    confinement.as_str().to_owned(),
+                    confinement.as_str().to_owned(),
+                )
+            },
         ),
     ]
 }
@@ -84,11 +106,35 @@ pub fn change(
         .map(|effort| SessionControlChange::Effort(*effort)),
         MODE => chosen(&state.mode, value, |mode: &Mode| mode.as_str())
             .map(|mode| SessionControlChange::Mode(*mode)),
+        // Matched against the offer like everything else, which is the whole
+        // enforcement of the ceiling: a confinement outside it was never
+        // advertised, so it is refused here by the rule that already exists
+        // rather than by a second one that could disagree with the first.
+        SANDBOX => chosen(&state.sandbox, value, |confinement: &Confinement| {
+            confinement.as_str()
+        })
+        .map(|confinement| SessionControlChange::Sandbox(*confinement)),
         _ => Err(refuse(format!(
             "this agent advertises no `{config}` session config option"
         ))),
     }
-    .map_err(|error| error.data(format!("`{value}` is not an available `{config}`")))
+    .map_err(|_| refuse(format!("`{value}` is not an available `{config}`")))
+}
+
+/// A real confinement spelling from a sandbox request, offered or not.
+///
+/// The router uses this only after offer matching refused the value, so the
+/// measured admission can distinguish a known but unsupported confinement
+/// from an unknown spelling without weakening the offer as the admission
+/// rule.
+pub fn requested_confinement(request: &v1::SetSessionConfigOptionRequest) -> Option<Confinement> {
+    if request.config_id.0.as_ref() != SANDBOX {
+        return None;
+    }
+    let v1::SessionConfigOptionValue::ValueId { value } = &request.value else {
+        return None;
+    };
+    value.0.as_ref().parse().ok()
 }
 
 /// The one value in the offer that spells itself the way the host answered.
@@ -133,5 +179,8 @@ fn select<T>(
 }
 
 fn refuse(message: String) -> Error {
-    Error::invalid_params().data(message)
+    Error::new(
+        i32::from(agent_client_protocol::ErrorCode::InvalidParams),
+        message,
+    )
 }

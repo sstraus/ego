@@ -439,7 +439,10 @@ pub enum EventKind {
         decision: FallbackDecision,
     },
     /// The process backend evidence captured before any turn action.
-    ExecutionObserved { observation: ExecObservation },
+    ExecutionObserved {
+        observation: ExecObservation,
+        probe_evidence: Option<crate::store::evidence::EvidenceRef>,
+    },
     /// One attempt reached a terminal state.
     ///
     /// Carries no money. `UsageUpdated` is the single accounting fact
@@ -630,6 +633,9 @@ impl EventKind {
     pub fn blob_references(&self) -> Vec<BlobRef> {
         let mut references = Vec::new();
         match self {
+            Self::ExecutionObserved { probe_evidence, .. } => {
+                references.extend(probe_evidence.iter().map(|evidence| evidence.blob_ref()));
+            }
             Self::PromptQueued { images, .. } | Self::UserPrompt { images, .. } => {
                 references.extend(images.iter().map(|image| image.reference().clone()));
             }

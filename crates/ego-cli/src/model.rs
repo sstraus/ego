@@ -112,8 +112,9 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
 /// The API-key `xai` candidate remains absent. The distinct `xai-oauth` row
 /// is present because the Pi ∪ Hermes inclusion decision explicitly promotes
 /// that subscription contract without collapsing its metering into the API
-/// key row. Gemini remains absent because this batch adds no current login or
-/// acceptance evidence for it.
+/// key row. Gemini used to be absent for want of acceptance evidence and is
+/// now present:
+/// `docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`.
 pub(crate) fn rows(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Vec<ProviderRow>, ResolveError> {
@@ -642,23 +643,27 @@ mod tests {
     /// rule needs a test rather than a comment. A live recording cannot promote
     /// the retired mapping; an API-key row would first need the current
     /// Responses mapping.
+    ///
+    /// `gemini` used to be in this list and is not a counter-example to it.
+    /// The bar §9 sets is a **current** contract, and
+    /// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md` says a
+    /// current published contract with passing fixtures clears it. `xai`
+    /// cannot: its mapping is the vendor-deprecated endpoint, so what it lacks
+    /// is not a recording but a contract worth recording against.
     #[test]
     fn a_candidate_provider_cannot_be_selected() {
         let ids = selectable();
 
-        for candidate in ["xai", "gemini"] {
-            assert!(
-                !ids.contains(&candidate.to_string()),
-                "{candidate} has no selectable current row: {ids:?}"
-            );
-        }
+        let candidate = "xai";
+        assert!(
+            !ids.contains(&candidate.to_string()),
+            "{candidate} has no selectable current row: {ids:?}"
+        );
         let catalogue = Catalogue::new(rows(&Default::default()).unwrap());
-        for candidate in ["xai", "gemini"] {
-            assert!(matches!(
-                catalogue.row(candidate),
-                Err(ResolveError::UnknownProvider { provider, .. }) if provider == candidate
-            ));
-        }
+        assert!(matches!(
+            catalogue.row(candidate),
+            Err(ResolveError::UnknownProvider { provider, .. }) if provider == candidate
+        ));
         assert!(catalogue.row("xai-oauth").is_ok());
     }
 
@@ -751,6 +756,7 @@ mod tests {
                 "minimax-oauth",
                 "nous",
                 "openrouter",
+                "gemini",
             ],
             "the selectable provider table changed"
         );

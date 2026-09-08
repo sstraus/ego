@@ -109,6 +109,91 @@ pub struct Effective {
     pub ui: UiLayer,
     /// Effective configured entries and winning tombstones with provenance.
     pub mcp: ResolvedMcpConfig,
+    /// What the trust gate threw away, so a run can say so.
+    ///
+    /// Dropping a Project or Local layer under [`Posture::Bare`] is correct
+    /// and this does not change it. Dropping it *in silence* is what made an
+    /// operator's `sandbox` key in a workspace `.ego/config.local.toml` look
+    /// applied when nobody had read it — the configuration was not overridden,
+    /// it was discarded, and no surface anywhere said which. Empty when the
+    /// posture is ambient, and empty when the discarded layers set nothing.
+    pub discarded: Vec<Discarded>,
+}
+
+/// One layer the trust gate discarded, and the settings it was carrying.
+///
+/// The settings are named rather than counted. "Two settings were dropped"
+/// sends somebody reading a file to find out which; naming them is the whole
+/// value of saying anything at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discarded {
+    pub source: Source,
+    pub settings: Vec<&'static str>,
+}
+
+impl std::fmt::Display for Discarded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {} configuration set {}, and none of it was applied: \
+             ambient project configuration is disabled by the bare posture",
+            self.source,
+            join(&self.settings)
+        )
+    }
+}
+
+/// Every setting this layer actually carries, in the words its file spells.
+///
+/// An exhaustive match rather than a list of the interesting ones: a field
+/// added to [`ConfigLayer`] and forgotten here would be discarded as silently
+/// as `sandbox` was, which is the failure this whole mechanism exists to stop.
+/// `bare` is deliberately absent — it is read from every layer regardless of
+/// eligibility, so it is never discarded and saying it was would be false.
+fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
+    let ConfigLayer {
+        model,
+        thinking,
+        mode,
+        sandbox,
+        permissions,
+        budget,
+        bare: _,
+        profile,
+        auth,
+        ui,
+        mcp,
+        hooks,
+    } = layer;
+    let mut settings = Vec::new();
+    for (present, name) in [
+        (model.is_some(), "model"),
+        (thinking.is_some(), "thinking"),
+        (mode.is_some(), "mode"),
+        (sandbox.is_some(), "sandbox"),
+        (permissions.is_some(), "permissions"),
+        (budget.is_some(), "budget"),
+        (!profile.is_empty(), "profile tables"),
+        (!auth.is_empty(), "auth"),
+        (ui.is_some(), "ui"),
+        (!mcp.servers.is_empty(), "mcp servers"),
+        (!hooks.is_empty(), "hooks"),
+    ] {
+        if present {
+            settings.push(name);
+        }
+    }
+    settings
+}
+
+/// `a`, `a and b`, `a, b and c` — a list a person reads rather than a debug
+/// rendering of a `Vec`.
+fn join(settings: &[&'static str]) -> String {
+    match settings {
+        [] => "nothing".to_owned(),
+        [only] => (*only).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Resolves layered config into one [`Effective`] value.
@@ -188,10 +273,25 @@ fn resolve_inner(
         Posture::Ambient
     };
 
+    let mut discarded = Vec::new();
     let eligible: Vec<&Sourced<ConfigLayer>> = ordered
         .into_iter()
         .filter(|l| {
-            posture == Posture::Ambient || !matches!(l.source, Source::Project | Source::Local)
+            let keep = posture == Posture::Ambient
+                || !matches!(l.source, Source::Project | Source::Local);
+            // Recorded on the way past, where the reason for the drop is still
+            // in hand. A later pass would have to reconstruct which layers
+            // were eligible, and could reconstruct it wrongly.
+            if !keep {
+                let settings = settings_in(&l.value);
+                if !settings.is_empty() {
+                    discarded.push(Discarded {
+                        source: l.source,
+                        settings,
+                    });
+                }
+            }
+            keep
         })
         .collect();
 
@@ -429,6 +529,7 @@ fn resolve_inner(
         auth,
         ui,
         mcp,
+        discarded,
     })
 }
 

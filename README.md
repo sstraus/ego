@@ -50,8 +50,12 @@ advertised as working.
 
 Available entry points are `ego [PROMPT]`, `ego run`, `ego resume`, `ego ls`,
 `ego fork`, `ego compact`, `ego export`, `ego usage`, `ego models`, `ego mcp`,
-`ego config`, `ego rules`, `ego hooks`, `ego doctor`, `ego mcp-server`, and
-`ego acp`, plus `ego auth` for subscription credentials. Promptless `ego resume [ID]` re-enters
+`ego config`, `ego rules`, `ego hooks`, `ego doctor`, `ego mcp-server`,
+`ego acp`, and `ego a2a`, plus `ego auth` for subscription credentials.
+`ego a2a --listen ENDPOINT` serves Agent2Agent so another agent can discover
+and delegate to εgo; a socket path is authenticated by the operating system,
+while an address requires a credential and refuses by name if it is reachable
+from outside this machine. Promptless `ego resume [ID]` re-enters
 the interactive driver; a resume carrying a prompt or `-` stays headless.
 `ego hooks ls` inspects the admitted system and user hook catalogue without
 reading project configuration. `ego doctor [--json]` reports one ordered,
@@ -74,11 +78,12 @@ export ANTHROPIC_API_KEY=sk-…
 ego -m anthropic/claude-opus-5
 ```
 
-`openai/…` is deliberately absent from that line. Its Responses mapping is
-implemented and pinned against fixtures, but
-`docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`
-does not let a public row become selectable on published schema alone, so the
-row refuses and says how the missing evidence is made.
+Public OpenAI Responses and Gemini Interactions are selectable through the
+same catalogue. Set `OPENAI_API_KEY` or `GEMINI_API_KEY`, then use `ego models`
+to choose a current model. The accepted
+`docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`
+separates deterministic conformance from live provider evidence; a missing
+recording does not disable a published mapping.
 
 `ego models` lists what that catalogue knows, with a `SOURCE` column reading
 `builtin` until a file of yours overrides a row. The built-in facts are the

@@ -31,6 +31,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand hooks 'Inspect the admitted system and user hook catalogue.'
             cand doctor 'Report a read-only redacted health snapshot of this installation.'
             cand acp 'Serve the Agent Client Protocol on stdio.'
+            cand a2a 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
             cand auth 'Manage subscription credentials.'
             cand mcp 'Manage configured MCP servers.'
             cand config 'Manage stored user configuration.'
@@ -194,8 +195,17 @@ set edit:completion:arg-completer[ego] = {|@words|
         &'ego;acp'= {
             cand --session-dir 'Override the store location'
             cand -C 'Run as if started in DIR'
+            cand --sandbox 'The weakest confinement a session may select: ro|workspace|off'
             cand -h 'Print help'
             cand --help 'Print help'
+        }
+        &'ego;a2a'= {
+            cand --session-dir 'Override the store location'
+            cand -C 'Run as if started in DIR'
+            cand --listen 'Where to serve: a socket path, or an address such as `127.0.0.1:8080`'
+            cand --allow-public-bind 'Serve on an address reachable from outside this machine'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
         }
         &'ego;auth'= {
             cand -h 'Print help'

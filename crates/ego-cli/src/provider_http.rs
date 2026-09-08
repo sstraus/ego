@@ -83,12 +83,23 @@ impl HttpCall for ProviderHttpCall {
 }
 
 /// Build the complete effect-port owner for one cancellation scope.
+///
+/// A supplied observation is admission truth: `for_run` compares its single
+/// fresh measurement before it constructs any of the returned ports.
 pub(crate) async fn run_effect_ports(
     confinement: RunConfinement,
     evidence: SessionEvidenceStore,
     cancel: CancelToken,
     run_deadline: Option<Instant>,
-) -> Result<(Arc<RunEffectPorts>, ExecObservation), ProcessError> {
+    admitted_observation: Option<&ExecObservation>,
+) -> Result<
+    (
+        Arc<RunEffectPorts>,
+        ExecObservation,
+        Option<ego_core::store::evidence::EvidenceRef>,
+    ),
+    ProcessError,
+> {
     let config = ExecRunConfig::new(
         confinement,
         evidence,
@@ -98,8 +109,12 @@ pub(crate) async fn run_effect_ports(
         run_deadline,
         Arc::new(SystemResolver::new()),
     );
-    let (ports, observation) = RunEffectPorts::for_run(config).await?;
-    Ok((Arc::new(ports), observation))
+    let config = match admitted_observation {
+        Some(observation) => config.with_admitted_observation(observation.clone()),
+        None => config,
+    };
+    let (ports, observation, probe_evidence) = RunEffectPorts::for_run(config).await?;
+    Ok((Arc::new(ports), observation, probe_evidence))
 }
 
 /// Complete lifetime owner for an online command that has no durable session.
@@ -123,7 +138,7 @@ impl CommandHttpScope {
             .map_err(|error| error.to_string())
     }
 
-    async fn confined(
+    pub(crate) async fn confined(
         confinement: RunConfinement,
         cancel: CancelToken,
         run_deadline: Option<Instant>,
@@ -139,7 +154,7 @@ impl CommandHttpScope {
         .map_err(|error| {
             McpProcessScopeError::Setup(format!("could not open the MCP evidence store: {error}"))
         })?;
-        let (ports, _) = run_effect_ports(confinement, evidence, cancel, run_deadline)
+        let (ports, _, _) = run_effect_ports(confinement, evidence, cancel, run_deadline, None)
             .await
             .map_err(McpProcessScopeError::Effects)?;
         let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn Http>;

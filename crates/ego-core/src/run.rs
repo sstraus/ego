@@ -19,7 +19,7 @@
 //! the same table.
 
 use crate::event::domain::{CancelCause, ExitReason};
-use crate::permit::{Authority, HumanApprover};
+use crate::permit::{Authority, Confinement, ExecObservation, HumanApprover};
 use crate::public::QuestionReport;
 
 use std::any::Any;
@@ -547,6 +547,24 @@ pub struct RunSelections {
     )]
     budget: Option<Budget>,
     profile: Option<String>,
+    /// The confinement the caller picked, if they picked one.
+    ///
+    /// Here rather than in the per-generation seat because confinement is
+    /// admitted once and everything downstream is derived from it — the MCP
+    /// transports admitted for this run, the effect scope opened for it, and
+    /// the child authority ceiling. A selection carried here lands before
+    /// `RunConfinement` is built; one applied later would answer the caller
+    /// `sandbox: ro` and run at something else.
+    #[serde(default)]
+    sandbox: Option<Confinement>,
+    /// The measured process fact admitted with an ACP sandbox selection.
+    ///
+    /// This crosses the existing durable run boundary because the executor
+    /// must compare effect construction with the exact session observation;
+    /// keeping it in an adapter-side registry would create a second owner for
+    /// admission truth. Non-ACP runs have no session observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sandbox_observation: Option<ExecObservation>,
 }
 
 impl RunSelections {
@@ -563,7 +581,32 @@ impl RunSelections {
             mode,
             budget,
             profile,
+            sandbox: None,
+            sandbox_observation: None,
         }
+    }
+
+    /// The confinement this run is pinned to.
+    ///
+    /// A builder rather than a seventh positional argument: every existing
+    /// caller selects no confinement, and making all of them say `None` again
+    /// would be six edits that mean nothing.
+    #[must_use]
+    pub const fn with_sandbox(mut self, sandbox: Confinement) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// Pin a sandbox and the session measurement that admitted it together.
+    #[must_use]
+    pub fn with_sandbox_observation(
+        mut self,
+        sandbox: Confinement,
+        observation: ExecObservation,
+    ) -> Self {
+        self.sandbox = Some(sandbox);
+        self.sandbox_observation = Some(observation);
+        self
     }
 
     pub const fn empty() -> Self {
@@ -573,7 +616,18 @@ impl RunSelections {
             mode: None,
             budget: None,
             profile: None,
+            sandbox: None,
+            sandbox_observation: None,
         }
+    }
+
+    pub const fn sandbox(&self) -> Option<Confinement> {
+        self.sandbox
+    }
+
+    /// The immutable process observation admitted with [`Self::sandbox`].
+    pub const fn sandbox_observation(&self) -> Option<&ExecObservation> {
+        self.sandbox_observation.as_ref()
     }
 
     pub fn model(&self) -> Option<&ModelRef> {

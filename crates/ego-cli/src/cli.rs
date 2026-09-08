@@ -509,12 +509,19 @@ pub struct DoctorArgs {
 
 /// The parsed command line of `ego acp`.
 ///
-/// Two fields, and the absent third is the point: `ego acp`'s stdout **is** the
-/// JSON-RPC stream, so there is no `--output` to choose. See [`Places`].
+/// One absence is the point: `ego acp`'s stdout **is** the JSON-RPC stream, so
+/// there is no `--output` to choose. See [`Places`].
+///
+/// `sandbox` is a ceiling and not a default. A connected host picks its own
+/// confinement per session and can only pick something at least this strong
+/// (`docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`).
+/// `None` means the operator named none, and the resolved configuration
+/// stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpArgs {
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
+    pub sandbox: Option<Confinement>,
 }
 
 /// Where `ego a2a` serves, and whether the operator asked for it to be
@@ -936,6 +943,23 @@ enum HooksSubcommand {
 struct AcpCommand {
     #[command(flatten)]
     places: Places,
+
+    #[command(flatten)]
+    ceiling: Ceiling,
+}
+
+/// The weakest confinement a served protocol's sessions may run at.
+///
+/// Its own struct rather than a field, because the ceiling belongs to the
+/// process that serves runs and not to the protocol it happens to speak:
+/// `ego a2a` is the same question and flattens the same two lines.
+///
+/// `docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`
+#[derive(Debug, ClapArgs)]
+struct Ceiling {
+    /// The weakest confinement a session may select: ro|workspace|off.
+    #[arg(long)]
+    sandbox: Option<Confinement>,
 }
 
 /// `ego a2a` — the Agent2Agent protocol, on an endpoint.
@@ -1855,6 +1879,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Command(parsed) => Ok(Invocation::Acp(Box::new(AcpArgs {
                 session_dir: parsed.places.session_dir,
                 directory: parsed.places.directory,
+                sandbox: parsed.ceiling.sandbox,
             }))),
         },
         Some("a2a") => match clap_or_answer::<A2aCommand>(&tokens)? {

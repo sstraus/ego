@@ -19,6 +19,10 @@ use ego_core::generator::capabilities::{
     ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::types::ThinkingLevel;
+use ego_core::permit::Confinement;
+use ego_core::permit::{
+    BackendIdentity, ExecCaps, ExecObservation, ExecRequirements, MissingExecCaps, PolicyDigest,
+};
 use ego_core::public::MeteringKind;
 
 fn entry(
@@ -77,22 +81,80 @@ fn catalogue() -> ModelCatalogueSnapshot {
 }
 
 fn seat(judge: bool) -> AcpSessionControls {
+    ceilinged(judge, Confinement::Workspace)
+}
+
+/// The same seat with a stated confinement ceiling, for the tests that are
+/// about the ceiling rather than about the generation controls.
+fn ceilinged(judge: bool, ceiling: Confinement) -> AcpSessionControls {
     AcpSessionControls::seeded(
         ModelRef("ollama/gemma4".to_owned()),
         ThinkingLevel::Low,
         Mode::Default,
         judge,
+        ceiling,
         Some(catalogue()),
     )
+}
+
+fn observation(confinement: Confinement) -> ExecObservation {
+    let capabilities = match confinement {
+        Confinement::Ro => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED),
+        Confinement::Workspace => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+        Confinement::Off => ExecCaps::empty(),
+    };
+    ExecObservation::new(
+        BackendIdentity::new("fixture", "regression_case"),
+        capabilities,
+        PolicyDigest::try_from("0000000000000000000000000000000000000000000000000000000000000000")
+            .expect("a valid fixture policy digest"),
+    )
+}
+
+fn missing(confinement: Confinement) -> MissingExecCaps {
+    ExecRequirements::new(confinement.required_caps())
+        .check(ExecCaps::empty())
+        .expect_err("the fixture deliberately lacks confinement capabilities")
+        .from_backend(BackendIdentity::new("fixture", "regression_case"))
+}
+
+fn admit_all(seat: &AcpSessionControls, session: SessionId) {
+    seat.seed_confinement(
+        session,
+        vec![
+            (Confinement::Ro, observation(Confinement::Ro)),
+            (Confinement::Workspace, observation(Confinement::Workspace)),
+            (Confinement::Off, observation(Confinement::Off)),
+        ],
+        Vec::new(),
+    )
+    .expect("the fixture's measured rows are unique and complete");
+}
+
+#[test]
+fn uninitialized_controls_refuse_state_and_stage() {
+    let seat = seat(false);
+    let session = SessionId::new();
+    assert!(matches!(
+        seat.state(session),
+        Err(ControlError::Internal(message))
+            if message.contains("before confinement initialization")
+    ));
+    assert!(matches!(
+        seat.stage(session, SessionControlChange::Mode(Mode::Plan)),
+        Err(ControlError::Internal(message))
+            if message.contains("before confinement initialization")
+    ));
 }
 
 /// The configured model and effort are what the run would use, and neither is
 /// reported as a choice: nobody picked them.
 #[test]
 fn an_untouched_session_reports_configuration_without_calling_it_a_choice() {
-    let state = seat(false)
-        .state(SessionId::new())
-        .expect("a readable seat");
+    let session = SessionId::new();
+    let seat = seat(false);
+    admit_all(&seat, session);
+    let state = seat.state(session).expect("a readable seat");
     assert_eq!(state.model.current, ModelRef("ollama/gemma4".to_owned()));
     assert_eq!(state.model.chosen, None);
     assert_eq!(state.effort.current, ThinkingLevel::Low);
@@ -105,9 +167,10 @@ fn an_untouched_session_reports_configuration_without_calling_it_a_choice() {
 /// let a host pick something the run then refuses to resolve.
 #[test]
 fn an_unavailable_model_is_never_offered() {
-    let state = seat(false)
-        .state(SessionId::new())
-        .expect("a readable seat");
+    let session = SessionId::new();
+    let seat = seat(false);
+    admit_all(&seat, session);
+    let state = seat.state(session).expect("a readable seat");
     assert!(
         state
             .model
@@ -130,6 +193,7 @@ fn an_unavailable_model_is_never_offered() {
 fn the_effort_offer_follows_the_model() {
     let seat = seat(false);
     let session = SessionId::new();
+    admit_all(&seat, session);
     let before = seat.state(session).expect("a readable seat");
     assert_eq!(
         before.effort.available,
@@ -157,9 +221,11 @@ fn a_model_that_rejects_the_current_effort_moves_the_effort_too() {
         ThinkingLevel::Max,
         Mode::Default,
         false,
+        Confinement::Workspace,
         Some(catalogue()),
     );
     let session = SessionId::new();
+    admit_all(&seat, session);
     let after = seat
         .stage(
             session,
@@ -177,11 +243,11 @@ fn a_model_that_rejects_the_current_effort_moves_the_effort_too() {
 /// enum can hold it.
 #[test]
 fn an_effort_the_model_rejects_is_refused() {
-    let refusal = seat(false)
-        .stage(
-            SessionId::new(),
-            SessionControlChange::Effort(ThinkingLevel::Max),
-        )
+    let session = SessionId::new();
+    let seat = seat(false);
+    admit_all(&seat, session);
+    let refusal = seat
+        .stage(session, SessionControlChange::Effort(ThinkingLevel::Max))
         .expect_err("an unsupported effort must be refused");
     assert_eq!(
         refusal,
@@ -198,10 +264,12 @@ fn an_effort_the_model_rejects_is_refused() {
 #[test]
 fn yolo_is_neither_offered_nor_accepted_over_the_wire() {
     let seat = seat(true);
-    let state = seat.state(SessionId::new()).expect("a readable seat");
+    let session = SessionId::new();
+    admit_all(&seat, session);
+    let state = seat.state(session).expect("a readable seat");
     assert!(!state.mode.available.contains(&Mode::Yolo));
     let refusal = seat
-        .stage(SessionId::new(), SessionControlChange::Mode(Mode::Yolo))
+        .stage(session, SessionControlChange::Mode(Mode::Yolo))
         .expect_err("yolo must never be staged from the wire");
     assert!(matches!(
         refusal,
@@ -216,17 +284,23 @@ fn yolo_is_neither_offered_nor_accepted_over_the_wire() {
 /// so offering it would be offering a mode that cannot be entered.
 #[test]
 fn auto_is_offered_only_where_a_judge_is_configured() {
+    let without_judge_session = SessionId::new();
+    let without_judge = seat(false);
+    admit_all(&without_judge, without_judge_session);
     assert!(
-        !seat(false)
-            .state(SessionId::new())
+        !without_judge
+            .state(without_judge_session)
             .expect("a readable seat")
             .mode
             .available
             .contains(&Mode::Auto)
     );
+    let with_judge_session = SessionId::new();
+    let with_judge = seat(true);
+    admit_all(&with_judge, with_judge_session);
     assert!(
-        seat(true)
-            .state(SessionId::new())
+        with_judge
+            .state(with_judge_session)
             .expect("a readable seat")
             .mode
             .available
@@ -241,6 +315,8 @@ fn a_pick_in_one_session_does_not_reach_another() {
     let seat = seat(false);
     let touched = SessionId::new();
     let untouched = SessionId::new();
+    admit_all(&seat, touched);
+    admit_all(&seat, untouched);
     seat.stage(touched, SessionControlChange::Mode(Mode::Plan))
         .expect("plan is offered");
     assert_eq!(
@@ -267,9 +343,12 @@ fn a_seat_with_no_catalogue_offers_only_what_it_can_vouch_for() {
         ThinkingLevel::Low,
         Mode::Default,
         false,
+        Confinement::Workspace,
         None,
     );
-    let state = seat.state(SessionId::new()).expect("a readable seat");
+    let session = SessionId::new();
+    admit_all(&seat, session);
+    let state = seat.state(session).expect("a readable seat");
     assert_eq!(
         state.model.available,
         vec![ModelRef("ollama/gemma4".to_owned())]
@@ -297,6 +376,7 @@ fn a_seat_with_no_catalogue_offers_only_what_it_can_vouch_for() {
 fn a_reconnecting_seat_offers_configuration_and_not_the_previous_pick() {
     let session = SessionId::new();
     let first = seat(false);
+    admit_all(&first, session);
     first
         .stage(session, SessionControlChange::Mode(Mode::Plan))
         .expect("plan is offered");
@@ -308,6 +388,7 @@ fn a_reconnecting_seat_offers_configuration_and_not_the_previous_pick() {
 
     // The host reconnects: same session, a seat this connection owns.
     let reconnected = seat(false);
+    admit_all(&reconnected, session);
     let state = reconnected.state(session).expect("a readable seat");
     assert_eq!(
         state.mode.chosen, None,
@@ -335,6 +416,8 @@ fn two_connections_picking_at_once_each_keep_their_own() {
     let session = SessionId::new();
     let first = seat(false);
     let second = seat(false);
+    admit_all(&first, session);
+    admit_all(&second, session);
 
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -362,5 +445,190 @@ fn two_connections_picking_at_once_each_keep_their_own() {
         second.state(session).expect("a readable seat").mode.chosen,
         Some(Mode::Edits),
         "the second host's window was retuned by the first"
+    );
+}
+
+// --- the confinement ceiling ---
+
+/// The offer is everything at least as strong as the ceiling, and nothing
+/// weaker.
+///
+/// This is the whole enforcement. `controls::change` admits a value because it
+/// appears in `available` and for no other reason, so a confinement that is
+/// absent here cannot be reached by any message — there is no second rule that
+/// could come to disagree with this one.
+#[test]
+fn the_offer_stops_at_the_ceiling_the_process_was_started_with() {
+    let session = SessionId::new();
+    for (ceiling, offered) in [
+        (
+            Confinement::Off,
+            vec![Confinement::Ro, Confinement::Workspace, Confinement::Off],
+        ),
+        (
+            Confinement::Workspace,
+            vec![Confinement::Ro, Confinement::Workspace],
+        ),
+        (Confinement::Ro, vec![Confinement::Ro]),
+    ] {
+        let seat = ceilinged(false, ceiling);
+        admit_all(&seat, session);
+        let state = seat.state(session).expect("a readable seat");
+        assert_eq!(
+            state.sandbox.available, offered,
+            "the offer under a `{ceiling}` ceiling"
+        );
+        assert_eq!(
+            state.sandbox.current, ceiling,
+            "a session starts on the ceiling"
+        );
+        assert_eq!(
+            state.sandbox.chosen, None,
+            "inheriting the ceiling is not a choice anybody made"
+        );
+    }
+}
+
+/// A host may confine itself further than the operator required.
+#[test]
+fn a_host_can_tighten_the_confinement_and_the_pick_is_recorded_as_one() {
+    let seat = ceilinged(false, Confinement::Workspace);
+    let session = SessionId::new();
+    admit_all(&seat, session);
+    let after = seat
+        .stage(session, SessionControlChange::Sandbox(Confinement::Ro))
+        .expect("`ro` is stronger than the `workspace` ceiling");
+    assert_eq!(after.sandbox.current, Confinement::Ro);
+    assert_eq!(
+        after.sandbox.chosen,
+        Some(Confinement::Ro),
+        "a pick has to travel as a pick: only `chosen` reaches the run"
+    );
+}
+
+/// It may not loosen it, and the refusal says whose decision it was.
+///
+/// `Refused`, not `Unavailable`: `off` is a real confinement this build
+/// supports, and telling the host to pick from the list would suggest the list
+/// is merely incomplete rather than deliberately capped by the person who
+/// started the process.
+#[test]
+fn a_host_cannot_loosen_the_confinement_past_the_ceiling() {
+    let seat = ceilinged(false, Confinement::Ro);
+    let session = SessionId::new();
+    admit_all(&seat, session);
+    let error = seat
+        .stage(session, SessionControlChange::Sandbox(Confinement::Off))
+        .expect_err("`off` is weaker than the `ro` ceiling");
+    match &error {
+        ControlError::Refused { control, why } => {
+            assert_eq!(*control, "sandbox");
+            assert!(
+                why.contains("ro"),
+                "the refusal does not name the ceiling in force: {why}"
+            );
+        }
+        other => panic!("a capped confinement should be refused, not {other}"),
+    }
+    assert_eq!(
+        seat.state(session).expect("a readable seat").sandbox.chosen,
+        None,
+        "a refused pick was staged anyway"
+    );
+}
+
+/// Every ceiling offers itself, so the picker's current value is always one of
+/// its choices. A client cannot render a select whose current value is absent
+/// from the options, and `ro` — the tightest — is the case that would break
+/// first if the filter were ever written the other way round.
+#[test]
+fn the_value_in_force_is_always_one_of_the_choices() {
+    let session = SessionId::new();
+    for ceiling in [Confinement::Ro, Confinement::Workspace, Confinement::Off] {
+        let seat = ceilinged(false, ceiling);
+        admit_all(&seat, session);
+        let state = seat.state(session).expect("a readable seat");
+        assert!(
+            state.sandbox.available.contains(&state.sandbox.current),
+            "a `{ceiling}` ceiling offers a picker its own current value cannot \
+             be found in: {:?}",
+            state.sandbox.available
+        );
+    }
+}
+
+#[test]
+fn measured_confinement_offer_intersects_the_ceiling_and_keeps_typed_reasons() {
+    let seat = ceilinged(false, Confinement::Workspace);
+    let session = SessionId::new();
+    let workspace_missing = missing(Confinement::Workspace);
+    seat.seed_confinement(
+        session,
+        vec![
+            (Confinement::Ro, observation(Confinement::Ro)),
+            // `off` is measured, but it is weaker than the operator ceiling.
+            (Confinement::Off, observation(Confinement::Off)),
+        ],
+        vec![(Confinement::Workspace, workspace_missing.clone())],
+    )
+    .expect("the first measured offer seeds the session");
+
+    let state = seat.state(session).expect("a readable seat");
+    assert_eq!(
+        state.sandbox.available,
+        vec![Confinement::Ro],
+        "the offer is measured capabilities intersected with the ceiling"
+    );
+    assert_eq!(
+        state.sandbox.current,
+        Confinement::Workspace,
+        "an unsupported configured default remains current so refusal stays truthful"
+    );
+    let refusal = seat
+        .stage(
+            session,
+            SessionControlChange::Sandbox(Confinement::Workspace),
+        )
+        .expect_err("a measured-but-unsupported confinement must refuse");
+    assert_eq!(
+        refusal,
+        ControlError::MissingCapabilities {
+            control: "sandbox",
+            value: "workspace".to_owned(),
+            missing: Box::new(workspace_missing),
+        }
+    );
+}
+
+#[test]
+fn confinement_measurements_are_seeded_once_without_duplicate_rows_or_reseed() {
+    let seat = ceilinged(false, Confinement::Workspace);
+    let session = SessionId::new();
+    assert!(
+        seat.seed_confinement(
+            session,
+            vec![
+                (Confinement::Ro, observation(Confinement::Ro)),
+                (Confinement::Ro, observation(Confinement::Ro)),
+            ],
+            Vec::new(),
+        )
+        .is_err(),
+        "duplicate supported measurements must not be silently collapsed"
+    );
+    seat.seed_confinement(
+        session,
+        vec![(Confinement::Ro, observation(Confinement::Ro))],
+        Vec::new(),
+    )
+    .expect("a unique measured offer seeds the session");
+    assert!(
+        seat.seed_confinement(
+            session,
+            vec![(Confinement::Ro, observation(Confinement::Ro))],
+            Vec::new(),
+        )
+        .is_err(),
+        "a session must not be reseeded after admission"
     );
 }

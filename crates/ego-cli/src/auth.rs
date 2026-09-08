@@ -4,7 +4,7 @@
 //! logout all use the same read-modify-write operation, so rotating refresh
 //! tokens cannot be lost when two ego processes share an account.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -438,6 +438,16 @@ impl AuthStore {
         self.read_unlocked()
     }
 
+    /// Provider identities present in the observed store, without credentials.
+    ///
+    /// Startup selection needs to distinguish a saved OAuth identity from no
+    /// configured source. It does not need, and must not receive, the access or
+    /// refresh material. [`read_observed`](Self::read_observed) also guarantees
+    /// this projection creates no home, lock, or store and refreshes nothing.
+    pub(crate) fn observed_provider_ids(&self) -> Result<BTreeSet<String>, AuthError> {
+        Ok(self.read_observed()?.into_keys().collect())
+    }
+
     pub fn read(&self) -> Result<BTreeMap<String, AuthEntry>, AuthError> {
         let mut lock = self.open_lock()?;
         let _guard = lock.write().map_err(|source| AuthError::Io {
@@ -568,6 +578,16 @@ pub async fn execute(
         }
         crate::cli::AuthAction::Login => {
             let Some(id) = args.provider.as_deref() else {
+                // The bare rows are the contract a script reads, so the
+                // sentence explaining them goes to the diagnostic channel
+                // exactly as `status` sends its empty-listing note there. A
+                // listing that arrives as eight unlabelled words reads as a
+                // command that did nothing.
+                crate::output::note(
+                    "these providers log in with `ego auth login PROVIDER`; a \
+                     provider that reads an API key from the environment is not \
+                     among them and needs no login",
+                );
                 return Ok(known_and_discovered(&home));
             };
             login(&store, &home, id, args.device, cancel, &commands).await?;
@@ -639,7 +659,14 @@ async fn login(
             .unwrap_or_default(),
     );
     let plugin = discover_plugin(id, home, None);
-    let source = select_source(id, command, plugin, oauth::built_in(id).is_some(), None);
+    let environment = environment_var(id);
+    let source = select_source(
+        id,
+        command,
+        plugin,
+        oauth::built_in(id).is_some(),
+        environment.as_deref(),
+    );
     let entry = match source {
         CredentialSource::Command(program) => {
             run_configured_command_scoped(&program, "login", None, commands, cancel, None).await?
@@ -665,8 +692,11 @@ async fn login(
         }
         CredentialSource::Environment(var) => {
             return Err(AuthError::MissingCredential {
-                program: var,
-                reason: "environment credentials are resolved at generation time".to_string(),
+                program: id.to_string(),
+                reason: format!(
+                    "it reads its key from {var} rather than through a login; \
+                     set that variable in the environment ego runs in"
+                ),
             });
         }
         CredentialSource::Missing(provider) => {
@@ -1379,6 +1409,23 @@ async fn refresh_built_in(
         .read_token(response, now_ms(), Some(refresh))
         .map_err(flow_error)?;
     token_entry(flow, token)
+}
+
+/// The variable the row for `id` reads a key from, if this build has that row
+/// and it reads one.
+///
+/// Read from the provider table rather than from a second list here, so a row
+/// that changes which variable it names cannot leave this message naming the
+/// old one. An unknown id yields `None` and the caller reports it as missing,
+/// which is the true answer for a provider this build does not have.
+fn environment_var(id: &str) -> Option<String> {
+    crate::model::rows(&Default::default())
+        .ok()?
+        .into_iter()
+        .find(|row| row.id() == id)?
+        .credential
+        .environment_var()
+        .map(str::to_owned)
 }
 
 fn known_and_discovered(home: &Path) -> String {

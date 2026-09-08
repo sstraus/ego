@@ -723,6 +723,7 @@ mod reducer {
                             .try_into()
                             .unwrap(),
                     ),
+                    probe_evidence: None,
                 },
             ),
             (
