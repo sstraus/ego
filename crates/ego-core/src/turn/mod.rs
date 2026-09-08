@@ -1037,7 +1037,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     }
 
     /// Attach one run observation, consumed before the first public turn event.
-    pub fn with_execution_observation(mut self, observation: ExecObservation, probe_evidence: Option<crate::store::evidence::EvidenceRef>) -> Self {
+    pub fn with_execution_observation(
+        mut self,
+        observation: ExecObservation,
+        probe_evidence: Option<crate::store::evidence::EvidenceRef>,
+    ) -> Self {
         self.execution_observation = Some((observation, probe_evidence));
         self
     }
@@ -1918,7 +1922,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 turn,
                 None,
                 None,
-                EventKind::ExecutionObserved { observation, probe_evidence },
+                EventKind::ExecutionObserved {
+                    observation,
+                    probe_evidence,
+                },
             )
         {
             return Err(self.abandon(turn, cause));
@@ -2305,7 +2312,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 turn,
                 None,
                 None,
-                EventKind::ExecutionObserved { observation, probe_evidence },
+                EventKind::ExecutionObserved {
+                    observation,
+                    probe_evidence,
+                },
             )?;
         }
         // `turn.started` of `CLI.md` §4.2. Published rather than appended:

@@ -897,7 +897,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 decision,
             }
         }
-        EventKind::ExecutionObserved { observation, probe_evidence } => ExportEvent::ExecutionObserved {
+        EventKind::ExecutionObserved {
+            observation,
+            probe_evidence,
+        } => ExportEvent::ExecutionObserved {
             observation: observation.clone(),
             probe_evidence: probe_evidence.clone(),
         },

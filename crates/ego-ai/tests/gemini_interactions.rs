@@ -35,10 +35,10 @@
 
 use base64::Engine as _;
 use ego_ai::http::HttpResponse;
-use ego_ai::wire::gemini_interactions::{
-    build_request, request_body, Inexpressible, StreamDecoder, DIALECT,
-};
 use ego_ai::wire::RequestTarget;
+use ego_ai::wire::gemini_interactions::{
+    DIALECT, Inexpressible, StreamDecoder, build_request, request_body,
+};
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     ContentBlock, Conversation, ErrorKind, GenRequest, Image, ImageMediaType, Message,
@@ -718,9 +718,11 @@ data: {"index":0,"event_type":"step.stop"}
 "#,
     );
 
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, AiEvent::ReasoningDelta { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AiEvent::ReasoningDelta { .. }))
+    );
     assert_eq!(
         state_json(&reasoning_states(&events)[0]),
         serde_json::json!({"type": "thought", "signature": "signature-only"})

@@ -277,8 +277,8 @@ fn resolve_inner(
     let eligible: Vec<&Sourced<ConfigLayer>> = ordered
         .into_iter()
         .filter(|l| {
-            let keep = posture == Posture::Ambient
-                || !matches!(l.source, Source::Project | Source::Local);
+            let keep =
+                posture == Posture::Ambient || !matches!(l.source, Source::Project | Source::Local);
             // Recorded on the way past, where the reason for the drop is still
             // in hand. A later pass would have to reconstruct which layers
             // were eligible, and could reconstruct it wrongly.

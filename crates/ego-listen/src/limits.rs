@@ -140,9 +140,7 @@ impl ConnectionGate {
             inner: stream,
             _permit: permit,
             remaining_ingress: self.state.limits.max_ingress_bytes,
-            deadline: Box::pin(tokio::time::sleep(
-                self.state.limits.connection_lifetime,
-            )),
+            deadline: Box::pin(tokio::time::sleep(self.state.limits.connection_lifetime)),
             shutdown: Box::pin(self.state.shutdown.clone().cancelled_owned()),
         })
     }
@@ -268,10 +266,7 @@ where
         Pin::new(&mut this.inner).poll_write(context, buffer)
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if let Err(error) = this.poll_open(context) {
             return Poll::Ready(Err(error));
@@ -279,10 +274,7 @@ where
         Pin::new(&mut this.inner).poll_flush(context)
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if let Err(error) = this.poll_open(context) {
             return Poll::Ready(Err(error));
