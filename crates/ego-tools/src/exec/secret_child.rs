@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::task::JoinHandle;
 use zeroize::{Zeroize as _, Zeroizing};
 
-use super::process_tree::{cleanup_descendants, configure_process_group, terminate_tree};
+use super::process_tree::ManagedChild;
 
 /// Complete authority and lifecycle bounds for one secret child exchange.
 pub struct SecretChildRequest {
@@ -133,26 +133,22 @@ pub async fn run_secret_child(
             Stdio::inherit()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
+        .stderr(Stdio::null());
     if let Some(cwd) = &request.cwd {
         command.current_dir(cwd.as_path());
     }
-    configure_process_group(&mut command);
-
-    let mut child = command.spawn().map_err(SecretChildError::Launch)?;
-    let tree_id = child.id();
-    let Some(stdout) = child.stdout.take() else {
-        terminate_tree(&mut child, tree_id, request.termination_grace).await;
+    let mut child = ManagedChild::spawn(command).map_err(SecretChildError::Launch)?;
+    let Some(stdout) = child.take_stdout() else {
+        child.terminate(request.termination_grace).await;
         return Err(SecretChildError::InvalidRequest(
             "credential command stdout pipe was not installed",
         ));
     };
     let mut stdout_task = Some(tokio::spawn(read_secret(stdout)));
-    let mut stdin_task = match (request.stdin, child.stdin.take()) {
+    let mut stdin_task = match (request.stdin, child.take_stdin()) {
         (Some(secret), Some(stdin)) => Some(tokio::spawn(write_secret(stdin, secret))),
         (Some(_), None) => {
-            terminate_tree(&mut child, tree_id, request.termination_grace).await;
+            child.terminate(request.termination_grace).await;
             let _ = finish_stdout(stdout_task.take()).await;
             return Err(SecretChildError::InvalidRequest(
                 "credential command stdin pipe was not installed",
@@ -207,10 +203,10 @@ pub async fn run_secret_child(
     let (status, cleanup_complete) = match settlement {
         Settlement::Exited(status) => (
             Some(status),
-            cleanup_descendants(tree_id, request.termination_grace).await,
+            child.cleanup_after_exit(request.termination_grace).await,
         ),
         Settlement::Failed(error) => {
-            let cleanup = terminate_tree(&mut child, tree_id, request.termination_grace).await;
+            let cleanup = child.terminate(request.termination_grace).await;
             let _ = finish_stdin(stdin_task.take()).await;
             let _ = finish_stdout(stdout_task.take()).await;
             return if cleanup {

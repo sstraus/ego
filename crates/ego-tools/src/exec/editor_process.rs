@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ego_core::turn::CancelToken;
 
-use super::process_tree::{cleanup_descendants, configure_process_group, terminate_tree};
+use super::process_tree::ManagedChild;
 
 const TERMINATION_GRACE: Duration = Duration::from_millis(500);
 
@@ -81,16 +81,14 @@ pub async fn run_editor_process(
         .args(&argv[1..])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-    configure_process_group(&mut command);
+        .stderr(Stdio::inherit());
 
-    let mut child = command.spawn().map_err(EditorProcessError::Launch)?;
-    let tree_id = child.id();
+    let mut child = ManagedChild::spawn(command).map_err(EditorProcessError::Launch)?;
+    let tree_id = child.tree_id();
     let mut terminal = match ForegroundTerminal::acquire(tree_id) {
         Ok(terminal) => terminal,
         Err(error) => {
-            let cleanup = terminate_tree(&mut child, tree_id, TERMINATION_GRACE).await;
+            let cleanup = child.terminate(TERMINATION_GRACE).await;
             return if cleanup {
                 Err(EditorProcessError::Terminal(error))
             } else {
@@ -114,11 +112,11 @@ pub async fn run_editor_process(
 
     let (status, error, cleanup) = match settlement {
         Settlement::Exited(status) => {
-            let cleanup = cleanup_descendants(tree_id, TERMINATION_GRACE).await;
+            let cleanup = child.cleanup_after_exit(TERMINATION_GRACE).await;
             (Some(status), None, cleanup)
         }
         Settlement::Failed(error) => {
-            let cleanup = terminate_tree(&mut child, tree_id, TERMINATION_GRACE).await;
+            let cleanup = child.terminate(TERMINATION_GRACE).await;
             (None, Some(error), cleanup)
         }
     };

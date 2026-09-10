@@ -19,7 +19,6 @@ use ego_core::turn::CancelToken;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead as FuturesAsyncRead, AsyncWrite as FuturesAsyncWrite};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -28,9 +27,7 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt as _, TokioAsyncWriteCo
 
 use super::ExecLimits;
 use super::backend::{Backend, executable, prefixed_command};
-use super::process_tree::{
-    cleanup_descendants, configure_process_group, terminate_group, terminate_tree,
-};
+use super::process_tree::ManagedChild;
 
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
@@ -134,9 +131,7 @@ pub(crate) async fn execute(
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    configure_process_group(&mut command);
+        .stderr(Stdio::piped());
 
     let stdout_writer = evidence.begin().map_err(ProcessError::Evidence)?;
     let stderr_writer = match evidence.begin() {
@@ -147,7 +142,7 @@ pub(crate) async fn execute(
         }
     };
 
-    let mut child = match command.spawn() {
+    let mut child = match ManagedChild::spawn(command) {
         Ok(child) => child,
         Err(error) => {
             let launch = ProcessError::Launch {
@@ -158,17 +153,16 @@ pub(crate) async fn execute(
             return Err(launch);
         }
     };
-    let tree_id = child.id();
-    let stdin = child.stdin.take();
-    let Some(stdout) = child.stdout.take() else {
-        terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+    let stdin = child.take_stdin();
+    let Some(stdout) = child.take_stdout() else {
+        child.terminate(limits.termination_grace()).await;
         let _ = abort_writers([stdout_writer, stderr_writer]).await;
         return Err(ProcessError::Invariant(
             "stdout pipe was not installed".into(),
         ));
     };
-    let Some(stderr) = child.stderr.take() else {
-        terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+    let Some(stderr) = child.take_stderr() else {
+        child.terminate(limits.termination_grace()).await;
         let _ = abort_writers([stdout_writer, stderr_writer]).await;
         return Err(ProcessError::Invariant(
             "stderr pipe was not installed".into(),
@@ -189,14 +183,14 @@ pub(crate) async fn execute(
     ));
     if let Some((input, scope)) = &handler {
         let Some(mut stdin) = stdin else {
-            terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+            child.terminate(limits.termination_grace()).await;
             let _ = abort_outputs(stdout_task.take(), stderr_task.take(), None, None).await;
             return Err(ProcessError::Invariant(
                 "stdin pipe was not installed".into(),
             ));
         };
         if let Err(error) = write_handler_input(&mut stdin, input, &cancel, scope).await {
-            terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+            child.terminate(limits.termination_grace()).await;
             let _ = abort_outputs(stdout_task.take(), stderr_task.take(), None, None).await;
             return Err(error);
         }
@@ -219,7 +213,7 @@ pub(crate) async fn execute(
         {
             request_abort(&mut stdout_task);
             request_abort(&mut stderr_task);
-            terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+            child.terminate(limits.termination_grace()).await;
             let _ = abort_outputs(
                 stdout_task.take(),
                 stderr_task.take(),
@@ -234,7 +228,7 @@ pub(crate) async fn execute(
         {
             request_abort(&mut stdout_task);
             request_abort(&mut stderr_task);
-            terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+            child.terminate(limits.termination_grace()).await;
             let _ = abort_outputs(
                 stdout_task.take(),
                 stderr_task.take(),
@@ -253,7 +247,7 @@ pub(crate) async fn execute(
             let timeout = spec.timeout().expect("checked as present");
             request_abort(&mut stdout_task);
             request_abort(&mut stderr_task);
-            terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+            child.terminate(limits.termination_grace()).await;
             let _ = abort_outputs(
                 stdout_task.take(),
                 stderr_task.take(),
@@ -270,7 +264,7 @@ pub(crate) async fn execute(
                 Err(error) => {
                     request_abort(&mut stdout_task);
                     request_abort(&mut stderr_task);
-                    terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+                    child.terminate(limits.termination_grace()).await;
                     let _ = abort_outputs(
                         stdout_task.take(),
                         stderr_task.take(),
@@ -283,7 +277,7 @@ pub(crate) async fn execute(
             }
         }
         if status.is_some() && !descendants_cleaned {
-            cleanup_descendants(tree_id, limits.termination_grace()).await;
+            child.cleanup_after_exit(limits.termination_grace()).await;
             descendants_cleaned = true;
         }
         if stdout_task.as_ref().is_some_and(DrainHandle::is_finished) {
@@ -291,7 +285,7 @@ pub(crate) async fn execute(
                 Ok(pending) => stdout_pending = Some(pending),
                 Err(error) => {
                     request_abort(&mut stderr_task);
-                    terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+                    child.terminate(limits.termination_grace()).await;
                     let _ = abort_outputs(
                         None,
                         stderr_task.take(),
@@ -308,7 +302,7 @@ pub(crate) async fn execute(
                 Ok(pending) => stderr_pending = Some(pending),
                 Err(error) => {
                     request_abort(&mut stdout_task);
-                    terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+                    child.terminate(limits.termination_grace()).await;
                     let _ = abort_outputs(
                         stdout_task.take(),
                         None,
@@ -402,15 +396,13 @@ async fn spawn_duplex(
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    configure_process_group(&mut command);
+        .stderr(Stdio::piped());
 
     let stderr_writer = context
         .evidence
         .begin()
         .map_err(|error| process_before_spawn(ProcessError::Evidence(error)))?;
-    let mut child = match command.spawn() {
+    let mut child = match ManagedChild::spawn(command) {
         Ok(child) => child,
         Err(error) => {
             let _ = abort_writer(stderr_writer).await;
@@ -420,23 +412,22 @@ async fn spawn_duplex(
             }));
         }
     };
-    let tree_id = child.id();
-    let Some(stdin) = child.stdin.take() else {
-        terminate_tree(&mut child, tree_id, context.limits.termination_grace()).await;
+    let Some(stdin) = child.take_stdin() else {
+        child.terminate(context.limits.termination_grace()).await;
         let _ = abort_writer(stderr_writer).await;
         return Err(process_before_spawn(ProcessError::Invariant(
             "stdin pipe was not installed".into(),
         )));
     };
-    let Some(stdout) = child.stdout.take() else {
-        terminate_tree(&mut child, tree_id, context.limits.termination_grace()).await;
+    let Some(stdout) = child.take_stdout() else {
+        child.terminate(context.limits.termination_grace()).await;
         let _ = abort_writer(stderr_writer).await;
         return Err(process_before_spawn(ProcessError::Invariant(
             "stdout pipe was not installed".into(),
         )));
     };
-    let Some(stderr) = child.stderr.take() else {
-        terminate_tree(&mut child, tree_id, context.limits.termination_grace()).await;
+    let Some(stderr) = child.take_stderr() else {
+        child.terminate(context.limits.termination_grace()).await;
         let _ = abort_writer(stderr_writer).await;
         return Err(process_before_spawn(ProcessError::Invariant(
             "stderr pipe was not installed".into(),
@@ -445,29 +436,24 @@ async fn spawn_duplex(
 
     let delivery = Arc::new(AtomicBool::new(false));
     let started = tokio::time::Instant::now();
+    let supervisor = start_duplex_supervisor(
+        child,
+        context.cancel.clone(),
+        spec.timeout(),
+        started,
+        context.limits.termination_grace(),
+    );
     Ok(Box::new(ProcessDuplex {
         stdin: Some(stdin.compat_write()),
         stdout: Some(stdout.compat()),
         lifecycle: Some(DuplexLifecycle {
-            child,
-            tree_id,
             stderr: start_drain(
                 stderr,
                 StreamProvenance::Stderr,
                 stderr_writer,
                 context.limits.preview_bytes(),
             ),
-            watcher: Some(start_duplex_watcher(
-                tree_id,
-                context.cancel.clone(),
-                spec.timeout(),
-                started,
-                context.limits.termination_grace(),
-            )),
-            started,
-            timeout: spec.timeout(),
-            cancel: context.cancel.clone(),
-            grace: context.limits.termination_grace(),
+            supervisor,
         }),
         delivery,
         _context: context,
@@ -479,14 +465,8 @@ fn process_before_spawn(error: ProcessError) -> TransportError {
 }
 
 struct DuplexLifecycle {
-    child: Child,
-    tree_id: Option<u32>,
     stderr: DrainHandle,
-    watcher: Option<DuplexWatcher>,
-    started: tokio::time::Instant,
-    timeout: Option<Duration>,
-    cancel: CancelToken,
-    grace: Duration,
+    supervisor: DuplexSupervisor,
 }
 
 struct ProcessDuplex {
@@ -592,7 +572,7 @@ async fn settle_duplex(mut session: ProcessDuplex, interrupt: bool) -> DuplexSet
     drop(session.stdin.take());
     drop(session.stdout.take());
     let delivery = delivery_certainty(&session.delivery);
-    let Some(mut lifecycle) = session.lifecycle.take() else {
+    let Some(lifecycle) = session.lifecycle.take() else {
         return DuplexSettlement::new(
             DuplexEnd::Failed,
             CleanupCertainty::Uncertain,
@@ -603,51 +583,91 @@ async fn settle_duplex(mut session: ProcessDuplex, interrupt: bool) -> DuplexSet
         );
     };
 
-    let watcher_complete = match lifecycle.watcher.take() {
-        Some(watcher) => watcher.stop().await,
-        None => false,
-    };
-
-    let (end, mut cleanup) = if interrupt {
-        let complete =
-            terminate_tree(&mut lifecycle.child, lifecycle.tree_id, lifecycle.grace).await;
-        (DuplexEnd::Interrupted, cleanup_certainty(complete))
-    } else {
-        settle_child(&mut lifecycle).await
-    };
-    if !watcher_complete {
-        cleanup = CleanupCertainty::Uncertain;
-    }
+    let (end, cleanup) = lifecycle.supervisor.finish(interrupt).await;
     let evidence = finalize_stderr(lifecycle.stderr).await;
     DuplexSettlement::new(end, cleanup, delivery, evidence)
 }
 
-async fn settle_child(lifecycle: &mut DuplexLifecycle) -> (DuplexEnd, CleanupCertainty) {
+enum DuplexControl {
+    Interrupt,
+}
+
+struct DuplexSupervisor {
+    control: mpsc::UnboundedSender<DuplexControl>,
+    task: JoinHandle<(DuplexEnd, CleanupCertainty)>,
+}
+
+impl DuplexSupervisor {
+    async fn finish(self, interrupt: bool) -> (DuplexEnd, CleanupCertainty) {
+        let Self { control, task } = self;
+        if interrupt {
+            let _ = control.send(DuplexControl::Interrupt);
+        }
+        let (end, cleanup) = task
+            .await
+            .unwrap_or((DuplexEnd::Failed, CleanupCertainty::Uncertain));
+        drop(control);
+        if interrupt {
+            (DuplexEnd::Interrupted, cleanup)
+        } else {
+            (end, cleanup)
+        }
+    }
+}
+
+fn start_duplex_supervisor(
+    child: ManagedChild,
+    cancel: CancelToken,
+    timeout: Option<Duration>,
+    started: tokio::time::Instant,
+    grace: Duration,
+) -> DuplexSupervisor {
+    let (control, receiver) = mpsc::unbounded_channel();
+    let task = tokio::spawn(supervise_duplex_child(
+        child, receiver, cancel, timeout, started, grace,
+    ));
+    DuplexSupervisor { control, task }
+}
+
+async fn supervise_duplex_child(
+    mut child: ManagedChild,
+    mut control: mpsc::UnboundedReceiver<DuplexControl>,
+    cancel: CancelToken,
+    timeout: Option<Duration>,
+    started: tokio::time::Instant,
+    grace: Duration,
+) -> (DuplexEnd, CleanupCertainty) {
     loop {
-        if lifecycle.cancel.is_cancelled() {
-            let complete =
-                terminate_tree(&mut lifecycle.child, lifecycle.tree_id, lifecycle.grace).await;
+        if cancel.is_cancelled() {
+            let complete = child.terminate(grace).await;
             return (DuplexEnd::Cancelled, cleanup_certainty(complete));
         }
-        if lifecycle
-            .timeout
-            .is_some_and(|timeout| lifecycle.started.elapsed() >= timeout)
-        {
-            let timeout = lifecycle.timeout.expect("checked as present");
-            let complete =
-                terminate_tree(&mut lifecycle.child, lifecycle.tree_id, lifecycle.grace).await;
+        if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+            let timeout = timeout.expect("checked as present");
+            let complete = child.terminate(grace).await;
             return (DuplexEnd::TimedOut { timeout }, cleanup_certainty(complete));
         }
-        match lifecycle.child.try_wait() {
+        match child.try_wait() {
             Ok(Some(status)) => {
-                let complete = cleanup_descendants(lifecycle.tree_id, lifecycle.grace).await;
+                let complete = child.cleanup_after_exit(grace).await;
                 return (duplex_end(status), cleanup_certainty(complete));
             }
-            Ok(None) => tokio::time::sleep(Duration::from_millis(2)).await,
+            Ok(None) => {}
             Err(_) => {
-                terminate_tree(&mut lifecycle.child, lifecycle.tree_id, lifecycle.grace).await;
+                child.terminate(grace).await;
                 return (DuplexEnd::Failed, CleanupCertainty::Uncertain);
             }
+        }
+        tokio::select! {
+            command = control.recv() => {
+                let complete = child.terminate(grace).await;
+                let end = match command {
+                    Some(DuplexControl::Interrupt) => DuplexEnd::Interrupted,
+                    None => DuplexEnd::Failed,
+                };
+                return (end, cleanup_certainty(complete));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(2)) => {}
         }
     }
 }
@@ -675,42 +695,6 @@ fn cleanup_certainty(complete: bool) -> CleanupCertainty {
     } else {
         CleanupCertainty::Uncertain
     }
-}
-
-struct DuplexWatcher {
-    task: JoinHandle<()>,
-    stop: oneshot::Sender<()>,
-}
-
-impl DuplexWatcher {
-    async fn stop(self) -> bool {
-        let Self { task, stop } = self;
-        let _ = stop.send(());
-        task.await.is_ok()
-    }
-}
-
-fn start_duplex_watcher(
-    tree_id: Option<u32>,
-    cancel: CancelToken,
-    timeout: Option<Duration>,
-    started: tokio::time::Instant,
-    grace: Duration,
-) -> DuplexWatcher {
-    let (stop, mut stopped) = oneshot::channel();
-    let task = tokio::spawn(async move {
-        loop {
-            if cancel.is_cancelled() || timeout.is_some_and(|limit| started.elapsed() >= limit) {
-                terminate_group(tree_id, grace).await;
-                return;
-            }
-            tokio::select! {
-                _ = &mut stopped => return,
-                _ = tokio::time::sleep(Duration::from_millis(2)) => {}
-            }
-        }
-    });
-    DuplexWatcher { task, stop }
 }
 
 async fn finalize_stderr(handle: DrainHandle) -> Result<ToolResult, EvidenceError> {

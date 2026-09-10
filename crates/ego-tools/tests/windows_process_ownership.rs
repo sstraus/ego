@@ -1,30 +1,34 @@
 #![cfg(windows)]
 
-//! RED contract for one public process-execution composition on Windows.
-//!
-//! This representative path covers exact argv and handler stdin while a
-//! short-lived descendant keeps the inherited stdout pipe open. The remaining
-//! editor, secret-child, duplex cancellation, and failure seams belong to
-//! later native batches.
+//! Native Windows contract for public process ownership and whole-tree cleanup.
 
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
+use ego_core::credentials::SecretMaterial;
+use ego_core::event::domain::CancelCause;
 use ego_core::hook::EffectScope;
 use ego_core::permit::{
-    CanonPath, Confinement, EnvPolicy, ProcessExecutor, RunConfinement, SpawnSpec,
+    CanonPath, Confinement, DuplexEnd, DuplexSpawner, EnvPolicy, ProcessExecutor, RunConfinement,
+    SpawnSpec,
 };
 use ego_core::turn::CancelToken;
 use ego_tools::exec::{
-    ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts, SessionEvidenceStore,
+    ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts, SecretChildError,
+    SecretChildRequest, SessionEvidenceStore, run_editor_process, run_secret_child,
 };
 use ego_tools::http::SystemResolver;
+use futures::io::AsyncReadExt as _;
 
 const DESCENDANT_LIFETIME: Duration = Duration::from_millis(250);
+const LATE_DESCENDANT_LIFETIME: Duration = Duration::from_secs(1);
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
+const MARKER_WAIT: Duration = Duration::from_secs(3);
 
 struct ScenarioRuntime(tokio::runtime::Runtime);
 
@@ -46,6 +50,7 @@ impl ScenarioRuntime {
 struct RunFixture {
     runtime: ScenarioRuntime,
     _evidence_root: tempfile::TempDir,
+    cancel: CancelToken,
     ports: RunEffectPorts,
 }
 
@@ -64,10 +69,11 @@ fn run_fixture() -> RunFixture {
     );
     let policy =
         RunConfinement::new(Confinement::Off, false, workspace).expect("unconfined Windows run");
+    let cancel = CancelToken::new();
     let config = ExecRunConfig::new(
         policy,
         evidence,
-        CancelToken::new(),
+        cancel.clone(),
         ExecLimits::new(1024 * 1024, Duration::from_millis(500)).expect("process limits"),
         HttpCallTimeout::default(),
         None,
@@ -79,11 +85,12 @@ fn run_fixture() -> RunFixture {
     RunFixture {
         runtime,
         _evidence_root: evidence_root,
+        cancel,
         ports,
     }
 }
 
-fn fixture_argv(extras: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+fn fixture_argv(mode: &str, extras: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut argv = vec![
         std::env::current_exe()
             .expect("test executable")
@@ -92,24 +99,86 @@ fn fixture_argv(extras: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
         OsString::from("--exact"),
         OsString::from("windows_process_ownership_fixture"),
         OsString::from("--nocapture"),
+        OsString::from("--test-threads=1"),
         OsString::from("--"),
-        OsString::from("args-and-stdin"),
+        OsString::from(mode),
     ];
     argv.extend(extras);
     argv
 }
 
 fn fixture_spec(args: impl IntoIterator<Item = OsString>) -> SpawnSpec {
+    fixture_spec_with_mode("args-and-stdin", args, None)
+}
+
+fn fixture_spec_with_mode(
+    mode: &str,
+    args: impl IntoIterator<Item = OsString>,
+    timeout: Option<Duration>,
+) -> SpawnSpec {
     SpawnSpec::new(
-        fixture_argv(args),
+        fixture_argv(mode, args),
         Some(CanonPath::new(
             std::fs::canonicalize(std::env::current_dir().expect("current directory"))
                 .expect("canonical current directory"),
         )),
-        None,
+        timeout,
         EnvPolicy::Inherited,
     )
     .expect("fixture spawn spec")
+}
+
+fn marker(path: &Path) {
+    std::fs::write(path, b"started").expect("fixture marker");
+}
+
+fn descendant_started(path: &Path) -> PathBuf {
+    path.with_extension("started")
+}
+
+fn wait_for_marker(path: &Path) {
+    let deadline = Instant::now() + MARKER_WAIT;
+    while !path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(path.exists(), "fixture did not write marker {path:?}");
+}
+
+fn assert_marker_absent_after(path: &Path) {
+    assert_marker_absent_after_duration(path, DESCENDANT_LIFETIME);
+}
+
+fn assert_marker_absent_after_duration(path: &Path, lifetime: Duration) {
+    thread::sleep(lifetime + Duration::from_millis(250));
+    assert!(!path.exists(), "descendant survived cleanup: {path:?}");
+}
+
+fn marker_paths(args: &mut impl Iterator<Item = OsString>) -> (PathBuf, PathBuf) {
+    let direct = PathBuf::from(args.next().expect("direct marker"));
+    let descendant = PathBuf::from(args.next().expect("descendant marker"));
+    (direct, descendant)
+}
+
+fn spawn_descendant(path: &Path) {
+    spawn_descendant_with_mode(path, "tree-descendant");
+}
+
+fn spawn_descendant_with_mode(path: &Path, mode: &str) {
+    Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            OsString::from("--ignored"),
+            OsString::from("--exact"),
+            OsString::from("windows_process_ownership_fixture"),
+            OsString::from("--nocapture"),
+            OsString::from("--test-threads=1"),
+            OsString::from("--"),
+            OsString::from(mode),
+            path.as_os_str().to_os_string(),
+        ])
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("descendant fixture");
+    wait_for_marker(&descendant_started(path));
 }
 
 #[test]
@@ -151,6 +220,91 @@ fn windows_process_ownership_fixture() {
             std::thread::sleep(DESCENDANT_LIFETIME);
             println!("DESCENDANT_DONE");
             std::io::stdout().flush().expect("descendant flush");
+        }
+        "tree-descendant" => {
+            let path = PathBuf::from(args.next().expect("descendant marker path"));
+            marker(&descendant_started(&path));
+            thread::sleep(DESCENDANT_LIFETIME);
+            marker(&path);
+        }
+        "tree-descendant-late" => {
+            let path = PathBuf::from(args.next().expect("late descendant marker path"));
+            marker(&descendant_started(&path));
+            thread::sleep(LATE_DESCENDANT_LIFETIME);
+            marker(&path);
+        }
+        "editor-natural" => {
+            let (direct, descendant) = marker_paths(&mut args);
+            spawn_descendant(&descendant);
+            marker(&direct);
+        }
+        "secret-natural" => {
+            let (direct, descendant) = marker_paths(&mut args);
+            spawn_descendant(&descendant);
+            marker(&direct);
+            let mut input = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut input)
+                .expect("secret fixture stdin");
+            std::io::stdout()
+                .write_all(&input)
+                .expect("secret fixture stdout");
+            std::io::stdout().flush().expect("secret fixture flush");
+        }
+        "editor-blocking" | "secret-blocking" => {
+            let (direct, descendant) = marker_paths(&mut args);
+            spawn_descendant(&descendant);
+            marker(&direct);
+            thread::sleep(Duration::from_secs(2));
+        }
+        "secret-timeout" => {
+            let (direct, descendant) = marker_paths(&mut args);
+            spawn_descendant_with_mode(&descendant, "tree-descendant-late");
+            marker(&direct);
+            thread::sleep(Duration::from_secs(2));
+        }
+        "duplex-natural" => {
+            let (direct, descendant) = marker_paths(&mut args);
+            spawn_descendant(&descendant);
+            marker(&direct);
+            std::io::stdout()
+                .write_all(b"DUPLEX_DONE\0")
+                .expect("duplex fixture output");
+            std::io::stdout().flush().expect("duplex fixture flush");
+        }
+        "duplex-blocking" => {
+            let (direct, descendant) = marker_paths(&mut args);
+            spawn_descendant(&descendant);
+            marker(&direct);
+            std::io::stdout()
+                .write_all(b"DUPLEX_READY\0")
+                .expect("duplex fixture ready");
+            std::io::stdout().flush().expect("duplex fixture flush");
+            thread::sleep(Duration::from_secs(2));
+        }
+        "duplex-timeout" => {
+            let (direct, descendant) = marker_paths(&mut args);
+            spawn_descendant_with_mode(&descendant, "tree-descendant-late");
+            marker(&direct);
+            std::io::stdout()
+                .write_all(b"DUPLEX_READY\0")
+                .expect("duplex timeout fixture ready");
+            std::io::stdout()
+                .flush()
+                .expect("duplex timeout fixture flush");
+            thread::sleep(Duration::from_secs(2));
+        }
+        "duplex-drop" => {
+            let (direct, descendant) = marker_paths(&mut args);
+            spawn_descendant(&descendant);
+            marker(&direct);
+            std::io::stdout()
+                .write_all(b"DUPLEX_READY\0")
+                .expect("duplex drop fixture ready");
+            std::io::stdout()
+                .flush()
+                .expect("duplex drop fixture flush");
+            thread::sleep(Duration::from_millis(100));
         }
         other => panic!("unknown fixture mode {other:?}"),
     }
@@ -195,4 +349,295 @@ fn public_process_path_preserves_args_and_stdin_until_owned_descendant_completes
         output.contains("DESCENDANT_DONE"),
         "public process path completed before the owned descendant"
     );
+}
+
+fn fixture_paths(root: &tempfile::TempDir, stem: &str) -> (PathBuf, PathBuf) {
+    (
+        root.path().join(format!("{stem}-direct")),
+        root.path().join(format!("{stem}-descendant")),
+    )
+}
+
+fn public_fixture_command(mode: &str, direct: &Path, descendant: &Path) -> Vec<OsString> {
+    fixture_argv(
+        mode,
+        [
+            direct.as_os_str().to_os_string(),
+            descendant.as_os_str().to_os_string(),
+        ],
+    )
+}
+
+#[test]
+fn public_editor_path_completes_and_drops_a_natural_descendant_tree() {
+    let root = tempfile::tempdir().expect("editor fixture root");
+    let (direct, descendant) = fixture_paths(&root, "editor-natural");
+    let result = ScenarioRuntime::new().block_on(run_editor_process(
+        public_fixture_command("editor-natural", &direct, &descendant),
+        CancelToken::new(),
+    ));
+    assert!(result.is_ok(), "editor unexpectedly failed: {result:?}");
+    wait_for_marker(&direct);
+    wait_for_marker(&descendant);
+}
+
+#[test]
+fn public_editor_cancel_cleans_the_complete_descendant_tree() {
+    let root = tempfile::tempdir().expect("editor cancellation fixture root");
+    let (direct, descendant) = fixture_paths(&root, "editor-cancel");
+    let cancel = CancelToken::new();
+    let cancel_for_observer = cancel.clone();
+    let observer_path = direct.clone();
+    let observer = thread::spawn(move || {
+        wait_for_marker(&observer_path);
+        cancel_for_observer.cancel(CancelCause::User);
+    });
+    let result = ScenarioRuntime::new().block_on(run_editor_process(
+        public_fixture_command("editor-blocking", &direct, &descendant),
+        cancel,
+    ));
+    observer.join().expect("editor observer");
+    assert!(
+        matches!(result, Err(ego_tools::exec::EditorProcessError::Cancelled)),
+        "unexpected editor cancellation result: {result:?}"
+    );
+    assert_marker_absent_after(&descendant);
+}
+
+fn secret_request(
+    mode: &str,
+    direct: &Path,
+    descendant: &Path,
+    cancel: CancelToken,
+    stdin: Option<SecretMaterial>,
+    command_timeout: Duration,
+) -> SecretChildRequest {
+    SecretChildRequest {
+        argv: public_fixture_command(mode, direct, descendant),
+        cwd: Some(CanonPath::new(
+            std::fs::canonicalize(std::env::current_dir().expect("current directory"))
+                .expect("canonical current directory"),
+        )),
+        stdin,
+        cancel,
+        run_deadline: None,
+        command_timeout,
+        termination_grace: Duration::from_millis(500),
+    }
+}
+
+#[test]
+fn public_secret_child_path_returns_opaque_output_and_cleans_natural_tree() {
+    let root = tempfile::tempdir().expect("secret fixture root");
+    let (direct, descendant) = fixture_paths(&root, "secret-natural");
+    let result = ScenarioRuntime::new().block_on(run_secret_child(secret_request(
+        "secret-natural",
+        &direct,
+        &descendant,
+        CancelToken::new(),
+        Some(SecretMaterial::new(b"secret-input\n".to_vec())),
+        COMPLETION_TIMEOUT,
+    )));
+    let output = result.expect("secret child natural completion");
+    assert_eq!(output.stdout().expose_secret_bytes(), b"secret-input\n");
+    wait_for_marker(&direct);
+    wait_for_marker(&descendant);
+}
+
+#[test]
+fn public_secret_child_cancel_cleans_the_complete_descendant_tree() {
+    let root = tempfile::tempdir().expect("secret cancellation fixture root");
+    let (direct, descendant) = fixture_paths(&root, "secret-cancel");
+    let cancel = CancelToken::new();
+    let cancel_for_observer = cancel.clone();
+    let observer_path = direct.clone();
+    let observer = thread::spawn(move || {
+        wait_for_marker(&observer_path);
+        cancel_for_observer.cancel(CancelCause::User);
+    });
+    let result = ScenarioRuntime::new().block_on(run_secret_child(secret_request(
+        "secret-blocking",
+        &direct,
+        &descendant,
+        cancel,
+        None,
+        COMPLETION_TIMEOUT,
+    )));
+    observer.join().expect("secret observer");
+    assert!(
+        matches!(result, Err(SecretChildError::Cancelled)),
+        "unexpected secret cancellation result: {result:?}"
+    );
+    assert_marker_absent_after(&descendant);
+}
+
+#[test]
+fn public_secret_child_timeout_cleans_the_complete_descendant_tree() {
+    let root = tempfile::tempdir().expect("secret timeout fixture root");
+    let (direct, descendant) = fixture_paths(&root, "secret-timeout");
+    let observer_path = direct.clone();
+    let observer = thread::spawn(move || wait_for_marker(&observer_path));
+    let result = ScenarioRuntime::new().block_on(run_secret_child(secret_request(
+        "secret-timeout",
+        &direct,
+        &descendant,
+        CancelToken::new(),
+        None,
+        Duration::from_millis(500),
+    )));
+    observer.join().expect("secret timeout observer");
+    assert!(
+        matches!(result, Err(SecretChildError::CommandTimeout)),
+        "unexpected secret timeout result: {result:?}"
+    );
+    assert_marker_absent_after_duration(&descendant, LATE_DESCENDANT_LIFETIME);
+}
+
+fn duplex_spec(
+    mode: &str,
+    direct: &Path,
+    descendant: &Path,
+    timeout: Option<Duration>,
+) -> SpawnSpec {
+    fixture_spec_with_mode(
+        mode,
+        [
+            direct.as_os_str().to_os_string(),
+            descendant.as_os_str().to_os_string(),
+        ],
+        timeout,
+    )
+}
+
+fn read_duplex_ready(fixture: &RunFixture, handle: &mut ego_core::permit::DuplexHandle) {
+    let mut ready = [0; b"DUPLEX_READY\0".len()];
+    fixture
+        .runtime
+        .block_on(handle.read_exact(&mut ready))
+        .expect("duplex fixture ready");
+    assert_eq!(&ready, b"DUPLEX_READY\0");
+}
+
+#[test]
+fn public_duplex_path_completes_naturally_and_cleans_the_descendant_tree() {
+    let root = tempfile::tempdir().expect("duplex natural fixture root");
+    let (direct, descendant) = fixture_paths(&root, "duplex-natural");
+    let fixture = run_fixture();
+    let mut handle = fixture
+        .runtime
+        .block_on(fixture.ports.duplex_handle().spawn(duplex_spec(
+            "duplex-natural",
+            &direct,
+            &descendant,
+            None,
+        )))
+        .expect("duplex natural spawn");
+    let mut output = [0; b"DUPLEX_DONE\0".len()];
+    fixture
+        .runtime
+        .block_on(handle.read_exact(&mut output))
+        .expect("duplex natural output");
+    assert_eq!(&output, b"DUPLEX_DONE\0");
+    let settlement = fixture.runtime.block_on(handle.settle());
+    assert!(matches!(settlement.end(), DuplexEnd::Exited { code: 0 }));
+    assert!(matches!(
+        settlement.cleanup(),
+        ego_core::permit::CleanupCertainty::Complete
+    ));
+    wait_for_marker(&descendant);
+}
+
+#[test]
+fn public_duplex_cancel_cleans_the_complete_descendant_tree() {
+    let root = tempfile::tempdir().expect("duplex cancellation fixture root");
+    let (direct, descendant) = fixture_paths(&root, "duplex-cancel");
+    let fixture = run_fixture();
+    let mut handle = fixture
+        .runtime
+        .block_on(fixture.ports.duplex_handle().spawn(duplex_spec(
+            "duplex-blocking",
+            &direct,
+            &descendant,
+            None,
+        )))
+        .expect("duplex cancellation spawn");
+    read_duplex_ready(&fixture, &mut handle);
+    fixture.cancel.cancel(CancelCause::User);
+    let settlement = fixture.runtime.block_on(handle.settle());
+    assert!(matches!(settlement.end(), DuplexEnd::Cancelled));
+    assert!(matches!(
+        settlement.cleanup(),
+        ego_core::permit::CleanupCertainty::Complete
+    ));
+    assert_marker_absent_after(&descendant);
+}
+
+#[test]
+fn public_duplex_timeout_cleans_the_complete_descendant_tree() {
+    let root = tempfile::tempdir().expect("duplex timeout fixture root");
+    let (direct, descendant) = fixture_paths(&root, "duplex-timeout");
+    let fixture = run_fixture();
+    let mut handle = fixture
+        .runtime
+        .block_on(fixture.ports.duplex_handle().spawn(duplex_spec(
+            "duplex-timeout",
+            &direct,
+            &descendant,
+            Some(Duration::from_millis(500)),
+        )))
+        .expect("duplex timeout spawn");
+    read_duplex_ready(&fixture, &mut handle);
+    let settlement = fixture.runtime.block_on(handle.settle());
+    assert!(matches!(
+        settlement.end(),
+        DuplexEnd::TimedOut { timeout } if *timeout == Duration::from_millis(500)
+    ));
+    assert!(matches!(
+        settlement.cleanup(),
+        ego_core::permit::CleanupCertainty::Complete
+    ));
+    assert_marker_absent_after_duration(&descendant, LATE_DESCENDANT_LIFETIME);
+}
+
+#[test]
+fn public_duplex_interrupt_cleans_the_complete_descendant_tree() {
+    let root = tempfile::tempdir().expect("duplex interrupt fixture root");
+    let (direct, descendant) = fixture_paths(&root, "duplex-interrupt");
+    let fixture = run_fixture();
+    let mut handle = fixture
+        .runtime
+        .block_on(fixture.ports.duplex_handle().spawn(duplex_spec(
+            "duplex-blocking",
+            &direct,
+            &descendant,
+            None,
+        )))
+        .expect("duplex interrupt spawn");
+    read_duplex_ready(&fixture, &mut handle);
+    let settlement = fixture.runtime.block_on(handle.interrupt());
+    assert!(matches!(settlement.end(), DuplexEnd::Interrupted));
+    assert!(matches!(
+        settlement.cleanup(),
+        ego_core::permit::CleanupCertainty::Complete
+    ));
+    assert_marker_absent_after(&descendant);
+}
+
+#[test]
+fn public_duplex_drop_cleans_the_complete_descendant_tree() {
+    let root = tempfile::tempdir().expect("duplex drop fixture root");
+    let (direct, descendant) = fixture_paths(&root, "duplex-drop");
+    let fixture = run_fixture();
+    let mut handle = fixture
+        .runtime
+        .block_on(fixture.ports.duplex_handle().spawn(duplex_spec(
+            "duplex-drop",
+            &direct,
+            &descendant,
+            None,
+        )))
+        .expect("duplex drop spawn");
+    read_duplex_ready(&fixture, &mut handle);
+    drop(handle);
+    assert_marker_absent_after(&descendant);
 }
