@@ -16,6 +16,7 @@ use std::time::Duration;
 use agent_client_protocol::{Agent, Channel, Client, ConnectTo, Error, TransportFrame};
 use agent_client_protocol_schema::{ProtocolVersion, v1};
 use async_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
+use ego_core::endpoint::{Admitted, PublicBind, Requested, admit};
 use futures::StreamExt;
 use support::{Ego, Running};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -411,4 +412,57 @@ async fn a2a_discovery_boot_continues_after_diagnostic_without_session_artifacts
         !home.join("sessions").exists(),
         "discovery-only boot created session evidence"
     );
+}
+
+/// The shared inbound seam is selected once by endpoint kind, then either host
+/// protocol composes above it. Keep both real-process probes in one assertion so
+/// separate ACP/A2A loopback tests cannot drift into proving unrelated kinds.
+#[tokio::test]
+async fn the_same_loopback_endpoint_kind_serves_acp_and_a2a() {
+    let address = free_tcp_address();
+    let admitted = admit(Requested::Tcp(address), PublicBind::Refused)
+        .expect("the shared test endpoint is admitted");
+    assert_eq!(
+        admitted,
+        Admitted::Loopback(address),
+        "the cross-protocol contract must exercise one loopback endpoint kind"
+    );
+    let listen = admitted.to_string();
+
+    let acp_ego = Ego::nowhere();
+    let workspace = acp_ego.workspace_path().to_string_lossy().into_owned();
+    let mut acp = ChildGuard::start(
+        acp_ego
+            .subcommand("acp")
+            .args(["--listen", listen.as_str()])
+            .env("EGO_ACP_TOKEN", ACP_TOKEN),
+    );
+    wait_for_tcp(&mut acp, address).await;
+    initialize_websocket(
+        &listen,
+        SessionClient {
+            workspace,
+            session_id: Arc::new(Mutex::new(None)),
+            options: Arc::new(Mutex::new(None)),
+            ready: Arc::new(Notify::new()),
+        },
+    )
+    .await
+    .expect("ACP serves over the admitted loopback endpoint kind");
+    let _ = acp.finish();
+
+    let a2a_ego = Ego::nowhere();
+    let mut a2a = ChildGuard::start(
+        a2a_ego
+            .subcommand("a2a")
+            .args(["--listen", listen.as_str()])
+            .env("EGO_A2A_TOKEN", A2A_TOKEN),
+    );
+    wait_for_tcp(&mut a2a, address).await;
+    let card = agent_card(address).await;
+    assert!(
+        card.starts_with("HTTP/1.1 200") && card.contains("agent"),
+        "A2A serves over the same admitted loopback endpoint kind: {card}"
+    );
+    let _ = a2a.finish();
 }
