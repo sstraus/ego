@@ -45,6 +45,14 @@ nix = { version = "0.31.3", features = ["process", "signal", "term"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
 
+[target.'cfg(windows)'.dependencies]
+process-wrap = { path = "../../vendor/process-wrap", default-features = false, features = [
+    "tokio1",
+    "creation-flags",
+    "job-object",
+    "kill-on-drop",
+] }
+
 [features]
 # `NonDurableOsIo`: `OsIo` with the fsync barriers elided, for tests that
 # sweep thousands of filesystem states and assert nothing about surviving a

@@ -9,7 +9,7 @@ members = [
     "crates/ego-mcp",
     "crates/ego-cli",
 ]
-exclude = ["vendor/reedline"]
+exclude = ["vendor/process-wrap", "vendor/reedline"]
 resolver = "3"
 
 [workspace.package]
