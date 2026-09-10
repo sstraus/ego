@@ -511,6 +511,10 @@ enum Control {
         workspace: String,
         reply: Sender<Trust>,
     },
+    WindowsUnconfined {
+        workspace: String,
+        reply: Sender<bool>,
+    },
     Permission {
         request: PermissionRequest,
         reply: oneshot::Sender<PermissionDecision>,
@@ -1186,6 +1190,19 @@ impl crate::run::InteractiveSeat for Seat {
                 reply,
             },
             Trust::Untrusted,
+        )
+    }
+
+    fn acknowledge_windows_unconfined(&self, workspace: &Path) -> bool {
+        if !self.terminal {
+            return false;
+        }
+        self.request(
+            |reply| Control::WindowsUnconfined {
+                workspace: workspace.display().to_string(),
+                reply,
+            },
+            false,
         )
     }
 
@@ -2937,6 +2954,7 @@ fn answer_control(
     enum Reply {
         Compaction(Sender<bool>, bool),
         Trust(Sender<Trust>, Trust),
+        WindowsUnconfined(Sender<bool>, bool),
         Permission(oneshot::Sender<PermissionDecision>, PermissionDecision),
         Question(oneshot::Sender<QuestionOutcome>, QuestionOutcome),
     }
@@ -2999,6 +3017,36 @@ fn answer_control(
             };
             (Reply::Trust(reply, trust), EditPhase::Idle, true)
         }
+        Control::WindowsUnconfined { workspace, reply } => {
+            let prompt = Question::new(
+                format!(
+                    "Windows execution is unconfined in {workspace}; filesystem and network \
+                     isolation are not enforced. Continue? [y/N] "
+                ),
+                Arc::clone(surface.status),
+            );
+            let accepted = loop {
+                match modal_line(editor, surface, &prompt) {
+                    Line::Submitted(answer) => match parse_trust(&answer) {
+                        Some(Trust::Trusted) => break true,
+                        Some(Trust::Untrusted) => break false,
+                        None => continue,
+                    },
+                    Line::Blank | Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                        break false;
+                    }
+                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        break false;
+                    }
+                    Line::Refused(_) | Line::HostCommand(_) => continue,
+                }
+            };
+            (
+                Reply::WindowsUnconfined(reply, accepted),
+                EditPhase::Idle,
+                true,
+            )
+        }
         Control::Permission { request, reply } => {
             let prompt = Question::new(
                 format!("{request}. [allow/deny/amend] "),
@@ -3057,6 +3105,9 @@ fn answer_control(
         }
         Reply::Trust(sender, trust) => {
             let _ = sender.send(trust);
+        }
+        Reply::WindowsUnconfined(sender, accepted) => {
+            let _ = sender.send(accepted);
         }
         Reply::Permission(sender, decision) => {
             let _ = sender.send(decision);

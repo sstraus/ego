@@ -12,6 +12,7 @@ pub mod rule_management;
 mod ruleset;
 mod source;
 mod vocabulary;
+mod windows_unconfined;
 mod workspace_trust;
 
 pub use discovery::{
@@ -37,6 +38,7 @@ pub use resolve::{
 pub use ruleset::{OriginSet, Ruleset, SourcedRule};
 pub use source::{Source, Sourced, Trust};
 pub use vocabulary::{ManagedConfigKey, ManagedConfigValue, ProfileName, UserConfigTarget};
+pub use windows_unconfined::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger, UnconfinedRecord};
 pub use workspace_trust::{
     TRUST_DIGEST_MAX_BYTES, TrustInventory, TrustLedger, TrustRecord, TrustedContent,
 };

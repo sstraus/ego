@@ -106,6 +106,11 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
         false
     }
     fn trust(&self, workspace: &Path) -> Trust;
+    /// Acknowledge the Windows host's lack of confinement for this workspace.
+    /// Test and non-human seats deny unless they explicitly own this authority.
+    fn acknowledge_windows_unconfined(&self, _workspace: &Path) -> bool {
+        false
+    }
     fn permission(&self, request: &PermissionRequest) -> PermissionDecision;
     /// Await a modal decision without blocking the core's intent polling.
     fn permission_future<'a>(

@@ -7,6 +7,8 @@
 
 mod support;
 
+use std::fs;
+
 use support::{Ego, Places, Plan, Reply, Stub, text};
 
 const QUESTION: &str = "Trust project files";
@@ -97,5 +99,32 @@ fn bare_neither_asks_nor_consults_the_remembered_answer() {
     assert!(
         !places.ego(&stub).home_path().join("trust.json").exists(),
         "a bare launch records no answer"
+    );
+}
+
+#[test]
+fn a_corrupt_trust_ledger_is_asked_about_again_without_being_overwritten() {
+    let places = Places::new();
+    let stub = stub();
+    places.ego(&stub).file("AGENTS.md", "# be careful here\n");
+    let path = places.ego(&stub).home_file("trust.json", "{ not json\n");
+    let before = fs::read(&path).expect("the corrupt ledger is readable");
+
+    let launched = places
+        .ego(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .run_pty_trusting("yes", "hello");
+
+    assert_eq!(launched.code, Some(0), "{}", launched.stdout);
+    assert!(
+        launched.stdout.contains(QUESTION),
+        "corrupt trust state must ask again:\n{}",
+        launched.stdout
+    );
+    assert_eq!(
+        fs::read(&path).expect("the corrupt ledger remains readable"),
+        before,
+        "a fresh answer must not silently replace corrupt trust state"
     );
 }

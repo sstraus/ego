@@ -108,6 +108,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 mod executor;
 mod session_commands;
 mod turns;
+mod windows_unconfined;
 
 pub(crate) use executor::protocol_effective;
 use executor::{
@@ -1527,6 +1528,34 @@ fn settings(
 ) -> Result<Settings, UsageError> {
     let cwd = workspace(args.directory.as_ref())?;
     rooted_settings(args, cwd, trust_for, diagnostics)
+}
+
+/// Apply the Windows direct-CLI admission after configuration resolution and
+/// before any provider, session, or user-code effect.
+fn admit_windows_unconfined_start(
+    args: &Args,
+    settings: &mut Settings,
+    driver: &Driver<'_>,
+    home: Option<&Path>,
+    diagnostics: &dyn Diagnostics,
+) -> Result<(), UsageError> {
+    let Some(confinement) = windows_unconfined::admit(
+        args,
+        settings.effective.sandbox,
+        driver,
+        &settings.root,
+        home,
+        diagnostics,
+    )?
+    else {
+        return Ok(());
+    };
+
+    settings.effective.sandbox = Some(confinement);
+    settings.confinement =
+        RunConfinement::new(confinement, args.offline, CanonPath::new(&settings.root))
+            .map_err(|error| UsageError(error.to_string()))?;
+    Ok(())
 }
 
 fn rooted_settings(
@@ -3838,6 +3867,8 @@ async fn execution_preflight(
         diagnostics,
     )
     .map_err(usage)?;
+    admit_windows_unconfined_start(args, &mut settings, driver, home.as_deref(), diagnostics)
+        .map_err(usage)?;
     let ci = ci_invocation(args, &settings, driver).map_err(usage)?;
     let chosen = chosen(
         args,
@@ -3995,6 +4026,14 @@ async fn execute<S: EventSink>(
             let mut settings = settings(
                 &args,
                 |root| run_trust(&args, &driver, root, home.as_deref(), diagnostics),
+                diagnostics,
+            )
+            .map_err(usage)?;
+            admit_windows_unconfined_start(
+                &args,
+                &mut settings,
+                &driver,
+                home.as_deref(),
                 diagnostics,
             )
             .map_err(usage)?;

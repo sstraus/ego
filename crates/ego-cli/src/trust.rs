@@ -1,21 +1,25 @@
-//! Which files a workspace offers to be trusted with, and the answer it was
-//! already given.
+//! Workspace decisions stored outside the workspace that cannot grant
+//! themselves.
 //!
 //! See `docs/decisions/2026-09-05-a-trust-answer-is-remembered-per-root.md`.
-//! `ego-core` owns what an inventory *is* and whether a stored answer still
-//! applies; this module owns the paths that get probed, the reads that build
-//! the inventory, and the locked document under `$EGO_HOME`. The record lives
-//! outside the workspace on purpose: a project file must never be able to
-//! write the record that admits it.
+//! `ego-core` owns what each fact means and whether a stored answer still
+//! applies. This module owns trust inventory reads and the separate locked
+//! documents under `$EGO_HOME`. Records live outside the workspace on purpose:
+//! a project file must never be able to write the decision that admits it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use ego_core::config::{
     INSTRUCTIONS_FILE, TRUST_DIGEST_MAX_BYTES, Trust, TrustInventory, TrustLedger, TrustedContent,
 };
+#[cfg(windows)]
+use ego_core::config::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger};
 use fd_lock::RwLock;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::output::Diagnostics;
 
@@ -75,6 +79,54 @@ pub(crate) fn resolve(
         ));
     }
     decision
+}
+
+/// Resolve the separate host-risk acknowledgement for one canonical workspace.
+///
+/// A broken document is not an acknowledgement and is never replaced by a
+/// fresh answer. The answer still governs this invocation, so a failed write
+/// costs another question rather than making an informed interactive start
+/// unusable.
+#[cfg(windows)]
+pub(crate) fn resolve_unconfined(
+    root: &Path,
+    home: Option<&Path>,
+    diagnostics: &dyn Diagnostics,
+    ask: impl FnOnce() -> bool,
+) -> bool {
+    let key = root.display().to_string();
+    let store = home.map(UnconfinedStore::new);
+    if let Some(store) = &store {
+        match store.read() {
+            Ok(ledger) => {
+                if ledger.acknowledged(&key, UNCONFINED_CONTRACT_REVISION) {
+                    return true;
+                }
+            }
+            Err(error) => diagnostics.note(&format!(
+                "the remembered Windows unconfined acknowledgement could not be read ({error}); \
+                 asking again"
+            )),
+        }
+    }
+
+    let accepted = ask();
+    if accepted && store.is_none() {
+        diagnostics.note(
+            "this Windows unconfined acknowledgement could not be remembered because EGO_HOME \
+             is unavailable; this workspace will be asked about again",
+        );
+    }
+    if accepted
+        && let Some(store) = &store
+        && let Err(error) = store.acknowledge(&key)
+    {
+        diagnostics.note(&format!(
+            "this Windows unconfined acknowledgement could not be remembered ({error}); \
+             this workspace will be asked about again"
+        ));
+    }
+    accepted
 }
 
 /// The digest of what this workspace offers to be trusted with, if anything.
@@ -233,52 +285,63 @@ fn content(root: &Path, path: &Path) -> Option<TrustedContent> {
     ))
 }
 
-/// The remembered answers under one ego home.
+/// One typed JSON document under an ego home.
 ///
-/// Same shape and same lock as the credential store beside it: one sibling
-/// lock held across read-modify-write, a mode-0600 temporary file, `fsync`,
-/// then `rename`. Two launches in two workspaces cannot lose each other's
-/// answer.
-struct TrustStore {
+/// The sibling lock is held across read-modify-write. Publication uses a
+/// mode-0600 temporary file, `fsync`, then `rename`, so concurrent launches do
+/// not lose each other's records and readers never observe a torn document.
+struct LockedJsonStore<T> {
     home: PathBuf,
+    name: &'static str,
+    document: PhantomData<T>,
 }
 
-impl TrustStore {
-    fn new(home: &Path) -> Self {
+impl<T> LockedJsonStore<T>
+where
+    T: Default + DeserializeOwned + Serialize,
+{
+    fn new(home: &Path, name: &'static str) -> Self {
         Self {
             home: home.to_path_buf(),
+            name,
+            document: PhantomData,
         }
     }
 
     fn path(&self) -> PathBuf {
-        self.home.join("trust.json")
+        self.home.join(format!("{}.json", self.name))
     }
 
     /// Read without the lock: `rename` publishes the whole document at once,
     /// so a reader sees either the old file or the new one and never a torn
     /// one. Only the read-modify-write below needs exclusion.
-    fn read(&self) -> Result<TrustLedger, String> {
+    fn read(&self) -> Result<T, String> {
         let path = self.path();
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(TrustLedger::default());
+                return Ok(T::default());
             }
             Err(error) => return Err(format!("{}: {error}", path.display())),
         };
         serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))
     }
 
-    fn remember(&self, root: &str, digest: &str, decision: Trust) -> Result<(), String> {
+    fn update(&self, change: impl FnOnce(&mut T)) -> Result<(), String> {
         let mut lock = self.open_lock()?;
         let _guard = lock
             .write()
-            .map_err(|error| format!("{}: {error}", self.home.join("trust.lock").display()))?;
+            .map_err(|error| format!("{}: {error}", self.lock_path().display()))?;
         // Re-read under the lock: another launch may have answered about a
-        // different workspace since this process read.
-        let mut ledger = self.read().unwrap_or_default();
-        ledger.remember(root, digest, decision);
-        self.write_unlocked(&ledger)
+        // different workspace since this process read. An unreadable document
+        // must not be silently replaced with an empty one.
+        let mut document = self.read()?;
+        change(&mut document);
+        self.write_unlocked(&document)
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        self.home.join(format!("{}.lock", self.name))
     }
 
     fn open_lock(&self) -> Result<RwLock<File>, String> {
@@ -290,7 +353,7 @@ impl TrustStore {
             fs::set_permissions(&self.home, fs::Permissions::from_mode(0o700))
                 .map_err(|error| format!("{}: {error}", self.home.display()))?;
         }
-        let path = self.home.join("trust.lock");
+        let path = self.lock_path();
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -301,10 +364,10 @@ impl TrustStore {
         Ok(RwLock::new(file))
     }
 
-    fn write_unlocked(&self, ledger: &TrustLedger) -> Result<(), String> {
+    fn write_unlocked(&self, document: &T) -> Result<(), String> {
         let path = self.path();
-        let temporary = self.home.join("trust.json.tmp");
-        let bytes = serde_json::to_vec_pretty(ledger)
+        let temporary = self.home.join(format!("{}.json.tmp", self.name));
+        let bytes = serde_json::to_vec_pretty(document)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         let mut options = OpenOptions::new();
         options.create(true).truncate(true).write(true);
@@ -320,6 +383,44 @@ impl TrustStore {
             .and_then(|()| file.sync_all())
             .map_err(|error| format!("{}: {error}", temporary.display()))?;
         fs::rename(&temporary, &path).map_err(|error| format!("{}: {error}", path.display()))
+    }
+}
+
+/// Project-trust answers under one ego home.
+struct TrustStore(LockedJsonStore<TrustLedger>);
+
+impl TrustStore {
+    fn new(home: &Path) -> Self {
+        Self(LockedJsonStore::new(home, "trust"))
+    }
+
+    fn read(&self) -> Result<TrustLedger, String> {
+        self.0.read()
+    }
+
+    fn remember(&self, root: &str, digest: &str, decision: Trust) -> Result<(), String> {
+        self.0
+            .update(|ledger| ledger.remember(root, digest, decision))
+    }
+}
+
+/// Windows unconfined-execution acknowledgements under one ego home.
+#[cfg(windows)]
+struct UnconfinedStore(LockedJsonStore<UnconfinedLedger>);
+
+#[cfg(windows)]
+impl UnconfinedStore {
+    fn new(home: &Path) -> Self {
+        Self(LockedJsonStore::new(home, "unconfined"))
+    }
+
+    fn read(&self) -> Result<UnconfinedLedger, String> {
+        self.0.read()
+    }
+
+    fn acknowledge(&self, root: &str) -> Result<(), String> {
+        self.0
+            .update(|ledger| ledger.acknowledge(root, UNCONFINED_CONTRACT_REVISION))
     }
 }
 

@@ -909,6 +909,15 @@ impl Ego {
     /// about the refusal needs to say `no` without reimplementing the whole
     /// terminal owner.
     pub fn run_pty_trusting(self, trust_answer: &str, input: &str) -> Finished {
+        self.run_pty_responding("Trust project files", trust_answer, input)
+    }
+
+    /// Run one interactive script and answer one startup modal by its stable
+    /// prompt text.  This is deliberately narrower than a general terminal
+    /// driver: the response is sent once, before the ordinary input script,
+    /// so a startup admission can be tested without teaching every caller
+    /// about PTY cursor handshakes.
+    pub fn run_pty_responding(self, prompt: &str, answer: &str, input: &str) -> Finished {
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows: 24,
@@ -982,14 +991,14 @@ impl Ego {
             output.extend_from_slice(&chunk);
             if !trust_answered
                 && output
-                    .windows(b"Trust project files".len())
-                    .any(|window| window == b"Trust project files")
+                    .windows(prompt.len())
+                    .any(|window| window == prompt.as_bytes())
             {
                 let mut writer = writer.lock().expect("pty writer lock");
                 writer
-                    .write_all(format!("{trust_answer}\r").as_bytes())
-                    .expect("trust answer");
-                writer.flush().expect("trust answer flush");
+                    .write_all(format!("{answer}\r").as_bytes())
+                    .expect("startup answer");
+                writer.flush().expect("startup answer flush");
                 trust_answered = true;
             }
             let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
@@ -1032,17 +1041,24 @@ impl Ego {
     /// selection and refusal happen before reedline draws that prompt, so the
     /// ordinary scripted-input helper cannot prove either path safely.
     pub fn run_pty_until(self, needle: &str) -> Finished {
-        self.run_pty_probe("yes", Some(needle))
+        self.run_pty_probe("Trust project files", "yes", Some(needle))
     }
 
     /// Observe an interactive process that must refuse before opening a
     /// prompt.  A bounded kill is returned as a failed `Finished` result on a
     /// genuine hang, keeping a broken startup test from leaking a child.
     pub fn run_pty_to_exit(self) -> Finished {
-        self.run_pty_probe("yes", None)
+        self.run_pty_probe("Trust project files", "yes", None)
     }
 
-    fn run_pty_probe(self, trust_answer: &str, needle: Option<&str>) -> Finished {
+    /// Observe an interactive process that answers one startup modal and must
+    /// then terminate before the ordinary idle prompt.  This is the refusal
+    /// counterpart to [`Self::run_pty_responding`].
+    pub fn run_pty_responding_to_exit(self, prompt: &str, answer: &str) -> Finished {
+        self.run_pty_probe(prompt, answer, None)
+    }
+
+    fn run_pty_probe(self, prompt: &str, answer: &str, needle: Option<&str>) -> Finished {
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows: 24,
@@ -1114,14 +1130,14 @@ impl Ego {
                     output.extend_from_slice(&chunk);
                     if !trust_answered
                         && output
-                            .windows(b"Trust project files".len())
-                            .any(|window| window == b"Trust project files")
+                            .windows(prompt.len())
+                            .any(|window| window == prompt.as_bytes())
                     {
                         let mut writer = writer.lock().expect("pty writer lock");
                         writer
-                            .write_all(format!("{trust_answer}\r").as_bytes())
-                            .expect("trust answer");
-                        writer.flush().expect("trust answer flush");
+                            .write_all(format!("{answer}\r").as_bytes())
+                            .expect("startup answer");
+                        writer.flush().expect("startup answer flush");
                         trust_answered = true;
                     }
                     if needle.is_some_and(|needle| {
