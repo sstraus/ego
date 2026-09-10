@@ -33,22 +33,22 @@ impl SessionControls for Seat {
         }
         Ok(SessionControlState {
             model: ControlSelect {
-                current: ModelRef("model/test".into()),
+                current: Some(ModelRef("model/test".into())),
                 chosen: None,
                 available: vec![],
             },
             effort: ControlSelect {
-                current: ThinkingLevel::Off,
+                current: Some(ThinkingLevel::Off),
                 chosen: None,
                 available: vec![],
             },
             mode: ControlSelect {
-                current: Mode::Default,
+                current: Some(Mode::Default),
                 chosen: None,
                 available: vec![],
             },
             sandbox: ControlSelect {
-                current: Confinement::Ro,
+                current: Some(Confinement::Ro),
                 chosen: None,
                 available: vec![Confinement::Ro, Confinement::Workspace],
             },

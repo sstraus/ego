@@ -19,10 +19,12 @@ use ego_core::control::{ControlSelect, SessionControlChange, SessionControlState
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::Confinement;
 
+const UNSELECTED: &str = "__ego_unselected__";
+
 fn state() -> SessionControlState {
     SessionControlState {
         model: ControlSelect {
-            current: ModelRef("ollama/gemma4:e4b-mlx".to_owned()),
+            current: Some(ModelRef("ollama/gemma4:e4b-mlx".to_owned())),
             chosen: None,
             available: vec![
                 ModelRef("ollama/gemma4:e4b-mlx".to_owned()),
@@ -30,23 +32,32 @@ fn state() -> SessionControlState {
             ],
         },
         effort: ControlSelect {
-            current: ThinkingLevel::Low,
+            current: Some(ThinkingLevel::Low),
             chosen: Some(ThinkingLevel::Low),
             available: vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High],
         },
         mode: ControlSelect {
-            current: Mode::Default,
+            current: Some(Mode::Default),
             chosen: None,
             available: vec![Mode::Plan, Mode::Default, Mode::Edits],
         },
         // A `workspace` ceiling: `off` is absent because it is weaker, and a
         // value the state never offered is what `change` must refuse.
         sandbox: ControlSelect {
-            current: Confinement::Workspace,
+            current: Some(Confinement::Workspace),
             chosen: None,
             available: vec![Confinement::Ro, Confinement::Workspace],
         },
     }
+}
+
+fn unselected_state() -> SessionControlState {
+    let mut state = state();
+    state.model.current = None;
+    state.model.chosen = None;
+    state.effort.current = None;
+    state.effort.chosen = None;
+    state
 }
 
 fn request(config: &str, value: &str) -> v1::SetSessionConfigOptionRequest {
@@ -180,17 +191,17 @@ fn a_value_the_host_was_offered_becomes_the_change_it_names() {
             &state,
             &request(controls::MODEL, "anthropic/claude-sonnet-5")
         ),
-        Ok(SessionControlChange::Model(ModelRef(
+        Ok(Some(SessionControlChange::Model(ModelRef(
             "anthropic/claude-sonnet-5".to_owned()
-        )))
+        ))))
     );
     assert_eq!(
         controls::change(&state, &request(controls::EFFORT, "high")),
-        Ok(SessionControlChange::Effort(ThinkingLevel::High))
+        Ok(Some(SessionControlChange::Effort(ThinkingLevel::High)))
     );
     assert_eq!(
         controls::change(&state, &request(controls::MODE, "plan")),
-        Ok(SessionControlChange::Mode(Mode::Plan))
+        Ok(Some(SessionControlChange::Mode(Mode::Plan)))
     );
 }
 
@@ -237,4 +248,38 @@ fn a_boolean_answer_to_a_select_control_is_refused() {
     let refusal = controls::change(&state(), &boolean)
         .expect_err("a boolean must not resolve to a select change");
     assert_eq!(refusal.code, Error::invalid_params().code);
+}
+
+#[test]
+fn absent_model_and_effort_project_as_opaque_invites_to_choose() {
+    let options = controls::options(&unselected_state());
+    for id in [controls::MODEL, controls::EFFORT] {
+        let projected = select(option(&options, id));
+        assert_eq!(projected.current_value.0.as_ref(), UNSELECTED, "{id}");
+        assert!(values(option(&options, id)).contains(&UNSELECTED.to_owned()));
+    }
+    for id in [controls::MODE, controls::SANDBOX] {
+        assert!(
+            !values(option(&options, id)).contains(&UNSELECTED.to_owned()),
+            "{id}"
+        );
+    }
+}
+
+#[test]
+fn selecting_the_opaque_current_value_is_a_noop_until_a_real_value_exists() {
+    assert_eq!(
+        controls::change(&unselected_state(), &request(controls::MODEL, UNSELECTED),),
+        Ok(None)
+    );
+    assert_eq!(
+        controls::change(&unselected_state(), &request(controls::EFFORT, UNSELECTED),),
+        Ok(None)
+    );
+
+    for id in [controls::MODEL, controls::EFFORT] {
+        let refusal = controls::change(&state(), &request(id, UNSELECTED))
+            .expect_err("a stale opaque value must refuse after a real choice");
+        assert_eq!(refusal.code, Error::invalid_params().code, "{id}");
+    }
 }

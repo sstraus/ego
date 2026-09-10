@@ -30,6 +30,7 @@ pub struct ModelSwitchRequest {
 
 impl ModelSwitchRequest {
     /// A startup selection that must become the next user default.
+    #[cfg(test)]
     pub(crate) fn persistent(target: ModelRef, thinking: ThinkingLevel) -> Self {
         Self {
             target,
@@ -334,8 +335,8 @@ impl ModelPicker {
                     self.modal = Some(ModalState::Model(selector));
                     return Err(PickerError::NoSelection);
                 };
-                let reasoning = match self.reasoning_levels(&model) {
-                    Ok(reasoning) => reasoning,
+                let (reasoning, default) = match reasoning_configuration(&self.snapshot, &model) {
+                    Ok(configuration) => configuration,
                     Err(error) => {
                         self.modal = Some(ModalState::Model(selector));
                         return Err(error);
@@ -343,7 +344,7 @@ impl ModelPicker {
                 };
                 self.modal = Some(ModalState::Reasoning {
                     model,
-                    selector: reasoning_selector(&reasoning),
+                    selector: reasoning_selector(&reasoning, default),
                 });
                 Ok(PickerInputOutcome::FocusChanged(PickerFocus::Reasoning))
             }
@@ -433,13 +434,7 @@ impl ModelPicker {
             .map_err(|error| PickerError::SelectionRead(error.to_string()))?;
         let model = current.identity.0;
         let reasoning = self.reasoning_levels(&model)?;
-        let mut selector = reasoning_selector(&reasoning);
-        if let Some(index) = reasoning
-            .iter()
-            .position(|level| *level == current.thinking)
-        {
-            selector.key(SelectorKey::Number(index + 1));
-        }
+        let selector = reasoning_selector(&reasoning, Some(current.thinking));
         self.open = true;
         self.chosen = None;
         self.modal = Some(ModalState::Reasoning { model, selector });
@@ -532,14 +527,22 @@ pub(crate) fn reasoning_levels(
     snapshot: &ModelCatalogueSnapshot,
     slug: &str,
 ) -> Result<Vec<ThinkingLevel>, PickerError> {
+    reasoning_configuration(snapshot, slug).map(|(levels, _)| levels)
+}
+
+fn reasoning_configuration(
+    snapshot: &ModelCatalogueSnapshot,
+    slug: &str,
+) -> Result<(Vec<ThinkingLevel>, Option<ThinkingLevel>), PickerError> {
     let row = available_entry(snapshot, slug)?;
-    match &row.capabilities.reasoning_efforts {
+    let levels = match &row.capabilities.reasoning_efforts {
         ReasoningEffortSupport::Unknown => Err(PickerError::UnknownReasoningSupport {
             slug: slug.to_string(),
         }),
         ReasoningEffortSupport::Any => Ok(ALL_THINKING.to_vec()),
         ReasoningEffortSupport::Only(levels) => Ok(levels.iter().copied().collect()),
-    }
+    }?;
+    Ok((levels, row.capabilities.default_reasoning_effort))
 }
 
 const ALL_THINKING: [ThinkingLevel; 7] = [
@@ -579,14 +582,21 @@ fn availability_order(availability: &ModelAvailability) -> u8 {
     }
 }
 
-fn reasoning_selector(levels: &[ThinkingLevel]) -> Selector {
-    Selector::with_options(
-        SelectorKind::Single,
+fn reasoning_selector(levels: &[ThinkingLevel], selected: Option<ThinkingLevel>) -> Selector {
+    let options = || {
         levels.iter().map(|level| {
             let id = thinking_id(*level);
             SelectorOption::new(id, id)
-        }),
-    )
+        })
+    };
+    let Some(index) =
+        selected.and_then(|selected| levels.iter().position(|level| *level == selected))
+    else {
+        return Selector::with_options_unselected(SelectorKind::Single, options());
+    };
+    let mut selector = Selector::with_options(SelectorKind::Single, options());
+    selector.key(SelectorKey::Number(index + 1));
+    selector
 }
 
 fn selector_key(input: PickerInput) -> Option<SelectorKey> {

@@ -714,6 +714,7 @@ impl CliRunExecutor {
         artifacts: Arc<dyn RunArtifactStore>,
         max_concurrent_runs: NonZeroUsize,
         admission: Arc<EvidenceAdmissionService>,
+        catalogue: &ego_ai::catalogue::ModelCatalogueSnapshot,
     ) -> Result<(Self, CliMcpRunPolicy), UsageError> {
         let args = protocol_args(session_dir);
         let frozen = Arc::new(config::FrozenRunConfig::capture(
@@ -725,6 +726,19 @@ impl CliRunExecutor {
         let model = effective.model.clone().ok_or_else(|| {
             UsageError("mcp-server requires an effective configured model".to_owned())
         })?;
+        let model_facts = catalogue
+            .models
+            .iter()
+            .find(|entry| entry.slug.to_string() == model.0)
+            .ok_or_else(|| {
+                UsageError(format!(
+                    "mcp-server has no current capability facts for configured model `{model}`"
+                ))
+            })?;
+        let thinking = model_facts
+            .capabilities
+            .resolve_reasoning_effort(effective.thinking)
+            .map_err(|error| UsageError(format!("configured model `{model}`: {error}")))?;
         if effective.ceilings.money.is_none() && effective.ceilings.tokens.is_none() {
             return Err(UsageError(
                 "mcp-server requires at least one effective budget ceiling".to_owned(),
@@ -733,7 +747,7 @@ impl CliRunExecutor {
         let policy = CliMcpRunPolicy {
             root,
             model,
-            thinking: effective.thinking.unwrap_or(ThinkingLevel::Off),
+            thinking,
             mode: effective.mode.unwrap_or(Mode::Default),
             ceilings: effective.ceilings,
             profile: frozen.profile().map(str::to_owned),
@@ -886,3 +900,6 @@ impl RunExecutor for CliRunExecutor {
         })
     }
 }
+
+#[cfg(test)]
+mod regression_case_tests;

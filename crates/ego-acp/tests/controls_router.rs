@@ -20,6 +20,7 @@ use ego_core::permit::Confinement;
 mod support;
 
 const ROOT: &str = "/tmp/regression case";
+const UNSELECTED: &str = "__ego_unselected__";
 
 /// A seat that answers for one session and remembers what was staged.
 #[derive(Debug, Default)]
@@ -36,22 +37,22 @@ impl Seat {
         });
         SessionControlState {
             model: ControlSelect {
-                current: ModelRef("ollama/gemma4:e4b-mlx".to_owned()),
+                current: Some(ModelRef("ollama/gemma4:e4b-mlx".to_owned())),
                 chosen: None,
                 available: vec![ModelRef("ollama/gemma4:e4b-mlx".to_owned())],
             },
             effort: ControlSelect {
-                current: ThinkingLevel::Off,
+                current: Some(ThinkingLevel::Off),
                 chosen: None,
                 available: vec![ThinkingLevel::Off],
             },
             mode: ControlSelect {
-                current: mode.unwrap_or(Mode::Default),
+                current: Some(mode.unwrap_or(Mode::Default)),
                 chosen: mode,
                 available: vec![Mode::Plan, Mode::Default],
             },
             sandbox: ControlSelect {
-                current: Confinement::Workspace,
+                current: Some(Confinement::Workspace),
                 chosen: None,
                 available: vec![Confinement::Ro, Confinement::Workspace],
             },
@@ -74,6 +75,49 @@ impl SessionControls for Seat {
             .expect("seat lock")
             .push((session, change));
         Ok(Seat::state(self))
+    }
+}
+
+#[derive(Debug, Default)]
+struct UnselectedSeat {
+    staged: Mutex<usize>,
+}
+
+impl SessionControls for UnselectedSeat {
+    fn state(&self, _session: SessionId) -> Result<SessionControlState, ControlError> {
+        Ok(SessionControlState {
+            model: ControlSelect {
+                current: None,
+                chosen: None,
+                available: vec![ModelRef("ollama/gemma4:e4b-mlx".to_owned())],
+            },
+            effort: ControlSelect {
+                current: None,
+                chosen: None,
+                available: vec![ThinkingLevel::Low, ThinkingLevel::High],
+            },
+            mode: ControlSelect {
+                current: Some(Mode::Default),
+                chosen: None,
+                available: vec![Mode::Plan, Mode::Default],
+            },
+            sandbox: ControlSelect {
+                current: Some(Confinement::Workspace),
+                chosen: None,
+                available: vec![Confinement::Ro, Confinement::Workspace],
+            },
+        })
+    }
+
+    fn stage(
+        &self,
+        _session: SessionId,
+        _change: SessionControlChange,
+    ) -> Result<SessionControlState, ControlError> {
+        *self.staged.lock().expect("stage counter lock") += 1;
+        Err(ControlError::Internal(
+            "the opaque unselected value must not reach the domain".to_owned(),
+        ))
     }
 }
 
@@ -199,5 +243,30 @@ async fn an_unoffered_value_is_refused_before_the_seat_is_asked() {
         seat.staged.lock().expect("seat lock").is_empty(),
         "a refused value must never reach the seat"
     );
+    connection.abort().await;
+}
+
+#[tokio::test]
+async fn an_opaque_unselected_answer_is_a_wire_noop_without_staging() {
+    let seat = Arc::new(UnselectedSeat::default());
+    let mut connection =
+        support::Connected::new(router(Some(Arc::clone(&seat) as Arc<dyn SessionControls>)));
+    connection.initialize().await;
+    let session = connection.new_session(ROOT).await;
+    let id = session["result"]["sessionId"]
+        .as_str()
+        .expect("a session id");
+    let (answer, _) = connection
+        .request(
+            "session/set_config_option",
+            serde_json::json!({
+                "sessionId": id,
+                "configId": "model",
+                "value": UNSELECTED
+            }),
+        )
+        .await;
+    assert!(answer["result"]["configOptions"].is_array(), "{answer}");
+    assert_eq!(*seat.staged.lock().expect("stage counter lock"), 0);
     connection.abort().await;
 }

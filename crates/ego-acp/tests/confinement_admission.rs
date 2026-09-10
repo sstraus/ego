@@ -184,22 +184,22 @@ impl SessionControls for Seat {
         let chosen = *self.chosen.lock().expect("seat choice lock");
         Ok(SessionControlState {
             model: ControlSelect {
-                current: ModelRef("model/test".to_owned()),
+                current: Some(ModelRef("model/test".to_owned())),
                 chosen: None,
                 available: vec![ModelRef("model/test".to_owned())],
             },
             effort: ControlSelect {
-                current: ThinkingLevel::Off,
+                current: Some(ThinkingLevel::Off),
                 chosen: None,
                 available: vec![ThinkingLevel::Off],
             },
             mode: ControlSelect {
-                current: Mode::Default,
+                current: Some(Mode::Default),
                 chosen: None,
                 available: vec![Mode::Default],
             },
             sandbox: ControlSelect {
-                current: chosen.unwrap_or(self.current),
+                current: Some(chosen.unwrap_or(self.current)),
                 chosen,
                 available: self.available.clone(),
             },

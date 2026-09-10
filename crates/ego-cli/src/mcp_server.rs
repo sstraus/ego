@@ -13,6 +13,7 @@ use ego_core::permit::{CleanupCertainty, DuplexEnd, DuplexSession, DuplexSettlem
 use ego_core::run::{EventSinkFactory, RunController, RunRetention, RunRoot, RunTermination};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::run_artifact::{RunArtifactId, RunArtifactStore, RunArtifactStoreError};
+use ego_core::turn::CancelToken;
 use ego_mcp::{
     McpError, McpFailure, McpFuture, McpRunBindingsBuilder, McpRunResourceReader,
     McpRunResourceRequest, McpRunSelectionPolicy, McpRunServerConfig, McpRunServerFactory,
@@ -24,9 +25,9 @@ use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::cli::McpServerArgs;
+use crate::cli::{McpServerArgs, ModelsArgs};
 use crate::host_ports::{CanonicalRoots, TokioExecutionSpawner, UuidIds};
-use crate::{run, session};
+use crate::{models, run, session};
 
 type Controller = RunController<JsonlStore, run::CliRunExecutor, SystemClock, UuidIds>;
 
@@ -245,6 +246,32 @@ async fn compose_and_serve(
         .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
     let store = Arc::new(session::jsonl(store_root, root.clone()));
     let artifact_publisher: Arc<dyn RunArtifactStore> = store.clone();
+    let catalogue_scope = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+        .await
+        .map_err(|message| McpError::new(McpFailure::Transport, message))?;
+    let catalogue = models::build_catalogue_snapshot(
+        &ModelsArgs {
+            provider: None,
+            refresh: false,
+            json: false,
+        },
+        catalogue_scope.http(),
+    )
+    .await
+    .map_err(|termination| {
+        let (failure, message) = match termination {
+            RunTermination::UsageError { message } => (McpFailure::InvalidValue, message),
+            RunTermination::Provider { message } => (McpFailure::Transport, message),
+            RunTermination::ContextOverflow { message } | RunTermination::Failed { message } => {
+                (McpFailure::Protocol, message)
+            }
+            other => (
+                McpFailure::Protocol,
+                format!("the model catalogue stopped with {}", other.exit_reason()),
+            ),
+        };
+        McpError::new(failure, message)
+    })?;
     let (executor, deployment) = run::CliRunExecutor::for_mcp(
         run_root,
         args.session_dir.clone(),
@@ -252,6 +279,7 @@ async fn compose_and_serve(
         artifact_publisher,
         args.max_concurrent_runs,
         Arc::clone(&evidence),
+        &catalogue,
     )
     .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
 

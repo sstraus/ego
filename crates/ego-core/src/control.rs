@@ -28,9 +28,10 @@ use crate::permit::{Confinement, MissingExecCaps};
 /// acknowledgement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlSelect<T> {
-    /// What the next generation uses: whatever the operator chose, or what
-    /// configuration resolved for this workspace when they chose nothing.
-    pub current: T,
+    /// What the next generation uses: whatever the operator chose, what
+    /// configuration resolved for this workspace, or `None` while model or
+    /// effort selection is still unresolved.
+    pub current: Option<T>,
     /// What the operator explicitly chose, if they chose at all.
     ///
     /// Separate from `current` because inheriting a configured default is not

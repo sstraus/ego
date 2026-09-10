@@ -9,8 +9,9 @@ use ego_ai::catalogue::{
 use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::provider::{CredentialStrategy, ProviderRow};
 use ego_core::config::{
-    ModelRef, UserConfigError, UserConfigMutation, UserConfigMutationResult, UserConfigPublication,
-    UserConfigSnapshot, UserConfigStore, UserConfigTarget,
+    ManagedConfigKey, ManagedConfigValue, ModelRef, UserConfigError, UserConfigMutation,
+    UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot, UserConfigStore,
+    UserConfigTarget,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
@@ -24,7 +25,7 @@ use url::Url;
 
 use super::{
     EnvironmentPresence, StartupDecision, credential_present, decide_missing_model,
-    discover_ollama, persist_startup_selection,
+    discover_ollama, persist_startup_model, persist_startup_selection,
 };
 
 #[derive(Default)]
@@ -212,7 +213,7 @@ fn missing_model_decisions_cover_zero_one_multiple_and_bad_defaults() {
         snapshot(Vec::new()),
         &BTreeMap::new(),
         &BTreeSet::new(),
-        ThinkingLevel::Medium,
+        Some(ThinkingLevel::Medium),
         false,
     );
     let StartupDecision::Headless(error) = zero else {
@@ -229,7 +230,7 @@ fn missing_model_decisions_cover_zero_one_multiple_and_bad_defaults() {
         Arc::clone(&one_snapshot),
         &defaults(&[("openai", "openai/gpt-5.6-sol")]),
         &BTreeSet::from(["openai".to_owned()]),
-        ThinkingLevel::Medium,
+        Some(ThinkingLevel::Medium),
         false,
     );
     let StartupDecision::Headless(error) = one else {
@@ -241,7 +242,7 @@ fn missing_model_decisions_cover_zero_one_multiple_and_bad_defaults() {
         one_snapshot,
         &defaults(&[("openai", "openai/gpt-5.6-sol")]),
         &BTreeSet::from(["anthropic".to_owned(), "openai".to_owned()]),
-        ThinkingLevel::Medium,
+        Some(ThinkingLevel::Medium),
         true,
     );
     assert!(matches!(multiple, StartupDecision::Pick(_, None)));
@@ -253,7 +254,7 @@ fn missing_model_decisions_cover_zero_one_multiple_and_bad_defaults() {
         )]),
         &BTreeMap::new(),
         &BTreeSet::from(["openai".to_owned()]),
-        ThinkingLevel::Medium,
+        Some(ThinkingLevel::Medium),
         true,
     );
     let StartupDecision::Pick(_, Some(error)) = missing_default else {
@@ -274,7 +275,7 @@ fn missing_model_decisions_cover_zero_one_multiple_and_bad_defaults() {
         ]),
         &defaults(&[("openai", "openai/gpt-4-retired")]),
         &BTreeSet::from(["openai".to_owned()]),
-        ThinkingLevel::Medium,
+        Some(ThinkingLevel::Medium),
         true,
     );
     let StartupDecision::Pick(_, Some(error)) = unavailable_default else {
@@ -284,19 +285,30 @@ fn missing_model_decisions_cover_zero_one_multiple_and_bad_defaults() {
 }
 
 #[test]
-fn sole_provider_default_preserves_an_explicit_off_thinking_level() {
+fn sole_provider_auto_selection_returns_only_the_model() {
     let decision = decide_missing_model(
         snapshot(vec![entry("ollama/qwen3", ModelAvailability::Available)]),
         &defaults(&[("ollama", "ollama/qwen3")]),
         &BTreeSet::from(["ollama".to_owned()]),
-        ThinkingLevel::Off,
+        Some(ThinkingLevel::Off),
         true,
     );
     let StartupDecision::AutoSelect(request) = decision else {
         panic!("a valid sole provider default should auto-select")
     };
-    assert_eq!(request.target(), ModelRef("ollama/qwen3".to_owned()));
-    assert_eq!(request.thinking(), ThinkingLevel::Off);
+    assert_eq!(request, ModelRef("ollama/qwen3".to_owned()));
+
+    let absent = decide_missing_model(
+        snapshot(vec![entry("ollama/qwen3", ModelAvailability::Available)]),
+        &defaults(&[("ollama", "ollama/qwen3")]),
+        &BTreeSet::from(["ollama".to_owned()]),
+        None,
+        true,
+    );
+    let StartupDecision::AutoSelect(model) = absent else {
+        panic!("an absent effort must not block model-only automatic selection")
+    };
+    assert_eq!(model, ModelRef("ollama/qwen3".to_owned()));
 }
 
 struct RecordingStore {
@@ -374,6 +386,25 @@ fn startup_publication_preserves_error_and_uncertain_outcomes_atomically() {
         UserConfigPublication::PublishedDurabilityUncertain {
             diagnostic: "directory sync failed".to_owned(),
         }
+    );
+}
+
+#[test]
+fn automatic_startup_persists_only_the_model_in_the_base_managed_set() {
+    let store = RecordingStore::with_outcome(Ok(UserConfigPublication::PublishedDurably));
+    let model = ModelRef("ollama/qwen3".to_owned());
+    persist_startup_model(&store, &model).expect("automatic model persistence");
+    assert_eq!(
+        store
+            .mutations
+            .lock()
+            .expect("store fixture lock")
+            .as_slice(),
+        &[UserConfigMutation::ManagedSet {
+            target: UserConfigTarget::Base,
+            key: ManagedConfigKey::Model,
+            value: ManagedConfigValue::Model(model),
+        }]
     );
 }
 

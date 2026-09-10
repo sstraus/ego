@@ -73,8 +73,8 @@ struct SessionSeat {
 /// One ACP connection's generation controls.
 #[derive(Debug)]
 pub struct AcpSessionControls {
-    model: ModelRef,
-    effort: ThinkingLevel,
+    model: Option<ModelRef>,
+    effort: Option<ThinkingLevel>,
     mode: Mode,
     judge: bool,
     /// The weakest confinement this connection may run at, and the value a
@@ -94,8 +94,8 @@ impl AcpSessionControls {
     ///
     /// The catalogue is optional because discovery is an egress that can
     /// fail: a connection that could not enumerate models still offers mode,
-    /// and offers exactly one model — the configured one — rather than a list
-    /// it cannot vouch for.
+    /// and offers only the configured model when one exists rather than a
+    /// list it cannot vouch for.
     /// `ceiling` is the operator's, not the configuration's. It comes from
     /// `ego acp --sandbox`, and where that was not given it is the resolved
     /// `sandbox` — which for a headless untrusted resolution means the user
@@ -106,8 +106,8 @@ impl AcpSessionControls {
         catalogue: Option<ModelCatalogueSnapshot>,
     ) -> Self {
         Self::seeded(
-            effective.model.clone().unwrap_or(ModelRef(String::new())),
-            effective.thinking.unwrap_or(ThinkingLevel::Off),
+            effective.model.clone(),
+            effective.thinking,
             effective.mode.unwrap_or(Mode::Default),
             effective.judge.is_some(),
             ceiling,
@@ -119,8 +119,8 @@ impl AcpSessionControls {
     /// the configuration. This is the whole of what the seat needs, and
     /// saying so is what lets it be tested without building a workspace.
     pub fn seeded(
-        model: ModelRef,
-        effort: ThinkingLevel,
+        model: Option<ModelRef>,
+        effort: Option<ThinkingLevel>,
         mode: Mode,
         judge: bool,
         sandbox_ceiling: Confinement,
@@ -248,22 +248,25 @@ impl AcpSessionControls {
         }
     }
 
-    /// Every model this connection can actually run, current one included.
+    /// Every model this connection can actually run, current one included
+    /// when selection has resolved one.
     ///
-    /// The configured model is always present even when discovery never saw
-    /// it: a host that cannot re-select what the session started with would
-    /// be looking at a picker that disagrees with the run.
-    fn models(&self, current: &ModelRef) -> Vec<ModelRef> {
-        let mut models = vec![current.clone()];
+    /// A configured model remains present even when discovery never saw it: a
+    /// host that cannot re-select what the session started with would be
+    /// looking at a picker that disagrees with the run.
+    fn models(&self, current: Option<&ModelRef>) -> Vec<ModelRef> {
+        let mut models: Vec<_> = current.cloned().into_iter().collect();
         if let Some(catalogue) = &self.catalogue {
-            models.extend(
-                catalogue
-                    .models
-                    .iter()
-                    .filter(|entry| matches!(entry.availability, ModelAvailability::Available))
-                    .map(|entry| ModelRef(entry.slug.to_string()))
-                    .filter(|model| model != current),
-            );
+            for model in catalogue
+                .models
+                .iter()
+                .filter(|entry| matches!(entry.availability, ModelAvailability::Available))
+                .map(|entry| ModelRef(entry.slug.to_string()))
+            {
+                if !models.contains(&model) {
+                    models.push(model);
+                }
+            }
         }
         models
     }
@@ -279,6 +282,20 @@ impl AcpSessionControls {
         reasoning_levels(self.catalogue.as_ref()?, &model.0).ok()
     }
 
+    fn resolved_effort(
+        &self,
+        model: &ModelRef,
+        explicit: Option<ThinkingLevel>,
+    ) -> Option<ThinkingLevel> {
+        let row = self
+            .catalogue
+            .as_ref()?
+            .models
+            .iter()
+            .find(|entry| entry.slug.to_string() == model.0)?;
+        row.capabilities.resolve_reasoning_effort(explicit).ok()
+    }
+
     /// What the effort picker offers for this model, with the value in force
     /// always present.
     ///
@@ -288,11 +305,20 @@ impl AcpSessionControls {
     /// value is not one of the choices, which no client can render honestly.
     /// Showing it is not endorsing it — [`Self::stage`] still refuses to move
     /// *to* a level the model rejects.
-    fn efforts(&self, model: &ModelRef, current: ThinkingLevel) -> Vec<ThinkingLevel> {
-        let Some(mut efforts) = self.accepted(model) else {
-            return vec![current];
+    fn efforts(
+        &self,
+        model: Option<&ModelRef>,
+        current: Option<ThinkingLevel>,
+    ) -> Vec<ThinkingLevel> {
+        let Some(model) = model else {
+            return Vec::new();
         };
-        if !efforts.contains(&current) {
+        let Some(mut efforts) = self.accepted(model) else {
+            return current.into_iter().collect();
+        };
+        if let Some(current) = current
+            && !efforts.contains(&current)
+        {
             efforts.push(current);
             efforts.sort_unstable();
         }
@@ -302,28 +328,31 @@ impl AcpSessionControls {
     fn compose(&self, seat: &SessionSeat) -> Result<SessionControlState, ControlError> {
         let measured = seat.confinement.as_ref().ok_or_else(Self::uninitialized)?;
         let chosen = &seat.chosen;
-        let model = chosen.model.clone().unwrap_or_else(|| self.model.clone());
-        let effort = chosen.effort.unwrap_or(self.effort);
+        let model = chosen.model.clone().or_else(|| self.model.clone());
+        let explicit_effort = chosen.effort.or(self.effort);
+        let effort = model
+            .as_ref()
+            .and_then(|model| explicit_effort.or_else(|| self.resolved_effort(model, None)));
         let mode = chosen.mode.unwrap_or(self.mode);
         Ok(SessionControlState {
             model: ControlSelect {
-                available: self.models(&model),
+                available: self.models(model.as_ref()),
                 current: model.clone(),
                 chosen: chosen.model.clone(),
             },
             effort: ControlSelect {
-                available: self.efforts(&model, effort),
+                available: self.efforts(model.as_ref(), effort),
                 current: effort,
                 chosen: chosen.effort,
             },
             mode: ControlSelect {
                 available: self.modes(),
-                current: mode,
+                current: Some(mode),
                 chosen: chosen.mode,
             },
             sandbox: ControlSelect {
                 available: self.sandboxes(measured),
-                current: chosen.sandbox.unwrap_or(self.sandbox_ceiling),
+                current: Some(chosen.sandbox.unwrap_or(self.sandbox_ceiling)),
                 chosen: chosen.sandbox,
             },
         })
@@ -376,25 +405,24 @@ impl SessionControls for AcpSessionControls {
                 // is the only thing that knows the catalogue, and a model
                 // change can leave the effort behind on a model that does not
                 // accept it.
-                let effort = chosen.effort.unwrap_or(self.effort);
-                if let Some(accepted) = self.accepted(&model)
-                    && !accepted.contains(&effort)
+                let explicit_effort = chosen.effort.or(self.effort);
+                if explicit_effort.is_some()
+                    && self.resolved_effort(&model, explicit_effort).is_none()
                 {
-                    // The highest the new model will take, rather than the
-                    // lowest: the operator asked for this much thinking and
-                    // the model is the only reason they cannot have it.
-                    chosen.effort = accepted.last().copied();
+                    return Err(ControlError::Refused {
+                        control: "model",
+                        why: format!(
+                            "`{model}` does not accept the explicit reasoning effort in force"
+                        ),
+                    });
                 }
                 chosen.model = Some(model);
             }
             SessionControlChange::Effort(effort) => {
-                let model = chosen.model.clone().unwrap_or_else(|| self.model.clone());
-                // The offer, not `accepted`: re-selecting the value already in
-                // force is always allowed, even where nobody can vouch for the
-                // model's levels. Everything else has to be vouched for.
-                if !self
-                    .efforts(&model, chosen.effort.unwrap_or(self.effort))
-                    .contains(&effort)
+                let model = chosen.model.as_ref().or(self.model.as_ref());
+                if model
+                    .and_then(|model| self.resolved_effort(model, Some(effort)))
+                    .is_none()
                 {
                     return Err(ControlError::Unavailable {
                         control: "effort",

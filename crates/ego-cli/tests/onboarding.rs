@@ -210,6 +210,10 @@ fn interactive_single_provider_persists_the_explicit_default_before_generation()
     );
     let config = fs::read_to_string(config).expect("auto-selection persisted atomically");
     assert!(config.contains("model = \"anthropic/claude-opus-5\""));
+    assert!(
+        !config.contains("thinking"),
+        "automatic model selection must not persist a derived reasoning default"
+    );
     assert_eq!(
         stub.generations().len(),
         1,
@@ -261,7 +265,14 @@ fn startup_banner_names_ego_version_model_and_help_unless_quiet() {
     let stub = Stub::start(Plan::default());
     let normal = Ego::against(&stub)
         .conversing()
-        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--thinking",
+            "off",
+            "--sandbox",
+            "off",
+        ])
         .run_pty("hello");
     let normal_text = normal.stdout.to_ascii_lowercase();
     assert!(normal_text.contains("ego"));
@@ -271,7 +282,15 @@ fn startup_banner_names_ego_version_model_and_help_unless_quiet() {
 
     let quiet = Ego::against(&stub)
         .conversing()
-        .args(["--model", "ollama/qwen3", "--sandbox", "off", "--quiet"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--thinking",
+            "off",
+            "--sandbox",
+            "off",
+            "--quiet",
+        ])
         .run_pty("hello");
     let quiet_text = quiet.stdout.to_ascii_lowercase();
     assert!(

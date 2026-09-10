@@ -188,7 +188,10 @@ impl<'s> RunModelSwitchOwner<'s> {
             .selection
             .snapshot()
             .map_err(|error| RunModelSwitchError::Selection(error.to_string()))?;
-        if current.identity == target && current.thinking == thinking {
+        if current.identity == target
+            && current.thinking == thinking
+            && current.explicit_thinking == Some(thinking)
+        {
             return Ok(None);
         }
 
@@ -2048,12 +2051,17 @@ async fn generation_preflight_inner(
     let judge_identity = effective.judge.clone();
     let source = Arc::new(model::CliGenerationModelSource::new(
         ego_core::config::ModelRef(slug),
-        effective.thinking.unwrap_or(ThinkingLevel::Off),
+        effective.thinking,
         judge_identity,
         effective.ceilings.clone(),
         effective.auth.clone(),
     ));
     let selection = source.selection();
+    let bound = source.bind(Arc::clone(&http), cancel.clone(), run_deadline);
+    let main = bound
+        .resolve(GenerationModelRequest::new(GenerationRole::Main))
+        .await
+        .map_err(generation_refusal)?;
     if status.as_ref().is_some_and(|status| status.human) {
         let catalogue_snapshot = Arc::new(
             models::build_catalogue_snapshot(
@@ -2105,11 +2113,6 @@ async fn generation_preflight_inner(
             "the run retains the installed picker"
         );
     }
-    let bound = source.bind(Arc::clone(&http), cancel.clone(), run_deadline);
-    let main = bound
-        .resolve(GenerationModelRequest::new(GenerationRole::Main))
-        .await
-        .map_err(generation_refusal)?;
     let capabilities = main.capabilities.clone();
     let judge_available = effective.judge.is_some();
     if mode == Mode::Auto {
@@ -3734,23 +3737,23 @@ async fn select_startup_model(
         Arc::new(snapshot),
         &defaults,
         &usable,
-        settings.effective.thinking.unwrap_or(ThinkingLevel::Off),
+        settings.effective.thinking,
         seat.is_some(),
     );
-    let (request, automatic) = match decision {
+    let selection = match decision {
         crate::onboarding::StartupDecision::Headless(error) => {
             return Err(RunTermination::UsageError {
                 message: error.to_string(),
             });
         }
-        crate::onboarding::StartupDecision::AutoSelect(request) => (request, true),
+        crate::onboarding::StartupDecision::AutoSelect(model) => (Some(model), None),
         crate::onboarding::StartupDecision::Pick(snapshot, notice) => {
             let picker = Arc::new(Mutex::new(ModelPicker::for_startup(snapshot)));
             match seat
                 .expect("an interactive decision has a human seat")
                 .read_startup_model(picker, notice.map(|error| error.to_string()))
             {
-                crate::model_picker::PickerOutcome::ModelSwitch(request) => (request, false),
+                crate::model_picker::PickerOutcome::ModelSwitch(request) => (None, Some(request)),
                 crate::model_picker::PickerOutcome::Cancelled => {
                     cancel.cancel(CancelCause::User);
                     return Err(cancelled_termination(cancel));
@@ -3763,10 +3766,28 @@ async fn select_startup_model(
             .to_owned(),
     })?;
     let config_store = OsUserConfigStore::new(Arc::new(OsIo), home.join("config.toml"));
-    let publication = crate::onboarding::persist_startup_selection(&config_store, &request)
-        .map_err(|error| RunTermination::UsageError {
-            message: format!("could not persist the startup model configuration: {error}"),
-        })?;
+    let (publication, selected_model, selected_thinking, automatic) = match selection {
+        (Some(model), None) => {
+            let publication = crate::onboarding::persist_startup_model(&config_store, &model)
+                .map_err(|error| RunTermination::UsageError {
+                    message: format!("could not persist the startup model configuration: {error}"),
+                })?;
+            (publication, model, None, true)
+        }
+        (None, Some(request)) => {
+            let publication = crate::onboarding::persist_startup_selection(&config_store, &request)
+                .map_err(|error| RunTermination::UsageError {
+                    message: format!("could not persist the startup model configuration: {error}"),
+                })?;
+            (
+                publication,
+                request.target(),
+                Some(request.thinking()),
+                false,
+            )
+        }
+        _ => unreachable!("startup selection has exactly one source"),
+    };
     if let UserConfigPublication::PublishedDurabilityUncertain { diagnostic } = publication {
         diagnostics.note(&format!(
             "model defaults are authoritative with a durability warning: {diagnostic}"
@@ -3775,11 +3796,13 @@ async fn select_startup_model(
     if automatic {
         diagnostics.note(&format!(
             "selected {} as the default model and saved it to user configuration",
-            request.target().0
+            selected_model.0
         ));
     }
-    settings.effective.model = Some(request.target());
-    settings.effective.thinking = Some(request.thinking());
+    settings.effective.model = Some(selected_model);
+    if let Some(thinking) = selected_thinking {
+        settings.effective.thinking = Some(thinking);
+    }
     Ok(())
 }
 
@@ -7818,22 +7841,22 @@ mod tests {
         let mut slug = "started-with".to_owned();
         let state = SessionControlState {
             model: ControlSelect {
-                current: ModelRef("started-with".to_owned()),
+                current: Some(ModelRef("started-with".to_owned())),
                 chosen: Some(ModelRef("picked".to_owned())),
                 available: Vec::new(),
             },
             effort: ControlSelect {
-                current: ThinkingLevel::High,
+                current: Some(ThinkingLevel::High),
                 chosen: Some(ThinkingLevel::High),
                 available: Vec::new(),
             },
             mode: ControlSelect {
-                current: Mode::Plan,
+                current: Some(Mode::Plan),
                 chosen: Some(Mode::Plan),
                 available: Vec::new(),
             },
             sandbox: ControlSelect {
-                current: ego_core::permit::Confinement::Workspace,
+                current: Some(ego_core::permit::Confinement::Workspace),
                 chosen: None,
                 available: Vec::new(),
             },
@@ -7861,22 +7884,22 @@ mod tests {
         let mut slug = "configured".to_owned();
         let state = SessionControlState {
             model: ControlSelect {
-                current: ModelRef("configured".to_owned()),
+                current: Some(ModelRef("configured".to_owned())),
                 chosen: None,
                 available: Vec::new(),
             },
             effort: ControlSelect {
-                current: ThinkingLevel::Off,
+                current: Some(ThinkingLevel::Off),
                 chosen: None,
                 available: Vec::new(),
             },
             mode: ControlSelect {
-                current: Mode::Default,
+                current: Some(Mode::Default),
                 chosen: None,
                 available: Vec::new(),
             },
             sandbox: ControlSelect {
-                current: ego_core::permit::Confinement::Workspace,
+                current: Some(ego_core::permit::Confinement::Workspace),
                 chosen: None,
                 available: Vec::new(),
             },

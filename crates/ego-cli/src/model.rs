@@ -265,6 +265,7 @@ fn retirement_instead(error: ResolveError) -> ResolveError {
 struct MainSelection {
     identity: ModelRef,
     thinking: ThinkingLevel,
+    explicit_thinking: Option<ThinkingLevel>,
 }
 
 /// Read-only view of the model authority currently installed for main turns.
@@ -272,18 +273,29 @@ struct MainSelection {
 pub struct GenerationSelectionSnapshot {
     pub identity: ModelRef,
     pub thinking: ThinkingLevel,
+    pub explicit_thinking: Option<ThinkingLevel>,
 }
 
 /// Mutable session selection observed afresh at every main generation boundary.
 #[derive(Debug)]
 pub struct GenerationSelection {
-    current: RwLock<MainSelection>,
+    current: RwLock<Option<MainSelection>>,
 }
 
 impl GenerationSelection {
     pub fn new(identity: ModelRef, thinking: ThinkingLevel) -> Self {
         Self {
-            current: RwLock::new(MainSelection { identity, thinking }),
+            current: RwLock::new(Some(MainSelection {
+                identity,
+                thinking,
+                explicit_thinking: Some(thinking),
+            })),
+        }
+    }
+
+    fn unresolved() -> Self {
+        Self {
+            current: RwLock::new(None),
         }
     }
 
@@ -293,35 +305,71 @@ impl GenerationSelection {
             .current
             .write()
             .map_err(|_| "the model selection lock is poisoned".to_string())?;
-        *current = MainSelection { identity, thinking };
+        *current = Some(MainSelection {
+            identity,
+            thinking,
+            explicit_thinking: Some(thinking),
+        });
+        Ok(())
+    }
+
+    /// Install the configured main selection once, after its model facts have
+    /// resolved. A concurrent human choice always wins the race.
+    fn initialize(
+        &self,
+        identity: ModelRef,
+        thinking: ThinkingLevel,
+        explicit_thinking: Option<ThinkingLevel>,
+    ) -> Result<(), GenerationModelError> {
+        let mut current = self.current.write().map_err(|_| selection_lock_error())?;
+        if current.is_none() {
+            *current = Some(MainSelection {
+                identity,
+                thinking,
+                explicit_thinking,
+            });
+        }
         Ok(())
     }
 
     /// Observe the same mutable authority read at every generation boundary.
     pub fn snapshot(&self) -> Result<GenerationSelectionSnapshot, GenerationModelError> {
-        let current = self.read()?;
+        let current = self.read()?.ok_or_else(unresolved_selection_error)?;
         Ok(GenerationSelectionSnapshot {
             identity: current.identity,
             thinking: current.thinking,
+            explicit_thinking: current.explicit_thinking,
         })
     }
 
-    fn read(&self) -> Result<MainSelection, GenerationModelError> {
+    fn read(&self) -> Result<Option<MainSelection>, GenerationModelError> {
         self.current
             .read()
             .map(|selection| selection.clone())
-            .map_err(|_| {
-                GenerationModelError::new(
-                    GenerationModelErrorClass::Internal,
-                    "the model selection lock is poisoned",
-                )
-            })
+            .map_err(|_| selection_lock_error())
     }
+}
+
+fn selection_lock_error() -> GenerationModelError {
+    GenerationModelError::new(
+        GenerationModelErrorClass::Internal,
+        "the model selection lock is poisoned",
+    )
+}
+
+fn unresolved_selection_error() -> GenerationModelError {
+    GenerationModelError::new(
+        GenerationModelErrorClass::Usage,
+        "the main model selection has no resolved thinking level; pass --thinking \
+         off|minimal|low|medium|high|xhigh|max",
+    )
 }
 
 /// CLI adapter for the core-owned fresh generation-model port.
 pub struct CliGenerationModelSource {
     selection: Arc<GenerationSelection>,
+    initial_identity: ModelRef,
+    initial_thinking: Option<ThinkingLevel>,
     judge: Option<ModelRef>,
     ceilings: Ceilings,
     auth: std::collections::HashMap<String, AuthProviderLayer>,
@@ -331,13 +379,15 @@ pub struct CliGenerationModelSource {
 impl CliGenerationModelSource {
     pub fn new(
         identity: ModelRef,
-        thinking: ThinkingLevel,
+        thinking: Option<ThinkingLevel>,
         judge: Option<ModelRef>,
         ceilings: Ceilings,
         auth: std::collections::HashMap<String, AuthProviderLayer>,
     ) -> Self {
         Self {
-            selection: Arc::new(GenerationSelection::new(identity, thinking)),
+            selection: Arc::new(GenerationSelection::unresolved()),
+            initial_identity: identity,
+            initial_thinking: thinking,
             judge,
             ceilings,
             auth,
@@ -371,16 +421,34 @@ impl CliGenerationModelSource {
         cancel: &CancelToken,
         run_deadline: Option<std::time::Instant>,
     ) -> Result<GenerationProfile, GenerationModelError> {
-        let (identity, thinking) = match request.role() {
+        let role = request.role();
+        let has_model_overlay = request.model().is_some();
+        let has_thinking_overlay = request.thinking().is_some();
+        let initialize_main =
+            role == GenerationRole::Main && !has_model_overlay && !has_thinking_overlay;
+        let current = self.selection.read()?;
+        let (identity, requested_thinking, resolved_thinking) = match role {
             GenerationRole::Main
             | GenerationRole::Compaction
             | GenerationRole::Subagent
             | GenerationRole::Hook => {
-                let selection = self.selection.read()?;
-                (
-                    request.model().cloned().unwrap_or(selection.identity),
-                    request.thinking().unwrap_or(selection.thinking),
-                )
+                let identity = request
+                    .model()
+                    .cloned()
+                    .or_else(|| current.as_ref().map(|selection| selection.identity.clone()))
+                    .unwrap_or_else(|| self.initial_identity.clone());
+                let explicit = request.thinking().or_else(|| {
+                    current
+                        .as_ref()
+                        .and_then(|selection| selection.explicit_thinking)
+                        .or(self.initial_thinking)
+                });
+                let concrete = if !has_model_overlay && !has_thinking_overlay {
+                    current.as_ref().map(|selection| selection.thinking)
+                } else {
+                    None
+                };
+                (identity, explicit, concrete)
             }
             GenerationRole::Judge => (
                 self.judge.clone().ok_or_else(|| {
@@ -389,7 +457,8 @@ impl CliGenerationModelSource {
                         "no judge model is configured",
                     )
                 })?,
-                ThinkingLevel::Off,
+                Some(ThinkingLevel::Off),
+                None,
             ),
         };
         let provider_id = identity
@@ -416,6 +485,16 @@ impl CliGenerationModelSource {
             resolve(&identity.0, hosted, http, credentials.as_ref(), &self.auth)
                 .await
                 .map_err(generation_error)?;
+        let thinking = resolved
+            .capabilities
+            .resolve_reasoning_effort(resolved_thinking.or(requested_thinking))
+            .map_err(|error| {
+                GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
+            })?;
+        if initialize_main {
+            self.selection
+                .initialize(identity.clone(), thinking, self.initial_thinking)?;
+        }
         let request_model = resolved.model.clone();
         let generator: Arc<dyn Generator> = Arc::new(ego_ai::generator::WireGenerator::new(
             resolved.row,
@@ -583,6 +662,44 @@ mod tests {
             .into_iter()
             .map(|row| row.id().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn public_generation_selection_constructors_record_explicit_thinking() {
+        let selection =
+            GenerationSelection::new(ModelRef("ollama/qwen3".to_owned()), ThinkingLevel::Medium);
+        let snapshot = selection
+            .snapshot()
+            .expect("explicit selection is readable");
+        assert_eq!(snapshot.identity, ModelRef("ollama/qwen3".to_owned()));
+        assert_eq!(snapshot.thinking, ThinkingLevel::Medium);
+        assert_eq!(snapshot.explicit_thinking, Some(ThinkingLevel::Medium));
+
+        selection
+            .install(ModelRef("openai/gpt-5.6".to_owned()), ThinkingLevel::High)
+            .expect("explicit installation succeeds");
+        let snapshot = selection
+            .snapshot()
+            .expect("installed selection is readable");
+        assert_eq!(snapshot.identity, ModelRef("openai/gpt-5.6".to_owned()));
+        assert_eq!(snapshot.thinking, ThinkingLevel::High);
+        assert_eq!(snapshot.explicit_thinking, Some(ThinkingLevel::High));
+    }
+
+    #[test]
+    fn source_with_no_initial_choice_stays_typed_unresolved_until_initialized() {
+        let source = CliGenerationModelSource::new(
+            ModelRef("ollama/qwen3".to_owned()),
+            None,
+            None,
+            Ceilings::default(),
+            std::collections::HashMap::new(),
+        );
+        let error = source
+            .selection()
+            .snapshot()
+            .expect_err("a source without an initial effort is unresolved");
+        assert!(error.to_string().contains("thinking"));
     }
 
     #[test]

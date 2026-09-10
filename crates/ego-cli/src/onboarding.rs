@@ -14,7 +14,8 @@ use ego_ai::http::Http;
 use ego_ai::provider::{CredentialStrategy, ProviderRow};
 use ego_ai::resolver::Enumeration;
 use ego_core::config::{
-    ModelRef, UserConfigError, UserConfigMutation, UserConfigPublication, UserConfigStore,
+    ManagedConfigKey, ManagedConfigValue, ModelRef, UserConfigError, UserConfigMutation,
+    UserConfigPublication, UserConfigStore, UserConfigTarget,
 };
 use ego_core::generator::types::ThinkingLevel;
 use url::Host;
@@ -122,7 +123,7 @@ fn is_loopback(row: &ProviderRow) -> bool {
 /// The only three outcomes for startup after model resolution found no model.
 #[derive(Debug)]
 pub(crate) enum StartupDecision {
-    AutoSelect(ModelSwitchRequest),
+    AutoSelect(ModelRef),
     Pick(Arc<ModelCatalogueSnapshot>, Option<UsageError>),
     Headless(UsageError),
 }
@@ -132,7 +133,7 @@ pub(crate) fn decide_missing_model(
     snapshot: Arc<ModelCatalogueSnapshot>,
     defaults: &BTreeMap<String, ModelSlug>,
     usable_provider_ids: &BTreeSet<String>,
-    thinking: ThinkingLevel,
+    _thinking: Option<ThinkingLevel>,
     interactive: bool,
 ) -> StartupDecision {
     if !interactive {
@@ -170,10 +171,7 @@ pub(crate) fn decide_missing_model(
         );
     }
 
-    StartupDecision::AutoSelect(ModelSwitchRequest::persistent(
-        ModelRef(default.to_string()),
-        thinking,
-    ))
+    StartupDecision::AutoSelect(ModelRef(default.to_string()))
 }
 
 fn missing_default(provider: &str) -> UsageError {
@@ -225,6 +223,23 @@ pub(crate) fn persist_startup_selection(
     let result = store.mutate(UserConfigMutation::ModelAndThinking {
         model: request.target().0,
         thinking: request.thinking(),
+    })?;
+    Ok(result.publication)
+}
+
+/// Atomically publish only the automatically selected model.
+///
+/// The model's reasoning default is derived capability authority, not an
+/// operator choice, so automatic onboarding must not turn it into a durable
+/// explicit override.
+pub(crate) fn persist_startup_model(
+    store: &dyn UserConfigStore,
+    model: &ModelRef,
+) -> Result<UserConfigPublication, UserConfigError> {
+    let result = store.mutate(UserConfigMutation::ManagedSet {
+        target: UserConfigTarget::Base,
+        key: ManagedConfigKey::Model,
+        value: ManagedConfigValue::Model(model.clone()),
     })?;
     Ok(result.publication)
 }

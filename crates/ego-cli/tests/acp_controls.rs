@@ -81,6 +81,25 @@ fn catalogue() -> ModelCatalogueSnapshot {
     }
 }
 
+fn catalogue_with_default(default: ThinkingLevel) -> ModelCatalogueSnapshot {
+    let mut catalogue = catalogue();
+    let row = catalogue
+        .models
+        .iter_mut()
+        .find(|entry| entry.slug.to_string() == "ollama/gemma4")
+        .expect("catalogue fixture includes ollama/gemma4");
+    row.capabilities.reasoning_efforts = ReasoningEffortSupport::Only(
+        [
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+        ]
+        .into(),
+    );
+    row.capabilities.default_reasoning_effort = Some(default);
+    catalogue
+}
+
 fn seat(judge: bool) -> AcpSessionControls {
     ceilinged(judge, Confinement::Workspace)
 }
@@ -89,8 +108,8 @@ fn seat(judge: bool) -> AcpSessionControls {
 /// about the ceiling rather than about the generation controls.
 fn ceilinged(judge: bool, ceiling: Confinement) -> AcpSessionControls {
     AcpSessionControls::seeded(
-        ModelRef("ollama/gemma4".to_owned()),
-        ThinkingLevel::Low,
+        Some(ModelRef("ollama/gemma4".to_owned())),
+        Some(ThinkingLevel::Low),
         Mode::Default,
         judge,
         ceiling,
@@ -156,11 +175,14 @@ fn an_untouched_session_reports_configuration_without_calling_it_a_choice() {
     let seat = seat(false);
     admit_all(&seat, session);
     let state = seat.state(session).expect("a readable seat");
-    assert_eq!(state.model.current, ModelRef("ollama/gemma4".to_owned()));
+    assert_eq!(
+        state.model.current,
+        Some(ModelRef("ollama/gemma4".to_owned()))
+    );
     assert_eq!(state.model.chosen, None);
-    assert_eq!(state.effort.current, ThinkingLevel::Low);
+    assert_eq!(state.effort.current, Some(ThinkingLevel::Low));
     assert_eq!(state.effort.chosen, None);
-    assert_eq!(state.mode.current, Mode::Default);
+    assert_eq!(state.mode.current, Some(Mode::Default));
     assert_eq!(state.mode.chosen, None);
 }
 
@@ -213,31 +235,44 @@ fn the_effort_offer_follows_the_model() {
     );
 }
 
-/// Moving to a model that accepts fewer levels must not leave the session on
-/// an effort that model rejects; the next generation would fail on it.
+/// Moving models recomputes a resolved default when the operator has not
+/// selected an explicit effort. The next generation must not inherit the
+/// previous model's default by accident.
 #[test]
-fn a_model_that_rejects_the_current_effort_moves_the_effort_too() {
+fn a_model_change_recomputes_a_resolved_default_without_an_explicit_effort() {
+    let mut catalogue = catalogue_with_default(ThinkingLevel::Low);
+    catalogue
+        .models
+        .iter_mut()
+        .find(|entry| entry.slug.to_string() == "anthropic/claude-sonnet-5")
+        .expect("catalogue fixture includes anthropic/claude-sonnet-5")
+        .capabilities
+        .default_reasoning_effort = Some(ThinkingLevel::Max);
     let seat = AcpSessionControls::seeded(
-        ModelRef("anthropic/claude-sonnet-5".to_owned()),
-        ThinkingLevel::Max,
+        Some(ModelRef("anthropic/claude-sonnet-5".to_owned())),
+        None,
         Mode::Default,
         false,
         Confinement::Workspace,
-        Some(catalogue()),
+        Some(catalogue),
     );
     let session = SessionId::new();
     admit_all(&seat, session);
+    assert_eq!(
+        seat.state(session)
+            .expect("the base model default is resolved")
+            .effort
+            .current,
+        Some(ThinkingLevel::Max)
+    );
     let after = seat
         .stage(
             session,
             SessionControlChange::Model(ModelRef("ollama/gemma4".to_owned())),
         )
         .expect("an offered model is accepted");
-    assert!(
-        after.effort.available.contains(&after.effort.current),
-        "the effort must land inside what the new model accepts: {after:?}"
-    );
-    assert_ne!(after.effort.current, ThinkingLevel::Max);
+    assert_eq!(after.effort.current, Some(ThinkingLevel::Low));
+    assert_eq!(after.effort.chosen, None);
 }
 
 /// An effort the current model does not accept is refused even though the
@@ -322,11 +357,11 @@ fn a_pick_in_one_session_does_not_reach_another() {
         .expect("plan is offered");
     assert_eq!(
         seat.state(touched).expect("a readable seat").mode.current,
-        Mode::Plan
+        Some(Mode::Plan)
     );
     assert_eq!(
         seat.state(untouched).expect("a readable seat").mode.current,
-        Mode::Default
+        Some(Mode::Default)
     );
     assert_eq!(
         seat.state(untouched).expect("a readable seat").mode.chosen,
@@ -340,8 +375,8 @@ fn a_pick_in_one_session_does_not_reach_another() {
 #[test]
 fn a_seat_with_no_catalogue_offers_only_what_it_can_vouch_for() {
     let seat = AcpSessionControls::seeded(
-        ModelRef("ollama/gemma4".to_owned()),
-        ThinkingLevel::Low,
+        Some(ModelRef("ollama/gemma4".to_owned())),
+        Some(ThinkingLevel::Low),
         Mode::Default,
         false,
         Confinement::Workspace,
@@ -356,6 +391,157 @@ fn a_seat_with_no_catalogue_offers_only_what_it_can_vouch_for() {
     );
     assert_eq!(state.effort.available, vec![ThinkingLevel::Low]);
     assert!(state.mode.available.contains(&Mode::Plan));
+}
+
+#[test]
+fn an_unconfigured_seat_can_select_a_model_before_selecting_unknown_effort() {
+    let seat = AcpSessionControls::seeded(
+        None,
+        None,
+        Mode::Default,
+        false,
+        Confinement::Workspace,
+        Some(catalogue()),
+    );
+    let session = SessionId::new();
+    admit_all(&seat, session);
+    let initial = seat
+        .state(session)
+        .expect("an unconfigured seat is reachable");
+    assert_eq!(initial.model.current, None);
+    assert_eq!(initial.effort.current, None);
+    assert_eq!(initial.model.chosen, None);
+    assert_eq!(initial.effort.chosen, None);
+
+    let selected = seat
+        .stage(
+            session,
+            SessionControlChange::Model(ModelRef("ollama/gemma4".to_owned())),
+        )
+        .expect("the catalogue offers the model");
+    assert_eq!(
+        selected.model.current,
+        Some(ModelRef("ollama/gemma4".to_owned()))
+    );
+    assert_eq!(
+        selected.model.chosen,
+        Some(ModelRef("ollama/gemma4".to_owned()))
+    );
+    assert_eq!(selected.effort.current, None);
+    assert_eq!(selected.effort.chosen, None);
+    assert_eq!(
+        selected.effort.available,
+        vec![ThinkingLevel::Off, ThinkingLevel::Low]
+    );
+
+    let chosen = seat
+        .stage(session, SessionControlChange::Effort(ThinkingLevel::Low))
+        .expect("a known effort can now be chosen");
+    assert_eq!(chosen.effort.current, Some(ThinkingLevel::Low));
+    assert_eq!(chosen.effort.chosen, Some(ThinkingLevel::Low));
+}
+
+#[test]
+fn a_known_model_default_is_current_without_becoming_a_choice() {
+    let seat = AcpSessionControls::seeded(
+        Some(ModelRef("ollama/gemma4".to_owned())),
+        None,
+        Mode::Default,
+        false,
+        Confinement::Workspace,
+        Some(catalogue_with_default(ThinkingLevel::Medium)),
+    );
+    let session = SessionId::new();
+    admit_all(&seat, session);
+    let state = seat.state(session).expect("a readable seat");
+    assert_eq!(state.effort.current, Some(ThinkingLevel::Medium));
+    assert_eq!(state.effort.chosen, None);
+}
+
+#[test]
+fn an_incompatible_explicit_effort_refuses_model_change_atomically() {
+    let seat = AcpSessionControls::seeded(
+        Some(ModelRef("anthropic/claude-sonnet-5".to_owned())),
+        Some(ThinkingLevel::High),
+        Mode::Default,
+        false,
+        Confinement::Workspace,
+        Some(catalogue()),
+    );
+    let session = SessionId::new();
+    admit_all(&seat, session);
+    let before = seat.state(session).expect("a readable seat");
+    let refusal = seat
+        .stage(
+            session,
+            SessionControlChange::Model(ModelRef("ollama/gemma4".to_owned())),
+        )
+        .expect_err("an explicit effort incompatible with the target must refuse");
+    assert!(matches!(
+        refusal,
+        ControlError::Refused {
+            control: "model",
+            ..
+        }
+    ));
+    assert_eq!(seat.state(session).expect("state remains readable"), before);
+}
+
+#[test]
+fn an_unstated_effort_derives_the_target_model_default_without_chosen_effort() {
+    let seat = AcpSessionControls::seeded(
+        Some(ModelRef("anthropic/claude-sonnet-5".to_owned())),
+        None,
+        Mode::Default,
+        false,
+        Confinement::Workspace,
+        Some(catalogue_with_default(ThinkingLevel::Low)),
+    );
+    let session = SessionId::new();
+    admit_all(&seat, session);
+    let before = seat.state(session).expect("a readable seat");
+    assert_eq!(before.effort.current, None);
+    let after = seat
+        .stage(
+            session,
+            SessionControlChange::Model(ModelRef("ollama/gemma4".to_owned())),
+        )
+        .expect("a model change may derive its known default");
+    assert_eq!(after.effort.current, Some(ThinkingLevel::Low));
+    assert_eq!(after.effort.chosen, None);
+}
+
+#[test]
+fn a_new_model_with_unknown_default_does_not_reuse_the_base_resolved_effort() {
+    let seat = AcpSessionControls::seeded(
+        Some(ModelRef("ollama/gemma4".to_owned())),
+        None,
+        Mode::Default,
+        false,
+        Confinement::Workspace,
+        Some(catalogue_with_default(ThinkingLevel::Medium)),
+    );
+    let session = SessionId::new();
+    admit_all(&seat, session);
+    let before = seat.state(session).expect("a readable seat");
+    assert_eq!(before.effort.current, Some(ThinkingLevel::Medium));
+    assert_eq!(before.effort.chosen, None);
+
+    let after = seat
+        .stage(
+            session,
+            SessionControlChange::Model(ModelRef("anthropic/claude-sonnet-5".to_owned())),
+        )
+        .expect("the target model is available");
+    assert_eq!(
+        after.model.chosen,
+        Some(ModelRef("anthropic/claude-sonnet-5".to_owned()))
+    );
+    assert_eq!(
+        after.effort.current, None,
+        "an unknown target default must clear the previous model's resolved effort"
+    );
+    assert_eq!(after.effort.chosen, None);
 }
 
 /// A reconnecting host is offered configuration again, not the last
@@ -397,7 +583,7 @@ fn a_reconnecting_seat_offers_configuration_and_not_the_previous_pick() {
     );
     assert_eq!(
         state.mode.current,
-        Mode::Default,
+        Some(Mode::Default),
         "and the run uses what configuration resolves"
     );
 }
@@ -480,7 +666,8 @@ fn the_offer_stops_at_the_ceiling_the_process_was_started_with() {
             "the offer under a `{ceiling}` ceiling"
         );
         assert_eq!(
-            state.sandbox.current, ceiling,
+            state.sandbox.current,
+            Some(ceiling),
             "a session starts on the ceiling"
         );
         assert_eq!(
@@ -499,7 +686,7 @@ fn a_host_can_tighten_the_confinement_and_the_pick_is_recorded_as_one() {
     let after = seat
         .stage(session, SessionControlChange::Sandbox(Confinement::Ro))
         .expect("`ro` is stronger than the `workspace` ceiling");
-    assert_eq!(after.sandbox.current, Confinement::Ro);
+    assert_eq!(after.sandbox.current, Some(Confinement::Ro));
     assert_eq!(
         after.sandbox.chosen,
         Some(Confinement::Ro),
@@ -550,7 +737,10 @@ fn the_value_in_force_is_always_one_of_the_choices() {
         admit_all(&seat, session);
         let state = seat.state(session).expect("a readable seat");
         assert!(
-            state.sandbox.available.contains(&state.sandbox.current),
+            state
+                .sandbox
+                .current
+                .is_some_and(|current| state.sandbox.available.contains(&current)),
             "a `{ceiling}` ceiling offers a picker its own current value cannot \
              be found in: {:?}",
             state.sandbox.available
@@ -582,7 +772,7 @@ fn measured_confinement_offer_intersects_the_ceiling_and_keeps_typed_reasons() {
     );
     assert_eq!(
         state.sandbox.current,
-        Confinement::Workspace,
+        Some(Confinement::Workspace),
         "an unsupported configured default remains current so refusal stays truthful"
     );
     let refusal = seat

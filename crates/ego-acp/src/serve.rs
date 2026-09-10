@@ -1202,7 +1202,11 @@ fn selected_confinement(
     let state = controls
         .state(session)
         .map_err(|error| control_error(&error))?;
-    let sandbox = state.sandbox.current;
+    let sandbox = state.sandbox.current.ok_or_else(|| {
+        control_error(&ControlError::Internal(
+            "the ACP sandbox control has no current confinement".to_owned(),
+        ))
+    })?;
     let selections = RunSelections::empty().with_sandbox(sandbox);
     let Some(admission) = admission else {
         return Ok(selections);
@@ -2261,6 +2265,11 @@ where
                             }
                             return responder.respond_with_error(error);
                         }
+                    };
+                    let Some(change) = change else {
+                        return responder.respond(v1::SetSessionConfigOptionResponse::new(
+                            crate::controls::options(&state),
+                        ));
                     };
                     // Refused rather than staged. Staging it would leave the
                     // picker showing a confinement the run does not have, and

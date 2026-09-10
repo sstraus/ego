@@ -33,8 +33,8 @@ use support::{AcpHost, Ego, Plan, Reply, Stub, text, tool_call};
 
 fn seat(ceiling: Confinement) -> AcpSessionControls {
     AcpSessionControls::seeded(
-        ModelRef("fixture/model".to_owned()),
-        ThinkingLevel::Off,
+        Some(ModelRef("fixture/model".to_owned())),
+        Some(ThinkingLevel::Off),
         Mode::Default,
         false,
         ceiling,
@@ -270,7 +270,7 @@ fn the_same_acp_prompt_reaches_a_workspace_write_and_refuses_it_under_ro() {
         let target = ego.workspace_path().join(target_name);
         ego.home_file(
             "config.toml",
-            "model = \"ollama/qwen3\"\npermissions.allow = [\"exec(/bin/sh *)\"]\n",
+            "model = \"ollama/qwen3\"\nthinking = \"off\"\npermissions.allow = [\"exec(/bin/sh *)\"]\n",
         );
         let workspace = ego.workspace_path().to_owned();
         let running = Ego::at(ego.home_path(), &workspace, Some(&stub))

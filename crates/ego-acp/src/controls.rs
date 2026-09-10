@@ -29,6 +29,8 @@ pub const MODEL: &str = "model";
 pub const EFFORT: &str = "effort";
 pub const MODE: &str = "mode";
 pub const SANDBOX: &str = "sandbox";
+const UNSELECTED: &str = "__ego_unselected__";
+const CHOOSE: &str = "Choose a value";
 
 /// Every control, in the order a host should render them.
 pub fn options(state: &SessionControlState) -> Vec<v1::SessionConfigOption> {
@@ -39,6 +41,7 @@ pub fn options(state: &SessionControlState) -> Vec<v1::SessionConfigOption> {
             "The model the next generation uses.",
             v1::SessionConfigOptionCategory::Model,
             &state.model,
+            true,
             |model: &ModelRef| (model.0.clone(), model.0.clone()),
         ),
         select(
@@ -47,6 +50,7 @@ pub fn options(state: &SessionControlState) -> Vec<v1::SessionConfigOption> {
             "How much the model is asked to think, within what it supports.",
             v1::SessionConfigOptionCategory::ThoughtLevel,
             &state.effort,
+            true,
             |effort: &ThinkingLevel| (effort.as_str().to_owned(), effort.as_str().to_owned()),
         ),
         select(
@@ -55,6 +59,7 @@ pub fn options(state: &SessionControlState) -> Vec<v1::SessionConfigOption> {
             "The permission mode the next generation is judged under.",
             v1::SessionConfigOptionCategory::Mode,
             &state.mode,
+            false,
             |mode: &Mode| (mode.as_str().to_owned(), mode.as_str().to_owned()),
         ),
         // `Other` rather than `Mode`. The pinned schema names `Mode`,
@@ -70,6 +75,7 @@ pub fn options(state: &SessionControlState) -> Vec<v1::SessionConfigOption> {
              this machine can enforce; it can be narrowed here and not widened.",
             v1::SessionConfigOptionCategory::Other(SANDBOX.to_owned()),
             &state.sandbox,
+            false,
             |confinement: &Confinement| {
                 (
                     confinement.as_str().to_owned(),
@@ -89,7 +95,7 @@ pub fn options(state: &SessionControlState) -> Vec<v1::SessionConfigOption> {
 pub fn change(
     state: &SessionControlState,
     request: &v1::SetSessionConfigOptionRequest,
-) -> Result<SessionControlChange, Error> {
+) -> Result<Option<SessionControlChange>, Error> {
     let config = request.config_id.0.as_ref();
     let v1::SessionConfigOptionValue::ValueId { value } = &request.value else {
         return Err(refuse(format!(
@@ -98,14 +104,16 @@ pub fn change(
     };
     let value = value.0.as_ref();
     match config {
+        MODEL if value == UNSELECTED && state.model.current.is_none() => Ok(None),
         MODEL => chosen(&state.model, value, |model: &ModelRef| model.0.as_str())
-            .map(|model| SessionControlChange::Model(model.clone())),
+            .map(|model| Some(SessionControlChange::Model(model.clone()))),
+        EFFORT if value == UNSELECTED && state.effort.current.is_none() => Ok(None),
         EFFORT => chosen(&state.effort, value, |effort: &ThinkingLevel| {
             effort.as_str()
         })
-        .map(|effort| SessionControlChange::Effort(*effort)),
+        .map(|effort| Some(SessionControlChange::Effort(*effort))),
         MODE => chosen(&state.mode, value, |mode: &Mode| mode.as_str())
-            .map(|mode| SessionControlChange::Mode(*mode)),
+            .map(|mode| Some(SessionControlChange::Mode(*mode))),
         // Matched against the offer like everything else, which is the whole
         // enforcement of the ceiling: a confinement outside it was never
         // advertised, so it is refused here by the rule that already exists
@@ -113,7 +121,7 @@ pub fn change(
         SANDBOX => chosen(&state.sandbox, value, |confinement: &Confinement| {
             confinement.as_str()
         })
-        .map(|confinement| SessionControlChange::Sandbox(*confinement)),
+        .map(|confinement| Some(SessionControlChange::Sandbox(*confinement))),
         _ => Err(refuse(format!(
             "this agent advertises no `{config}` session config option"
         ))),
@@ -156,9 +164,10 @@ fn select<T>(
     description: &str,
     category: v1::SessionConfigOptionCategory,
     control: &ControlSelect<T>,
+    admits_unselected: bool,
     spell: impl Fn(&T) -> (String, String),
 ) -> v1::SessionConfigOption {
-    let options = control
+    let mut options: Vec<_> = control
         .available
         .iter()
         .map(|candidate| {
@@ -166,11 +175,25 @@ fn select<T>(
             v1::SessionConfigSelectOption::new(v1::SessionConfigValueId::new(value), label)
         })
         .collect();
+    let current = match control.current.as_ref() {
+        Some(current) => spell(current).0,
+        None if admits_unselected => {
+            options.insert(
+                0,
+                v1::SessionConfigSelectOption::new(
+                    v1::SessionConfigValueId::new(UNSELECTED),
+                    CHOOSE,
+                ),
+            );
+            UNSELECTED.to_owned()
+        }
+        None => panic!("the `{id}` control must always have a current value"),
+    };
     v1::SessionConfigOption::new(
         v1::SessionConfigId::new(id),
         name,
         v1::SessionConfigKind::Select(v1::SessionConfigSelect::new(
-            v1::SessionConfigValueId::new(spell(&control.current).0),
+            v1::SessionConfigValueId::new(current),
             v1::SessionConfigSelectOptions::Ungrouped(options),
         )),
     )

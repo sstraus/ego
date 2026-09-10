@@ -67,6 +67,7 @@ pub struct Selector {
     kind: SelectorKind,
     choices: Vec<SelectorOption>,
     cursor: usize,
+    cursor_active: bool,
     selected: Vec<usize>,
     value: String,
     composer: (String, usize),
@@ -104,6 +105,7 @@ impl Selector {
             kind,
             choices: choices.into_iter().collect(),
             cursor: 0,
+            cursor_active: true,
             selected: Vec::new(),
             value: String::new(),
             composer: (String::new(), 0),
@@ -111,11 +113,22 @@ impl Selector {
             result: None,
         }
     }
+    /// Build a nonempty selector with no authoritative highlighted option.
+    /// Navigation or a number activates a cursor; bare Enter selects nothing.
+    pub fn with_options_unselected<I>(kind: SelectorKind, choices: I) -> Self
+    where
+        I: IntoIterator<Item = SelectorOption>,
+    {
+        let mut selector = Self::with_options(kind, choices);
+        selector.cursor_active = false;
+        selector
+    }
     pub fn free_text() -> Self {
         Self {
             kind: SelectorKind::FreeText,
             choices: Vec::new(),
             cursor: 0,
+            cursor_active: true,
             selected: Vec::new(),
             value: String::new(),
             composer: (String::new(), 0),
@@ -154,16 +167,29 @@ impl Selector {
     }
     /// Stable identity of the authoritative highlighted option.
     pub fn current_id(&self) -> Option<&str> {
+        if !self.cursor_active {
+            return None;
+        }
         self.choices.get(self.cursor).map(SelectorOption::id)
     }
     pub fn key(&mut self, key: SelectorKey) -> SelectorOutcome {
         let mut selected = None;
         match key {
             SelectorKey::Up if !self.choices.is_empty() => {
-                self.cursor = self.cursor.checked_sub(1).unwrap_or(self.choices.len() - 1)
+                self.cursor = if self.cursor_active {
+                    self.cursor.checked_sub(1).unwrap_or(self.choices.len() - 1)
+                } else {
+                    self.choices.len() - 1
+                };
+                self.cursor_active = true;
             }
             SelectorKey::Down if !self.choices.is_empty() => {
-                self.cursor = (self.cursor + 1) % self.choices.len()
+                self.cursor = if self.cursor_active {
+                    (self.cursor + 1) % self.choices.len()
+                } else {
+                    0
+                };
+                self.cursor_active = true;
             }
             SelectorKey::Number(number)
                 if self.kind != SelectorKind::FreeText
@@ -171,6 +197,7 @@ impl Selector {
                     && number <= self.choices.len() =>
             {
                 self.cursor = number - 1;
+                self.cursor_active = true;
                 self.choose_cursor();
                 selected = self
                     .choices
@@ -189,7 +216,10 @@ impl Selector {
                 }
             }
             SelectorKey::Enter => {
-                if self.kind == SelectorKind::Single && !self.choices.is_empty() {
+                if self.kind == SelectorKind::Single
+                    && self.cursor_active
+                    && !self.choices.is_empty()
+                {
                     self.choose_cursor();
                 }
                 selected = self.current_selection();

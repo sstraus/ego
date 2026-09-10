@@ -96,6 +96,18 @@ fn catalogue() -> Arc<ModelCatalogueSnapshot> {
     ))
 }
 
+fn catalogue_with_default(default: Option<ThinkingLevel>) -> Arc<ModelCatalogueSnapshot> {
+    let mut snapshot = (*catalogue()).clone();
+    snapshot
+        .models
+        .iter_mut()
+        .find(|row| row.slug.to_string() == "openai/gpt-5.6")
+        .expect("catalogue fixture includes openai/gpt-5.6")
+        .capabilities
+        .default_reasoning_effort = default;
+    Arc::new(snapshot)
+}
+
 #[derive(Clone)]
 struct RecordingUserConfigStore {
     mutations: Arc<Mutex<Vec<UserConfigMutation>>>,
@@ -172,6 +184,7 @@ fn assert_selection(selection: &GenerationSelection, model: &str, thinking: Thin
         .expect("the shared generation selection is readable");
     assert_eq!(snapshot.identity, ModelRef(model.into()));
     assert_eq!(snapshot.thinking, thinking);
+    assert_eq!(snapshot.explicit_thinking, Some(thinking));
 }
 
 fn open_model_picker(picker: &mut ModelPicker) {
@@ -208,6 +221,89 @@ fn choose_openai_high(picker: &mut ModelPicker) {
     );
 }
 
+#[test]
+fn reasoning_modal_starts_on_the_model_default_when_one_is_known() {
+    let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue_with_default(Some(ThinkingLevel::Medium)),
+        Arc::clone(&selection),
+        Arc::new(store),
+    );
+    open_model_picker(&mut picker);
+    picker
+        .input(PickerInput::Number(2))
+        .expect("select the OpenAI row");
+    assert_eq!(
+        picker.input(PickerInput::Enter).unwrap(),
+        PickerInputOutcome::FocusChanged(PickerFocus::Reasoning)
+    );
+    assert_eq!(
+        picker.view().current_id.as_deref(),
+        Some("medium"),
+        "a known model default is the initial reasoning highlight"
+    );
+}
+
+#[test]
+fn unknown_reasoning_default_requires_a_real_arrow_or_number_before_enter() {
+    let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue_with_default(None),
+        Arc::clone(&selection),
+        Arc::new(store),
+    );
+    open_model_picker(&mut picker);
+    picker
+        .input(PickerInput::Number(2))
+        .expect("select the OpenAI row");
+    assert_eq!(
+        picker.input(PickerInput::Enter).unwrap(),
+        PickerInputOutcome::FocusChanged(PickerFocus::Reasoning)
+    );
+    assert_eq!(picker.view().current_id, None);
+    assert_eq!(
+        picker.input(PickerInput::Enter),
+        Err(PickerError::NoSelection),
+        "unknown default must not silently choose first, last, or Off"
+    );
+    assert_eq!(picker.view().current_id, None);
+    assert_eq!(
+        picker.input(PickerInput::Number(5)).unwrap(),
+        PickerInputOutcome::Consumed
+    );
+    assert_eq!(picker.view().current_id.as_deref(), Some("high"));
+}
+
+#[test]
+fn a_human_picker_choice_of_off_remains_explicit() {
+    let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue_with_default(Some(ThinkingLevel::Medium)),
+        Arc::clone(&selection),
+        Arc::new(store),
+    );
+    open_model_picker(&mut picker);
+    picker
+        .input(PickerInput::Number(2))
+        .expect("select the OpenAI row");
+    picker
+        .input(PickerInput::Enter)
+        .expect("open the reasoning selector");
+    picker
+        .input(PickerInput::Number(1))
+        .expect("select explicit Off");
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) = picker
+        .input(PickerInput::SessionOnly)
+        .expect("session-only Off selection")
+    else {
+        panic!("the picker must return a typed model switch");
+    };
+    assert_eq!(request.thinking(), ThinkingLevel::Off);
+}
+
 fn catalogue_with_openai(
     availability: ModelAvailability,
     reasoning: ReasoningEffortSupport,
@@ -231,7 +327,7 @@ fn picker_and_models_use_one_snapshot_identity_order_and_availability() {
     assert!(Arc::ptr_eq(picker.snapshot(), &snapshot));
     assert_eq!(picker.entries(), snapshot.models.as_slice());
     assert_eq!(picker.sources(), snapshot.sources.as_slice());
-    assert_eq!(snapshot.v, 1);
+    assert_eq!(snapshot.v, 2);
     assert_eq!(
         snapshot
             .models
