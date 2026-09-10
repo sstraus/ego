@@ -707,6 +707,12 @@ impl CliRunExecutor {
         }
     }
 
+    /// Compose the fixed MCP deployment policy.
+    ///
+    /// An explicit thinking ceiling is already complete policy metadata. Only
+    /// an absent ceiling needs catalogue facts to resolve the model default;
+    /// actual generation still resolves and validates current model facts at
+    /// its ordinary preflight boundary.
     pub(crate) fn for_mcp(
         root: ego_core::run::RunRoot,
         session_dir: Option<PathBuf>,
@@ -714,7 +720,7 @@ impl CliRunExecutor {
         artifacts: Arc<dyn RunArtifactStore>,
         max_concurrent_runs: NonZeroUsize,
         admission: Arc<EvidenceAdmissionService>,
-        catalogue: &ego_ai::catalogue::ModelCatalogueSnapshot,
+        catalogue: Option<&ego_ai::catalogue::ModelCatalogueSnapshot>,
     ) -> Result<(Self, CliMcpRunPolicy), UsageError> {
         let args = protocol_args(session_dir);
         let frozen = Arc::new(config::FrozenRunConfig::capture(
@@ -726,19 +732,28 @@ impl CliRunExecutor {
         let model = effective.model.clone().ok_or_else(|| {
             UsageError("mcp-server requires an effective configured model".to_owned())
         })?;
-        let model_facts = catalogue
-            .models
-            .iter()
-            .find(|entry| entry.slug.to_string() == model.0)
-            .ok_or_else(|| {
-                UsageError(format!(
-                    "mcp-server has no current capability facts for configured model `{model}`"
-                ))
-            })?;
-        let thinking = model_facts
-            .capabilities
-            .resolve_reasoning_effort(effective.thinking)
-            .map_err(|error| UsageError(format!("configured model `{model}`: {error}")))?;
+        let thinking = match effective.thinking {
+            Some(thinking) => thinking,
+            None => {
+                let model_facts = catalogue
+                    .and_then(|catalogue| {
+                        catalogue
+                            .models
+                            .iter()
+                            .find(|entry| entry.slug.to_string() == model.0)
+                    })
+                    .ok_or_else(|| {
+                        UsageError(format!(
+                            "mcp-server has no current capability facts for configured model \
+                             `{model}` and no explicit thinking ceiling"
+                        ))
+                    })?;
+                model_facts
+                    .capabilities
+                    .resolve_reasoning_effort(None)
+                    .map_err(|error| UsageError(format!("configured model `{model}`: {error}")))?
+            }
+        };
         if effective.ceilings.money.is_none() && effective.ceilings.tokens.is_none() {
             return Err(UsageError(
                 "mcp-server requires at least one effective budget ceiling".to_owned(),

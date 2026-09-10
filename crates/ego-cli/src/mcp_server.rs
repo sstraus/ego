@@ -246,32 +246,27 @@ async fn compose_and_serve(
         .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
     let store = Arc::new(session::jsonl(store_root, root.clone()));
     let artifact_publisher: Arc<dyn RunArtifactStore> = store.clone();
-    let catalogue_scope = crate::provider_http::CommandHttpScope::online(CancelToken::new())
-        .await
-        .map_err(|message| McpError::new(McpFailure::Transport, message))?;
-    let catalogue = models::build_catalogue_snapshot(
-        &ModelsArgs {
-            provider: None,
-            refresh: false,
-            json: false,
-        },
-        catalogue_scope.http(),
-    )
-    .await
-    .map_err(|termination| {
-        let (failure, message) = match termination {
-            RunTermination::UsageError { message } => (McpFailure::InvalidValue, message),
-            RunTermination::Provider { message } => (McpFailure::Transport, message),
-            RunTermination::ContextOverflow { message } | RunTermination::Failed { message } => {
-                (McpFailure::Protocol, message)
-            }
-            other => (
-                McpFailure::Protocol,
-                format!("the model catalogue stopped with {}", other.exit_reason()),
-            ),
-        };
-        McpError::new(failure, message)
-    })?;
+    let effective = run::protocol_effective(root.as_path(), args.session_dir.clone())
+        .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+    let catalogue = if effective.thinking.is_none() {
+        let scope = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .map_err(|message| McpError::new(McpFailure::Transport, message))?;
+        Some(
+            models::build_catalogue_snapshot(
+                &ModelsArgs {
+                    provider: None,
+                    refresh: false,
+                    json: false,
+                },
+                scope.http(),
+            )
+            .await
+            .map_err(catalogue_error)?,
+        )
+    } else {
+        None
+    };
     let (executor, deployment) = run::CliRunExecutor::for_mcp(
         run_root,
         args.session_dir.clone(),
@@ -279,7 +274,7 @@ async fn compose_and_serve(
         artifact_publisher,
         args.max_concurrent_runs,
         Arc::clone(&evidence),
-        &catalogue,
+        catalogue.as_ref(),
     )
     .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
 
@@ -326,4 +321,19 @@ async fn compose_and_serve(
     let factory = McpRunServerFactory::new(controller, config, ports);
     let connection: Arc<dyn McpServerPort> = Arc::new(factory.new_connection());
     ego_mcp::serve_stdio(connection, Box::new(ProcessStdio::new())).await
+}
+
+fn catalogue_error(termination: RunTermination) -> McpError {
+    let (failure, message) = match termination {
+        RunTermination::UsageError { message } => (McpFailure::InvalidValue, message),
+        RunTermination::Provider { message } => (McpFailure::Transport, message),
+        RunTermination::ContextOverflow { message } | RunTermination::Failed { message } => {
+            (McpFailure::Protocol, message)
+        }
+        other => (
+            McpFailure::Protocol,
+            format!("the model catalogue stopped with {}", other.exit_reason()),
+        ),
+    };
+    McpError::new(failure, message)
 }
