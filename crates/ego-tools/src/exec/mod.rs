@@ -308,7 +308,14 @@ pub struct RunEffectPorts {
     duplex: Arc<crate::stdio::GuardedDuplex>,
 }
 
-/// One reconstructed backend and the measured facts it produced.
+/// Raw backend measurement before any session evidence or authority exists.
+struct RawExecMeasurement {
+    backend: Arc<MeasuredBackend>,
+    runtime_roots: Vec<CanonPath>,
+    probes: ProbeLog,
+}
+
+/// One reconstructed backend and the recorded facts it produced.
 ///
 /// Private because the backend and its scratch are run mechanisms, while only
 /// the observation and evidence reference cross the session admission port.
@@ -319,31 +326,53 @@ struct ExecMeasurement {
 }
 
 impl RunEffectPorts {
+    async fn measure_raw(
+        policy: &RunConfinement,
+        cancel: CancelToken,
+        exec_limits: ExecLimits,
+    ) -> Result<RawExecMeasurement, ProcessError> {
+        let probes = ProbeLog::default();
+        let (backend, runtime_roots) = select_backend(policy, cancel, exec_limits, &probes).await?;
+        backend.prerequisite(policy)?;
+        Ok(RawExecMeasurement {
+            backend,
+            runtime_roots,
+            probes,
+        })
+    }
+
     async fn measure(config: &ExecRunConfig) -> Result<ExecMeasurement, ProcessError> {
-        let measurement = ProbeLog::default();
-        let (selected, runtime_roots) = select_backend(
-            &config.policy,
-            config.cancel.clone(),
-            config.exec_limits,
-            &measurement,
-        )
-        .await?;
-        selected.prerequisite(&config.policy)?;
-        let capabilities = selected.capabilities();
+        let measured =
+            Self::measure_raw(&config.policy, config.cancel.clone(), config.exec_limits).await?;
+        let capabilities = measured.backend.capabilities();
         // The transcript lands in the session before the refusal that cites
         // it, so an operator can read what was measured rather than infer it
         // from a capability that is merely absent.
-        let transcript = commit_probe_transcript(&config.evidence, &measurement)?;
+        let transcript = commit_probe_transcript(&config.evidence, &measured.probes)?;
         let observation = ExecObservation::new(
-            selected.identity(),
+            measured.backend.identity(),
             capabilities,
-            policy_digest_with_runtime_roots(&config.policy, selected.as_ref(), &runtime_roots)?,
+            policy_digest_with_runtime_roots(
+                &config.policy,
+                measured.backend.as_ref(),
+                &measured.runtime_roots,
+            )?,
         );
         Ok(ExecMeasurement {
-            backend: selected,
+            backend: measured.backend,
             observation,
             evidence: transcript,
         })
+    }
+
+    /// Measure process capabilities without creating session authority.
+    pub async fn diagnostic_capabilities(
+        policy: &RunConfinement,
+        cancel: CancelToken,
+        exec_limits: ExecLimits,
+    ) -> Result<ExecCaps, ProcessError> {
+        let measured = Self::measure_raw(policy, cancel, exec_limits).await?;
+        Ok(measured.backend.capabilities())
     }
 
     /// Measure one policy and commit its transcript without constructing effects.
