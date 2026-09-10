@@ -60,7 +60,7 @@ fn compaction_target_carries_old_skill_history_and_reopens_with_fresh_catalogue(
     let ego = places.ego(&stub);
     ego.home_file(
         "config.toml",
-        "model = \"ollama/qwen3\"\nsandbox = \"off\"\n",
+        "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
     );
     ego.home_file(
         "skills/alpha/SKILL.md",

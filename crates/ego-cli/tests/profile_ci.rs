@@ -42,13 +42,14 @@ fn profile_ci_config(session_root: &Path, artifact_root: &Path) -> String {
 
 const OPENAI_CODEX_FACTS: &str = r#"
 [model."openai-codex/gpt-5.1".capabilities]
-schema_version = 2
+schema_version = 5
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128
 supports_parallel_tool_calls = true
 reasoning_carryover = "same_provider_only"
 reasoning_efforts = "any"
+default_reasoning_effort = "off"
 cancel = "cooperative"
 cache = "long"
 transport = "sse"
@@ -133,6 +134,8 @@ impl Fixture {
             "--artifact-dir",
             artifact_root.to_str().expect("UTF-8 artifact root"),
             "--sandbox",
+            "off",
+            "--thinking",
             "off",
         ]);
         if let Some(profile) = profile {

@@ -86,6 +86,7 @@ max_tools = 16
 supports_parallel_tool_calls = false
 reasoning_carryover = "unsupported"
 reasoning_efforts = "any"
+default_reasoning_effort = "off"
 cancel = "cooperative"
 cache = "none"
 transport = "sse"

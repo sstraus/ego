@@ -17,13 +17,14 @@ const XAI_JUDGE_MODEL: &str = "xai-oauth/grok-code-fast-1";
 
 const ANTHROPIC_FACTS: &str = r#"
 [model."anthropic/claude-test-5".capabilities]
-schema_version = 2
+schema_version = 5
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128
 supports_parallel_tool_calls = true
 reasoning_carryover = "same_provider_only"
 reasoning_efforts = "any"
+default_reasoning_effort = "off"
 cancel = "cooperative"
 cache = "long"
 transport = "sse"
@@ -39,13 +40,14 @@ output = "0.00001"
 
 const XAI_FACTS: &str = r#"
 [model."xai-oauth/grok-code-fast-1".capabilities]
-schema_version = 2
+schema_version = 5
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128
 supports_parallel_tool_calls = true
 reasoning_carryover = "same_provider_only"
 reasoning_efforts = "any"
+default_reasoning_effort = "off"
 cancel = "cooperative"
 cache = "long"
 transport = "sse"
@@ -345,7 +347,7 @@ fn incompatible_judge_capabilities_refuse_before_generation_or_session_creation(
         "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
     );
     let incompatible_facts = ANTHROPIC_FACTS.replace(
-        "reasoning_efforts = \"any\"",
+        "reasoning_efforts = \"any\"\ndefault_reasoning_effort = \"off\"",
         "reasoning_efforts = \"unknown\"",
     );
     ego.home_file("models.toml", &incompatible_facts);

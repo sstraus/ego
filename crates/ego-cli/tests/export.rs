@@ -44,6 +44,8 @@ impl Fixture {
                 support::FIXTURE_SESSION_ID,
                 "--sandbox",
                 "off",
+                "--thinking",
+                "off",
                 "SECRET-PROMPT",
             ])
             .run();

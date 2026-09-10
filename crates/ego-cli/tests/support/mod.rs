@@ -649,7 +649,10 @@ impl Places {
     }
 
     pub fn ego(&self, stub: &Stub) -> Ego {
-        Ego::at(self.home.path(), self.workspace.path(), Some(stub))
+        let mut ego = Ego::at(self.home.path(), self.workspace.path(), Some(stub));
+        ego.args = vec!["--thinking".to_owned(), "off".to_owned()];
+        ego.fixture_default_thinking = true;
+        ego
     }
 }
 
@@ -666,6 +669,7 @@ pub struct Ego {
     args: Vec<String>,
     env: HashMap<String, String>,
     stdin: Option<String>,
+    fixture_default_thinking: bool,
 }
 
 /// What a finished invocation left behind.
@@ -761,6 +765,12 @@ impl Ego {
         let home = tempfile::tempdir().expect("a temp dir");
         let workspace = tempfile::tempdir().expect("a temp dir");
         let mut ego = Ego::at(home.path(), workspace.path(), Some(stub));
+        // The Ollama discovery fixture intentionally exposes no declared
+        // reasoning default. Keep every process-level fixture explicit so a
+        // missing provider fact cannot turn an unrelated test into a startup
+        // refusal.
+        ego.args = vec!["--thinking".to_owned(), "off".to_owned()];
+        ego.fixture_default_thinking = true;
         ego.keep = vec![home, workspace];
         ego
     }
@@ -812,11 +822,16 @@ impl Ego {
             args: Vec::new(),
             env,
             stdin: None,
+            fixture_default_thinking: false,
         }
     }
 
     /// Run `ego <name>` rather than `ego run`.
     pub fn subcommand(mut self, name: &str) -> Self {
+        if !matches!(name, "run" | "resume") && self.fixture_default_thinking {
+            self.args.drain(..2);
+            self.fixture_default_thinking = false;
+        }
         self.subcommand = name.to_string();
         self
     }
@@ -832,11 +847,24 @@ impl Ego {
     }
 
     pub fn arg(mut self, arg: &str) -> Self {
+        if self.fixture_default_thinking && (arg == "--thinking" || arg.starts_with("--thinking="))
+        {
+            self.args.drain(..2);
+            self.fixture_default_thinking = false;
+        }
         self.args.push(arg.to_string());
         self
     }
 
     pub fn args<const N: usize>(mut self, args: [&str; N]) -> Self {
+        if self.fixture_default_thinking
+            && args
+                .iter()
+                .any(|arg| *arg == "--thinking" || arg.starts_with("--thinking="))
+        {
+            self.args.drain(..2);
+            self.fixture_default_thinking = false;
+        }
         self.args.extend(args.iter().map(|arg| arg.to_string()));
         self
     }

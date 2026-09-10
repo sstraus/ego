@@ -127,6 +127,7 @@ fn invalid_hook_candidate_is_rejected_and_inspection_is_read_only() {
 #[test]
 fn executable_ego_shebang_uses_real_run_pipeline_and_relative_schema() {
     let fixture = Fixture::new();
+    fixture.ego().home_file("config.toml", "thinking = 'off'\n");
     fixture.ego().file("agents/schema.json", "{}");
     let path = fixture.ego().file("agents/demo.ego", "#!/usr/bin/env -S ego run -f\n---\nversion: 1\nmodel: ollama/qwen3\nsandbox: off\nschema: '@schema.json'\n---\nSay hello.\n");
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
