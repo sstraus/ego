@@ -150,6 +150,12 @@ impl ConnectionGate {
         self.state.shutdown.cancel();
     }
 
+    /// Observe shutdown inside the listener lifecycle without exposing the
+    /// token that owns it to protocol callers.
+    pub(crate) fn cancelled(&self) -> WaitForCancellationFutureOwned {
+        self.state.shutdown.clone().cancelled_owned()
+    }
+
     async fn drain(&self) -> Result<(), ConnectionGateError> {
         let permits = Arc::clone(&self.state.permits)
             .acquire_many_owned(self.state.limits.max_connections)

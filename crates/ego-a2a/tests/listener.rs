@@ -13,8 +13,10 @@ use std::time::Duration;
 use ego_a2a::auth::Credential;
 use ego_a2a::serve::{WELL_KNOWN_AGENT_CARD_PATH, serve_on};
 use ego_core::endpoint::{Admitted, PublicBind, Requested, admit};
+use ego_listen::{ConnectionGate, ConnectionLimits};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
+use tokio::sync::oneshot;
 
 const TOKEN: &str = "listener-test-token";
 
@@ -32,28 +34,54 @@ impl Answer {
     }
 }
 
+struct Running {
+    address: String,
+    stop: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl Running {
+    async fn shutdown(self) {
+        self.stop.send(()).expect("the listener is still running");
+        tokio::time::timeout(Duration::from_secs(1), self.task)
+            .await
+            .expect("the listener shuts down while idle")
+            .expect("the listener task joins")
+            .expect("the listener shuts down cleanly");
+    }
+}
+
 /// Serve `admitted`, and report the endpoint it actually got.
-async fn serving(
+async fn serving(admitted: Admitted, credential: Option<Credential>) -> Running {
+    serving_with_limits(admitted, credential, ConnectionLimits::default()).await
+}
+
+async fn serving_with_limits(
     admitted: Admitted,
     credential: Option<Credential>,
-) -> (String, tokio::task::JoinHandle<()>) {
+    limits: ConnectionLimits,
+) -> Running {
     let bound = ego_listen::bind(&admitted)
         .await
         .expect("the endpoint binds");
-    let advertised = bound.advertised().expect("a bound endpoint names itself");
-    let handle = tokio::spawn(async move {
-        // Never resolves: the task is aborted at the end of the test, which is
-        // the shutdown a test wants — no graceful-drain timing in the assertions.
-        let forever = std::future::pending();
-        serve_on(bound, &admitted, credential, forever)
-            .await
-            .expect("the listener serves");
+    let address = bound.advertised().expect("a bound endpoint names itself");
+    let gate = ConnectionGate::new(limits);
+    let (stop, shutdown) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        serve_on(bound, &admitted, credential, gate, async move {
+            let _ = shutdown.await;
+        })
+        .await
     });
-    (advertised, handle)
+    Running {
+        address,
+        stop,
+        task,
+    }
 }
 
 /// A listener on an OS-chosen port, and the address it actually got.
-async fn listening() -> (String, tokio::task::JoinHandle<()>) {
+async fn listening() -> Running {
     let admitted = admit(
         Requested::Tcp("127.0.0.1:0".parse().expect("an address")),
         PublicBind::Refused,
@@ -69,7 +97,7 @@ async fn listening() -> (String, tokio::task::JoinHandle<()>) {
 ///
 /// Under `~/Gits` deliberately: `CLAUDE.md` keeps test paths out of the per-user
 /// temp dir on this machine.
-async fn listening_locally(name: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
+async fn listening_locally(name: &str) -> (PathBuf, Running) {
     let mut path = PathBuf::from(std::env::var("HOME").expect("HOME is set"));
     path.push("Gits/.tmp/ego-a2a-tests");
     path.push(name);
@@ -81,8 +109,8 @@ async fn listening_locally(name: &str) -> (PathBuf, tokio::task::JoinHandle<()>)
         PublicBind::Refused,
     )
     .expect("a local endpoint is admitted");
-    let (_, handle) = serving(admitted, None).await;
-    (path, handle)
+    let running = serving(admitted, None).await;
+    (path, running)
 }
 
 /// Write one request verbatim and read the whole answer.
@@ -128,6 +156,49 @@ async fn exchange_on(mut stream: impl AsyncRead + AsyncWrite + Unpin, request: &
     }
 }
 
+/// Read one response without closing the keep-alive connection.
+async fn exchange_one(stream: &mut TcpStream, request: &str) -> Answer {
+    stream.write_all(request.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
+
+    read_response_one(stream).await
+}
+
+async fn read_response_one(stream: &mut TcpStream) -> Answer {
+    let mut raw = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).await.unwrap();
+        raw.extend_from_slice(&byte);
+        if raw.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let separator = raw.len() - 4;
+    let head = String::from_utf8(raw[..separator].to_vec()).unwrap();
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap();
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then_some(value.trim())
+        })
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("a keep-alive response has a content length");
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await.unwrap();
+    Answer {
+        status,
+        headers: head,
+        body: String::from_utf8(body).unwrap(),
+    }
+}
+
 fn get(path: &str, authorization: Option<&str>) -> String {
     request("GET", path, authorization, None)
 }
@@ -152,9 +223,14 @@ fn bearer() -> String {
 
 #[tokio::test]
 async fn an_authenticated_caller_discovers_the_card_at_the_well_known_path() {
-    let (address, handle) = listening().await;
-    let answer = exchange(&address, &get(WELL_KNOWN_AGENT_CARD_PATH, Some(&bearer()))).await;
-    handle.abort();
+    let running = listening().await;
+    let advertised = running.address.clone();
+    let answer = exchange(
+        &running.address,
+        &get(WELL_KNOWN_AGENT_CARD_PATH, Some(&bearer())),
+    )
+    .await;
+    running.shutdown().await;
 
     assert_eq!(answer.status, 200, "{}", answer.body);
     let card = answer.json();
@@ -168,7 +244,7 @@ async fn an_authenticated_caller_discovers_the_card_at_the_well_known_path() {
     // one that was asked for: the test asked for port 0.
     assert_eq!(
         card["supportedInterfaces"][0]["url"],
-        format!("http://{address}/")
+        format!("http://{advertised}/")
     );
     assert_eq!(card["capabilities"]["streaming"], false);
 }
@@ -177,7 +253,7 @@ async fn an_authenticated_caller_discovers_the_card_at_the_well_known_path() {
 /// listener to learn what it serves.
 #[tokio::test]
 async fn an_unauthenticated_caller_learns_nothing_at_all() {
-    let (address, handle) = listening().await;
+    let running = listening().await;
 
     let cases = [
         ("no header", get(WELL_KNOWN_AGENT_CARD_PATH, None)),
@@ -203,7 +279,7 @@ async fn an_unauthenticated_caller_learns_nothing_at_all() {
     ];
 
     for (name, raw) in cases {
-        let answer = exchange(&address, &raw).await;
+        let answer = exchange(&running.address, &raw).await;
         assert_eq!(answer.status, 401, "{name}: {}", answer.body);
         assert!(
             answer.body.is_empty(),
@@ -226,14 +302,14 @@ async fn an_unauthenticated_caller_learns_nothing_at_all() {
             answer.body
         );
     }
-    handle.abort();
+    running.shutdown().await;
 }
 
 /// An authenticated caller gets the honest answer for this milestone: the
 /// method is real, and this build has no route for it.
 #[tokio::test]
 async fn every_a2a_method_is_recognised_and_refused_as_unserved() {
-    let (address, handle) = listening().await;
+    let running = listening().await;
 
     for method in [
         "SendMessage",
@@ -246,7 +322,7 @@ async fn every_a2a_method_is_recognised_and_refused_as_unserved() {
     ] {
         let body = format!(r#"{{"jsonrpc":"2.0","id":7,"method":"{method}","params":{{}}}}"#);
         let answer = exchange(
-            &address,
+            &running.address,
             &request("POST", "/", Some(&bearer()), Some(&body)),
         )
         .await;
@@ -261,16 +337,16 @@ async fn every_a2a_method_is_recognised_and_refused_as_unserved() {
             "{method}: an unserved method reads as unknown: {message}"
         );
     }
-    handle.abort();
+    running.shutdown().await;
 }
 
 /// A method A2A does not define reads differently from one it does, so a caller
 /// can tell a typo from a version gap.
 #[tokio::test]
 async fn a_method_a2a_does_not_define_reads_as_no_such_method() {
-    let (address, handle) = listening().await;
+    let running = listening().await;
     let answer = exchange(
-        &address,
+        &running.address,
         &request(
             "POST",
             "/",
@@ -279,7 +355,7 @@ async fn a_method_a2a_does_not_define_reads_as_no_such_method() {
         ),
     )
     .await;
-    handle.abort();
+    running.shutdown().await;
 
     let rpc = answer.json();
     assert_eq!(rpc["error"]["code"], -32601);
@@ -294,13 +370,13 @@ async fn a_method_a2a_does_not_define_reads_as_no_such_method() {
 
 #[tokio::test]
 async fn a_body_that_is_not_a_jsonrpc_envelope_is_a_parse_error() {
-    let (address, handle) = listening().await;
+    let running = listening().await;
     let answer = exchange(
-        &address,
+        &running.address,
         &request("POST", "/", Some(&bearer()), Some("{not json")),
     )
     .await;
-    handle.abort();
+    running.shutdown().await;
 
     assert_eq!(answer.json()["error"]["code"], -32700);
 }
@@ -309,12 +385,12 @@ async fn a_body_that_is_not_a_jsonrpc_envelope_is_a_parse_error() {
 /// endpoint kind the operating system authenticates instead of a credential.
 #[tokio::test]
 async fn a_local_endpoint_serves_its_owner_with_no_credential_anywhere() {
-    let (path, handle) = listening_locally("card").await;
+    let (path, running) = listening_locally("card").await;
     let stream = UnixStream::connect(&path)
         .await
         .expect("the owner reaches its own endpoint");
     let answer = exchange_on(stream, &get(WELL_KNOWN_AGENT_CARD_PATH, None)).await;
-    handle.abort();
+    running.shutdown().await;
 
     assert_eq!(answer.status, 200, "{}", answer.body);
     let card = answer.json();
@@ -332,7 +408,7 @@ async fn a_local_endpoint_serves_its_owner_with_no_credential_anywhere() {
 /// answered for, and presenting a wrong one is not a way to be refused.
 #[tokio::test]
 async fn a_local_endpoint_ignores_the_authorization_header_entirely() {
-    let (path, handle) = listening_locally("header").await;
+    let (path, running) = listening_locally("header").await;
     for authorization in ["Bearer not-the-token", "Basic whatever", ""] {
         let stream = UnixStream::connect(&path)
             .await
@@ -348,7 +424,7 @@ async fn a_local_endpoint_ignores_the_authorization_header_entirely() {
             answer.body
         );
     }
-    handle.abort();
+    running.shutdown().await;
 }
 
 /// The refusal is at startup, not at the first request: an endpoint that cannot
@@ -363,7 +439,8 @@ async fn a_loopback_endpoint_refuses_to_start_without_a_credential() {
     let bound = ego_listen::bind(&admitted)
         .await
         .expect("the endpoint binds");
-    let error = serve_on(bound, &admitted, None, std::future::pending::<()>())
+    let gate = ConnectionGate::new(ConnectionLimits::default());
+    let error = serve_on(bound, &admitted, None, gate, std::future::pending::<()>())
         .await
         .expect_err("a loopback endpoint served with no credential");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
@@ -374,8 +451,79 @@ async fn a_loopback_endpoint_refuses_to_start_without_a_credential() {
 
 #[tokio::test]
 async fn an_authenticated_caller_still_gets_404_for_a_path_that_does_not_exist() {
-    let (address, handle) = listening().await;
-    let answer = exchange(&address, &get("/nope", Some(&bearer()))).await;
-    handle.abort();
+    let running = listening().await;
+    let answer = exchange(&running.address, &get("/nope", Some(&bearer()))).await;
+    running.shutdown().await;
     assert_eq!(answer.status, 404);
+}
+
+#[tokio::test]
+async fn an_idle_listener_shuts_down_without_aborting_its_task() {
+    let running = listening().await;
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_keepalive_connection_holds_its_gate_permit_until_disconnect() {
+    let admitted = admit(
+        Requested::Tcp("127.0.0.1:0".parse().unwrap()),
+        PublicBind::Refused,
+    )
+    .unwrap();
+    let running = serving_with_limits(
+        admitted,
+        Some(Credential::from_env(|_| Some(TOKEN.to_owned())).unwrap()),
+        ConnectionLimits::new(1, Duration::from_secs(60), 2 * 1024 * 1024).unwrap(),
+    )
+    .await;
+    let keepalive = request("GET", WELL_KNOWN_AGENT_CARD_PATH, Some(&bearer()), None)
+        .replace("connection: close", "connection: keep-alive");
+    let mut first = TcpStream::connect(&running.address).await.unwrap();
+    let answer = exchange_one(&mut first, &keepalive).await;
+    assert_eq!(answer.status, 200);
+
+    let mut second = TcpStream::connect(&running.address).await.unwrap();
+    let second_request = request("GET", WELL_KNOWN_AGENT_CARD_PATH, Some(&bearer()), None);
+    second.write_all(second_request.as_bytes()).await.unwrap();
+    second.flush().await.unwrap();
+    let blocked =
+        tokio::time::timeout(Duration::from_millis(100), read_response_one(&mut second)).await;
+    assert!(
+        blocked.is_err(),
+        "the second keep-alive occupied a permit early"
+    );
+
+    drop(first);
+    let released = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut raw = Vec::new();
+        second.read_to_end(&mut raw).await.unwrap();
+        raw
+    })
+    .await
+    .expect("the second connection proceeds after the first disconnects");
+    assert!(String::from_utf8_lossy(&released).starts_with("HTTP/1.1 200"));
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a2a_rejects_bodies_over_one_mib_even_with_a_larger_connection_budget() {
+    let admitted = admit(
+        Requested::Tcp("127.0.0.1:0".parse().unwrap()),
+        PublicBind::Refused,
+    )
+    .unwrap();
+    let running = serving_with_limits(
+        admitted,
+        Some(Credential::from_env(|_| Some(TOKEN.to_owned())).unwrap()),
+        ConnectionLimits::new(1, Duration::from_secs(60), 2 * 1024 * 1024).unwrap(),
+    )
+    .await;
+    let body = "x".repeat(1024 * 1024 + 1);
+    let answer = exchange(
+        &running.address,
+        &request("POST", "/", Some(&bearer()), Some(&body)),
+    )
+    .await;
+    running.shutdown().await;
+    assert_eq!(answer.status, 413, "{}", answer.body);
 }

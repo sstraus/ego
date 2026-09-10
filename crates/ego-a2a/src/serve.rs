@@ -33,7 +33,9 @@ use crate::auth::BEARER;
 use crate::auth::Credential;
 use crate::card::{Served, card};
 use ego_core::endpoint::Admitted;
-use ego_listen::{Bound, Peer};
+use ego_listen::{
+    Bound, ConnectionGate, ConnectionLimits, GuardedAccepted, Peer, serve_connections,
+};
 
 /// The discovery path, pinned to the constant the reference server publishes.
 ///
@@ -71,7 +73,14 @@ pub async fn serve(
     shutdown: impl Future<Output = ()> + Send,
 ) -> std::io::Result<()> {
     let bound = ego_listen::bind(admitted).await?;
-    serve_on(bound, admitted, credential, shutdown).await
+    serve_on(
+        bound,
+        admitted,
+        credential,
+        ConnectionGate::new(ConnectionLimits::default()),
+        shutdown,
+    )
+    .await
 }
 
 /// The same, on an endpoint the caller already opened.
@@ -79,6 +88,7 @@ pub async fn serve_on(
     bound: Bound,
     admitted: &Admitted,
     credential: Option<Credential>,
+    gate: ConnectionGate,
     shutdown: impl Future<Output = ()> + Send,
 ) -> std::io::Result<()> {
     // Refuse before serving rather than per request. An endpoint whose
@@ -111,41 +121,30 @@ pub async fn serve_on(
     });
     tracing::info!(endpoint = %advertised, "serving A2A");
 
-    let mut shutdown = Box::pin(shutdown);
-    loop {
-        let accepted = tokio::select! {
-            biased;
-            () = &mut shutdown => return Ok(()),
-            accepted = bound.accept() => accepted,
-        };
-        let accepted = match accepted {
-            // The transport refused a peer it could not vouch for. That is a
-            // connection that did not happen, not a reason to stop serving the
-            // peers entitled to be here.
-            Ok(None) => continue,
-            Ok(Some(accepted)) => accepted,
-            // One failed accept is not a reason to stop serving the callers
-            // that did get through; a listener that exits on the first EMFILE
-            // turns a transient limit into an outage.
-            Err(error) => {
-                tracing::warn!(%error, "an A2A connection could not be accepted");
-                continue;
+    serve_connections(
+        bound,
+        gate,
+        move |accepted: GuardedAccepted| {
+            // Decided once per connection, from what the transport proved,
+            // and never re-derived per request from a header.
+            let authenticated = accepted.peer == Peer::CurrentUser;
+            let state = Arc::clone(&state);
+            async move {
+                serve_connection(accepted, state, authenticated).await;
             }
-        };
-        // Decided once per connection, from what the transport proved, and
-        // never re-derived per request from a header.
-        let authenticated = accepted.peer == Peer::CurrentUser;
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            let service =
-                service_fn(move |request| answer(Arc::clone(&state), authenticated, request));
-            if let Err(error) = http1::Builder::new()
-                .serve_connection(TokioIo::new(accepted.stream), service)
-                .await
-            {
-                tracing::debug!(%error, "an A2A connection ended badly");
-            }
-        });
+        },
+        shutdown,
+    )
+    .await
+}
+
+async fn serve_connection(accepted: GuardedAccepted, state: Arc<Listener>, authenticated: bool) {
+    let service = service_fn(move |request| answer(Arc::clone(&state), authenticated, request));
+    if let Err(error) = http1::Builder::new()
+        .serve_connection(TokioIo::new(accepted.stream), service)
+        .await
+    {
+        tracing::debug!(%error, "an A2A connection ended badly");
     }
 }
 

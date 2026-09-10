@@ -3,6 +3,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
+use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::pin::Pin;
@@ -12,14 +13,22 @@ use crate::negotiate::{SERVED, negotiate};
 use crate::project::{project_replay_v1, stop_reason_v1};
 use crate::question::{AcpQuestionAdapter, CapabilityCapture};
 use agent_client_protocol::{
-    Agent, AgentProtocolRouter, Client, ConnectionTo, Error, ErrorCode, JsonRpcMessage,
-    JsonRpcRequest, Responder, UntypedMessage, on_receive_notification, on_receive_request,
+    Agent, AgentProtocolRouter, ByteStreams, Client, ConnectTo, ConnectionTo, Error, ErrorCode,
+    JsonRpcMessage, JsonRpcRequest, Responder, UntypedMessage, on_receive_notification,
+    on_receive_request,
 };
+use agent_client_protocol_http::{AcpHttpServer, CorsOptions, ServerOptions};
 use agent_client_protocol_schema::v1;
+use axum::extract::{Request as AxumRequest, State};
+use axum::http::header::{AUTHORIZATION, CONNECTION, UPGRADE, WWW_AUTHENTICATE};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response as AxumResponse};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ego_core::compact::{CompactionCommand, CompactionReceipt, CompactionTransitionRequest};
 use ego_core::control::{ControlError, SessionControlChange, SessionControlState, SessionControls};
+use ego_core::endpoint::{Admitted, Authentication};
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ModelCapabilities;
@@ -39,8 +48,196 @@ use ego_core::session_lifecycle::{
 use ego_core::sink::EventSink;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use ego_core::turn::AdmittedToolSource;
+use ego_listen::{Bound, ConnectionGate, GuardedAccepted, Peer, serve_connections};
 use futures::channel::oneshot;
+use hyper::server::conn::http1;
+use hyper_util::rt::TokioIo;
+use hyper_util::service::TowerToHyperService;
 use serde::{Deserialize, Serialize};
+use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+use crate::auth::{Credential, TOKEN_VAR};
+
+const ACP_PATH: &str = "/acp";
+
+/// Serve ACP on one endpoint already opened by the shared listener.
+///
+/// Local endpoints use the SDK's newline-delimited [`ByteStreams`] directly
+/// after operating-system peer authentication. TCP endpoints use the official
+/// HTTP/WebSocket adapter, with bearer and WebSocket admission outside its
+/// router so no protocol component exists for a refused request.
+pub async fn serve_on<F, C, Shutdown>(
+    bound: Bound,
+    admitted: &Admitted,
+    credential: Option<Credential>,
+    gate: ConnectionGate,
+    factory: F,
+    shutdown: Shutdown,
+) -> io::Result<()>
+where
+    F: Fn() -> C + Send + Sync + 'static,
+    C: ConnectTo<Client>,
+    Shutdown: Future<Output = ()> + Send,
+{
+    match admitted.authentication() {
+        Authentication::PeerIdentity => serve_local(bound, gate, factory, shutdown).await,
+        Authentication::BearerCredential => {
+            let credential = credential.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{admitted} requires an ACP bearer credential before serving: set {TOKEN_VAR}"
+                    ),
+                )
+            })?;
+            serve_network(bound, gate, credential, factory, shutdown).await
+        }
+    }
+}
+
+async fn serve_local<F, C, Shutdown>(
+    bound: Bound,
+    gate: ConnectionGate,
+    factory: F,
+    shutdown: Shutdown,
+) -> io::Result<()>
+where
+    F: Fn() -> C + Send + Sync + 'static,
+    C: ConnectTo<Client>,
+    Shutdown: Future<Output = ()> + Send,
+{
+    let factory = Arc::new(factory);
+    serve_connections(
+        bound,
+        gate,
+        move |accepted: GuardedAccepted| {
+            let factory = Arc::clone(&factory);
+            async move {
+                if accepted.peer != Peer::CurrentUser {
+                    tracing::warn!(
+                        target: "ego::acp",
+                        "an ACP local connection lacked operating-system peer authentication"
+                    );
+                    return;
+                }
+                let (incoming, outgoing) = tokio::io::split(accepted.stream);
+                let transport = ByteStreams::new(outgoing.compat_write(), incoming.compat());
+                if let Err(error) = factory().connect_to(transport).await {
+                    tracing::debug!(%error, "an ACP local connection ended badly");
+                }
+            }
+        },
+        shutdown,
+    )
+    .await
+}
+
+#[derive(Clone)]
+struct NetworkAdmission {
+    credential: Arc<Credential>,
+}
+
+async fn admit_network_request(
+    State(admission): State<NetworkAdmission>,
+    request: AxumRequest,
+    next: Next,
+) -> AxumResponse {
+    if !presents_exactly_one_credential(request.headers(), &admission.credential) {
+        return unauthorized();
+    }
+    if request.uri().path() != ACP_PATH {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if request.method() != Method::GET
+        || !header_contains_token(request.headers(), CONNECTION, b"upgrade")
+        || !header_contains_token(request.headers(), UPGRADE, b"websocket")
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    next.run(request).await
+}
+
+fn presents_exactly_one_credential(headers: &HeaderMap, credential: &Credential) -> bool {
+    let mut values = headers.get_all(AUTHORIZATION).iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    values.next().is_none() && credential.admits(value.as_bytes())
+}
+
+fn header_contains_token(headers: &HeaderMap, name: HeaderName, expected: &[u8]) -> bool {
+    headers.get_all(name).iter().any(|value| {
+        value
+            .as_bytes()
+            .split(|byte| *byte == b',')
+            .map(trim_ascii_whitespace)
+            .any(|token| token.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn trim_ascii_whitespace(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
+    }
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn unauthorized() -> AxumResponse {
+    let mut response = StatusCode::UNAUTHORIZED.into_response();
+    response
+        .headers_mut()
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    response
+}
+
+async fn serve_network<F, C, Shutdown>(
+    bound: Bound,
+    gate: ConnectionGate,
+    credential: Credential,
+    factory: F,
+    shutdown: Shutdown,
+) -> io::Result<()>
+where
+    F: Fn() -> C + Send + Sync + 'static,
+    C: ConnectTo<Client>,
+    Shutdown: Future<Output = ()> + Send,
+{
+    let router = AcpHttpServer::new(factory)
+        .with_options(ServerOptions {
+            path: ACP_PATH.to_owned(),
+            cors: CorsOptions::disabled(),
+            health_endpoint: false,
+        })
+        .into_router()
+        .layer(middleware::from_fn_with_state(
+            NetworkAdmission {
+                credential: Arc::new(credential),
+            },
+            admit_network_request,
+        ));
+
+    serve_connections(
+        bound,
+        gate,
+        move |accepted: GuardedAccepted| {
+            let service = TowerToHyperService::new(router.clone());
+            async move {
+                if let Err(error) = http1::Builder::new()
+                    .serve_connection(TokioIo::new(accepted.stream), service)
+                    .with_upgrades()
+                    .await
+                {
+                    tracing::debug!(%error, "an ACP WebSocket connection ended badly");
+                }
+            }
+        },
+        shutdown,
+    )
+    .await
+}
 
 /// Failure to turn an untrusted protocol path into a canonical run root.
 #[derive(Debug, Clone, PartialEq, Eq)]

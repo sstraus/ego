@@ -8,24 +8,42 @@ publish.workspace = true
 
 [dependencies]
 agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation", "unstable_protocol_v2", "unstable_session_fork"] }
+# The released HTTP/WebSocket adapter owns ACP's network framing and connection
+# registry. Exact because it is a foreign protocol implementation, not an
+# internal convenience dependency.
+agent-client-protocol-http = { version = "=2.0.0", features = ["server"] }
 agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation", "unstable_protocol_v2", "unstable_session_fork"] }
+# Named directly for admission middleware around the official router.
+axum = "0.8.9"
 # ACP sends image bytes base64-encoded inside the JSON frame, so the decode is
 # part of reading a prompt at all. Pinned to the same version `ego-ai` uses so
 # the wire decoder and this one cannot disagree about what an encoding is.
 base64 = "0.22.1"
 ego-core.workspace = true
+ego-listen.workspace = true
 # `oneshot` only: an admitted turn settles on the spawned execution, so the
 # diagnostic that explains an executor failure has to reach the request that is
 # still waiting to be answered.
 futures = "0.3.34"
+# Hyper owns the accepted HTTP/1 connection while hyper-util adapts the
+# official Axum router without copying its WebSocket implementation.
+hyper = { version = "1.11.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["service", "tokio"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Local ACP splits the listener's guarded Tokio stream and hands compatible
+# futures-io halves to the SDK's ByteStreams transport.
+tokio = { version = "1", features = ["io-util"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1.44"
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+# The official ACP HTTP adapter uses this maintained WebSocket implementation;
+# the test client needs request-header access to exercise bearer authentication.
+async-tungstenite = { version = "=0.34.1", default-features = false, features = ["tokio-rustls-webpki-roots"] }
 # The `initialize` test drives the real SDK router over a pair of in-memory
 # line channels, which is the only way to ask what the router actually answers.
 uuid = "1.24.1"
@@ -35,3 +53,4 @@ uuid = "1.24.1"
 # answered fails the test with what its silence meant, rather than hanging the
 # suite — which is precisely how the admission defect presents.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["compat"] }

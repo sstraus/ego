@@ -33,10 +33,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::net::{UnixListener, UnixStream};
 
 mod limits;
+mod serve;
 
 pub use limits::{
     ConnectionGate, ConnectionGateError, ConnectionLimits, ConnectionLimitsError, GuardedStream,
 };
+pub use serve::{GuardedAccepted, serve_connections};
 
 /// Who connected, as far as the transport can prove it.
 ///
