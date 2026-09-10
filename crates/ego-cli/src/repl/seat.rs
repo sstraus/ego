@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{IsTerminal, Write as _};
+use std::io::{BufRead, IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -548,8 +548,7 @@ impl LiveSeat {
 }
 
 struct SequentialSeat {
-    editor: Mutex<Reedline>,
-    asked_for_image: Arc<AtomicBool>,
+    input: Mutex<std::io::BufReader<std::io::Stdin>>,
 }
 
 enum SeatKind {
@@ -581,12 +580,23 @@ impl Seat {
     pub fn new(cancel: CancelToken) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
         let (ingress, control) = interactive_control();
         let terminal = std::io::stdin().is_terminal();
-        let phase = SurfacePhase::new(if terminal {
-            EditPhase::Busy
-        } else {
-            EditPhase::Idle
-        });
         let registry = Arc::new(ActionRegistry::final_surface());
+
+        if !terminal {
+            return Ok((
+                Self {
+                    kind: SeatKind::Sequential(Box::new(SequentialSeat {
+                        input: Mutex::new(std::io::BufReader::new(std::io::stdin())),
+                    })),
+                    terminal,
+                    registry,
+                    coordinator: Mutex::new(Some(control)),
+                },
+                None,
+            ));
+        }
+
+        let phase = SurfacePhase::new(EditPhase::Busy);
         let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
             &registry,
         ))));
@@ -622,21 +632,6 @@ impl Seat {
                 ColumnarMenu::default().with_name(ACTION_MENU),
             )))
             .use_bracketed_paste(true);
-
-        if !terminal {
-            return Ok((
-                Self {
-                    kind: SeatKind::Sequential(Box::new(SequentialSeat {
-                        editor: Mutex::new(editor),
-                        asked_for_image,
-                    })),
-                    terminal,
-                    registry,
-                    coordinator: Mutex::new(Some(control)),
-                },
-                None,
-            ));
-        }
 
         let painter = Arc::new(InteractivePainter::live(editor.repaint_signal()));
         {
@@ -704,11 +699,8 @@ impl Seat {
                 line
             }
             SeatKind::Sequential(seat) => {
-                let line = read_with(
-                    &seat.editor,
-                    &seat.asked_for_image,
-                    &Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default()))),
-                );
+                let line =
+                    read_sequential_line(&mut *seat.input.lock().expect("sequential input lock"));
                 let Line::Submitted(text) = line else {
                     return line;
                 };
@@ -1091,6 +1083,22 @@ impl Seat {
         }
         live.wake_owner();
         answer.recv().unwrap_or(fallback)
+    }
+}
+
+fn read_sequential_line(input: &mut impl BufRead) -> Line {
+    let mut text = String::new();
+    match input.read_line(&mut text) {
+        Ok(0) | Err(_) => Line::Ended,
+        Ok(_) => {
+            if text.ends_with('\n') {
+                text.pop();
+                if text.ends_with('\r') {
+                    text.pop();
+                }
+            }
+            Line::of(reedline::Signal::Success(text))
+        }
     }
 }
 
@@ -3667,6 +3675,68 @@ fn question_selector_command(command: &str) -> ReedlineEvent {
 mod tests {
     use super::*;
     use crate::repl::policy_controls::PolicyControlRequest;
+    use std::io::{self, BufReader, Cursor, Read};
+
+    // RED contract for Sol: the sequential adapter must consume BufRead input
+    // without constructing Reedline or probing terminal cursor state.
+    #[test]
+    fn sequential_reader_submits_text_after_lf() {
+        let mut input = Cursor::new(b"hello\n".to_vec());
+
+        assert_eq!(
+            read_sequential_line(&mut input),
+            Line::Submitted("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn sequential_reader_strips_exactly_the_crlf_terminator() {
+        let mut input = Cursor::new(b"hello\r\n".to_vec());
+
+        assert_eq!(
+            read_sequential_line(&mut input),
+            Line::Submitted("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn sequential_reader_maps_whitespace_only_input_to_blank() {
+        let mut input = Cursor::new(b" \t \n".to_vec());
+
+        assert_eq!(read_sequential_line(&mut input), Line::Blank);
+    }
+
+    #[test]
+    fn sequential_reader_submits_a_final_unterminated_line() {
+        let mut input = Cursor::new(b"final line".to_vec());
+
+        assert_eq!(
+            read_sequential_line(&mut input),
+            Line::Submitted("final line".to_string())
+        );
+    }
+
+    #[test]
+    fn sequential_reader_maps_immediate_eof_to_ended() {
+        let mut input = Cursor::new(Vec::<u8>::new());
+
+        assert_eq!(read_sequential_line(&mut input), Line::Ended);
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected sequential read failure"))
+        }
+    }
+
+    #[test]
+    fn sequential_reader_maps_a_read_error_to_ended() {
+        let mut input = BufReader::new(FailingReader);
+
+        assert_eq!(read_sequential_line(&mut input), Line::Ended);
+    }
 
     #[test]
     fn trust_accepts_only_an_explicit_yes_or_no() {
