@@ -132,6 +132,43 @@ fn every_system_turn_lands_in_the_one_slot_the_api_offers() {
     );
 }
 
+/// The system slot holds text and nothing else.
+///
+/// A non-text block is refused while projecting the request, before this
+/// mapping can produce request bytes for a transport to observe.
+#[test]
+fn a_system_turn_that_is_not_text_is_refused_before_request_construction() {
+    let req = GenRequest {
+        messages: conversation(vec![
+            Message::text(Role::User, "go"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    call_id: "call_read".to_string(),
+                    name: "read_file".to_string(),
+                    args: "{}".to_string(),
+                }],
+            },
+            Message {
+                role: Role::System,
+                content: vec![ContentBlock::ToolResult {
+                    call_id: "call_read".to_string(),
+                    output: "main.rs".to_string(),
+                    is_error: false,
+                }],
+            },
+        ]),
+        ..wide_request()
+    };
+
+    let refusal = request_body(&req).expect_err("the system slot is text-only");
+    assert_eq!(refusal, Inexpressible::SystemTurnIsTextOnly);
+    assert_eq!(
+        refusal.to_string(),
+        "a system turn carried something other than text, and system_instruction is a plain string on this API"
+    );
+}
+
 /// A conversation is steps, not roles — and the assistant's turn is a
 /// *request-side* `model_output` step.
 ///
