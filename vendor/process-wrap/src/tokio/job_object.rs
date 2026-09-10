@@ -1,12 +1,14 @@
 use std::{
 	future::Future,
 	io::{Error, ErrorKind, Result},
+	ops::ControlFlow,
 	os::windows::io::{AsRawHandle, BorrowedHandle},
 	pin::Pin,
 	process::ExitStatus,
 	time::Duration,
 };
 
+use futures::channel::oneshot;
 use tokio::{process::Command, task::spawn_blocking};
 #[cfg(feature = "tracing")]
 use tracing::{debug, instrument};
@@ -27,6 +29,8 @@ use super::CreationFlags;
 #[cfg(feature = "kill-on-drop")]
 use super::KillOnDrop;
 use super::{ChildWrapper, CommandWrap, CommandWrapper};
+
+type JobWaitReceiver = oneshot::Receiver<Result<ControlFlow<()>>>;
 
 /// Wrapper which creates a job object context for a `Command`.
 ///
@@ -135,6 +139,7 @@ pub struct JobObjectChild {
 	inner: Box<dyn ChildWrapper>,
 	exit_status: ChildExitStatus,
 	job_port: JobPort,
+	job_wait: Option<JobWaitReceiver>,
 }
 
 impl JobObjectChild {
@@ -144,6 +149,7 @@ impl JobObjectChild {
 			inner,
 			exit_status: ChildExitStatus::Running,
 			job_port,
+			job_wait: None,
 		}
 	}
 }
@@ -185,28 +191,79 @@ impl ChildWrapper for JobObjectChild {
 			// always wait for parent to exit first, as by the time it does,
 			// it's likely that all its children have already exited.
 			let status = self.inner.wait().await?;
-			self.exit_status = ChildExitStatus::Exited(status);
 
-			// nevertheless, now try reaping all children a few times...
-			for _ in 1..MAX_RETRY_ATTEMPT {
-				if wait_on_job(self.job_port.completion_port, Some(Duration::ZERO))?.is_break() {
-					return Ok(status);
+			if self.job_wait.is_none() {
+				// nevertheless, now try reaping all children a few times...
+				for _ in 1..MAX_RETRY_ATTEMPT {
+					if wait_on_job(self.job_port.completion_port, Some(Duration::ZERO))?.is_break()
+					{
+						self.exit_status = ChildExitStatus::Exited(status);
+						return Ok(status);
+					}
+				}
+
+				// ...finally, if there are some that are still alive,
+				// block in the background to reap them fully. Keep the receiver on
+				// the child so cancellation cannot lose a completion the blocking
+				// waiter consumes.
+				let completion_port = self.job_port.completion_port;
+				let (send, receive) = oneshot::channel();
+				drop(spawn_blocking(move || {
+					let _ = send.send(wait_on_job(completion_port, None));
+				}));
+				self.job_wait = Some(receive);
+			}
+			let result = self
+				.job_wait
+				.as_mut()
+				.expect("Job completion receiver is present")
+				.await;
+			self.job_wait = None;
+			match result.map_err(Error::other)?? {
+				ControlFlow::Break(()) => {}
+				ControlFlow::Continue(()) => {
+					return Err(Error::other("infinite Job wait returned a timeout"));
 				}
 			}
-
-			// ...finally, if there are some that are still alive,
-			// block in the background to reap them fully.
-			let JobPort {
-				completion_port, ..
-			} = self.job_port;
-			let _ = spawn_blocking(move || wait_on_job(completion_port, None)).await??;
+			self.exit_status = ChildExitStatus::Exited(status);
 			Ok(status)
 		})
 	}
 
 	#[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
 	fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-		let _ = wait_on_job(self.job_port.completion_port, Some(Duration::ZERO))?;
-		self.inner.try_wait()
+		if let ChildExitStatus::Exited(status) = &self.exit_status {
+			return Ok(Some(*status));
+		}
+
+		let Some(status) = self.inner.try_wait()? else {
+			return Ok(None);
+		};
+		let completion = if self.job_wait.is_some() {
+			let received = self
+				.job_wait
+				.as_mut()
+				.expect("Job completion receiver is present")
+				.try_recv();
+			match received {
+				Ok(Some(result)) => {
+					self.job_wait = None;
+					result?
+				}
+				Ok(None) => return Ok(None),
+				Err(error) => {
+					self.job_wait = None;
+					return Err(Error::other(error));
+				}
+			}
+		} else {
+			wait_on_job(self.job_port.completion_port, Some(Duration::ZERO))?
+		};
+		if completion.is_continue() {
+			return Ok(None);
+		}
+
+		self.exit_status = ChildExitStatus::Exited(status);
+		Ok(Some(status))
 	}
 }

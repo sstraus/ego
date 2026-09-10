@@ -1,16 +1,19 @@
 //! Windows API support functions.
 
 use std::{
-	io::{Error, Result},
+	io::{Error, ErrorKind, Result},
 	ops::ControlFlow,
-	time::Duration,
+	ptr::null_mut,
+	time::{Duration, Instant},
 };
 
 #[cfg(feature = "tracing")]
 use tracing::{debug, instrument};
 use windows::{
 	Win32::{
-		Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE},
+		Foundation::{
+			CloseHandle, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+		},
 		System::{
 			Diagnostics::ToolHelp::{
 				CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
@@ -23,6 +26,7 @@ use windows::{
 				JobObjectAssociateCompletionPortInformation, JobObjectExtendedLimitInformation,
 				SetInformationJobObject, TerminateJobObject,
 			},
+			SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO,
 			Threading::{
 				CREATE_SUSPENDED, GetProcessId, INFINITE, OpenThread, PROCESS_CREATION_FLAGS,
 				ResumeThread, THREAD_SUSPEND_RESUME,
@@ -92,7 +96,7 @@ unsafe impl Send for JobHandle {}
 unsafe impl Sync for JobHandle {}
 
 #[derive(Clone, Copy, Debug)]
-pub struct PortHandle(pub HANDLE);
+pub struct PortHandle(pub HANDLE, usize);
 
 unsafe impl Send for PortHandle {}
 unsafe impl Sync for PortHandle {}
@@ -128,8 +132,9 @@ pub(crate) fn make_job_object(process_handle: HANDLE, kill_on_drop: bool) -> Res
 	#[cfg(feature = "tracing")]
 	debug!(?completion_port, "done CreateIoCompletionPort");
 
+	let completion_key = job.0.0 as usize;
 	let associate_completion = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
-		CompletionKey: job.0.0 as _,
+		CompletionKey: completion_key as _,
 		CompletionPort: completion_port.0,
 	};
 
@@ -174,7 +179,7 @@ pub(crate) fn make_job_object(process_handle: HANDLE, kill_on_drop: bool) -> Res
 
 	Ok(JobPort {
 		job: JobHandle(job.into_raw()),
-		completion_port: PortHandle(completion_port.into_raw()),
+		completion_port: PortHandle(completion_port.into_raw(), completion_key),
 	})
 }
 
@@ -246,26 +251,56 @@ pub(crate) fn wait_on_job(
 	completion_port: PortHandle,
 	timeout: Option<Duration>,
 ) -> Result<ControlFlow<()>> {
-	let mut code: u32 = 0;
-	let mut key: usize = 0;
-	let mut overlapped = OVERLAPPED::default();
-	let mut lp_overlapped = &mut overlapped as *mut OVERLAPPED;
+	let started = Instant::now();
 
-	let result = unsafe {
-		GetQueuedCompletionStatus(
-			completion_port.0,
-			&mut code,
-			&mut key,
-			&mut lp_overlapped as *mut _,
-			timeout.map_or(INFINITE, |d| d.as_millis().try_into().unwrap_or(INFINITE)),
-		)
-	};
+	loop {
+		let wait_millis = timeout.map_or(INFINITE, |timeout| {
+			let remaining = timeout.saturating_sub(started.elapsed());
+			remaining
+				.as_millis()
+				.min(u128::from(INFINITE - 1))
+				.try_into()
+				.expect("finite Job wait milliseconds were clamped to a DWORD")
+		});
+		let mut code = 0;
+		let mut key = 0;
+		let mut overlapped: *mut OVERLAPPED = null_mut();
+		let result = unsafe {
+			GetQueuedCompletionStatus(
+				completion_port.0,
+				&mut code,
+				&mut key,
+				&mut overlapped,
+				wait_millis,
+			)
+		};
+		let packet_dequeued = result.is_ok() || !overlapped.is_null();
+		if packet_dequeued && key != completion_port.1 {
+			return Err(Error::new(
+				ErrorKind::InvalidData,
+				format!(
+					"Job completion packet has key {key:#x}, expected {:#x}",
+					completion_port.1
+				),
+			));
+		}
 
-	// ignore timing out errors unless the timeout was specified to INFINITE
-	// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus
-	if timeout.is_some() && result.is_err() && lp_overlapped.is_null() {
-		return Ok(ControlFlow::Continue(()));
+		match result {
+			Ok(()) => {
+				if code == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO {
+					return Ok(ControlFlow::Break(()));
+				}
+			}
+			Err(error)
+				if timeout.is_some()
+					&& !packet_dequeued
+					&& error.code() == HRESULT::from_win32(WAIT_TIMEOUT.0) =>
+			{
+				if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+					return Ok(ControlFlow::Continue(()));
+				}
+			}
+			Err(error) => return Err(Error::other(error)),
+		}
 	}
-
-	Ok(ControlFlow::Break(()))
 }
