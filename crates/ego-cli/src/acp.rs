@@ -20,7 +20,7 @@ use ego_core::endpoint::Admitted;
 use ego_core::event::domain::CancelCause;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::mcp::McpRuntimeBinding;
-use ego_core::permit::Confinement;
+use ego_core::permit::{CanonPath, Confinement, RunConfinement};
 use ego_core::run::{RunController, RunRetention, RunTermination};
 use ego_core::session_lifecycle::{SessionLifecycle, SessionRunLifecycle};
 use ego_core::suspension::ContinuationJournal;
@@ -33,6 +33,7 @@ use ego_mcp::{
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::credentials::{OsGenerationPolicyCaptureStore, OsResumeKey};
+use ego_tools::exec::{ExecLimits, RunEffectPorts};
 use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
 use ego_tools::mcp_continuation::JsonlContinuationJournal;
 use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
@@ -42,6 +43,7 @@ use futures::future::BoxFuture;
 use crate::acp_confinement::CliSessionConfinementAdmission;
 use crate::acp_controls::AcpSessionControls;
 use crate::cli::AcpArgs;
+use crate::confinement_diagnostics::Reporter;
 use crate::host_ports::{CanonicalRoots, TokioExecutionSpawner, UuidIds};
 use crate::provider_http::{CommandHttpScope, ProviderHttpAdapter};
 use crate::{run, session};
@@ -432,13 +434,28 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             }
         };
 
+    let reporter = Arc::new(Reporter::new(Arc::new(crate::output::Stderr)));
+    if listener.is_some() {
+        let policy = RunConfinement::new(ceiling, false, CanonPath::new(root.as_path()))
+            .expect("the resolved ACP process root is absolute");
+        reporter.report(
+            RunEffectPorts::diagnostic_capabilities(
+                &policy,
+                mcp_cancel.clone(),
+                ExecLimits::default(),
+            )
+            .await,
+        );
+    }
+
     let control_port: Arc<dyn SessionControls> = controls.clone();
     let confinement_port: Arc<dyn SessionConfinementAdmission> =
-        Arc::new(CliSessionConfinementAdmission::new(
+        Arc::new(CliSessionConfinementAdmission::with_reporter(
             Arc::clone(&store),
             controls,
             ceiling,
             mcp_cancel.clone(),
+            Arc::clone(&reporter),
         ));
 
     let roots = Arc::new(CanonicalRoots { base: root });

@@ -7,11 +7,18 @@
 //! reader would reasonably conclude the methods work. They arrive with the
 //! routes that need them.
 
+use std::sync::Arc;
+
 use ego_a2a::auth::Credential;
 use ego_core::endpoint::{Admitted, Refusal};
+use ego_core::permit::{CanonPath, RunConfinement};
 use ego_core::run::RunTermination;
+use ego_core::turn::CancelToken;
+use ego_tools::exec::{ExecLimits, RunEffectPorts};
 
 use crate::cli::A2aArgs;
+use crate::confinement_diagnostics::Reporter;
+use crate::{output::Stderr, run};
 
 /// Serve until the process is stopped.
 ///
@@ -33,6 +40,26 @@ pub async fn serve(args: &A2aArgs) -> RunTermination {
     } else {
         None
     };
+
+    let root = match run::workspace(args.directory.as_ref()) {
+        Ok(root) => root,
+        Err(error) => {
+            return RunTermination::UsageError {
+                message: error.to_string(),
+            };
+        }
+    };
+    let policy = RunConfinement::new(
+        args.sandbox.unwrap_or_default(),
+        false,
+        CanonPath::new(root.as_path()),
+    )
+    .expect("the resolved A2A process root is absolute");
+    let reporter = Reporter::new(Arc::new(Stderr));
+    reporter.report(
+        RunEffectPorts::diagnostic_capabilities(&policy, CancelToken::new(), ExecLimits::default())
+            .await,
+    );
 
     // Never resolves: the listener runs until the process is signalled, which
     // is the same lifetime `ego acp` has when its host keeps the pipe open.

@@ -22,6 +22,8 @@ use ego_tools::store::JsonlStore;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 
 use crate::acp_controls::AcpSessionControls;
+use crate::confinement_diagnostics::Reporter;
+use crate::output::Stderr;
 
 const SESSION_EVIDENCE_CAPACITY: u64 = 64 * 1024 * 1024;
 
@@ -44,6 +46,7 @@ pub struct CliSessionConfinementAdmission {
     controls: Arc<AcpSessionControls>,
     ceiling: Confinement,
     cancel: CancelToken,
+    reporter: Arc<Reporter>,
     initializations: Arc<Mutex<HashMap<SessionId, Initialization>>>,
 }
 
@@ -54,11 +57,28 @@ impl CliSessionConfinementAdmission {
         ceiling: Confinement,
         cancel: CancelToken,
     ) -> Self {
+        Self::with_reporter(
+            store,
+            controls,
+            ceiling,
+            cancel,
+            Arc::new(Reporter::new(Arc::new(Stderr))),
+        )
+    }
+
+    pub(crate) fn with_reporter(
+        store: Arc<JsonlStore>,
+        controls: Arc<AcpSessionControls>,
+        ceiling: Confinement,
+        cancel: CancelToken,
+        reporter: Arc<Reporter>,
+    ) -> Self {
         Self {
             store,
             controls,
             ceiling,
             cancel,
+            reporter,
             initializations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -114,6 +134,7 @@ impl SessionConfinementAdmission for CliSessionConfinementAdmission {
                     Arc::clone(&self.controls),
                     self.ceiling,
                     self.cancel.clone(),
+                    Arc::clone(&self.reporter),
                     session,
                     root.clone(),
                 )
@@ -172,6 +193,7 @@ async fn initialize_once(
     controls: Arc<AcpSessionControls>,
     ceiling: Confinement,
     cancel: CancelToken,
+    reporter: Arc<Reporter>,
     session: SessionId,
     root: RunRoot,
 ) -> Result<(), ControlError> {
@@ -231,6 +253,7 @@ async fn initialize_once(
     let turn = TurnId::new();
     let mut supported = Vec::new();
     let mut unsupported = Vec::new();
+    let mut ceiling_capabilities = None;
     for (confinement, policy, observation, probe_evidence) in measured {
         journal
             .append(
@@ -248,6 +271,10 @@ async fn initialize_once(
                 ))
             })?;
 
+        if confinement == ceiling {
+            ceiling_capabilities = Some(observation.capabilities());
+        }
+
         match policy.requirements().check(observation.capabilities()) {
             Ok(()) => supported.push((confinement, observation)),
             Err(missing) => unsupported.push((
@@ -259,7 +286,11 @@ async fn initialize_once(
         }
     }
 
+    let ceiling_capabilities = ceiling_capabilities.ok_or_else(|| {
+        ControlError::Internal("the effective ACP confinement ceiling was not measured".to_owned())
+    })?;
     controls.seed_confinement(session, supported, unsupported)?;
+    reporter.report(Ok(ceiling_capabilities));
     drop(journal);
     drop(evidence);
     drop(opened);

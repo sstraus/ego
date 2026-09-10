@@ -27,6 +27,7 @@ pub mod build_info;
 pub mod catalogue;
 pub mod cli;
 pub mod config;
+pub(crate) mod confinement_diagnostics;
 pub mod diagnostics;
 pub mod doctor;
 pub mod facts;
