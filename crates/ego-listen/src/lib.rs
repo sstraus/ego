@@ -8,25 +8,26 @@
 //! stream it yields and ACP serves `ByteStreams` over the same stream, and
 //! neither binds anything.
 //!
-//! **The local endpoint is authenticated by the operating system, twice.** The
-//! socket lives in a directory the current user alone may enter, so the kernel
-//! refuses a connection from anyone else before this crate sees it. Then every
-//! accepted peer's uid is compared with the owner captured when the endpoint
-//! was bound; authentication never consults mutable pathname metadata.
-//!
-//! **Windows is deliberately not served here yet.** The named pipe named by the
-//! ADR is the right primitive, but this crate cannot be compiled or run against
-//! it on the machine it was written on, and story `regression_case` exists to build and
-//! test this repository natively on Windows. Shipping an untested
-//! `#[cfg(windows)]` path would be a claim without evidence, so the platform
-//! refuses by name instead — the same discipline the provider rows use.
+//! **The local endpoint is authenticated by the operating system.** On Unix,
+//! the socket lives in a directory the current user alone may enter and every
+//! accepted peer's uid is compared with the owner captured at bind time. On
+//! Windows, a protected named-pipe DACL grants access only to the process
+//! `TokenUser` SID. Authentication never consults mutable pathname metadata or
+//! falls back to a bearer credential.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use ego_core::endpoint::{Admitted, Authentication};
+#[cfg(windows)]
+use interprocess::os::windows::named_pipe::{
+    PipeListenerOptions, pipe_mode,
+    tokio::{DuplexPipeStream, PipeListener},
+};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
@@ -71,6 +72,8 @@ pub struct Accepted {
 pub enum Stream {
     #[cfg(unix)]
     Unix(UnixStream),
+    #[cfg(windows)]
+    Pipe(DuplexPipeStream<pipe_mode::Bytes>),
     Tcp(TcpStream),
 }
 
@@ -79,6 +82,8 @@ macro_rules! delegate {
         match $self.get_mut() {
             #[cfg(unix)]
             Stream::Unix($stream) => $call,
+            #[cfg(windows)]
+            Stream::Pipe($stream) => $call,
             Stream::Tcp($stream) => $call,
         }
     };
@@ -121,6 +126,11 @@ pub enum Bound {
         owner: u32,
         _lease: fd_lock::RwLock<std::fs::File>,
     },
+    #[cfg(windows)]
+    Local {
+        listener: PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>,
+        name: String,
+    },
     Tcp(TcpListener),
 }
 
@@ -135,6 +145,8 @@ impl Bound {
         match self {
             #[cfg(unix)]
             Self::Local { path, .. } => Ok(path.display().to_string()),
+            #[cfg(windows)]
+            Self::Local { name, .. } => Ok(name.clone()),
             Self::Tcp(listener) => Ok(listener.local_addr()?.to_string()),
         }
     }
@@ -166,6 +178,21 @@ impl Bound {
                 }
                 Ok(Some(Accepted {
                     stream: Stream::Unix(stream),
+                    peer: Peer::CurrentUser,
+                }))
+            }
+            #[cfg(windows)]
+            Self::Local { listener, name } => {
+                let stream = listener.accept().await.map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "failed to accept a local named-pipe connection on {name}: {error}"
+                        ),
+                    )
+                })?;
+                Ok(Some(Accepted {
+                    stream: Stream::Pipe(stream),
                     peer: Peer::CurrentUser,
                 }))
             }
@@ -298,19 +325,98 @@ async fn bind_local(path: &Path) -> io::Result<Bound> {
     })
 }
 
-/// The platform that has no local endpoint here yet, refusing by name.
-///
-/// See the module documentation: the named pipe is the right primitive and
-/// story `regression_case` is where it can be built and tested. Until then this says
-/// so, rather than a listener silently becoming a TCP one.
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn bind_local(path: &Path) -> io::Result<Bound> {
+    use interprocess::os::windows::{ToWtf16 as _, security_descriptor::SecurityDescriptor};
+    use windows_permissions::utilities::current_process_sid;
+
+    const LOCAL_PIPE_PREFIX: &str = r"\\.\pipe\";
+
+    let name = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the local named-pipe endpoint is not valid Unicode: {}",
+                path.display()
+            ),
+        )
+    })?;
+    let prefix = name.get(..LOCAL_PIPE_PREFIX.len());
+    let leaf = name.get(LOCAL_PIPE_PREFIX.len()..);
+    if !prefix.is_some_and(|prefix| prefix.eq_ignore_ascii_case(LOCAL_PIPE_PREFIX))
+        || leaf.is_none_or(|leaf| leaf.is_empty() || leaf.contains('\\'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "invalid local named-pipe endpoint {name}: expected \\\\.\\pipe\\ followed by one non-empty pipe name"
+            ),
+        ));
+    }
+
+    let encoded_name = name.to_wtf_16().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid local named-pipe endpoint {name}: {error}"),
+        )
+    })?;
+    let sid = current_process_sid().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "failed to obtain the current TokenUser SID for local named-pipe endpoint {name}: {error}"
+            ),
+        )
+    })?;
+    let sddl = format!("D:P(A;;GA;;;{sid})");
+    let encoded_sddl = sddl.to_wtf_16().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to encode the owner-only security descriptor for local named-pipe endpoint {name}: {error}"
+            ),
+        )
+    })?;
+    let descriptor = SecurityDescriptor::deserialize(encoded_sddl.as_ref()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to build the owner-only security descriptor for local named-pipe endpoint {name}: {error}"
+            ),
+        )
+    })?;
+
+    let mut options = PipeListenerOptions::new()
+        .mode(interprocess::os::windows::named_pipe::PipeMode::Bytes)
+        .accept_remote(false)
+        .security_descriptor(Some(descriptor));
+    // Assign the already-validated encoding directly: the builder's path
+    // convenience method treats an encoding error as a panic.
+    options.path = encoded_name;
+    let listener = options
+        .create_tokio_duplex::<pipe_mode::Bytes>()
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to create the first local named-pipe instance for endpoint {name}: {error}"
+                ),
+            )
+        })?;
+
+    Ok(Bound::Local {
+        listener,
+        name: name.to_owned(),
+    })
+}
+
+/// Refuse rather than silently substituting TCP on unsupported platforms.
+#[cfg(not(any(unix, windows)))]
 async fn bind_local(path: &Path) -> io::Result<Bound> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         format!(
-            "a local endpoint ({}) is not served on this platform yet: it needs \
-             a named pipe, which regression case builds and tests natively. Bind \
-             to 127.0.0.1 with a credential in the meantime",
+            "a local endpoint ({}) is not supported on this platform",
             path.display()
         ),
     ))
