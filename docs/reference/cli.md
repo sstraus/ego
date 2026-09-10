@@ -176,10 +176,15 @@ Report a read-only redacted health snapshot of this installation.
 
 ## `ego acp`
 
-Serve the Agent Client Protocol on stdio.
+Serve the Agent Client Protocol on stdio or an endpoint.
 
+- `--allow-public-bind` — Serve on an address reachable from outside this machine
+- `--connection-lifetime <CONNECTION_LIFETIME>` — Maximum lifetime of one listener connection: 90s, 10m or 2h
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help
+- `--listen <LISTEN>` — Serve on a socket path or address instead of stdio
+- `--max-connections <MAX_CONNECTIONS>` — Maximum simultaneous listener connections
+- `--max-ingress-bytes <MAX_INGRESS_BYTES>` — Maximum cumulative bytes read from one listener connection
 - `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|off
 - `--session-dir <SESSION_DIR>` — Override the store location
 
@@ -191,6 +196,7 @@ Serve the Agent2Agent protocol on a local or loopback endpoint.
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help (see more with '--help')
 - `--listen <LISTEN>` — Where to serve: a socket path, or an address such as `127.0.0.1:8080`
+- `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|off
 - `--session-dir <SESSION_DIR>` — Override the store location
 
 ## `ego auth`

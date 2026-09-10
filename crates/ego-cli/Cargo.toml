@@ -101,6 +101,7 @@ tempfile = "3.27.0"
 # body is a stream of `bytes::Bytes` — the type `ego-ai` chose so a chunk can be
 # handed on without being copied. Dev-only: nothing in this crate's own code
 # constructs a response.
+async-tungstenite = { version = "=0.34.1", default-features = false, features = ["tokio-rustls-webpki-roots"] }
 bytes = "1.10"
 portable-pty = "0.9.0"
 

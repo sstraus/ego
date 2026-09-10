@@ -100,6 +100,13 @@ fn served<const N: usize>(args: [&str; N]) -> ego_cli::cli::AcpArgs {
     }
 }
 
+fn a2a<const N: usize>(args: [&str; N]) -> ego_cli::cli::A2aArgs {
+    match cli::parse(argv(args)).expect("the command line parses") {
+        Invocation::A2a(args) => *args,
+        _ => panic!("that is not `ego a2a`"),
+    }
+}
+
 /// The [`Args`](ego_cli::cli::Args) of an invocation that starts a session.
 ///
 /// Separate from [`parsed`] on purpose: `ego hello` and `ego run hello` differ
@@ -114,6 +121,12 @@ fn converses<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
 
 fn refused<const N: usize>(args: [&str; N]) -> String {
     cli::parse(argv(args))
+        .expect_err("the command line should have been refused")
+        .to_string()
+}
+
+fn refused_slice(args: &[&str]) -> String {
+    cli::parse(argv_slice(args))
         .expect_err("the command line should have been refused")
         .to_string()
 }
@@ -844,10 +857,62 @@ fn acp_needs_nothing_to_serve() {
     assert_eq!(args.session_dir, None);
     assert_eq!(args.directory, None);
     assert_eq!(
+        args.listen, None,
+        "without `--listen`, ACP stays on its existing stdio transport"
+    );
+    assert_eq!(
         args.sandbox, None,
         "no ceiling was named, so the resolved configuration must stand \
          rather than a default invented at the parser"
     );
+}
+
+/// `--listen` is an opt-in transport change. The endpoint spelling remains
+/// opaque to clap: `ego_core::endpoint` decides whether it names a local,
+/// loopback or public endpoint after parsing.
+#[test]
+fn acp_accepts_a_listener_endpoint_without_changing_the_stdio_default() {
+    let args = served(["acp", "--listen", "/tmp/ego-regression case.sock"]);
+    assert_eq!(args.listen.as_deref(), Some("/tmp/ego-regression case.sock"));
+}
+
+/// The shared listener controls are valid only when ACP is actually opening
+/// an endpoint. Keeping them out of the stdio grammar avoids silently claiming
+/// that a process-wide socket bound or ingress budget affects a pipe it does
+/// not own.
+#[test]
+fn acp_listener_only_controls_require_listen() {
+    for args in [
+        &["acp", "--max-connections", "1"][..],
+        &["acp", "--connection-lifetime", "1m"][..],
+        &["acp", "--max-ingress-bytes", "4096"][..],
+        &["acp", "--allow-public-bind"][..],
+    ] {
+        let refusal = refused_slice(args);
+        assert!(
+            refusal.contains("--listen"),
+            "listener-only flags must say that `--listen` is required: {refusal}"
+        );
+    }
+}
+
+#[test]
+fn a2a_requires_listen_and_inherits_the_acp_sandbox_ceiling() {
+    let refusal = refused(["a2a"]);
+    assert!(
+        refusal.contains("--listen"),
+        "A2A must not invent a default endpoint: {refusal}"
+    );
+
+    let args = a2a([
+        "a2a",
+        "--listen",
+        "/tmp/ego-regression case.sock",
+        "--sandbox",
+        "ro",
+    ]);
+    assert_eq!(args.listen, "/tmp/ego-regression case.sock");
+    assert_eq!(args.sandbox, Some(Confinement::Ro));
 }
 
 /// `--sandbox` names the weakest confinement a host may select.

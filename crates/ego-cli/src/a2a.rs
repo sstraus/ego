@@ -8,7 +8,7 @@
 //! routes that need them.
 
 use ego_a2a::auth::Credential;
-use ego_core::endpoint::{Admitted, PublicBind, Refusal, Requested, admit};
+use ego_core::endpoint::{Admitted, Refusal};
 use ego_core::run::RunTermination;
 
 use crate::cli::A2aArgs;
@@ -50,20 +50,7 @@ pub async fn serve(args: &A2aArgs) -> RunTermination {
 /// scheme prefix (`unix:`, `tcp:`) would be a second vocabulary for a question
 /// the value already answers.
 fn admit_endpoint(args: &A2aArgs) -> Result<Admitted, Refusal> {
-    let requested = match args.listen.parse() {
-        Ok(address) => Requested::Tcp(address),
-        Err(_) => Requested::Local {
-            name: args.listen.clone(),
-        },
-    };
-    admit(
-        requested,
-        if args.allow_public_bind {
-            PublicBind::RequestedByOperator
-        } else {
-            PublicBind::Refused
-        },
-    )
+    crate::cli::admit_endpoint(&args.listen, args.allow_public_bind)
 }
 
 fn refused(message: String) -> RunTermination {
@@ -85,6 +72,7 @@ mod tests {
             directory: None,
             listen: listen.to_string(),
             allow_public_bind,
+            sandbox: None,
         }
     }
 

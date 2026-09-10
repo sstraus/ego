@@ -35,7 +35,7 @@ complete -c ego -n "__fish_ego_needs_command" -f -a "usage" -d 'Report usage, co
 complete -c ego -n "__fish_ego_needs_command" -f -a "models" -d 'List the shared model catalogue.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "hooks" -d 'Inspect the admitted system and user hook catalogue.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "doctor" -d 'Report a read-only redacted health snapshot of this installation.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "acp" -d 'Serve the Agent Client Protocol on stdio.'
+complete -c ego -n "__fish_ego_needs_command" -f -a "acp" -d 'Serve the Agent Client Protocol on stdio or an endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "a2a" -d 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "auth" -d 'Manage subscription credentials.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "mcp" -d 'Manage configured MCP servers.'
@@ -170,9 +170,15 @@ complete -c ego -n "__fish_ego_using_subcommand doctor" -s h -l help -d 'Print h
 complete -c ego -n "__fish_ego_using_subcommand acp" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -s C -d 'Run as if started in DIR' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -l sandbox -d 'The weakest confinement a session may select: ro|workspace|off' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l listen -d 'Serve on a socket path or address instead of stdio' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l max-connections -d 'Maximum simultaneous listener connections' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l connection-lifetime -d 'Maximum lifetime of one listener connection: 90s, 10m or 2h' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l max-ingress-bytes -d 'Maximum cumulative bytes read from one listener connection' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l allow-public-bind -d 'Serve on an address reachable from outside this machine'
 complete -c ego -n "__fish_ego_using_subcommand acp" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand a2a" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand a2a" -s C -d 'Run as if started in DIR' -r -F
+complete -c ego -n "__fish_ego_using_subcommand a2a" -l sandbox -d 'The weakest confinement a session may select: ro|workspace|off' -r
 complete -c ego -n "__fish_ego_using_subcommand a2a" -l listen -d 'Where to serve: a socket path, or an address such as `127.0.0.1:8080`' -r
 complete -c ego -n "__fish_ego_using_subcommand a2a" -l allow-public-bind -d 'Serve on an address reachable from outside this machine'
 complete -c ego -n "__fish_ego_using_subcommand a2a" -s h -l help -d 'Print help (see more with \'--help\')'

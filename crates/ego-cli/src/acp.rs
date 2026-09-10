@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use agent_client_protocol::{ConnectTo, Stdio};
 use agent_client_protocol_schema::v1;
+use ego_acp::auth::Credential;
 use ego_acp::serve::{
     AcpRunBindingsBuilder, McpSessionAdmissionError, McpSessionAdmitter,
     SessionConfinementAdmission, SessionMcpAdmission,
@@ -15,9 +16,11 @@ use ego_core::config::{
 };
 use ego_core::control::SessionControls;
 use ego_core::credentials::SecretMaterial;
+use ego_core::endpoint::Admitted;
 use ego_core::event::domain::CancelCause;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::mcp::McpRuntimeBinding;
+use ego_core::permit::Confinement;
 use ego_core::run::{RunController, RunRetention, RunTermination};
 use ego_core::session_lifecycle::{SessionLifecycle, SessionRunLifecycle};
 use ego_core::suspension::ContinuationJournal;
@@ -251,8 +254,65 @@ fn safe_mcp_error(message: impl Into<String>) -> McpSessionAdmissionError {
     McpSessionAdmissionError::new(message)
 }
 
-/// Serve the protocol on stdio until the host closes it.
+struct AcpListener {
+    admitted: Admitted,
+    bound: ego_listen::Bound,
+    credential: Option<Credential>,
+    gate: ego_listen::ConnectionGate,
+}
+
+async fn prepare_listener(args: &AcpArgs) -> Result<Option<AcpListener>, RunTermination> {
+    let Some(listen) = args.listen.as_deref() else {
+        return Ok(None);
+    };
+    let admitted = crate::cli::admit_endpoint(listen, args.allow_public_bind)
+        .map_err(|error| failed(error.to_string()))?;
+    let credential = if ego_listen::credential_required(&admitted) {
+        Some(
+            Credential::from_env(|name| std::env::var(name).ok())
+                .map_err(|error| failed(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let limits = ego_listen::ConnectionLimits::new(
+        args.max_connections,
+        args.connection_lifetime,
+        args.max_ingress_bytes,
+    )
+    .map_err(|error| failed(format!("the ACP listener limits are invalid: {error}")))?;
+    let gate = ego_listen::ConnectionGate::new(limits);
+    let bound = ego_listen::bind(&admitted)
+        .await
+        .map_err(|error| failed(format!("the ACP endpoint could not be opened: {error}")))?;
+    Ok(Some(AcpListener {
+        admitted,
+        bound,
+        credential,
+        gate,
+    }))
+}
+
+fn failed(message: String) -> RunTermination {
+    RunTermination::Failed { message }
+}
+
+fn confinement_ceiling(
+    args: &AcpArgs,
+    configured: Option<Confinement>,
+    endpoint: Option<&Admitted>,
+) -> Confinement {
+    let selected = args.sandbox.or(configured).unwrap_or_default();
+    endpoint.map_or(selected, |endpoint| endpoint.cap_confinement(selected))
+}
+
+/// Serve the protocol on stdio or an explicitly selected endpoint.
 pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> RunTermination {
+    let listener = match prepare_listener(args).await {
+        Ok(listener) => listener,
+        Err(termination) => return termination,
+    };
+    let admitted = listener.as_ref().map(|listener| &listener.admitted);
     let root = match run::workspace(args.directory.as_ref()) {
         Ok(root) => root,
         Err(error) => {
@@ -357,7 +417,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                 // reason the flag exists: the layer an operator would have
                 // reached for is the one an untrusted headless resolution
                 // discards.
-                let ceiling = args.sandbox.or(effective.sandbox).unwrap_or_default();
+                let ceiling = confinement_ceiling(args, effective.sandbox, admitted);
                 (
                     Arc::new(AcpSessionControls::new(&effective, ceiling, catalogue)),
                     ceiling,
@@ -381,27 +441,108 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             mcp_cancel.clone(),
         ));
 
-    let agent = ego_acp::serve::durable_agent_with_compaction(
-        controller,
-        lifecycle,
-        Arc::new(CanonicalRoots { base: root }),
-        Arc::new(TokioExecutionSpawner),
-        ids,
-        Arc::new(AcpRunBindingsBuilder::with_controls(Some(Arc::clone(
-            &control_port,
-        )))),
-        mcp_admitter,
-        compaction,
-        Some(control_port),
-        Some(confinement_port),
-    );
-    let outcome = agent.connect_to(Stdio::new()).await;
+    let roots = Arc::new(CanonicalRoots { base: root });
+    let spawner = Arc::new(TokioExecutionSpawner);
+    let factory = move || {
+        ego_acp::serve::durable_agent_with_compaction(
+            Arc::clone(&controller),
+            Arc::clone(&lifecycle),
+            roots.clone(),
+            spawner.clone(),
+            ids.clone(),
+            Arc::new(AcpRunBindingsBuilder::with_controls(Some(Arc::clone(
+                &control_port,
+            )))),
+            Arc::clone(&mcp_admitter),
+            Arc::clone(&compaction),
+            Some(Arc::clone(&control_port)),
+            Some(Arc::clone(&confinement_port)),
+        )
+    };
+    let outcome = match listener {
+        Some(listener) => ego_acp::serve::serve_on(
+            listener.bound,
+            &listener.admitted,
+            listener.credential,
+            listener.gate,
+            factory,
+            std::future::pending(),
+        )
+        .await
+        .map_err(|error| format!("the ACP listener ended badly: {error}")),
+        None => factory()
+            .connect_to(Stdio::new())
+            .await
+            .map_err(|error| format!("the ACP connection ended badly: {error}")),
+    };
     mcp_cancel.cancel(CancelCause::Host);
     drop(mcp_effects);
     match outcome {
         Ok(()) => RunTermination::Done,
-        Err(error) => RunTermination::Failed {
-            message: format!("the ACP connection ended badly: {error}"),
-        },
+        Err(message) => RunTermination::Failed { message },
+    }
+}
+
+#[cfg(test)]
+mod confinement_ceiling_tests {
+    use super::confinement_ceiling;
+    use crate::cli::{self, AcpArgs, Invocation};
+    use ego_core::endpoint::Admitted;
+    use ego_core::permit::Confinement;
+
+    fn args(sandbox: Option<Confinement>) -> AcpArgs {
+        let mut argv = vec!["ego".to_owned(), "acp".to_owned()];
+        if let Some(sandbox) = sandbox {
+            argv.extend(["--sandbox".to_owned(), sandbox.as_str().to_owned()]);
+        }
+        match cli::parse(argv).expect("the ACP command line parses") {
+            Invocation::Acp(args) => *args,
+            _ => panic!("the test command is not `ego acp`"),
+        }
+    }
+
+    #[test]
+    fn resolves_flag_then_config_then_default_and_caps_only_admitted_public() {
+        let local = Admitted::Local {
+            name: "regression case.sock".to_owned(),
+        };
+        let loopback = Admitted::Loopback("127.0.0.1:8080".parse().unwrap());
+        let public = Admitted::Public("0.0.0.0:8080".parse().unwrap());
+
+        assert_eq!(
+            confinement_ceiling(&args(Some(Confinement::Ro)), Some(Confinement::Off), None),
+            Confinement::Ro,
+            "the CLI flag wins over configuration"
+        );
+        assert_eq!(
+            confinement_ceiling(&args(None), Some(Confinement::Ro), None),
+            Confinement::Ro,
+            "configuration wins when the CLI does not name a ceiling"
+        );
+        assert_eq!(
+            confinement_ceiling(&args(None), None, None),
+            Confinement::Workspace,
+            "the default applies when neither flag nor configuration names a ceiling"
+        );
+        assert_eq!(
+            confinement_ceiling(&args(None), Some(Confinement::Off), Some(&public)),
+            Confinement::Workspace,
+            "an admitted public endpoint caps unconfined ACP at workspace"
+        );
+        assert_eq!(
+            confinement_ceiling(&args(None), Some(Confinement::Off), None),
+            Confinement::Off,
+            "stdio has no endpoint cap"
+        );
+        assert_eq!(
+            confinement_ceiling(&args(None), Some(Confinement::Off), Some(&local)),
+            Confinement::Off,
+            "a local endpoint adds no confinement cap"
+        );
+        assert_eq!(
+            confinement_ceiling(&args(None), Some(Confinement::Off), Some(&loopback)),
+            Confinement::Off,
+            "a loopback endpoint adds no confinement cap"
+        );
     }
 }

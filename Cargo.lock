@@ -1190,6 +1190,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
+ "async-tungstenite",
  "bytes",
  "clap",
  "clap_complete",

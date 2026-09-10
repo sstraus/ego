@@ -224,6 +224,11 @@ _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
 '--sandbox=[The weakest confinement a session may select\: ro|workspace|off]:SANDBOX:_default' \
+'--listen=[Serve on a socket path or address instead of stdio]:LISTEN:_default' \
+'--max-connections=[Maximum simultaneous listener connections]:MAX_CONNECTIONS:_default' \
+'--connection-lifetime=[Maximum lifetime of one listener connection\: 90s, 10m or 2h]:CONNECTION_LIFETIME:_default' \
+'--max-ingress-bytes=[Maximum cumulative bytes read from one listener connection]:MAX_INGRESS_BYTES:_default' \
+'--allow-public-bind[Serve on an address reachable from outside this machine]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -232,6 +237,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
+'--sandbox=[The weakest confinement a session may select\: ro|workspace|off]:SANDBOX:_default' \
 '--listen=[Where to serve\: a socket path, or an address such as \`127.0.0.1\:8080\`]:LISTEN:_default' \
 '--allow-public-bind[Serve on an address reachable from outside this machine]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -496,7 +502,7 @@ _ego_commands() {
 'models:List the shared model catalogue.' \
 'hooks:Inspect the admitted system and user hook catalogue.' \
 'doctor:Report a read-only redacted health snapshot of this installation.' \
-'acp:Serve the Agent Client Protocol on stdio.' \
+'acp:Serve the Agent Client Protocol on stdio or an endpoint.' \
 'a2a:Serve the Agent2Agent protocol on a local or loopback endpoint.' \
 'auth:Manage subscription credentials.' \
 'mcp:Manage configured MCP servers.' \

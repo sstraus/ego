@@ -57,8 +57,19 @@ ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               stable IDs; `explain <tool> <args>` shows the
                               canonical intent + matching rule, dry)
 ego usage  [--period P] [--all-roles] [--json] cost and token report
-ego acp                       serve ACP on stdio (the embedding surface)
-ego a2a --listen ENDPOINT [--allow-public-bind]
+ego acp [--listen ENDPOINT [--allow-public-bind]
+         [--max-connections N] [--connection-lifetime DURATION]
+         [--max-ingress-bytes N]]
+                              serve ACP on stdio by default, or on an explicit
+                              endpoint. Listener controls default to 32
+                              connections, 24h, and 134217728 cumulative
+                              ingress bytes per connection. TCP endpoints need
+                              EGO_ACP_TOKEN; local endpoints use operating-
+                              system peer identity and never read that token.
+                              Public addresses additionally require
+                              --allow-public-bind and cap `off` confinement at
+                              `workspace`.
+ego a2a --listen ENDPOINT [--allow-public-bind] [--sandbox LEVEL]
                               serve Agent2Agent discovery information.
                               ENDPOINT is a socket path —
                               authenticated by the operating system, the

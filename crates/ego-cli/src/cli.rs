@@ -19,9 +19,10 @@
 //!    definition (§4.5's last clause) is only possible while there is exactly
 //!    one definition.
 
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand};
@@ -30,6 +31,7 @@ use ego_core::config::{
     McpHttpConfig, McpHttpUrl, McpServerConfig, McpServerName, Mode, ModelRef, ProfileName,
     UserConfigTarget,
 };
+use ego_core::endpoint::{Admitted, PublicBind, Refusal, Requested, admit};
 use ego_core::event::id::{ItemId, SessionId};
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::Confinement;
@@ -509,8 +511,9 @@ pub struct DoctorArgs {
 
 /// The parsed command line of `ego acp`.
 ///
-/// One absence is the point: `ego acp`'s stdout **is** the JSON-RPC stream, so
-/// there is no `--output` to choose. See [`Places`].
+/// With no `listen`, `ego acp`'s stdout **is** the JSON-RPC stream, so there is
+/// no `--output` to choose. Naming `listen` opts into the shared inbound
+/// endpoint and its finite process-owned limits.
 ///
 /// `sandbox` is a ceiling and not a default. A connected host picks its own
 /// confinement per session and can only pick something at least this strong
@@ -522,10 +525,16 @@ pub struct AcpArgs {
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
     pub sandbox: Option<Confinement>,
+    pub listen: Option<String>,
+    pub allow_public_bind: bool,
+    pub max_connections: u32,
+    pub connection_lifetime: Duration,
+    pub max_ingress_bytes: u64,
 }
 
-/// Where `ego a2a` serves, and whether the operator asked for it to be
-/// reachable from outside this machine.
+/// Where `ego a2a` serves, whether the operator asked for it to be reachable
+/// from outside this machine, and the confinement ceiling carried forward for
+/// the run-serving routes.
 ///
 /// `listen` is unparsed on purpose: which endpoint kind a spelling means is
 /// `ego_core::endpoint`'s decision, not the argument parser's, and duplicating
@@ -536,6 +545,7 @@ pub struct A2aArgs {
     pub directory: Option<PathBuf>,
     pub listen: String,
     pub allow_public_bind: bool,
+    pub sandbox: Option<Confinement>,
 }
 
 /// Fixed deployment bounds for `ego mcp-server`.
@@ -933,11 +943,11 @@ enum HooksSubcommand {
     },
 }
 
-/// `ego acp` — the protocol, on stdio.
+/// `ego acp` — the protocol, on stdio or one explicitly selected endpoint.
 #[derive(Debug, Parser)]
 #[command(
     name = "ego acp",
-    about = "Serve the Agent Client Protocol on stdio.",
+    about = "Serve the Agent Client Protocol on stdio or an endpoint.",
     disable_help_subcommand = true
 )]
 struct AcpCommand {
@@ -946,6 +956,26 @@ struct AcpCommand {
 
     #[command(flatten)]
     ceiling: Ceiling,
+
+    /// Serve on a socket path or address instead of stdio.
+    #[arg(long)]
+    listen: Option<String>,
+
+    /// Serve on an address reachable from outside this machine.
+    #[arg(long, requires = "listen")]
+    allow_public_bind: bool,
+
+    /// Maximum simultaneous listener connections.
+    #[arg(long, requires = "listen")]
+    max_connections: Option<NonZeroU32>,
+
+    /// Maximum lifetime of one listener connection: 90s, 10m or 2h.
+    #[arg(long, requires = "listen", value_parser = positive_duration)]
+    connection_lifetime: Option<Duration>,
+
+    /// Maximum cumulative bytes read from one listener connection.
+    #[arg(long, requires = "listen")]
+    max_ingress_bytes: Option<NonZeroU64>,
 }
 
 /// The weakest confinement a served protocol's sessions may run at.
@@ -977,6 +1007,9 @@ struct Ceiling {
 struct A2aCommand {
     #[command(flatten)]
     places: Places,
+
+    #[command(flatten)]
+    ceiling: Ceiling,
 
     /// Where to serve: a socket path, or an address such as `127.0.0.1:8080`.
     ///
@@ -1876,11 +1909,25 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         },
         Some("acp") => match clap_or_answer::<AcpCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Acp(Box::new(AcpArgs {
-                session_dir: parsed.places.session_dir,
-                directory: parsed.places.directory,
-                sandbox: parsed.ceiling.sandbox,
-            }))),
+            Parsed::Command(parsed) => {
+                let defaults = ego_listen::ConnectionLimits::default();
+                Ok(Invocation::Acp(Box::new(AcpArgs {
+                    session_dir: parsed.places.session_dir,
+                    directory: parsed.places.directory,
+                    sandbox: parsed.ceiling.sandbox,
+                    listen: parsed.listen,
+                    allow_public_bind: parsed.allow_public_bind,
+                    max_connections: parsed
+                        .max_connections
+                        .map_or(defaults.max_connections(), NonZeroU32::get),
+                    connection_lifetime: parsed
+                        .connection_lifetime
+                        .unwrap_or(defaults.connection_lifetime()),
+                    max_ingress_bytes: parsed
+                        .max_ingress_bytes
+                        .map_or(defaults.max_ingress_bytes(), NonZeroU64::get),
+                })))
+            }
         },
         Some("a2a") => match clap_or_answer::<A2aCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
@@ -1889,6 +1936,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 directory: parsed.places.directory,
                 listen: parsed.listen,
                 allow_public_bind: parsed.allow_public_bind,
+                sandbox: parsed.ceiling.sandbox,
             }))),
         },
         Some("mcp-server") => match clap_or_answer::<McpServerCommand>(&tokens)? {
@@ -2415,6 +2463,34 @@ pub(crate) fn duration_seconds(spec: &str) -> Result<u64, UsageError> {
     }
     let count: u64 = digits.parse().map_err(|_| refuse())?;
     count.checked_mul(scale).ok_or_else(refuse)
+}
+
+fn positive_duration(spec: &str) -> Result<Duration, String> {
+    let seconds = duration_seconds(spec).map_err(|error| error.to_string())?;
+    if seconds == 0 {
+        return Err(format!(
+            "`{spec}` is not a connection lifetime: the duration must be positive"
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+/// Parse and admit the endpoint spelling shared by inbound CLI protocols.
+pub(crate) fn admit_endpoint(listen: &str, allow_public_bind: bool) -> Result<Admitted, Refusal> {
+    let requested = match listen.parse() {
+        Ok(address) => Requested::Tcp(address),
+        Err(_) => Requested::Local {
+            name: listen.to_owned(),
+        },
+    };
+    admit(
+        requested,
+        if allow_public_bind {
+            PublicBind::RequestedByOperator
+        } else {
+            PublicBind::Refused
+        },
+    )
 }
 
 fn parse_usage_period(spec: &str) -> Result<UsagePeriod, String> {

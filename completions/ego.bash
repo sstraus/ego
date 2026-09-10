@@ -148,7 +148,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__a2a)
-            opts="-C -h --session-dir --listen --allow-public-bind --help"
+            opts="-C -h --session-dir --sandbox --listen --allow-public-bind --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -159,6 +159,10 @@ _ego() {
                     return 0
                     ;;
                 -C)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --sandbox)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -174,7 +178,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__acp)
-            opts="-C -h --session-dir --sandbox --help"
+            opts="-C -h --session-dir --sandbox --listen --allow-public-bind --max-connections --connection-lifetime --max-ingress-bytes --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -189,6 +193,22 @@ _ego() {
                     return 0
                     ;;
                 --sandbox)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --listen)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-connections)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --connection-lifetime)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-ingress-bytes)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
