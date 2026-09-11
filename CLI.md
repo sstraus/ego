@@ -300,6 +300,15 @@ an alias for it. The heads are `read`, `write`, `list`, `search`, `exec`,
 `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md`, which
 corrects the example this line used to carry.
 
+`tool(server/name)` is the one user-facing authority for an opaque foreign
+tool. Its captured HTTP route or stdio process remains sealed into the permit,
+rechecked at use, and subject to matching denies and hard ceilings, but does
+not need a second `net(...)` or `exec(...)` allow. The rule delegates the
+tool's downstream effects; Ego does not insert approval prompts for browser
+clicks, navigation, or other work performed behind that boundary. Running the
+same program through native shell remains an `exec(...)` operation and gains
+no tool authority by its name.
+
 Rules follow a published formal grammar matched against the *canonical* call
 (resolved paths, argv, endpoints — never rendered shell strings); the
 mode × sandbox matrix is published and contradictory combinations are

@@ -16,11 +16,10 @@ use std::sync::{Arc, Mutex};
 use futures::future::{self, BoxFuture};
 
 use super::foreign::{
-    DuplexHandle, DuplexSpawner, ForeignToolId, ForeignTransportTarget, GuardedHttp, HttpRequest,
-    InvocationDigest, OneHop, OneHopResponse, PreparedConnect, Resolver, TransportError,
-    TransportFailure,
+    DuplexHandle, DuplexSpawner, GuardedHttp, HttpRequest, OneHop, OneHopResponse, PreparedConnect,
+    Resolver, TransportError, TransportFailure,
 };
-use super::grant::{Permit, PermitDenied};
+use super::grant::{ForeignClaim, Permit, PermitDenied};
 use super::path::CanonPath;
 use super::prepared_call::{Op, PreparedCall};
 use super::scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanRequest};
@@ -329,7 +328,8 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         kind: ForeignKind,
         request: Option<&HttpRequest>,
     ) -> Result<ForeignClaim, TransportError> {
-        let claim = ForeignClaim::from_call(call)?;
+        self.permit.allows_call(call)?;
+        let claim = ForeignClaim::from_call(call).ok_or_else(authority_mismatch)?;
         if !claim.invocations.is_empty() {
             self.permit
                 .allows_foreign(&claim.invocations, &claim.transport)?;
@@ -730,69 +730,10 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
     }
 }
 
-struct ForeignClaim {
-    invocations: Vec<(ForeignToolId, InvocationDigest)>,
-    transport: ForeignTransportTarget,
-    connect: Option<PreparedConnect>,
-    protocol_target: Option<super::foreign::NetworkTarget>,
-    spawn: Option<SpawnSpec>,
-}
-
 enum ForeignKind {
     Http,
     SelectedMcp,
     Duplex,
-}
-
-impl ForeignClaim {
-    fn from_call(call: &PreparedCall) -> Result<Self, TransportError> {
-        let mut invocations = Vec::new();
-        let mut transport = call
-            .mcp_envelope()
-            .map(|envelope| envelope.transport().clone());
-        let mut connect = None;
-        let mut protocol_target = None;
-        let mut spawn = None;
-        for op in call.ops() {
-            match op {
-                Op::Opaque {
-                    tool,
-                    params_digest,
-                    transport: route,
-                } => {
-                    if transport.as_ref().is_some_and(|existing| existing != route) {
-                        return Err(authority_mismatch());
-                    }
-                    transport = Some(route.clone());
-                    invocations.push((tool.clone(), params_digest.clone()));
-                }
-                Op::Connect {
-                    target,
-                    request_digest,
-                } if connect.is_none() => {
-                    connect = Some(PreparedConnect::from_parts(
-                        target.clone(),
-                        request_digest.clone(),
-                    ));
-                }
-                Op::ProtocolConnect { target } if protocol_target.is_none() => {
-                    protocol_target = Some(target.clone());
-                }
-                Op::Spawn { spec } if spawn.is_none() => spawn = Some(spec.clone()),
-                _ => return Err(authority_mismatch()),
-            }
-        }
-        if invocations.is_empty() && call.mcp_envelope().is_none() {
-            return Err(authority_mismatch());
-        }
-        Ok(Self {
-            invocations,
-            transport: transport.ok_or_else(authority_mismatch)?,
-            connect,
-            protocol_target,
-            spawn,
-        })
-    }
 }
 
 fn authority_mismatch() -> TransportError {

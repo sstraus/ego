@@ -51,7 +51,7 @@ fn digest(label: &str) -> InvocationDigest {
 }
 
 #[test]
-fn protocol_envelope_refuses_semantic_or_byte_authority_mismatch_before_send() {
+fn protocol_envelope_tool_identity_does_not_require_network_allowance() {
     let call = PreparedCall::mcp(
         McpSubject::Tool {
             server: "alpha".into(),
@@ -75,7 +75,7 @@ fn protocol_envelope_refuses_semantic_or_byte_authority_mismatch_before_send() {
     let allowed = PolicyEngine::new(
         ego_core::permit::CanonPath::new("/workspace"),
         ego_core::config::Mode::Default,
-        rules(&["tool(alpha/weather)", "net(mcp.example:443)"]),
+        rules(&["tool(alpha/weather)"]),
     );
     assert!(matches!(
         allowed.classify(call),
@@ -106,15 +106,15 @@ fn protocol_envelope_refuses_semantic_or_byte_authority_mismatch_before_send() {
         PolicyEngine::new(
             ego_core::permit::CanonPath::new("/workspace"),
             ego_core::config::Mode::Default,
-            rules(&["tool(alpha/weather)"])
+            rules(&["tool(alpha/weather)"]),
         )
         .classify(mismatch),
-        ego_core::permit::Classification::Ask(_)
+        ego_core::permit::Classification::Settled(Ok(_))
     ));
 }
 
 #[test]
-fn collapsed_dispatch_ops_need_outer_inner_and_network_rules() {
+fn collapsed_dispatch_ops_need_outer_and_inner_tool_rules_without_network_rule() {
     let call = PreparedCall::foreign_dispatch(
         ForeignToolId::new("alpha", "call_tool").expect("outer identity"),
         digest("outer"),
@@ -132,11 +132,7 @@ fn collapsed_dispatch_ops_need_outer_inner_and_network_rules() {
         PolicyEngine::new(
             ego_core::permit::CanonPath::new("/workspace"),
             ego_core::config::Mode::Default,
-            rules(&[
-                "tool(alpha/call_tool)",
-                "tool(alpha/weather)",
-                "net(mcp.example:443)"
-            ])
+            rules(&["tool(alpha/call_tool)", "tool(alpha/weather)"])
         )
         .classify(call.clone()),
         ego_core::permit::Classification::Settled(Ok(_))
@@ -145,7 +141,7 @@ fn collapsed_dispatch_ops_need_outer_inner_and_network_rules() {
         PolicyEngine::new(
             ego_core::permit::CanonPath::new("/workspace"),
             ego_core::config::Mode::Default,
-            rules(&["tool(alpha/call_tool)", "net(mcp.example:443)"])
+            rules(&["tool(alpha/call_tool)"])
         )
         .classify(call),
         ego_core::permit::Classification::Ask(_)
@@ -188,11 +184,7 @@ fn collapsed_protocol_subject_keeps_exact_call_tool_identity() {
         PolicyEngine::new(
             ego_core::permit::CanonPath::new("/workspace"),
             ego_core::config::Mode::Default,
-            rules(&[
-                "tool(alpha/call_tool)",
-                "tool(alpha/weather)",
-                "net(mcp.example:443)"
-            ])
+            rules(&["tool(alpha/call_tool)", "tool(alpha/weather)"])
         )
         .classify(call.clone()),
         ego_core::permit::Classification::Settled(Ok(_))
@@ -201,7 +193,7 @@ fn collapsed_protocol_subject_keeps_exact_call_tool_identity() {
         PolicyEngine::new(
             ego_core::permit::CanonPath::new("/workspace"),
             ego_core::config::Mode::Default,
-            rules(&["tool(alpha/call_tool)", "net(mcp.example:443)"])
+            rules(&["tool(alpha/call_tool)"])
         )
         .classify(call.clone()),
         ego_core::permit::Classification::Ask(_)

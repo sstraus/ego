@@ -315,6 +315,16 @@ pub struct PreparedCall {
     ops: Vec<Op>,
     mcp: Option<Box<McpPreparedEnvelope>>,
     hook_http: Option<Box<HookHttpPreparedEnvelope>>,
+    provenance: PreparedCallProvenance,
+}
+
+/// Unforgeable provenance assigned by this module's typed constructors.
+/// Generic tool preparation can append operations but cannot promote a native
+/// call into a foreign delegation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedCallProvenance {
+    Native,
+    CapturedForeign,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,6 +397,7 @@ impl PreparedCall {
             ops: vec![first],
             mcp: None,
             hook_http: None,
+            provenance: PreparedCallProvenance::Native,
         }
     }
 
@@ -453,6 +464,7 @@ impl PreparedCall {
                 parameters,
             })),
             hook_http: None,
+            provenance: PreparedCallProvenance::CapturedForeign,
         })
     }
 
@@ -502,6 +514,7 @@ impl PreparedCall {
                 parameters,
             })),
             hook_http: None,
+            provenance: PreparedCallProvenance::CapturedForeign,
         })
     }
 
@@ -554,6 +567,7 @@ impl PreparedCall {
                 request_digest,
                 secret,
             })),
+            provenance: PreparedCallProvenance::Native,
         }
     }
 
@@ -574,13 +588,18 @@ impl PreparedCall {
         Ok(())
     }
 
-    /// Stable within the current contract: every canonical operation and MCP
-    /// envelope field participates, in order, without exposing their values.
+    /// Stable within the current contract: every canonical operation, MCP
+    /// envelope field and delegation provenance participates, in order,
+    /// without exposing their values.
     pub fn authority_fingerprint(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"ego:prepared-call:v1\0");
+        digest.update(b"ego:prepared-call:v2\0");
         digest.update(format!("{self:?}").as_bytes());
         digest.finalize().into()
+    }
+
+    pub(super) fn has_captured_foreign_provenance(&self) -> bool {
+        self.provenance == PreparedCallProvenance::CapturedForeign
     }
 
     pub fn foreign_http(
@@ -609,6 +628,7 @@ impl PreparedCall {
             ops,
             mcp: None,
             hook_http: None,
+            provenance: PreparedCallProvenance::CapturedForeign,
         }
     }
 
@@ -633,6 +653,7 @@ impl PreparedCall {
             ],
             mcp: None,
             hook_http: None,
+            provenance: PreparedCallProvenance::CapturedForeign,
         }
     }
 
@@ -671,6 +692,7 @@ impl PreparedCall {
             ops,
             mcp: None,
             hook_http: None,
+            provenance: PreparedCallProvenance::CapturedForeign,
         }
     }
 }

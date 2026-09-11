@@ -61,6 +61,7 @@ struct Sealed(());
 #[derive(Debug)]
 pub struct Permit {
     scope: Scope,
+    call_fingerprint: Option<[u8; 32]>,
     _sealed: Sealed,
 }
 
@@ -118,6 +119,16 @@ impl fmt::Display for PermitDenied {
 impl std::error::Error for PermitDenied {}
 
 impl Permit {
+    pub(crate) fn allows_call(&self, call: &PreparedCall) -> Result<(), TransportError> {
+        if self.call_fingerprint == Some(call.authority_fingerprint()) {
+            Ok(())
+        } else {
+            Err(TransportError::definitely_unsent(
+                TransportFailure::AuthorityMismatch,
+            ))
+        }
+    }
+
     /// The one prefix check the four path authorities share.
     ///
     /// Written once rather than four times: the *policy* difference between
@@ -322,13 +333,15 @@ impl Authorized {
     /// The one production caller is `turn/tools.rs`, which splits and
     /// immediately re-pairs: the permit goes into the seam, the call goes to
     /// the tool, and the tool is handed no permit at all.
-    pub fn into_parts(self) -> (PreparedCall, Permit) {
+    pub fn into_parts(mut self) -> (PreparedCall, Permit) {
+        self.permit.call_fingerprint = Some(self.call.authority_fingerprint());
         (self.call, self.permit)
     }
 
     pub(crate) fn from_verified_resume(call: PreparedCall, by: Authority) -> Self {
         let permit = Permit {
             scope: scope_of(&call),
+            call_fingerprint: None,
             _sealed: Sealed(()),
         };
         Self { call, permit, by }
@@ -1027,11 +1040,13 @@ impl PolicyEngine {
     ///
     /// The order is fixed
     /// (`docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6), first
-    /// match wins, and it is evaluated **per operation** — a call with three
-    /// ops is three questions and every one of them must be answered before
-    /// the call is authorised. That is why §4 of the rule ADR refuses a
-    /// conjunction across heads: it would be a second way to write what the
-    /// loop below already does.
+    /// match wins, and it is evaluated **per operation**. The sole exception
+    /// is a structurally supporting foreign transport after every opaque
+    /// identity is allowed; its authority is the same delegation, not a
+    /// second operator decision. Every independent operation must still be
+    /// answered before the call is authorised. That is why §4 of the rule ADR
+    /// refuses a conjunction across heads: it would be a second way to write
+    /// what the loop below already does.
     ///
     /// ```text
     /// 0. the workspace boundary   (not a rule; no mode lifts it)
@@ -1089,14 +1104,23 @@ impl PolicyEngine {
                 return Classification::Settled(Err(*denied));
             }
         }
-        // Every rule that covered an op, not the first one to match. An
-        // allow is a conjunction — the call proceeds because *all* of its ops
-        // were covered — so naming one of them would record a rule that did
-        // not, on its own, authorise anything. A denial is the other shape and
-        // gets one authority, because `judge` stops at the first deny.
+        // Every rule that covered an independent op, not the first one to
+        // match. A foreign transport structurally supporting wholly allowed
+        // opaque identities contributes no second rule authority. A denial is
+        // the other shape and gets one authority, because `judge` stops at the
+        // first deny.
+        let delegated_support = delegated_supporting_op(&call).filter(|_| {
+            call.ops()
+                .iter()
+                .filter(|op| matches!(op, Op::Opaque { .. }))
+                .all(|op| self.matching(&self.allow, op).is_some())
+        });
         let mut rules: Vec<RuleAuthority> = Vec::new();
         let mut yolo_authorized_secret_egress = false;
-        for op in call.ops() {
+        for (index, op) in call.ops().iter().enumerate() {
+            if delegated_support == Some(index) {
+                continue;
+            }
             let Some(entry) = self.matching(&self.allow, op) else {
                 if self.mode == Mode::Yolo && matches!(op, Op::SecretEgress { .. }) {
                     yolo_authorized_secret_egress = true;
@@ -1326,9 +1350,118 @@ impl PolicyEngine {
     fn mint(&self, scope: Scope) -> Permit {
         Permit {
             scope,
+            call_fingerprint: None,
             _sealed: Sealed(()),
         }
     }
+}
+
+pub(super) struct ForeignClaim {
+    pub(super) invocations: Vec<(ForeignToolId, InvocationDigest)>,
+    pub(super) transport: ForeignTransportTarget,
+    pub(super) connect: Option<PreparedConnect>,
+    pub(super) protocol_target: Option<NetworkTarget>,
+    pub(super) spawn: Option<SpawnSpec>,
+}
+
+impl ForeignClaim {
+    pub(super) fn from_call(call: &PreparedCall) -> Option<Self> {
+        let mut invocations = Vec::new();
+        let mut transport = call
+            .mcp_envelope()
+            .map(|envelope| envelope.transport().clone());
+        let mut connect = None;
+        let mut protocol_target = None;
+        let mut spawn = None;
+        for op in call.ops() {
+            match op {
+                Op::Opaque {
+                    tool,
+                    params_digest,
+                    transport: route,
+                } => {
+                    if transport.as_ref().is_some_and(|existing| existing != route) {
+                        return None;
+                    }
+                    transport = Some(route.clone());
+                    invocations.push((tool.clone(), params_digest.clone()));
+                }
+                Op::Connect {
+                    target,
+                    request_digest,
+                } if connect.is_none() => {
+                    connect = Some(PreparedConnect::from_parts(
+                        target.clone(),
+                        request_digest.clone(),
+                    ));
+                }
+                Op::ProtocolConnect { target } if protocol_target.is_none() => {
+                    protocol_target = Some(target.clone());
+                }
+                Op::Spawn { spec } if spawn.is_none() => spawn = Some(spec.clone()),
+                _ => return None,
+            }
+        }
+        if invocations.is_empty() && call.mcp_envelope().is_none() {
+            return None;
+        }
+        Some(Self {
+            invocations,
+            transport: transport?,
+            connect,
+            protocol_target,
+            spawn,
+        })
+    }
+}
+
+/// The one transport operation that only supports a structurally valid
+/// foreign delegation.
+///
+/// This does not decide whether any identity is allowed. It narrows the
+/// runtime's shared foreign-call projection to one compatible supporting
+/// operation. Native and mixed-effect calls therefore have no operation to
+/// collapse.
+fn delegated_supporting_op(call: &PreparedCall) -> Option<usize> {
+    if !call.has_captured_foreign_provenance() || call.hook_http_envelope().is_some() {
+        return None;
+    }
+    let claim = ForeignClaim::from_call(call)?;
+    if claim.invocations.is_empty() {
+        return None;
+    }
+
+    let support_count = usize::from(claim.connect.is_some())
+        + usize::from(claim.protocol_target.is_some())
+        + usize::from(claim.spawn.is_some());
+    if support_count != 1 {
+        return None;
+    }
+    call.ops()
+        .iter()
+        .enumerate()
+        .find_map(|(index, op)| match op {
+            Op::Connect { target, .. }
+                if call.mcp_envelope().is_none()
+                    && claim
+                        .transport
+                        .http_route()
+                        .is_some_and(|route| route.target() == target) =>
+            {
+                Some(index)
+            }
+            Op::ProtocolConnect { target }
+                if call.mcp_envelope().is_some()
+                    && claim
+                        .transport
+                        .http_route()
+                        .is_some_and(|route| route.target() == target) =>
+            {
+                Some(index)
+            }
+            Op::Spawn { .. } if claim.transport.is_stdio() => Some(index),
+            _ => None,
+        })
 }
 
 fn refused(tool: String, why: &Escalation, by: Authority) -> PolicyDenied {

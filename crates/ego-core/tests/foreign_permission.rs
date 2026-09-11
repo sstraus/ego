@@ -13,6 +13,7 @@ use futures::io::{AsyncRead, AsyncWrite};
 
 use ego_core::config::{ConfigLayer, Mode, Ruleset, Source};
 use ego_core::generator::attempt::DeliveryCertainty;
+use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
 use ego_core::permit::{
     CanonPath, DuplexHandle, DuplexSession, DuplexSpawner, EnvPolicy, Fs, FsError, GuardedEffects,
     GuardedHttp, HttpHeader, HttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, NetworkTarget,
@@ -103,6 +104,19 @@ fn stdio_call(server: &str, argv: Vec<OsString>) -> PreparedCall {
     PreparedCall::foreign_stdio(tool(server, "execute"), digest("args-a"), server, spec)
 }
 
+fn mcp_call(subject: McpSubject, parameters: serde_json::Value) -> PreparedCall {
+    PreparedCall::mcp(
+        subject,
+        McpOperationKind::CallTool,
+        vec![(tool("srv", "search"), digest("args-a"))],
+        McpAdmissionFingerprint::new("capture-a", "search", "schema-a").expect("admission"),
+        "profile-a",
+        ego_core::permit::ForeignTransportTarget::http(route("api.example.test:443")),
+        &parameters,
+    )
+    .expect("MCP call")
+}
+
 #[derive(Clone, Default)]
 struct FakeResolver {
     answer: Arc<Mutex<Option<ego_core::permit::DnsResolution>>>,
@@ -161,6 +175,10 @@ struct FakeOneHop {
     deadlines: Arc<Mutex<Vec<Instant>>>,
 }
 impl OneHop for FakeOneHop {
+    fn admit_mcp(&self) -> Result<(), TransportError> {
+        Ok(())
+    }
+
     fn begin_call(&self) -> Instant {
         Instant::now() + std::time::Duration::from_secs(60)
     }
@@ -321,12 +339,12 @@ impl EvidenceStore for NoEvidence {
 }
 
 #[test]
-fn permission_requires_outer_and_inner_opaque_plus_exact_http_or_spawn_authority() {
+fn foreign_tool_allow_covers_http_but_collapsed_dispatch_still_needs_outer_tool() {
     let req = request();
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
-        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+        rules(&["tool(srv/search)"], &[]),
     );
     assert!(matches!(
         policy.classify(http_call(
@@ -353,10 +371,7 @@ fn permission_requires_outer_and_inner_opaque_plus_exact_http_or_spawn_authority
     let denied = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
-        rules(
-            &["tool(srv/search)", "net(api.example.test:443)"],
-            &["tool(srv/search)"],
-        ),
+        rules(&["tool(srv/search)"], &["tool(srv/search)"]),
     );
     assert!(matches!(
         denied.classify(http_call(
@@ -371,12 +386,206 @@ fn permission_requires_outer_and_inner_opaque_plus_exact_http_or_spawn_authority
 }
 
 #[test]
+fn missing_foreign_tool_authority_asks_even_when_transport_is_allowed() {
+    let req = request();
+    let http_policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["net(api.example.test:443)"], &[]),
+    );
+    assert!(matches!(
+        http_policy.classify(http_call(
+            "srv",
+            "search",
+            "args-a",
+            "api.example.test:443",
+            &req
+        )),
+        ego_core::permit::Classification::Ask(_)
+    ));
+
+    let stdio_policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["exec(server --mcp)"], &[]),
+    );
+    assert!(matches!(
+        stdio_policy.classify(stdio_call("server", vec!["server".into(), "--mcp".into()])),
+        ego_core::permit::Classification::Ask(_)
+    ));
+}
+
+#[test]
+fn foreign_tool_allow_covers_stdio_without_exec_allowance() {
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(server/execute)"], &[]),
+    );
+
+    assert!(matches!(
+        policy.classify(stdio_call(
+            "server",
+            vec![OsString::from("server"), OsString::from("--mcp")],
+        )),
+        ego_core::permit::Classification::Settled(Ok(_))
+    ));
+}
+
+#[test]
+fn guarded_mcp_rejects_changed_subject_without_spending_authority() {
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+    );
+    let authorized = match policy.classify(mcp_call(
+        McpSubject::Tool {
+            server: "srv".into(),
+            name: "search".into(),
+        },
+        serde_json::json!({"name":"search","arguments":{"q":"one"}}),
+    )) {
+        ego_core::permit::Classification::Settled(Ok(value)) => value,
+        other => panic!("{other:?}"),
+    };
+    let (call, permit) = authorized.into_parts();
+    let guarded = GuardedEffects::new(
+        permit,
+        &MemoryFs,
+        &NoProcess,
+        &NoEvidence,
+        Arc::new(FakeResolver::default()),
+        Arc::new(FakeOneHop::default()),
+        Arc::new(FakeSpawner::default()),
+    );
+    let changed = mcp_call(
+        McpSubject::Tool {
+            server: "srv".into(),
+            name: "other".into(),
+        },
+        serde_json::json!({"name":"search","arguments":{"q":"one"}}),
+    );
+    let error = match guarded.claim_mcp_http(changed) {
+        Ok(_) => panic!("changed subject was accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.failure(),
+        TransportFailure::AuthorityMismatch
+    ));
+    guarded
+        .claim_mcp_http(call)
+        .expect("original remains usable");
+}
+
+#[test]
+fn guarded_mcp_rejects_changed_parameters_without_spending_authority() {
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+    );
+    let authorized = match policy.classify(mcp_call(
+        McpSubject::Tool {
+            server: "srv".into(),
+            name: "search".into(),
+        },
+        serde_json::json!({"name":"search","arguments":{"q":"one"}}),
+    )) {
+        ego_core::permit::Classification::Settled(Ok(value)) => value,
+        other => panic!("{other:?}"),
+    };
+    let (call, permit) = authorized.into_parts();
+    let guarded = GuardedEffects::new(
+        permit,
+        &MemoryFs,
+        &NoProcess,
+        &NoEvidence,
+        Arc::new(FakeResolver::default()),
+        Arc::new(FakeOneHop::default()),
+        Arc::new(FakeSpawner::default()),
+    );
+    let changed = mcp_call(
+        McpSubject::Tool {
+            server: "srv".into(),
+            name: "search".into(),
+        },
+        serde_json::json!({"name":"search","arguments":{"q":"two"}}),
+    );
+    let error = match guarded.claim_mcp_http(changed) {
+        Ok(_) => panic!("changed parameters were accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.failure(),
+        TransportFailure::AuthorityMismatch
+    ));
+    guarded
+        .claim_mcp_http(call)
+        .expect("original remains usable");
+}
+
+#[test]
+fn explicit_matching_transport_denies_override_foreign_tool_allow() {
+    let req = request();
+    let denied_http = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(srv/search)"], &["net(api.example.test:443)"]),
+    );
+    assert!(matches!(
+        denied_http.classify(http_call(
+            "srv",
+            "search",
+            "args-a",
+            "api.example.test:443",
+            &req
+        )),
+        ego_core::permit::Classification::Settled(Err(_))
+    ));
+
+    let denied_stdio = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(server/execute)"], &["exec(server --mcp)"]),
+    );
+    assert!(matches!(
+        denied_stdio.classify(stdio_call("server", vec!["server".into(), "--mcp".into()])),
+        ego_core::permit::Classification::Settled(Err(_))
+    ));
+}
+
+#[test]
+fn native_spawn_same_executable_is_not_covered_by_foreign_tool_allow() {
+    let spec = SpawnSpec::new(
+        vec![OsString::from("server"), OsString::from("--mcp")],
+        None,
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("spawn spec");
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(server/execute)"], &[]),
+    );
+    assert!(matches!(
+        policy.classify(PreparedCall::new(
+            "native",
+            ego_core::permit::Op::Spawn { spec },
+        )),
+        ego_core::permit::Classification::Ask(_)
+    ));
+}
+
+#[test]
 fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
     let req = request();
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
-        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+        rules(&["tool(srv/search)"], &[]),
     );
     let authorized = match policy.classify(http_call(
         "srv",
@@ -553,7 +762,7 @@ fn mismatched_actual_request_refuses_before_dns_without_spending_claim() {
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
-        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+        rules(&["tool(srv/search)"], &[]),
     );
     let authorized = match policy.classify(http_call(
         "srv",
@@ -607,7 +816,7 @@ fn resolution_target_mismatch_is_definitely_unsent_and_literal_skips_dns() {
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
-        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+        rules(&["tool(srv/search)"], &[]),
     );
     let authorized = match policy.classify(http_call(
         "srv",
@@ -650,7 +859,7 @@ fn resolution_target_mismatch_is_definitely_unsent_and_literal_skips_dns() {
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
-        rules(&["tool(srv/search)", "net(127.0.0.1:443)"], &[]),
+        rules(&["tool(srv/search)"], &[]),
     );
     let authorized = match policy.classify(http_call(
         "srv",
@@ -685,7 +894,7 @@ fn post_effect_transport_failure_retains_possibly_sent_delivery() {
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
-        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+        rules(&["tool(srv/search)"], &[]),
     );
     let authorized = match policy.classify(http_call(
         "srv",
@@ -730,7 +939,7 @@ fn guarded_duplex_returns_one_child_capability_and_exact_spawn_spec() {
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
-        rules(&["tool(server/execute)", "exec(server --mcp)"], &[]),
+        rules(&["tool(server/execute)"], &[]),
     );
     let authorized =
         match policy.classify(stdio_call("server", vec!["server".into(), "--mcp".into()])) {

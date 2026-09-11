@@ -9,6 +9,7 @@ fn impossible<T>() -> T {
 fn forge_permit() {
     let _ = Permit {
         scope: Scope::default(),
+        call_fingerprint: None,
         _sealed: impossible(),
     };
 }
