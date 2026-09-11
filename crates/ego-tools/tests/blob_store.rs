@@ -1,4 +1,4 @@
-//! RED contract for the generic session blob store and reachability GC.
+//! contract for the generic session blob store and reachability GC.
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
@@ -164,8 +164,8 @@ fn replay_hydration_fails_for_missing_or_corrupt_referenced_image_blobs() {
             std::fs::write(path, b"tampered").expect("corrupt image blob");
         }
 
-        // RED: the final replay/materialization seam must hydrate and verify
-        // every durable image reference before returning provider history.
+        // The replay/materialization seam must hydrate and verify every
+        // durable image reference before returning provider history.
         assert!(
             conversation_from_with_blobs(&state, &store).is_err(),
             "replay resumed after {damage} referenced image blob"

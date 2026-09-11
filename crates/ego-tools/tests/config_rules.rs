@@ -1,4 +1,4 @@
-//! regression case RED contract for durable user-rule authority through the OS adapter.
+//! regression case contract for durable user-rule authority through the OS adapter.
 
 use std::io;
 use std::path::Path;

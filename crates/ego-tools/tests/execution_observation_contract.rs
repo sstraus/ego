@@ -1,7 +1,7 @@
-//! RED contract for durable execution observations.
+//! contract for durable execution observations.
 //!
 //! The log is authoritative and the manifest is only its private catalogue
-//! cache.  These tests deliberately inspect bytes through the public
+//! cache. These tests deliberately inspect bytes through the public
 //! `JsonlStore`/`StoreIo` surface, never a private manifest wrapper.
 
 use std::path::{Path, PathBuf};

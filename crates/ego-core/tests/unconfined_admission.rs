@@ -1,4 +1,4 @@
-//! RED contract for regression case's Windows unconfined-start acknowledgement.
+//! Contract for Windows unconfined-start acknowledgement.
 //!
 //! The acknowledgement is a host-risk fact, not project trust and not user
 //! configuration.  `ego-core` owns only this pure, typed record and its

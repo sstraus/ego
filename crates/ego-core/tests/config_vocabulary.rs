@@ -1,4 +1,4 @@
-//! Vocabulary-only RED contract for regression case.
+//! Vocabulary-only contract for regression case.
 
 use std::path::PathBuf;
 

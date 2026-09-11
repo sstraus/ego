@@ -1,6 +1,6 @@
-//! RED contract for answer-bearing `ego resume`.
+//! contract for answer-bearing `ego resume`.
 //!
-//! Parsing is intentionally separate from application.  Invalid, duplicate,
+//! Parsing is intentionally separate from application. Invalid, duplicate,
 //! extra, and already-settled answers must be rejected by the opened-session
 //! replay gate before any provider or generation work; a valid batch is
 //! applied once against the stored identities and then the same turn resumes.

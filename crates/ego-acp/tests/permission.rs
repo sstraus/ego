@@ -1,4 +1,4 @@
-//! RED contract for the ACP human permission seat (regression case).
+//! contract for the ACP human permission seat (regression case).
 //!
 //! The connected host is the only human seat for an ACP-owned turn. These
 //! pin the two halves that decide whether that is true: the question ego

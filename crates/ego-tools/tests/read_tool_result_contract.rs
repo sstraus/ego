@@ -1,4 +1,4 @@
-//! RED contract for the exact session-bound `read_tool_result` operation.
+//! contract for the exact session-bound `read_tool_result` operation.
 //! The EvidenceStore/process contracts deliberately live in their own
 //! integration tests and do not depend on this tool's parameter surface.
 

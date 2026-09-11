@@ -1,4 +1,4 @@
-//! RED contract for regression case: the status row states the workspace posture.
+//! contract for regression case: the status row states the workspace posture.
 //!
 //! A session that starts untrusted in silence — because nothing in the
 //! workspace was worth asking about, or because the answer was remembered —

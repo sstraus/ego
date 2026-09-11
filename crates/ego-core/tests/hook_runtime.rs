@@ -1,4 +1,4 @@
-//! RED contract for M4 S4: one typed hook catalogue and durable runner.
+//! contract for M4 S4: one typed hook catalogue and durable runner.
 //!
 //! Core receives already projected, source-bound hook values. YAML envelope
 //! extraction belongs to the CLI boundary and is covered by its crate-private

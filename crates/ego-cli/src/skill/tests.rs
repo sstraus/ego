@@ -1,4 +1,4 @@
-//! RED contract for M4 S3: shared YAML extraction and skill admission.
+//! Contract tests for shared YAML extraction and skill admission.
 //!
 //! The service used here is deliberately the CLI-owned filesystem adapter. It
 //! must reuse the bounded envelope used by agent files while leaving policy,

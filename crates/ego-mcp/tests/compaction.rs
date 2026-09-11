@@ -1,4 +1,4 @@
-//! RED contract for the inbound MCP regression case `compact` tool.
+//! contract for the inbound MCP regression case `compact` tool.
 
 #![allow(dead_code)]
 

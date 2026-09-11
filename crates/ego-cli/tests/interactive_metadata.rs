@@ -1,4 +1,4 @@
-//! RED contract for interactive session metadata commands.
+//! contract for interactive session metadata commands.
 use ego_cli::cli::{GoalOperation, NameOperation, SessionMetadataOperation};
 use ego_cli::repl::actions::{
     ActionId, ActionKind, ActionRegistry, Availability, Dispatch, InputOrigin,

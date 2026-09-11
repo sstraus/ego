@@ -1,4 +1,4 @@
-//! RED contracts for the process-level ExecCaps diagnostic (regression case).
+//! Contracts for the process-level ExecCaps diagnostic.
 //!
 //! Boot measurement is deliberately weaker than session admission. It returns
 //! only the backend's measured capability bits, owns no session evidence store,

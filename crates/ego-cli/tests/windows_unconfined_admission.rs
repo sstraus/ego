@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-//! RED process contracts for regression case's Windows unconfined-start admission.
+//! Process contracts for Windows unconfined-start admission.
 //!
 //! These tests deliberately drive the real `ego` binary.  The fake provider
 //! remains loopback-only, so a passing admission test proves that the chosen

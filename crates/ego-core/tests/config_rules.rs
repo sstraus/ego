@@ -1,4 +1,4 @@
-//! regression case RED contract for persistent user-owned permission rules.
+//! regression case contract for persistent user-owned permission rules.
 
 use std::str::FromStr;
 

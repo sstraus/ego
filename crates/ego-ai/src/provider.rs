@@ -879,9 +879,9 @@ impl ProviderRow {
 
     /// The Gemini row, on the Interactions API.
     ///
-    /// **A candidate, not a member**, for the same §9 reason as the other
-    /// three: absent from `crates/ego-cli/src/model.rs`'s table, so
-    /// `--model gemini/…` does not resolve.
+    /// A selectable member of the final provider inventory. Its supplied
+    /// models are exposed through the shared CLI table, so
+    /// `--model gemini/…` resolves through this row.
     ///
     /// The third wire format, and the one that turns two into a seam. It also
     /// carries the one cost `docs/14` §3.6 accepted with its eyes open:

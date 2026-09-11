@@ -1,4 +1,4 @@
-//! RED contracts for the CLI's measured ACP confinement adapter (regression case).
+//! contracts for the CLI's measured ACP confinement adapter (regression case).
 //!
 //! The router already owns the protocol ordering and `AcpSessionControls`
 //! already owns the ceiling/offer policy. These tests cover the missing outer
@@ -7,7 +7,7 @@
 //! refusals to the existing controls port.
 //!
 //! The adapter name and constructor below are deliberately the smallest
-//! fixture-facing API accepted by the story ADR. They remain compile-RED until
+//! fixture-facing API accepted by the story ADR. They remain compile-until
 //! the CLI composition wires the real `SessionConfinementAdmission` port.
 
 mod support;

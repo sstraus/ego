@@ -1,4 +1,4 @@
-//! RED contract for the single live MCP admission authority.
+//! contract for the single live MCP admission authority.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

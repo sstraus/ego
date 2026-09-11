@@ -1,4 +1,4 @@
-//! RED contract for regression case: a remembered trust answer, and what it is an
+//! contract for regression case: a remembered trust answer, and what it is an
 //! answer about.
 //!
 //! Everything here is pure. Which paths get probed and how the ledger reaches

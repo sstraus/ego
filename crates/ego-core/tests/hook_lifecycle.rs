@@ -1,4 +1,4 @@
-//! RED contract for lifecycle production at the real core owners (M4 S7).
+//! contract for lifecycle production at the real core owners (M4 S7).
 
 mod common;
 

@@ -1,4 +1,4 @@
-//! RED contracts for adapter-owned default `StoreIo` line reads.
+//! contracts for adapter-owned default `StoreIo` line reads.
 
 use ego_tools::store::StoreIo;
 use std::io;

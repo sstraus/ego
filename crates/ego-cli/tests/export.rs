@@ -1,4 +1,4 @@
-//! RED contract for regression case: the real CLI renders the core sanitized export.
+//! contract for regression case: the real CLI renders the core sanitized export.
 
 use std::path::{Path, PathBuf};
 

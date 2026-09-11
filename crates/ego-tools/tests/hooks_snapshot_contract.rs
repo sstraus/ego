@@ -1,4 +1,4 @@
-//! RED snapshot contract for hook state, versions, and replay fallback.
+//! snapshot contract for hook state, versions, and replay fallback.
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{

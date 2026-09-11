@@ -1,4 +1,4 @@
-//! RED contract for versioned YAML agent files and `--attach` acquisition.
+//! contract for versioned YAML agent files and `--attach` acquisition.
 
 mod support;
 

@@ -1,0 +1,51 @@
+error[E0425]: cannot find function, tuple struct or tuple variant `Sealed` in module `ego_core::permit`
+  --> tests/ui/permit_boundaries_are_private.rs:15:31
+   |
+15 |     let _ = ego_core::permit::Sealed(impossible());
+   |                               ^^^^^^ not found in `ego_core::permit`
+
+error[E0425]: cannot find type `ModeApprover` in module `ego_core::permit`
+  --> tests/ui/permit_boundaries_are_private.rs:19:53
+   |
+19 |     let _ = std::any::type_name::<ego_core::permit::ModeApprover>();
+   |                                                     ^^^^^^^^^^^^
+   |
+  ::: src/permit/approver.rs
+   |
+   | pub trait Approver: fmt::Debug + Send + Sync {
+   | -------------------------------------------- similarly named trait `Approver` defined here
+   |
+help: a trait with a similar name exists
+   |
+19 -     let _ = std::any::type_name::<ego_core::permit::ModeApprover>();
+19 +     let _ = std::any::type_name::<ego_core::permit::Approver>();
+   |
+
+error[E0277]: the trait bound `ego_core::permit::Permit: Clone` is not satisfied
+  --> tests/ui/permit_boundaries_are_private.rs:11:21
+   |
+11 |     require_clone::<Permit>();
+   |                     ^^^^^^ the trait `Clone` is not implemented for `ego_core::permit::Permit`
+   |
+note: required by a bound in `require_clone`
+  --> tests/ui/permit_boundaries_are_private.rs:10:25
+   |
+10 |     fn require_clone<T: Clone>() {}
+   |                         ^^^^^ required by this bound in `require_clone`
+
+error[E0624]: method `mint` is private
+  --> tests/ui/permit_boundaries_are_private.rs:23:20
+   |
+23 |     let _ = engine.mint(Scope::default());
+   |                    ^^^^ private method
+   |
+  ::: src/permit/grant.rs
+   |
+   |     fn mint(&self, scope: Scope) -> Permit {
+   |     -------------------------------------- private method defined here
+
+error[E0599]: no method named `with_approver` found for reference `&PolicyEngine` in the current scope
+  --> tests/ui/permit_boundaries_are_private.rs:27:20
+   |
+27 |     let _ = engine.with_approver(impossible::<Box<dyn Approver>>());
+   |                    ^^^^^^^^^^^^^ method not found in `&PolicyEngine`

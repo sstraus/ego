@@ -1,7 +1,7 @@
-//! RED process-boundary contract for regression case first-run model onboarding.
+//! process-boundary contract for regression case first-run model onboarding.
 //!
 //! These cases deliberately use only the public `ego` executable and the
-//! existing loopback harness.  Provider key values are synthetic and every
+//! existing loopback harness. Provider key values are synthetic and every
 //! assertion also checks that they do not cross the diagnostic boundary.
 
 mod support;

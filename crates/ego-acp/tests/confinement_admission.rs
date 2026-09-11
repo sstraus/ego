@@ -1,4 +1,4 @@
-//! RED contracts for session-scoped confinement admission at the real router.
+//! contracts for session-scoped confinement admission at the real router.
 //!
 //! These tests deliberately exercise the protocol handlers. A fake admission
 //! is acceptable here because it records the external admission boundary and

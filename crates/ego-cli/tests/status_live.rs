@@ -1,4 +1,4 @@
-//! RED contract for hardened status Git command grammar.
+//! contract for hardened status Git command grammar.
 
 use ego_cli::repl::status::GitCommand;
 

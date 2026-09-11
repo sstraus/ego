@@ -1,4 +1,4 @@
-//! RED behavioral contract for regression case provider security and conformance.
+//! behavioral contract for regression case provider security and conformance.
 
 use std::sync::Arc;
 

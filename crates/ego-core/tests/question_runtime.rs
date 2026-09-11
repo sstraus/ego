@@ -1,7 +1,7 @@
-//! RED runtime contract for one-turn question suspension.
+//! runtime contract for one-turn question suspension.
 //!
 //! This module deliberately exercises the core-owned async port and the
-//! TurnLoop attachment point.  Host adapters are not allowed to become a
+//! TurnLoop attachment point. Host adapters are not allowed to become a
 //! second parser or to manufacture a question id: the id passed to Elicitor
 //! is the persisted QuestionRequested envelope ItemId.
 

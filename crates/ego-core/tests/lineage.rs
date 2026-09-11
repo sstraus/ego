@@ -1,4 +1,4 @@
-//! RED contracts for regression case: durable lineage replay and fork semantics.
+//! contracts for regression case: durable lineage replay and fork semantics.
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};

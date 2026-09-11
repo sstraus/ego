@@ -1,4 +1,4 @@
-//! RED contract for regression case: durable usage retains role and time.
+//! contract for regression case: durable usage retains role and time.
 
 use ego_core::cost::{Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{

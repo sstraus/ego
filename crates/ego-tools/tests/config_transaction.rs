@@ -1,4 +1,4 @@
-//! RED contract for one locked, comment-preserving user-config transaction.
+//! contract for one locked, comment-preserving user-config transaction.
 
 use std::io;
 use std::path::{Path, PathBuf};

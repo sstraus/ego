@@ -1,4 +1,4 @@
-//! RED contract for provider inventory and managed Kimi model selection.
+//! contract for provider inventory and managed Kimi model selection.
 //!
 //! regression case deliberately resolves the mapping through the public catalogue
 //! seam. The unresolved row is deployment authority; the resolved model is
@@ -805,6 +805,10 @@ fn qwen_oauth_has_no_selectable_compatibility_surface() {
     // ego-ai has no public provider inventory API. This negative inventory
     // check is therefore limited to the selectable source surfaces; all
     // positive regression case assertions use the public resolution API.
+    // `qwen` alone is not retired: Ollama's current local `ollama/qwen3`
+    // model is a valid selectable surface. Match the removed OAuth contract,
+    // not that unrelated model family.
+    let retired_markers = ["qwen-oauth", "qwen_portal", "portal.qwen.ai"];
     let provider = include_str!("../src/provider.rs");
     let model_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ego-cli/src/model.rs");
@@ -817,8 +821,9 @@ fn qwen_oauth_has_no_selectable_compatibility_surface() {
         ("OAuth", oauth),
         ("wire module", wire_mod),
     ] {
+        let source = source.to_ascii_lowercase();
         assert!(
-            !source.to_ascii_lowercase().contains("qwen"),
+            !retired_markers.iter().any(|marker| source.contains(marker)),
             "{name} still exposes retired Qwen OAuth"
         );
     }

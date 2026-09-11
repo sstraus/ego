@@ -1,4 +1,4 @@
-//! RED contract for the current MCP 2026-07-28 client and guarded transports.
+//! contract for the current MCP 2026-07-28 client and guarded transports.
 //!
 //! The effects below are deterministic protocol-neutral fakes. They record
 //! the exact request handed to the guarded boundary; they do not implement

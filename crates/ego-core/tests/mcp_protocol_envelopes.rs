@@ -1,4 +1,4 @@
-//! Coarse RED contract for protocol-owned MCP envelopes and core projections.
+//! Coarse contract for protocol-owned MCP envelopes and core projections.
 
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::mcp::{

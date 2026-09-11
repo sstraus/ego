@@ -1,4 +1,4 @@
-//! RED contract for the shared hook invocation wire at the tool adapters.
+//! contract for the shared hook invocation wire at the tool adapters.
 
 use std::time::Duration;
 

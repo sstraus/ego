@@ -1,4 +1,4 @@
-//! RED boundary tests for provider credential ownership.
+//! boundary tests for provider credential ownership.
 
 use ego_core::credentials::SecretMaterial;
 use ego_core::permit::HttpHeader;

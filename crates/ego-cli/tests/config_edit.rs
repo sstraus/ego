@@ -1,4 +1,4 @@
-//! RED contract for the process/editor half of `ego config edit`.
+//! contract for the process/editor half of `ego config edit`.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

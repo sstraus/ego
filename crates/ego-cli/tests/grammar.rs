@@ -314,12 +314,12 @@ fn every_waiting_on_reason_is_the_one_the_document_prints() {
 fn every_unbuilt_subcommand_is_one_the_document_offers() {
     let doc = include_str!("../../../CLI.md");
     let commands = doc
-        .split("## 2. Command set")
+        .split("<!-- ego-cli-command-set:start -->")
         .nth(1)
-        .expect("CLI.md has a command set section")
-        .split("## 3.")
+        .expect("CLI.md has the command-set start anchor")
+        .split("<!-- ego-cli-command-set:end -->")
         .next()
-        .expect("the command set section ends");
+        .expect("CLI.md has the command-set end anchor");
     for (name, _) in cli::UNBUILT {
         assert!(
             commands.contains(&format!("ego {name}")),
@@ -1159,9 +1159,12 @@ fn no_command_is_both_built_and_waiting_on_something() {
 fn every_command_the_document_offers_is_in_exactly_one_table() {
     let doc = include_str!("../../../CLI.md");
     let block = doc
-        .split("## 2. Command set")
+        .split("<!-- ego-cli-command-set:start -->")
         .nth(1)
-        .expect("CLI.md has a command set section")
+        .expect("CLI.md has the command-set start anchor")
+        .split("<!-- ego-cli-command-set:end -->")
+        .next()
+        .expect("CLI.md has the command-set end anchor")
         .split("```")
         .nth(1)
         .expect("the command set is a fenced block");

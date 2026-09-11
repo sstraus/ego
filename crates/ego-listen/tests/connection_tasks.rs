@@ -1,4 +1,4 @@
-//! RED contracts for the listener-owned accept task lifecycle (regression case).
+//! Contracts for the listener-owned accept task lifecycle.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

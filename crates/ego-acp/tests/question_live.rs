@@ -1,4 +1,4 @@
-//! RED contract for ACP live elicitation integration.
+//! contract for ACP live elicitation integration.
 
 use futures::executor::block_on;
 use std::sync::Arc;

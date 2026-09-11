@@ -1,4 +1,4 @@
-//! RED contract for the real ego models process surface.
+//! contract for the real ego models process surface.
 
 mod support;
 use std::path::{Path, PathBuf};

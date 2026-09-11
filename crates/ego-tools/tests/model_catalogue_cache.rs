@@ -1,4 +1,4 @@
-//! RED contract for the opaque durable cache boundary.
+//! contract for the opaque durable cache boundary.
 
 use ego_core::event::time::Timestamp;
 use ego_tools::model_catalogue_cache::{CacheError, ModelCatalogueCache};

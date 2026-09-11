@@ -1,4 +1,4 @@
-//! RED contract for ACP v1.5.0 unstable form elicitation.
+//! contract for ACP v1.5.0 unstable form elicitation.
 //!
 //! The imports below intentionally name the pinned v1 schema. In particular,
 //! v1 has form modes and property schemas; it does not have fictional

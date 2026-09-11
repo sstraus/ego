@@ -1,4 +1,4 @@
-//! RED contracts for regression case: lease-held authoritative evidence.
+//! contracts for regression case: lease-held authoritative evidence.
 
 use ego_core::config::{ActiveProfileProvenance, ModelRef, OriginSet, Source};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};

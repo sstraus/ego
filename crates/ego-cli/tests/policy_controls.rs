@@ -1,4 +1,4 @@
-//! RED contract for regression case interactive policy controls.
+//! contract for regression case interactive policy controls.
 //!
 //! The presenter owns modal state only. The application owner receives typed
 //! requests and owns preflight, persistence, re-resolution, and staging.

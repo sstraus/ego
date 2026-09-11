@@ -1,4 +1,4 @@
-//! RED contract for regression case OS adapters behind guarded core capabilities.
+//! contract for regression case OS adapters behind guarded core capabilities.
 
 use std::ffi::OsString;
 use std::io::{Read, Write};

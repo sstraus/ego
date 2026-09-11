@@ -1,4 +1,4 @@
-//! RED contract for the durable hook evidence schema (regression case).
+//! contract for the durable hook evidence schema (regression case).
 //!
 //! These assertions are about the final typed wire contract. Hook identity
 //! and feedback provenance are audit data, not stringly-shaped test input.

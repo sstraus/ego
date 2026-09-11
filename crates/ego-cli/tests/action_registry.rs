@@ -1,4 +1,4 @@
-//! RED contract for the single, final interactive action registry.
+//! contract for the single, final interactive action registry.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ego_cli::repl::actions::{

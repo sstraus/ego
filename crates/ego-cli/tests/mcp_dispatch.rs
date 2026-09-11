@@ -1,4 +1,4 @@
-//! RED contract for final MCP management dispatch.
+//! contract for final MCP management dispatch.
 //!
 //! Management commands run through the real `ego` binary. Protocol discovery
 //! and OAuth belong to the later `ego-mcp` spine, not this configuration story.

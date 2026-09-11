@@ -1,4 +1,4 @@
-//! RED contract for regression case and regression case: sanitized artifact publication.
+//! contract for regression case and regression case: sanitized artifact publication.
 
 use std::io;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,4 @@
-//! RED WAL/manifest crash-boundary contract for hook evidence.
+//! WAL/manifest crash-boundary contract for hook evidence.
 //!
 //! These tests drive the real `JsonlStore` through `StoreIo` spies and inspect
 //! the raw on-disk manifest. An array of operation names is not evidence.

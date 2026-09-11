@@ -1,4 +1,4 @@
-//! RED contract for truthful CLI handling of an admitted confinement drift.
+//! contract for truthful CLI handling of an admitted confinement drift.
 //!
 //! The pinned observation is carried by the same `RunSelections` value that
 //! the protocol admits. The changed backend identity must be refused before

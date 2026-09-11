@@ -1,4 +1,4 @@
-//! RED contract for the OS adapter's opaque whole-document editor session.
+//! contract for the OS adapter's opaque whole-document editor session.
 
 use std::fs;
 use std::io;

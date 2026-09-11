@@ -1,4 +1,4 @@
-//! RED contract for the shared catalogue picker and atomic user-config port.
+//! contract for the shared catalogue picker and atomic user-config port.
 
 use std::sync::{Arc, Mutex};
 

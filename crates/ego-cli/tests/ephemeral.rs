@@ -1,4 +1,4 @@
-//! RED contract for regression case: `--ephemeral` is no longer a session mode.
+//! contract for regression case: `--ephemeral` is no longer a session mode.
 
 mod support;
 

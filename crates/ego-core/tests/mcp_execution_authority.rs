@@ -1,4 +1,4 @@
-//! Coarse RED contract for core MCP execution authority.
+//! Coarse contract for core MCP execution authority.
 
 use ego_core::config::{ConfigLayer, Mode, Ruleset, Source};
 use ego_core::mcp::{

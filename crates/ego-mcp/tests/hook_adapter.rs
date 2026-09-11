@@ -1,4 +1,4 @@
-//! RED contract for the MCP hook adapter (M4 S5).
+//! contract for the MCP hook adapter (M4 S5).
 //!
 //! Dispatch consumes one immutable captured registry generation and the
 //! ordinary MCP operation path. The capture below is admitted through the

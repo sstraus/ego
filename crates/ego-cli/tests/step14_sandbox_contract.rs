@@ -1,4 +1,4 @@
-//! RED contract for CLI sandbox parsing, precedence, and process enforcement.
+//! contract for CLI sandbox parsing, precedence, and process enforcement.
 //!
 //! The provider transcript exercises the same production tool path as a real
 //! run. A missing backend capability is accepted only as a fail-closed result;

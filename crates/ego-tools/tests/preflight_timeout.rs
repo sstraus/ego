@@ -1,4 +1,4 @@
-//! RED contract for the protocol-neutral secret-child adapter.
+//! contract for the protocol-neutral secret-child adapter.
 //!
 //! Credential commands remain owned by `ego-cli`, while process-group
 //! ownership and bounded cleanup belong to `ego-tools`. This test names the

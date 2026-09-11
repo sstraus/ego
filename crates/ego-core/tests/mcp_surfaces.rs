@@ -1,4 +1,4 @@
-//! RED contract for the core-owned MCP execution boundaries.
+//! contract for the core-owned MCP execution boundaries.
 
 use std::sync::Arc;
 

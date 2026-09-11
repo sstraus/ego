@@ -1,4 +1,4 @@
-//! RED contract for regression case: invocation MCP discovery and stdio execution
+//! contract for regression case: invocation MCP discovery and stdio execution
 //! consume the resolved run confinement.
 
 mod support;

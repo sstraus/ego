@@ -1,4 +1,4 @@
-//! RED contracts for regression case: authoritative run and generation evidence.
+//! contracts for regression case: authoritative run and generation evidence.
 
 use ego_core::config::ModelRef;
 use ego_core::event::domain::GenerationRole;

@@ -1,4 +1,4 @@
-//! RED contracts for CLI-owned ACP listener composition (regression case).
+//! Contracts for CLI-owned ACP listener composition.
 //!
 //! The lower crates prove endpoint admission, listener lifecycle and ACP
 //! transport behavior in isolation. This suite keeps the composition root

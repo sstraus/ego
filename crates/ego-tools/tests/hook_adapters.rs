@@ -1,4 +1,4 @@
-//! RED contract for command and HTTP hook adapters (M4 S5).
+//! contract for command and HTTP hook adapters (M4 S5).
 //!
 //! Adapters delegate effects to existing process and guarded HTTP owners.
 //! Assertions observe prepared calls, typed owner results, and delivery

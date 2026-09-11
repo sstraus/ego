@@ -1,4 +1,4 @@
-//! RED contract for the confidential, immutable generation-policy value.
+//! contract for the confidential, immutable generation-policy value.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;

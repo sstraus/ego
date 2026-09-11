@@ -1,4 +1,4 @@
-//! RED contract for interactive Form answers through the canonical core parser.
+//! contract for interactive Form answers through the canonical core parser.
 
 use ego_core::question::{QuestionAnswer, QuestionMode, QuestionRequest};
 use serde_json::json;

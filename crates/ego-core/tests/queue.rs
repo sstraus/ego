@@ -1,7 +1,7 @@
-//! RED contract for durable prompt queues and safe steering.
+//! contract for durable prompt queues and safe steering.
 //!
 //! This module deliberately exercises the final event ledger, not an
-//! in-memory inbox.  Acceptance, expedited intent, and consumption are three
+//! in-memory inbox. Acceptance, expedited intent, and consumption are three
 //! different durable facts; replay must derive the queue from those facts in
 //! sequence order and must never infer acknowledgement from a missing turn.
 

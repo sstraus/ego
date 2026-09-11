@@ -1,4 +1,4 @@
-//! RED contract for M4 S1's one-way codec and snapshot migration.
+//! contract for M4 S1's one-way codec and snapshot migration.
 
 use ego_core::event::id::{Seq, SessionId};
 use ego_core::state::SessionState;

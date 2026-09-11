@@ -1,6 +1,6 @@
-//! RED contract for regression case: prompted clean-session compaction.
+//! contract for regression case: prompted clean-session compaction.
 //!
-//! The operation itself is intentionally not duplicated here.  These tests
+//! The operation itself is intentionally not duplicated here. These tests
 //! pin the core-owned grammar, durable event, reducer/history boundary and
 //! public projection that every host must share.
 

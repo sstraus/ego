@@ -1,4 +1,4 @@
-//! RED router contract for regression case's durable ACP v1 session surface.
+//! router contract for regression case's durable ACP v1 session surface.
 //!
 //! Every request crosses the pinned SDK's real JSON-RPC router. The fixture is
 //! deliberately restartable: separate routers share only the durable store,

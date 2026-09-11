@@ -1,4 +1,4 @@
-//! RED contract for regression case: provider context overflow is a distinct cause.
+//! contract for regression case: provider context overflow is a distinct cause.
 
 use ego_ai::wire::anthropic_messages::StreamDecoder as AnthropicStreamDecoder;
 use ego_ai::wire::openai_completions::StreamDecoder as OpenAiStreamDecoder;

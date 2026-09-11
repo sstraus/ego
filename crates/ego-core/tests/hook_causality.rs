@@ -1,4 +1,4 @@
-//! RED contracts for closed hook-owner causality and durable journal links.
+//! contracts for closed hook-owner causality and durable journal links.
 
 use std::sync::Mutex;
 

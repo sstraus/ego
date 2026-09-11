@@ -1,4 +1,4 @@
-//! RED contract for argv-native execution, confinement, and process evidence.
+//! contract for argv-native execution, confinement, and process evidence.
 //!
 //! The provider is never involved here. Each process is a real argv-native
 //! child launched through the same run-owned guarded process path production uses.

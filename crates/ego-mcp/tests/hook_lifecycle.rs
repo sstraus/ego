@@ -1,8 +1,8 @@
-//! RED contract for the concrete MCP continuation owner.
+//! contract for the concrete MCP continuation owner.
 //!
-//! This crosses the real stdio operation and guarded-authority seams.  It
-//! intentionally remains RED until `McpContinuationOwner` owns both the
-//! asynchronous input-required projection and accepted-answer resume.
+//! This crosses the real stdio operation and guarded-authority seams. The
+//! contract requires `McpContinuationOwner` to own both the asynchronous
+//! input-required projection and accepted-answer resume.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};

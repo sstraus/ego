@@ -314,7 +314,7 @@ pub fn now(clock: &dyn Clock) -> Timestamp {
 }
 
 #[cfg(test)]
-mod compaction {
+mod compaction_contract {
     use super::*;
     use ego_core::event::time::Clock;
     use ego_core::session::TargetPublication;

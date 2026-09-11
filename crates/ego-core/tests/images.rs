@@ -1,4 +1,4 @@
-//! RED contract for immutable images, capability schema v5, and durable image metadata.
+//! contract for immutable images, capability schema v5, and durable image metadata.
 //!
 //! The image value is deliberately constructed through its public serde shape in
 //! this module. That keeps the contract independent of constructor convenience

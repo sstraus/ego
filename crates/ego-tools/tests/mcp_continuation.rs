@@ -1,4 +1,4 @@
-//! Coarse RED contract for durable MCP continuation authority.
+//! Coarse contract for durable MCP continuation authority.
 
 use ego_core::config::{ConfigLayer, Mode, Ruleset, Source};
 use ego_core::event::time::{Clock, Timestamp};

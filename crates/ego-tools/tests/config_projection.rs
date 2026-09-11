@@ -1,4 +1,4 @@
-//! regression case RED contract for reading stored user authority through the OS adapter.
+//! regression case contract for reading stored user authority through the OS adapter.
 
 use std::io;
 use std::path::{Path, PathBuf};

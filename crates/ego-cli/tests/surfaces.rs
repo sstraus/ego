@@ -1,6 +1,6 @@
-//! RED contract for M4 S8: inspection surfaces and executable agent files.
+//! contract for M4 S8: inspection surfaces and executable agent files.
 //!
-//! These tests exercise the process boundary.  The catalogue shown by an
+//! These tests exercise the process boundary. The catalogue shown by an
 //! inspection command must be the immutable snapshot used by invocation, and
 //! reload must publish a complete replacement rather than mutate a live view.
 

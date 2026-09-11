@@ -1,4 +1,4 @@
-//! RED behavioral contract for the lease-bound shared lifecycle journal.
+//! behavioral contract for the lease-bound shared lifecycle journal.
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};

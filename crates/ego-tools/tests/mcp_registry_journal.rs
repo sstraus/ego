@@ -1,4 +1,4 @@
-//! RED contract for the append-only MCP registry journal adapter.
+//! contract for the append-only MCP registry journal adapter.
 //!
 //! The port belongs to `ego-core`; this suite crosses the final filesystem
 //! adapter and reopens it to prove that replay does not infer settlement.

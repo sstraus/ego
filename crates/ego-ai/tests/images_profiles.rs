@@ -1,4 +1,4 @@
-//! RED contract for image capability refusal and every current profile disposition.
+//! contract for image capability refusal and every current profile disposition.
 
 use base64::Engine as _;
 use ego_ai::catalogue::{Catalogue, HostedModel, ModelSlug, SuppliedAuthority, tabulated};

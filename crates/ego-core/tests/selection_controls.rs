@@ -1,7 +1,7 @@
-//! RED contract for typed absence in the session generation controls (regression case).
+//! contract for typed absence in the session generation controls (regression case).
 //!
 //! An unconfigured model and an unresolved reasoning default are different
-//! from a concrete value.  `chosen` is a separate operator-intent field: a
+//! from a concrete value. `chosen` is a separate operator-intent field: a
 //! configured default may be current without being a human choice, and an
 //! absent current must not be represented by an empty model id or `Off`.
 

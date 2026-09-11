@@ -605,10 +605,10 @@ mod store {
             });
             b_start.wait();
             // This bounded receive is the deterministic scheduling point. On
-            // the RED implementation B enters its authoritative read while
-            // A is paused; once production owns events.lock around that read,
-            // B remains outside read until A is released. Either way A is
-            // released below before joining, so the fixture cannot deadlock.
+            // An implementation that enters its authoritative read while A
+            // is paused must keep B outside that read once production owns
+            // events.lock around it. Either way A is released below before
+            // joining, so the fixture cannot deadlock.
             let b_read_before_release = b_read_observer
                 .recv_timeout(Duration::from_millis(250))
                 .is_ok();

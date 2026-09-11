@@ -1,4 +1,4 @@
-//! RED contracts for A2A endpoint policy and shared bearer authentication.
+//! Contracts for A2A endpoint policy and shared bearer authentication.
 
 use ego_a2a::auth::{Credential, CredentialRefusal, TOKEN_VAR};
 use ego_core::credentials::SecretMaterial;

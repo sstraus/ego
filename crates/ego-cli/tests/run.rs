@@ -62,12 +62,12 @@ impl Places {
 fn the_version_in_the_document_is_the_version_the_binary_writes() {
     let doc = include_str!("../../../CLI.md");
     let example = doc
-        .split("### 4.1 ")
+        .split("<!-- ego-cli-json-output:start -->")
         .nth(1)
-        .expect("CLI.md has a §4.1")
-        .split("### 4.2")
+        .expect("CLI.md has the JSON-output start anchor")
+        .split("<!-- ego-cli-json-output:end -->")
         .next()
-        .expect("§4.1 ends");
+        .expect("CLI.md has the JSON-output end anchor");
     assert!(
         example.contains(&format!("\"v\": {PUBLIC_EVENT_VERSION}")),
         "CLI.md §4.1's example does not show `\"v\": {PUBLIC_EVENT_VERSION}`, \

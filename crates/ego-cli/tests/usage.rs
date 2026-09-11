@@ -1,4 +1,4 @@
-//! RED contract for regression case: one versioned usage report over one ledger.
+//! contract for regression case: one versioned usage report over one ledger.
 
 use ego_core::usage::USAGE_REPORT_VERSION;
 use serde_json::Value;

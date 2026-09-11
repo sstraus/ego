@@ -1,4 +1,4 @@
-//! RED contract for MCP result metadata, tool subscriptions, and MRTR state.
+//! contract for MCP result metadata, tool subscriptions, and MRTR state.
 
 use ego_mcp::{
     CacheScope, McpInputResponse, McpInputState, McpResultMetadata, McpSubscription,

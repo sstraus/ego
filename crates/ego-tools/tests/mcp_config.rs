@@ -1,4 +1,4 @@
-//! RED contract for regression case user-config publication and OS credentials.
+//! contract for regression case user-config publication and OS credentials.
 
 use std::collections::HashMap;
 use std::io;

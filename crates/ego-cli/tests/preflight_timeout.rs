@@ -1,10 +1,10 @@
-//! RED contract for supervised credential preflight.
+//! contract for supervised credential preflight.
 //!
-//! These tests deliberately run the real `ego` process.  A configured
+//! These tests deliberately run the real `ego` process. A configured
 //! credential command is a secret-bearing child protocol, not an ordinary
 //! tool invocation: the run deadline and signals must own its complete
 //! process tree, while an independent credential failure must not become a
-//! run timeout.  The fixtures use only local shell processes and bounded
+//! run timeout. The fixtures use only local shell processes and bounded
 //! marker observation; no provider or external network is contacted.
 
 mod support;

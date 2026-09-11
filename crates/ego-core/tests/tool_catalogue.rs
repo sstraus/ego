@@ -1,4 +1,4 @@
-//! RED contract for one immutable admitted-tool capture per generation.
+//! contract for one immutable admitted-tool capture per generation.
 //!
 //! The loop in these tests is the production `TurnLoop`; only the generator,
 //! store, effect ports, and admitted source are test-owned ports.

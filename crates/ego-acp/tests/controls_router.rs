@@ -1,4 +1,4 @@
-//! RED router contract for the ACP session config options (regression case).
+//! router contract for the ACP session config options (regression case).
 //!
 //! Every request below crosses the pinned SDK's real v1 router, because the
 //! router is the only thing that can say whether a method is reachable. The

@@ -1072,7 +1072,7 @@ async fn audio_is_refused_by_name_and_no_turn_is_started() {
     connection.finish().await;
 }
 
-/// A one-pixel PNG, as the encoder emits it. Shared with `images.rs`
+/// A one-pixel PNG, as the encoder emits it. Shared with `images_profiles.rs`
 /// by value rather than by import, because a test fixture crossing a crate
 /// boundary would need a public constant that production has no use for.
 const PNG_1X1: &[u8] = &[

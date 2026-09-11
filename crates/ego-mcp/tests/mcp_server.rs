@@ -1,6 +1,6 @@
-//! RED contract for the inbound, scoped MCP server (regression case).
+//! contract for the inbound, scoped MCP server (regression case).
 //!
-//! These tests deliberately exercise the injected controller seam.  The MCP
+//! These tests deliberately exercise the injected controller seam. The MCP
 //! adapter owns protocol validation, connection visibility, and sanitisation;
 //! the core RunController remains the only lifecycle authority.
 

@@ -1,4 +1,4 @@
-//! RED contract for the immutable, width-aware interactive status surface.
+//! contract for the immutable, width-aware interactive status surface.
 
 use ego_cli::repl::status::{
     GitFactsSource, SeatFacts, SegmentValue, SelectionFacts, StatusLine, StatusSegmentName,

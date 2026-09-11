@@ -1,4 +1,4 @@
-//! RED contract for regression case's explicit `profile.ci` posture.
+//! contract for regression case's explicit `profile.ci` posture.
 //!
 //! These tests run the real binary for the process-level contract. The two
 //! publication tests use the existing public artifact port because the CLI

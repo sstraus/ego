@@ -1,4 +1,4 @@
-//! RED contract for regression case's target-session durability boundary.
+//! contract for regression case's target-session durability boundary.
 
 use ego_core::cost::{CostDelta, UnknownCost};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};

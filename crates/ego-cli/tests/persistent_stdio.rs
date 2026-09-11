@@ -1,4 +1,4 @@
-//! RED coverage for the live `ego mcp-server` stdio process.
+//! coverage for the live `ego mcp-server` stdio process.
 //!
 //! The child receives three complete current MCP requests while its stdin
 //! remains open. Responses must be observable before that stdin is closed;

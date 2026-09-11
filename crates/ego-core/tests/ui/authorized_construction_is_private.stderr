@@ -1,0 +1,11 @@
+error[E0451]: fields `call`, `permit` and `by` of struct `Authorized` are private
+ --> tests/ui/authorized_construction_is_private.rs:7:9
+  |
+6 |     let _ = Authorized {
+  |             ---------- in this type
+7 |         call,
+  |         ^^^^ private field
+8 |         permit,
+  |         ^^^^^^ private field
+9 |         by: Authority::Party,
+  |         ^^ private field

@@ -1,4 +1,4 @@
-//! RED contract for regression case: a sanitized export is a producer-only bundle.
+//! contract for regression case: a sanitized export is a producer-only bundle.
 
 use std::collections::{BTreeMap, HashMap};
 

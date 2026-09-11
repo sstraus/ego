@@ -1,4 +1,4 @@
-//! RED adapter tests for the single zeroizing provider-auth lifetime.
+//! adapter tests for the single zeroizing provider-auth lifetime.
 
 mod support;
 

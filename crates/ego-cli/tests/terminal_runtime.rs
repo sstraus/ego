@@ -1,4 +1,4 @@
-//! RED contract for the live Reedline action ingress.
+//! contract for the live Reedline action ingress.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ego_cli::repl::actions::{ActionId, ActionRegistry, Dispatch, InputOrigin};

@@ -1,4 +1,4 @@
-//! RED contracts for ACP's listener-owned transport lifecycle (regression case).
+//! Contracts for ACP's listener-owned transport lifecycle.
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! RED contract for the core judge seam.
+//! contract for the core judge seam.
 //!
 //! The CLI integration contract proves the real TurnLoop path. This module
 //! pins the public, provider-neutral judge request and decoder: the request is

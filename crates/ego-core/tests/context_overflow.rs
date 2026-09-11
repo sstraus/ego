@@ -1,4 +1,4 @@
-//! RED contract for regression case: overflow settles explicitly and compacts from idle.
+//! contract for regression case: overflow settles explicitly and compacts from idle.
 
 use ego_core::compact::{COMPACTION_PROMPT_REVISION, Checkpoint};
 use ego_core::generator::attempt::{DeliveryCertainty, Outcome, UsageReport};

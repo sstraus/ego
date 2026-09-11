@@ -1,4 +1,4 @@
-//! RED contract for regression case MCP protocol-facing CLI composition.
+//! contract for regression case MCP protocol-facing CLI composition.
 //!
 //! These assertions are intentionally isolated from regression case: they exercise
 //! the Login/Reload actions and `--mcp` attachment contract directly.

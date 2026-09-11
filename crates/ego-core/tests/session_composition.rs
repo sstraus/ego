@@ -1,4 +1,4 @@
-//! RED contract for one explicit MCP runtime binding per outer session.
+//! contract for one explicit MCP runtime binding per outer session.
 
 use std::sync::Arc;
 

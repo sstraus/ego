@@ -1,4 +1,4 @@
-//! RED contract for regression case's rooted durable RunController.
+//! contract for regression case's rooted durable RunController.
 //!
 //! The store and executor below are complete local adapters. Their only
 //! purpose is to expose durable transaction order, admission-before-effect,

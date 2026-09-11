@@ -1,4 +1,4 @@
-//! RED contract for shared inbound endpoint policy (regression case).
+//! Contract for shared inbound endpoint policy.
 
 use std::net::SocketAddr;
 

@@ -1,4 +1,4 @@
-//! RED contract for regression case's pure rule-management core seam.
+//! contract for regression case's pure rule-management core seam.
 
 use std::path::Path;
 

@@ -1,4 +1,4 @@
-//! RED contract for the separately resolved, tool-less `auto` judge.
+//! contract for the separately resolved, tool-less `auto` judge.
 //!
 //! These tests run the real `ego` binary against the existing provider stub.
 //! The first generation asks for the argv-native `exec` tool; the second is the

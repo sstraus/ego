@@ -1,4 +1,4 @@
-//! RED contract for regression case: manifest model projection follows main evidence.
+//! contract for regression case: manifest model projection follows main evidence.
 
 use std::time::Duration;
 

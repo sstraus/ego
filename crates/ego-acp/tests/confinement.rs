@@ -1,4 +1,4 @@
-//! RED contracts for ACP confinement selection at the real v1 router.
+//! contracts for ACP confinement selection at the real v1 router.
 
 use std::sync::{
     Arc, Mutex,

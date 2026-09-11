@@ -1,4 +1,4 @@
-//! RED wire contract for ACP's adaptation of the core RunController.
+//! wire contract for ACP's adaptation of the core RunController.
 //!
 //! This deliberately reuses the connected JSON-RPC line harness pattern from
 //! `prompt.rs`. ACP owns only wire correlation. The real `Arc<RunController>`

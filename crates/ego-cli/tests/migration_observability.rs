@@ -1,4 +1,4 @@
-//! RED contract for fail-closed rejection of retired session codecs.
+//! contract for fail-closed rejection of retired session codecs.
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};

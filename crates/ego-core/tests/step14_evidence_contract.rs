@@ -1,4 +1,4 @@
-//! RED contract for transactional, bounded process evidence.
+//! contract for transactional, bounded process evidence.
 //!
 //! Evidence retrieval is an exact session capability: the reference and
 //! original-byte offset are both part of the request that policy settles and

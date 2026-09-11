@@ -46,125 +46,18 @@ struct Sealed(());
 ///
 /// # Leg 1 of Invariant W: unforgeability, decided by the compiler
 ///
-/// `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` names three legs
-/// of proof and says only the first is total. This is the first.
+/// The external compiler contract lives in `tests/permit_privacy.rs` and its
+/// trybuild fixtures. They prove that callers cannot clone or construct
+/// `Permit`, name `Sealed`, read its private scope, construct `Authorized` or
+/// `Scope`, or call the widening method. The declarations here remain the
+/// source of truth: `Permit` is not `Clone`, `Sealed` is not exported, and no
+/// widening constructor is public.
 ///
-/// These run as doctests, which rustdoc compiles as an *external* crate
-/// against the public API. That is the right vantage point: the question is
-/// what someone outside `ego-core` can construct, not what this file can.
-///
-/// **Every `compile_fail` block below is paired with a companion block that
-/// must compile, and the two differ only in the forbidden line.** The pairing
-/// is the whole instrument. A lone `compile_fail` passes when the code fails
-/// to build *for any reason at all* — a typo, a renamed import, a moved
-/// module — so on its own it proves nothing and degrades silently the first
-/// time something is renamed around it. The companion is the control: if the
-/// setup stops compiling, the companion goes red and says so.
-///
-/// The error codes named in prose are what each block *does* fail with,
-/// recorded to say which rule is doing the work. They are documentation and
-/// not assertions: rustdoc accepts a `compile_fail,E0451` annotation on
-/// stable and does not check it — verified by changing one to a nonexistent
-/// `E0001`, which still passed. The annotations are therefore left off rather
-/// than written in a form that reads like a check and is not one.
-///
-/// **A permit cannot be duplicated.** `E0277`: the bound is not satisfied,
-/// because `Clone` is not implemented. Written as a bound rather than as
-/// `permit.clone()`, which would silently compile — `&Permit` is `Clone`
-/// however `Permit` is declared, and would hand back another reference.
-///
-/// ```compile_fail
-/// fn assert_clone<T: Clone>() {}
-/// assert_clone::<ego_core::permit::Permit>();
-/// ```
-///
-/// Control — the same helper shape, the same path, a bound `Permit` does
-/// satisfy:
-///
-/// ```
-/// fn assert_debug<T: std::fmt::Debug>() {}
-/// assert_debug::<ego_core::permit::Permit>();
-/// ```
-///
-/// **A permit cannot be built by naming its fields.** `E0451`: the fields
-/// are private.
-///
-/// ```compile_fail
-/// use ego_core::permit::Permit;
-/// let _forged = Permit { scope: Default::default(), _sealed: Default::default() };
-/// ```
-///
-/// Control — the type is nameable and the import resolves; only the literal
-/// is refused:
-///
-/// ```
-/// use ego_core::permit::Permit;
-/// fn takes(_: &Permit) {}
-/// ```
-///
-/// **The seal cannot be named.** `E0432`: `Sealed` is not exported, so the
-/// import does not resolve. It is the whole reason `Permit`'s constructor is
-/// unreachable rather than merely inconvenient.
-///
-/// ```compile_fail
-/// use ego_core::permit::Sealed;
-/// ```
-///
-/// Control — `ego_core::permit` is the right module and it does export
-/// things, so the failure above is `Sealed`'s absence and not a bad path:
-///
-/// ```
-/// use ego_core::permit::Permit;
-/// fn takes(_: &Permit) {}
-/// ```
-///
-/// **A permit's scope cannot be read out and re-minted.** `E0616`: the field
-/// is private. There is no accessor either, and none returning `&mut`.
-///
-/// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::rule::Rule;
-/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
-/// let engine = PolicyEngine::new(
-///     CanonPath::new("/ws"),
-///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
-/// );
-/// let call = PreparedCall::new("read", Op::Read {
-///     path: CanonPath::new("/ws/a.rs"),
-/// });
-/// let Classification::Settled(Ok(granted)) = engine.classify(call)
-///     else { panic!("an allow rule covers this read") };
-/// let _scope = &granted.permit().scope;
-/// ```
-///
-/// Control — every other line of that setup compiles; only the field access
-/// does not:
-///
-/// ```
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::rule::Rule;
-/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
-/// let engine = PolicyEngine::new(
-///     CanonPath::new("/ws"),
-///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
-/// );
-/// let call = PreparedCall::new("read", Op::Read {
-///     path: CanonPath::new("/ws/a.rs"),
-/// });
-/// let Classification::Settled(Ok(granted)) = engine.classify(call)
-///     else { panic!("an allow rule covers this read") };
-/// let _permit = granted.permit();
-/// ```
-///
-/// **What this leg does not prove.** Nothing here says the scope is
-/// *enforced*. That is `GuardedIo`'s job and `POTENTIALS.md` P23's open
-/// window: a permit that cannot be widened, checked against a path that is
-/// re-resolved between the check and the open, is still a hole. Leg 1 is
-/// about where permits come from, and about nothing else.
+/// This leg does not prove that the scope is enforced. That is the
+/// `GuardedEffects` responsibility and `POTENTIALS.md` P23 open window: a
+/// permit that cannot be widened, checked against a path that is re-resolved
+/// between the check and the open, is still a hole. Leg 1 is only about where
+/// permits come from.
 #[derive(Debug)]
 pub struct Permit {
     scope: Scope,
@@ -384,123 +277,11 @@ impl Permit {
 ///
 /// # Leg 1, continued
 ///
-/// **An `Authorized` cannot be taken apart by naming its fields.** `E0616`:
-/// both are private. Reaching the permit as a *field* is what would let it be
-/// moved out and re-paired with another call — §3's whole subject.
-///
-/// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::rule::Rule;
-/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
-/// let engine = PolicyEngine::new(
-///     CanonPath::new("/ws"),
-///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
-/// );
-/// let call = PreparedCall::new("read", Op::Read {
-///     path: CanonPath::new("/ws/a.rs"),
-/// });
-/// let Classification::Settled(Ok(granted)) = engine.classify(call)
-///     else { panic!("an allow rule covers this read") };
-/// let _stolen = &granted.permit;
-/// ```
-///
-/// Control — the same value through the accessor, which lends and cannot be
-/// moved out:
-///
-/// ```
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::rule::Rule;
-/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
-/// let engine = PolicyEngine::new(
-///     CanonPath::new("/ws"),
-///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
-/// );
-/// let call = PreparedCall::new("read", Op::Read {
-///     path: CanonPath::new("/ws/a.rs"),
-/// });
-/// let Classification::Settled(Ok(granted)) = engine.classify(call)
-///     else { panic!("an allow rule covers this read") };
-/// let _borrowed = granted.permit();
-/// ```
-///
-/// **Assembling one is refused by field privacy, and by nothing else.**
-/// `E0451`. This is worth stating precisely, because an earlier draft of this
-/// comment claimed two independent reasons — field privacy, *and* that no
-/// owned `Permit` could be obtained outside `ego-core` at all. The second is
-/// no longer true. `into_parts` is public, so the ingredients for the forgery
-/// are freely available; only the constructor refuses. The block below mints
-/// them on purpose rather than reaching for a borrow, so that it fails on the
-/// privacy it names.
-///
-/// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::rule::Rule;
-/// use ego_core::permit::{Authorized, CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
-/// let engine = PolicyEngine::new(
-///     CanonPath::new("/ws"),
-///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
-/// );
-/// let split = |path: &str| {
-///     let call = PreparedCall::new("read", Op::Read {
-///         path: CanonPath::new(path),
-///     });
-///     let Classification::Settled(Ok(granted)) = engine.classify(call)
-///         else { panic!("an allow rule covers this read") };
-///     granted.into_parts()
-/// };
-/// let (_, permit) = split("/ws/a.rs");
-/// let (call, _) = split("/ws/b.rs");
-/// let _forged = Authorized { call, permit };
-/// ```
-///
-/// Control — the same two splits, without the literal. It compiles, which is
-/// the half that matters: the ingredients really are in hand, and the forgery
-/// above fails on the constructor rather than on a missing value.
-///
-/// ```
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::rule::Rule;
-/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
-/// let engine = PolicyEngine::new(
-///     CanonPath::new("/ws"),
-///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
-/// );
-/// let split = |path: &str| {
-///     let call = PreparedCall::new("read", Op::Read {
-///         path: CanonPath::new(path),
-///     });
-///     let Classification::Settled(Ok(granted)) = engine.classify(call)
-///         else { panic!("an allow rule covers this read") };
-///     granted.into_parts()
-/// };
-/// let (_, _permit) = split("/ws/a.rs");
-/// let (_call, _) = split("/ws/b.rs");
-/// ```
-///
-/// **The forgery buys nothing even where it is available.** Inside
-/// `ego-core`, where the literal *does* compile, pairing call `b` with permit
-/// `a` hands the tool `b`'s operations under `a`'s authority — and `a`'s
-/// authority is the ceiling. Every path `b` names that `a` did not is refused
-/// by [`GuardedEffects`](super::GuardedEffects) at use time. Mispairing can lose
-/// authority; it cannot gain any. Invariant W is about what `mint` was told,
-/// and `into_parts` does not mint.
-///
-/// **The earlier draft of the first block was found wrong by running the
-/// mutation, not by reading it.** It wrote the literal
-/// `Authorized { call: b, permit: a.permit() }` and passed — on a *type*
-/// error, because `permit()` lends and the field wants an owned value. Making
-/// both fields `pub` did not disturb it, so it asserted nothing whatever
-/// about privacy. The `compile_fail`-plus-control pairing does not catch
-/// that; only mutating the modifier does. Recorded here because the same trap
-/// is waiting for anyone who writes the next one.
+/// `Authorized` exposes borrows and `into_parts`, but its fields and
+/// constructor remain private. The shared trybuild fixture attempts the
+/// forbidden field construction from an external crate. Pairing a call with
+/// a permit is therefore structural at construction time; after `into_parts`,
+/// `GuardedEffects` still limits every operation to the permit scope.
 #[derive(Debug)]
 pub struct Authorized {
     call: PreparedCall,
@@ -1123,113 +904,16 @@ pub enum Resolution {
 ///
 /// # Leg 1, continued
 ///
-/// **`mint` is unreachable.** `E0599`: there is no such method on
-/// `PolicyEngine` from outside `grant.rs`. This is the widening primitive —
-/// give it a `Scope` and it hands back the matching authority, with no call
-/// involved — and its absence from the public surface is what makes
-/// [`classify`](Self::classify) the only source of a permit.
+/// `mint` and the mode approver remain private, and callers cannot compose a
+/// `Scope` through its fields. The trybuild privacy contract covers these
+/// external field, type, and method boundaries; the declarations here directly
+/// enforce the private methods and module. There is deliberately no `widen`
+/// method: broader authority requires a new classification and a newly minted
+/// `Permit`.
 ///
-/// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::{CanonPath, PolicyEngine, Scope};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
-/// let _wide = engine.mint(Scope::default());
-/// ```
-///
-/// Control — the engine is constructible and `Scope::default()` exists; the
-/// method is the only missing piece:
-///
-/// ```
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::{CanonPath, PolicyEngine, Scope};
-/// let _engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
-/// let _empty = Scope::default();
-/// ```
-///
-/// **And a `Scope` cannot be composed to feed it.** `E0451`: the fields are
-/// `pub(super)`. Even reachable, `mint` would have nothing to be given.
-///
-/// ```compile_fail
-/// use ego_core::permit::{CanonPath, Scope};
-/// let _reachable = Scope {
-///     read_paths: vec![CanonPath::new("/")],
-///     ..Default::default()
-/// };
-/// ```
-///
-/// Control — a `Scope` is still a public, readable value. Composing one is
-/// what is refused, not naming or reading one:
-///
-/// ```
-/// use ego_core::permit::Scope;
-/// let empty = Scope::default();
-/// assert!(empty.read_paths().is_empty());
-/// ```
-///
-/// Two of §3.4's three axes are here: the mode and the rules. The third, the
-/// judge, has nothing to build it out of yet, so a call the first two cannot
-/// settle leaves as a question — see [`classify`](Self::classify).
-///
-/// # Leg 1, continued: nobody can supply the mode
-///
-/// Since §6 step 5 became the [`Approver`] port, "the mode decides" is only
-/// true if the caller cannot decide which mode-shaped thing is consulted.
-/// A port moves the choice of implementation somewhere, and wherever that
-/// somewhere is, *it* becomes the mode. The same three blocks as above,
-/// pointed at that:
-///
-/// **The mode's approver cannot be named.** `E0603`: `approver` is a private
-/// module and `ModeApprover` is not re-exported, so there is no path to the
-/// type a caller would have to mention in order to build a different one.
-///
-/// ```compile_fail
-/// use ego_core::permit::approver::ModeApprover;
-/// ```
-///
-/// Control — `Approver` and `Verdict` *are* exported, from the module a
-/// caller really does reach, so the failure above is the type's absence and
-/// not a mistyped path:
-///
-/// ```
-/// use ego_core::permit::{Approver, Authority, Verdict};
-/// fn takes(_: &dyn Approver) {}
-/// let _answers = [Verdict::Allow { by: Authority::Party }, Verdict::Deny { by: Authority::Party }];
-/// ```
-///
-/// **And there is no way to hand one in.** `E0599`: `with_approver` exists
-/// only under `#[cfg(test)]`, inside this crate, so no release build contains
-/// it and no other crate can reach it in any build. `new` takes a `Mode` and
-/// builds the approver itself; a caller supplies the *configuration*, never
-/// the party.
-///
-/// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::{CanonPath, PolicyEngine};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
-/// let _yolo = engine.with_approver(todo!());
-/// ```
-///
-/// Control — the engine really is constructible from outside, and the mode
-/// really is the argument it takes, so the block above fails on the method
-/// and not on the setup:
-///
-/// ```
-/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
-/// use ego_core::permit::{CanonPath, PolicyEngine};
-/// let _engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Yolo, Ruleset::default());
-/// ```
-///
-/// **What this does not prove, and it is the same limit as everywhere else in
-/// Leg 1.** Nothing here stops a caller passing `Mode::Yolo` to `new`. It is
-/// not supposed to: choosing the mode is exactly what the config layers are
-/// for, and `run.rs` passes `effective.mode`. The property is narrower and it
-/// is the one that was at risk — *given* a resolved mode, no code downstream
-/// of `new` can obtain a different mode's behaviour. Where the mode comes
-/// from is `config::resolve`'s claim and `tests/config.rs` holds it.
-///
-/// There is deliberately no `widen` method, here or anywhere: a call that
-/// needs a broader grant is a new decision, made by minting a new `Permit`,
-/// not by mutating an old one.
+/// Callers may still select `Mode::Yolo` through configuration. Given the
+/// resolved mode, no downstream code can replace its approver. Configuration
+/// provenance is covered by `tests/config.rs`.
 pub struct PolicyEngine {
     /// The boundary ego draws for itself. Not a rule: nobody wrote it, and no
     /// rule lifts it.

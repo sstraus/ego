@@ -1,4 +1,4 @@
-//! RED contracts for the S8 user operation and immutable hook catalogue seams.
+//! contracts for the S8 user operation and immutable hook catalogue seams.
 
 use ego_core::event::skill::{
     SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillSourceAuthority, SkillSourceLocation,

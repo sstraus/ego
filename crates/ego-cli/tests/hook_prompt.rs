@@ -1,4 +1,4 @@
-//! RED contract for prompt hooks through the ordinary tool-less generation owner.
+//! contract for prompt hooks through the ordinary tool-less generation owner.
 
 use futures::executor::block_on;
 use serde_json::json;

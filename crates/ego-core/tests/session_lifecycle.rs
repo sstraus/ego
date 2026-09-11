@@ -1,4 +1,4 @@
-//! RED contract for the connection-neutral durable session lifecycle.
+//! contract for the connection-neutral durable session lifecycle.
 //!
 //! Fault injection and run-state manipulation are retained by explicit test
 //! handles. The lifecycle service has no test-only control surface and opens

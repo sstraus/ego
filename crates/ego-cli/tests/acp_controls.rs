@@ -1,4 +1,4 @@
-//! RED contract for the ACP operator seat (regression case, criterion 1).
+//! contract for the ACP operator seat (regression case, criterion 1).
 //!
 //! The wire half lives in `ego-acp`; this is the half that decides what a
 //! host may be offered at all. The rules it has to keep: never offer a model

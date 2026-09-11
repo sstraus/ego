@@ -1,4 +1,4 @@
-//! RED contract for one shared root budget authority across session owners.
+//! contract for one shared root budget authority across session owners.
 
 use std::sync::Arc;
 

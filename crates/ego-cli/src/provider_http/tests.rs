@@ -1,4 +1,4 @@
-//! RED contract for the CLI-owned provider HTTP adapter.
+//! Contract tests for the CLI-owned provider HTTP adapter.
 //!
 //! These tests stop at the CLI boundary: provider authority is prepared by a
 //! real `WireGenerator`, while the adapter must spend it through one run's

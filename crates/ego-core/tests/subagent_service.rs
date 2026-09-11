@@ -1,4 +1,4 @@
-//! RED contract for M4 S2: isolated child runs over the rooted controller.
+//! contract for M4 S2: isolated child runs over the rooted controller.
 //!
 //! This suite builds the ordinary `RunController` with test-owned adapters
 //! and injects only the narrow durable parent/child journal port. It must not

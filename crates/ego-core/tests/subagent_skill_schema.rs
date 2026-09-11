@@ -1,6 +1,6 @@
-//! RED contract for M4 S1: typed child, skill, hook, accounting, and codec facts.
+//! contract for M4 S1: typed child, skill, hook, accounting, and codec facts.
 //!
-//! These tests deliberately build the durable wire shapes through serde.  The
+//! These tests deliberately build the durable wire shapes through serde. The
 //! event log is the contract boundary: a future implementation must make the
 //! shapes below typed, closed, replayable, and privacy preserving rather than
 //! teaching this test a second in-memory DTO.

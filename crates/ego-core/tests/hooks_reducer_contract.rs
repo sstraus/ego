@@ -1,4 +1,4 @@
-//! RED reducer contract for hook catalogue and invocation evidence.
+//! reducer contract for hook catalogue and invocation evidence.
 
 use ego_core::digest::sha256_hex;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};

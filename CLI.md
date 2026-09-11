@@ -23,6 +23,7 @@ proposed.
 5. **Every interactive capability has a non-interactive spelling.** Nothing is
    locked behind the REPL (Codex's `exec` lesson; pi's `print`/`json` modes).
 
+<!-- ego-cli-command-set:start -->
 ## 2. Command set
 
 ```
@@ -251,6 +252,7 @@ The rule ADR fixes its output as ordered `DERIVED`/`OMITTED` rows followed by
 one `RESULT` row containing stored change, effective change, target, and
 publication state; this replaces the singular-rule receipt for this command.
 
+<!-- ego-cli-command-set:end -->
 ## 3. Flags (the argument grammar)
 
 Grouped; all long flags, short forms only for the hot four
@@ -431,6 +433,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ## 4. Output contracts
 
+<!-- ego-cli-json-output:start -->
 ### 4.1 `--output json` (one object on stdout at completion)
 
 ```json
@@ -479,6 +482,7 @@ exit 6 and deliberately not exit 3 for exactly that reason: a script that reads
 3 goes looking for a `denied`/`denied_by` pair or a `question` object, and a
 pause has neither.
 
+<!-- ego-cli-json-output:end -->
 ### 4.2 `--output jsonl` (one event per line, live)
 
 

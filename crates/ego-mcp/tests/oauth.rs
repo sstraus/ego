@@ -1,4 +1,4 @@
-//! RED contract for current MCP authorization and credential identity.
+//! contract for current MCP authorization and credential identity.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;

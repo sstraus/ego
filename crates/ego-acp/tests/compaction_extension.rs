@@ -1,4 +1,4 @@
-//! RED contract for ACP's advertised regression case compaction extension.
+//! contract for ACP's advertised regression case compaction extension.
 
 use agent_client_protocol::{ConnectTo, Lines};
 use futures::channel::mpsc;

@@ -1,4 +1,4 @@
-//! RED contract for regression case: every empty listing says what is missing.
+//! contract for regression case: every empty listing says what is missing.
 //!
 //! A first run has no credentials, no user configuration, no rules of its own,
 //! no hooks and no MCP servers. Five commands answered that with silence and

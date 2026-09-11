@@ -1,4 +1,4 @@
-//! RED contracts for process-level ExecCaps diagnostics (regression case).
+//! Contracts for process-level ExecCaps diagnostics.
 //!
 //! Boot measurement is a diagnostic side channel. It does not mint session
 //! authority, create session evidence, or prevent a listener from serving.

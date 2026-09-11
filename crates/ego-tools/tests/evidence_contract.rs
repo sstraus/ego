@@ -1,4 +1,4 @@
-//! RED contract for the real session-bound evidence store.
+//! contract for the real session-bound evidence store.
 //!
 //! An `EvidenceWriter` appends fixed-size chunks to private staging and publishes only
 //! after digest, length and durability checks. Readers receive one fixed page

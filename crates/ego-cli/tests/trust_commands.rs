@@ -1,4 +1,4 @@
-//! RED contract for what a remembered trust answer actually admits (regression case).
+//! contract for what a remembered trust answer actually admits (regression case).
 //!
 //! Trust is remembered against a digest of what the workspace offered. That is
 //! only honest if the digest covers everything the answer admits. Three config

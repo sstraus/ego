@@ -1,4 +1,4 @@
-//! RED contracts for ACP bearer authentication before protocol routing.
+//! Contracts for ACP bearer authentication before protocol routing.
 
 use ego_acp::auth::{Credential, CredentialRefusal, TOKEN_VAR};
 

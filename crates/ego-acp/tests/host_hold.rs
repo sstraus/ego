@@ -1,4 +1,4 @@
-//! RED contract for regression case's `_ego/pause` and `_ego/resume` host controls.
+//! contract for regression case's `_ego/pause` and `_ego/resume` host controls.
 //!
 //! Every request crosses the pinned SDK's real JSON-RPC router, because the
 //! claim under test is a protocol claim: that a host which negotiated the

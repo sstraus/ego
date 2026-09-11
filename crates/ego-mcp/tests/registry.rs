@@ -1,4 +1,4 @@
-//! Final-contract RED tests for one immutable admitted MCP registry.
+//! Final-contract tests for one immutable admitted MCP registry.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};

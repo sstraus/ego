@@ -1,4 +1,4 @@
-//! RED contracts for the borrow-scoped shared session hook runtime.
+//! contracts for the borrow-scoped shared session hook runtime.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};

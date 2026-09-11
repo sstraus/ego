@@ -1,4 +1,4 @@
-//! Coarse RED contract for current dynamic MCP families and MRTR.
+//! Coarse contract for current dynamic MCP families and MRTR.
 
 use std::collections::BTreeMap;
 

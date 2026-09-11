@@ -1,4 +1,4 @@
-//! RED contract for the target-log-backed regression case compaction transition.
+//! contract for the target-log-backed regression case compaction transition.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

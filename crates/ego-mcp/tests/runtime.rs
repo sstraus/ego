@@ -1,4 +1,4 @@
-//! RED runtime contract for guarded Streamable HTTP cancellation.
+//! runtime contract for guarded Streamable HTTP cancellation.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};

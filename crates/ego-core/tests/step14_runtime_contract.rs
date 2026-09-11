@@ -1,4 +1,4 @@
-//! RED contract for the core half of Step 14's process boundary.
+//! contract for the core half of Step 14's process boundary.
 //!
 //! These tests describe the permanent authority values shared by preparation,
 //! permission classification, and `GuardedExec`. Provider-level judge

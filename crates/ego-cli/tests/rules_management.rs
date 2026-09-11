@@ -1,4 +1,4 @@
-//! RED contract for regression case's final `ego rules` management surface.
+//! contract for regression case's final `ego rules` management surface.
 
 use std::process::{Command, Output};
 

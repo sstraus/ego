@@ -1,4 +1,4 @@
-//! RED contract for regression case typed MCP configuration and credentials.
+//! contract for regression case typed MCP configuration and credentials.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

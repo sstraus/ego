@@ -1,4 +1,4 @@
-//! RED contract for the typed skill operation and authority epoch (M4 S6).
+//! contract for the typed skill operation and authority epoch (M4 S6).
 //!
 //! These tests deliberately cross the existing blob, session-journal, turn,
 //! permit, child, and hook seams. They do not define a second skill parser,

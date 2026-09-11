@@ -1,4 +1,4 @@
-//! RED contract for one opaque live MCP binding per ACP session.
+//! contract for one opaque live MCP binding per ACP session.
 
 use std::sync::Arc;
 

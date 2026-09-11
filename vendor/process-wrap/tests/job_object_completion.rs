@@ -5,7 +5,7 @@
 	feature = "kill-on-drop"
 ))]
 
-//! RED contract for the corrected process-wrap Job completion barrier.
+//! Contract for the corrected process-wrap Job completion barrier.
 //!
 //! The fixture communicates over the inherited stdout pipe. This keeps the
 //! test on process-wrap's public API: no PID polling, taskkill, private Job

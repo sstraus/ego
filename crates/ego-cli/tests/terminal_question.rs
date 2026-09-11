@@ -1,4 +1,4 @@
-//! RED contract for terminal question control grammar.
+//! contract for terminal question control grammar.
 
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 
