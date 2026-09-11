@@ -527,8 +527,10 @@ printer accepts the renderer's bounded output batches while the editor remains
 live, then repaints the exact composer and ephemeral chrome below the appended
 transcript. The renderer never writes around it. Headless and protocol hosts
 continue to consume the same events without terminal chrome. A future
-full-screen front-end would still be a different `Host`, not a core change —
-and tuicommander over ACP already *is* the GUI (`SPEC.md` §3).
+full-screen front-end would still be a different `Host`, not a core change.
+TUICommander's production ACP backend is the external host client; its visual
+workspace is a separate TUICommander product surface and is not currently an
+ego capability claim (`SPEC.md` §3).
 
 The surface ships with an **ownership contract** (R12): exactly one component
 writes terminal bytes; transcript output is append-only; status, menus, and the
@@ -553,8 +555,8 @@ Coverage is **negotiated per connection, not assumed** (R11): pinning crates
 controls ego's build, not each host's capability set. Every ACP operation is
 modelled as a negotiated capability with a defined fallback when absent;
 ACP DTOs stay inside the `ego-acp` adapter; projection fixtures and a
-compatibility matrix run against current real Zed and the separate-repository
-TUICommander client. `_ego/pause` and `_ego/resume` are namespaced,
+compatibility matrix runs against the separate-repository TUICommander client;
+Zed is out of scope by decision. `_ego/pause` and `_ego/resume` are namespaced,
 session-bound, durable safe-boundary controls; absence is reported as
 unavailable and never mapped to cancel. An ACP-owned turn uses the connected
 host as its only permission seat and never reads terminal input.
