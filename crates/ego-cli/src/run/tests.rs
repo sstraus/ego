@@ -1,0 +1,1656 @@
+use super::*;
+use crate::render::caps::{Depth, OscProfile};
+use ego_core::event::domain::{DomainEvent, Envelope};
+use ego_core::event::hook::{HookDecision, HookOutcome, HookSource};
+use ego_core::event::id::Seq;
+use ego_core::event::skill::{SkillInvocationId, SkillSourceAuthority};
+use ego_core::event::time::{Clock, Timestamp};
+use ego_core::hook::{
+    HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort, HookInvocationRequest,
+};
+use ego_core::question::{
+    QuestionAnswer, QuestionMode, QuestionOption, QuestionRequest, QuestionTarget,
+};
+use ego_core::run::RunOrigin;
+use ego_core::store::evidence::{EvidenceId, EvidenceRef};
+use ego_core::store::session_store::SessionMeta;
+use ego_core::store::session_store::{SessionStore, StoreError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tempfile::tempdir;
+
+struct UnusedStore;
+
+impl ego_core::config::UserConfigStore for UnusedStore {
+    fn snapshot(
+        &self,
+        _target: ego_core::config::UserConfigTarget,
+    ) -> Result<ego_core::config::UserConfigSnapshot, ego_core::config::UserConfigError> {
+        panic!("remember preview must not read the store")
+    }
+
+    fn rule_snapshot(
+        &self,
+        _target: ego_core::config::UserConfigTarget,
+    ) -> Result<ego_core::config::RuleSnapshot, ego_core::config::UserConfigError> {
+        panic!("remember preview must not read the store")
+    }
+
+    fn mutate(
+        &self,
+        _mutation: ego_core::config::UserConfigMutation,
+    ) -> Result<ego_core::config::UserConfigMutationResult, ego_core::config::UserConfigError> {
+        panic!("remember preview must not mutate the store")
+    }
+}
+
+#[derive(Default)]
+struct HookCaptureStore;
+
+impl SessionStore for HookCaptureStore {
+    fn append(&self, _id: &SessionId, _event: &DomainEvent) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn read(
+        &self,
+        _id: &SessionId,
+    ) -> Result<futures::stream::BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError>
+    {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<ego_core::run::RunRevision>,
+        _transaction: ego_core::run::RunTransaction,
+    ) -> Result<ego_core::run::RunAppend, StoreError> {
+        Err(StoreError::NotFound)
+    }
+
+    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        Ok(Vec::new())
+    }
+}
+
+struct HookCaptureClock;
+
+impl Clock for HookCaptureClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::from_millis(1_000)
+    }
+}
+
+#[derive(Default)]
+struct HookCaptureInvoker;
+
+impl HookInvocationPort for HookCaptureInvoker {
+    fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
+        Box::pin(std::future::ready(Ok(HookOutcome::new(
+            HookDecision::Continue,
+            None,
+        ))))
+    }
+}
+
+fn pending_resume_state(target: QuestionTarget) -> (SessionState, ResumeAnswer, TurnId, EventId) {
+    let question = ItemId::new();
+    let turn = TurnId::new();
+    let request_event = EventId::new();
+    let request = QuestionRequest::new(
+        "Continue?",
+        QuestionMode::Single,
+        vec![QuestionOption::new("yes", "Yes")],
+        false,
+    );
+    let mut state = SessionState::default();
+    state.apply(&DomainEvent {
+        env: Envelope {
+            seq: Seq::default(),
+            id: request_event,
+            turn,
+            item: Some(question),
+            parent: None,
+            ts: Timestamp::from_millis(1_000),
+            producer: Producer::Main,
+        },
+        kind: EventKind::QuestionRequested { request, target },
+    });
+    assert_eq!(
+        state.pending_question().map(|pending| pending.item_id()),
+        Some(question)
+    );
+    (
+        state,
+        ResumeAnswer {
+            id: question,
+            json: r#""yes""#.to_owned(),
+        },
+        turn,
+        request_event,
+    )
+}
+
+#[derive(Default, Clone)]
+struct LaunchBarrierStore {
+    events: Arc<Mutex<Vec<DomainEvent>>>,
+    transactions: Arc<Mutex<Vec<ego_core::run::RunTransaction>>>,
+}
+
+impl SessionStore for LaunchBarrierStore {
+    fn append(&self, _id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+        self.events.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+
+    fn read(
+        &self,
+        _id: &SessionId,
+    ) -> Result<futures::stream::BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError>
+    {
+        let events = self.events.lock().unwrap().clone();
+        let transactions = self.transactions.lock().unwrap().clone();
+        Ok(Box::pin(futures::stream::iter(
+            events
+                .into_iter()
+                .map(|event| Ok(SessionEntry::Event(event)))
+                .chain(
+                    transactions
+                        .into_iter()
+                        .map(|transaction| Ok(SessionEntry::RunTransaction(transaction))),
+                ),
+        )))
+    }
+
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<ego_core::run::RunRevision>,
+        transaction: ego_core::run::RunTransaction,
+    ) -> Result<ego_core::run::RunAppend, StoreError> {
+        let revision = transaction.revision();
+        self.transactions.lock().unwrap().push(transaction);
+        Ok(ego_core::run::RunAppend::Committed { revision })
+    }
+
+    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
+struct LaunchBarrierClock;
+
+impl Clock for LaunchBarrierClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::from_millis(1_000)
+    }
+}
+
+#[derive(Default)]
+struct LaunchBarrierIds;
+
+impl ego_core::run::IdSource for LaunchBarrierIds {
+    fn next_uuid(&self) -> uuid::Uuid {
+        uuid::Uuid::now_v7()
+    }
+}
+
+struct LaunchBarrierSink;
+
+impl ego_core::run::EventSinkFactory for LaunchBarrierSink {
+    fn create(&self, _capabilities: &ModelCapabilities) -> Arc<dyn EventSink> {
+        Arc::new(NullSink)
+    }
+}
+
+struct LaunchBarrierExecutor {
+    crossed: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl LaunchBarrierExecutor {
+    fn arm(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        *self.crossed.lock().unwrap() = Some(sender);
+        receiver
+    }
+}
+
+impl RunExecutor for LaunchBarrierExecutor {
+    type Prepared = ();
+
+    fn prepare<'a>(
+        &'a self,
+        _request: &'a RunPreparation,
+    ) -> futures::future::BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
+        Box::pin(std::future::ready(Ok(RunPrepared::new(
+            ModelRef("launch-test-model".to_owned()),
+            (),
+        ))))
+    }
+
+    fn admit_run_context<'a>(
+        &'a self,
+        _prepared: &'a Self::Prepared,
+    ) -> ego_core::run::RunFuture<'a, Result<EvidenceWrite, EvidenceError>> {
+        Box::pin(std::future::ready(Ok(EvidenceWrite::Published)))
+    }
+
+    fn attach<'a>(
+        &'a self,
+        request: &'a RunAttachment,
+    ) -> futures::future::BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
+        Box::pin(std::future::ready(Ok(RunHandle::new(request.run_id, ()))))
+    }
+
+    fn recover<'a>(
+        &'a self,
+        _run: &'a RunId,
+    ) -> futures::future::BoxFuture<'a, Result<RecoveryEvidence, RunExecutorError>> {
+        Box::pin(std::future::ready(Ok(RecoveryEvidence::NotRecoverable)))
+    }
+
+    fn observe<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+        _bindings: RunExecutionBindings,
+    ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        Box::pin(std::future::ready(Ok(RunSettlement::Completed)))
+    }
+
+    fn submit<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+        _prompt: &'a RunPrompt,
+        _prepared: Self::Prepared,
+        _bindings: RunExecutionBindings,
+    ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        if let Some(sender) = self.crossed.lock().unwrap().take() {
+            sender
+                .send(())
+                .expect("launch barrier receiver remains alive");
+        }
+        Box::pin(std::future::ready(Ok(RunSettlement::Completed)))
+    }
+
+    /// A no-op for the same reason `interrupt` is one: this double never
+    /// runs a turn, so there is nothing here that a hold could hold back.
+    fn pause<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+        _request: RequestId,
+    ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn interrupt<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+    ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
+/// The launch-only fixture host: it answers what a launch needs and
+/// refuses what a launch does not reach.
+///
+/// One fake for one port. Six fakes existed because six ports did, and
+/// every one of them was constructed in the same breath as the others —
+/// which is the evidence that none of them was a boundary.
+struct LaunchBarrierHost(&'static LaunchBarrierStore);
+
+impl ChildHost for LaunchBarrierHost {
+    fn read_journal(
+        &self,
+        _invocation: SubagentInvocationId,
+    ) -> Result<Vec<DomainEvent>, ChildJournalError> {
+        Ok(self.0.events.lock().unwrap().clone())
+    }
+
+    fn read_rendered_task(&self, _reference: &BlobRef) -> Result<Vec<u8>, ChildResultReaderError> {
+        Ok(b"background launch task".to_vec())
+    }
+
+    fn read_final_assistant(
+        &self,
+        run: RunId,
+    ) -> Result<ChildResultEvidence, ChildResultReaderError> {
+        Err(ChildResultReaderError::Missing { run })
+    }
+
+    fn copy_to_parent(
+        &self,
+        _child: RunId,
+        _evidence: &ChildResultEvidence,
+    ) -> Result<BlobRef, ChildResultReaderError> {
+        Err(ChildResultReaderError::Read {
+            diagnostic: "collection is outside this launch-only fixture".to_owned(),
+        })
+    }
+
+    fn resolve_profile(&self, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn admit_selections(
+        &self,
+        request: &ChildRequest,
+        bindings: &RunExecutionBindings,
+    ) -> Result<(RunSelections, RunExecutionBindings), String> {
+        Ok((request.selections().clone(), bindings.clone()))
+    }
+}
+
+fn launch_barrier_parent_hooks(
+    store: &'static LaunchBarrierStore,
+    session: SessionId,
+) -> SessionHookRuntime<'static> {
+    let journal = SharedJournal::new(Journal::new(
+        session,
+        store,
+        &LaunchBarrierClock,
+        &NullSink,
+        Producer::Main,
+        {
+            let mut state = SessionState::default();
+            for event in store.events.lock().unwrap().iter() {
+                state.apply(event);
+            }
+            state
+        },
+    ));
+    let catalogue = HookCatalogue::admit_typed(&[], &[], Trust::Trusted)
+        .expect("empty launch barrier hook catalogue");
+    SessionHookState::new(
+        HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+        journal,
+        CancelToken::new(),
+        Instant::now() + Duration::from_secs(30),
+    )
+    .bind(Arc::new(HookCaptureInvoker))
+}
+
+#[tokio::test]
+async fn cli_background_launch_crosses_execution_barrier_without_collection_future() {
+    let store: &'static LaunchBarrierStore = Box::leak(Box::new(LaunchBarrierStore::default()));
+    let executor = Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+    });
+    let crossed = executor.arm();
+    let parent_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
+    let parent_session = parent_run.session_id();
+    let gate = SharedBudgetGate::new(ego_core::budget::BudgetGate::unlimited(
+        CurrencyCode::new("USD").expect("launch barrier currency"),
+    ));
+    let bindings =
+        RunExecutionBindings::new(Arc::new(LaunchBarrierSink), None).with_budget_gate(gate.clone());
+    let ports = ChildServicePorts::new(parent_run, Arc::new(LaunchBarrierHost(store)));
+    let controller = Arc::new(RunController::new(
+        Arc::new(store.clone()),
+        Arc::clone(&executor),
+        Arc::new(LaunchBarrierClock),
+        Arc::new(LaunchBarrierIds),
+        RunRetention::new(NonZeroUsize::new(8).expect("retention")).expect("retention"),
+    ));
+    let service = ChildRunService::new(
+        controller,
+        gate,
+        RunRoot::new("/workspace").expect("launch barrier root"),
+        bindings,
+        ports,
+    );
+    let invocation = SubagentInvocationId::new();
+    let parent_turn = TurnId::new();
+    let parent_item = ItemId::new();
+    let parent_event = EventId::new();
+    store
+        .append(
+            &parent_session,
+            &DomainEvent {
+                env: Envelope {
+                    seq: Seq::default(),
+                    id: parent_event,
+                    turn: parent_turn,
+                    item: Some(parent_item),
+                    parent: None,
+                    ts: Timestamp::from_millis(1_000),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::ToolCallStarted {
+                    name: "skill".to_owned(),
+                    args: "{}".to_owned(),
+                    call_id: Some("launch-barrier".to_owned()),
+                },
+            },
+        )
+        .expect("parent event is durable before child admission");
+    let hooks = launch_barrier_parent_hooks(store, parent_session);
+    let task = b"background launch task";
+    service
+        .start(
+            ChildRequest::new(
+                invocation,
+                ChildRequestOrigin::new(parent_run, parent_turn, parent_item, parent_event),
+                BlobRef::new(
+                    BlobId::parse(ego_core::digest::sha256_hex(task)).expect("task blob id"),
+                    task.len() as u64,
+                ),
+                RunSelections::empty(),
+                ChildWait::Background,
+            )
+            .with_requested_tools(["read"]),
+            &hooks,
+        )
+        .await
+        .expect("background child admission");
+    let owner = CliSkillInvocationOwner::new(service, hooks, CancelToken::new());
+    let execution = owner
+        .launch(invocation)
+        .expect("launch does not fail")
+        .expect("admitted background execution is transferred");
+    let completed = tokio::time::timeout(Duration::from_secs(1), execution)
+        .await
+        .expect("background execution does not stall")
+        .expect("background execution task does not panic");
+    completed.expect("background execution settles");
+    tokio::time::timeout(Duration::from_secs(1), crossed)
+        .await
+        .expect("child execution crosses its barrier before collection exists")
+        .expect("launch barrier sender remains alive");
+}
+
+#[test]
+fn workspace_accepts_a_directory_but_rejects_an_existing_regular_file() {
+    let owner = tempdir().expect("workspace owner");
+    let directory = owner.path().join("workspace");
+    std::fs::create_dir(&directory).expect("workspace directory");
+    let regular_file = owner.path().join("workspace-file");
+    std::fs::write(&regular_file, b"not a workspace").expect("workspace file");
+
+    let directory_arg = directory.clone();
+    assert_eq!(
+        workspace(Some(&directory_arg)).expect("directory is a workspace"),
+        std::fs::canonicalize(directory).expect("canonical workspace")
+    );
+
+    let file_arg = regular_file.clone();
+    assert!(
+        workspace(Some(&file_arg)).is_err(),
+        "an existing regular file must be rejected as a workspace root: {}",
+        regular_file.display()
+    );
+}
+
+/// A refusal an operator can act on names four things.
+///
+/// The mode that asked, the guarantee that is missing in words, the
+/// backend that failed to demonstrate it, and the way out. The bitflag
+/// `Debug` text named none of them.
+#[test]
+fn a_capability_refusal_names_the_mode_the_guarantee_the_backend_and_the_remedies() {
+    let owner = tempdir().expect("refusal fixture owner");
+    let workspace = CanonPath::new(owner.path().to_path_buf());
+    let confinement = RunConfinement::new(Confinement::Workspace, false, workspace)
+        .expect("workspace confinement");
+    let missing = ExecCaps::READ_SCOPED
+        .union(ExecCaps::WRITE_SCOPED)
+        .check(ExecCaps::READ_SCOPED)
+        .expect_err("a backend without scoped writes cannot serve workspace confinement")
+        .with_probe_evidence(Some(EvidenceRef {
+            id: EvidenceId::parse("a".repeat(64)).expect("probe transcript identity"),
+            bytes: 128,
+        }));
+
+    let termination = process_error_termination(
+        ProcessError::MissingCapabilities(missing),
+        &confinement,
+        &CancelToken::new(),
+    );
+    let RunTermination::UsageError { message } = termination else {
+        panic!("a backend that cannot demonstrate the requested sandbox is a usage refusal");
+    };
+
+    assert!(
+        message.contains("--sandbox workspace"),
+        "the refusal names the mode that asked: {message}"
+    );
+    assert!(
+        message.contains("write only inside the workspace and ego's private scratch directory"),
+        "the refusal names the missing guarantee in words: {message}"
+    );
+    assert!(
+        message.contains(if cfg!(target_os = "macos") {
+            "macOS Seatbelt"
+        } else if cfg!(target_os = "linux") {
+            "Linux Landlock"
+        } else {
+            "no confinement backend"
+        }),
+        "the refusal names the platform backend that failed: {message}"
+    );
+    assert!(
+        message.contains("`--sandbox ro`") && message.contains("`--sandbox off`"),
+        "the refusal offers the remedy of asking for less: {message}"
+    );
+    assert!(
+        message.contains(&"a".repeat(64)),
+        "the refusal cites the measurement that diagnosed the cause: {message}"
+    );
+    assert!(
+        !message.contains("ExecCaps("),
+        "the refusal must not fall back on the bitflag debug text: {message}"
+    );
+}
+
+#[tokio::test]
+async fn protocol_ci_profile_is_refused_before_session_or_provider_effects() {
+    let owner = tempdir().expect("protocol profile fixture owner");
+    let workspace = owner.path().join("workspace");
+    let session_root = owner.path().join("sessions");
+    std::fs::create_dir(&workspace).expect("protocol fixture workspace");
+    let store = Arc::new(JsonlStore::new(
+        session_root.clone(),
+        workspace.clone(),
+        Box::new(OsIo),
+    ));
+    let invocation = RunInvocationId::new();
+    let request = RunPreparation {
+        run_id: RunId::new(SessionId::new(), invocation.uuid()),
+        invocation,
+        root: ego_core::run::RunRoot::new(workspace).expect("protocol fixture root"),
+        selections: ego_core::run::RunSelections::new(
+            None,
+            None,
+            None,
+            None,
+            Some("ci".to_owned()),
+        ),
+        continuation: false,
+        origin: RunOrigin::TopLevel,
+    };
+
+    let admission = Arc::new(EvidenceAdmissionService::new());
+    let child_executor = Arc::new(
+        CliRunExecutor::for_acp(None, Arc::clone(&store), Arc::clone(&admission)).for_children(),
+    );
+    let result = CliPrepared::prepare(
+        protocol_args(None),
+        store,
+        None,
+        &request,
+        None,
+        None,
+        PreparedExecutionRuntime {
+            admission,
+            child_executor,
+            child: false,
+            child_authority: None,
+        },
+    )
+    .await;
+    let message = match result {
+        Err(RunTermination::UsageError { message }) => message,
+        Err(_) => panic!("protocol ci selection must be a usage refusal"),
+        Ok(_) => panic!("protocol ci selection must be refused"),
+    };
+    assert_eq!(
+        message,
+        "profile ci available only through ego run or ego resume"
+    );
+    assert!(
+        !session_root.exists(),
+        "protocol profile refusal must precede session creation"
+    );
+}
+
+#[test]
+fn durable_compact_is_enabled_when_idle_before_confirmation_resolution_generation_or_publication() {
+    let source = SessionId::new();
+    let root: &'static tempfile::TempDir =
+        Box::leak(Box::new(tempdir().expect("durable evidence owner")));
+    let store = Box::leak(Box::new(crate::session::jsonl(
+        root.path().to_path_buf(),
+        PathBuf::from("/workspace"),
+    )));
+    let opened =
+        crate::session::open(store, &source, &SystemClock).expect("durable session writer");
+    let active = crate::session::ActiveSession::durable(opened, SessionState::default(), 1024)
+        .expect("durable active session");
+
+    assert_eq!(
+        super::compaction_availability(false),
+        repl::actions::Availability::Enabled
+    );
+    assert_eq!(active.id(), source);
+    assert_eq!(active.state(), &SessionState::default());
+}
+
+#[derive(Debug)]
+struct CompactionDecisionSeat {
+    confirm: bool,
+    activate: bool,
+}
+
+impl Reads for CompactionDecisionSeat {
+    fn read(&self) -> repl::Line {
+        repl::Line::Ended
+    }
+}
+
+impl InteractiveSeat for CompactionDecisionSeat {
+    fn has_human(&self) -> bool {
+        true
+    }
+
+    fn read_startup_model(
+        &self,
+        _picker: Arc<Mutex<ModelPicker>>,
+        _notice: Option<String>,
+    ) -> crate::model_picker::PickerOutcome {
+        panic!("compaction fixture must not ask for startup model selection");
+    }
+
+    fn trust(&self, _workspace: &Path) -> Trust {
+        Trust::Trusted
+    }
+
+    fn permission(&self, _request: &PermissionRequest) -> PermissionDecision {
+        PermissionDecision::Deny
+    }
+
+    fn confirm_compaction(&self, _source: SessionId) -> bool {
+        self.confirm
+    }
+
+    fn activate_session(&self, _target: SessionId) -> bool {
+        self.activate
+    }
+}
+
+#[test]
+fn compaction_decline_is_a_control_decision_and_keeps_the_source_selected() {
+    let source = SessionId::new();
+    let seat = CompactionDecisionSeat {
+        confirm: false,
+        activate: true,
+    };
+
+    assert!(!seat.confirm_compaction(source));
+}
+
+#[test]
+fn activation_failure_is_reported_after_publication_without_a_revert_request() {
+    let target = SessionId::new();
+    let seat = CompactionDecisionSeat {
+        confirm: true,
+        activate: false,
+    };
+
+    assert!(seat.confirm_compaction(SessionId::new()));
+    assert!(!seat.activate_session(target));
+}
+
+#[derive(Debug)]
+struct TrustingSeat {
+    asked: AtomicUsize,
+}
+
+impl Reads for TrustingSeat {
+    fn read(&self) -> repl::Line {
+        repl::Line::Ended
+    }
+}
+
+impl InteractiveSeat for TrustingSeat {
+    fn has_human(&self) -> bool {
+        true
+    }
+
+    fn read_startup_model(
+        &self,
+        _picker: Arc<Mutex<ModelPicker>>,
+        _notice: Option<String>,
+    ) -> crate::model_picker::PickerOutcome {
+        panic!("trust fixture must not ask for startup model selection");
+    }
+
+    fn trust(&self, _workspace: &Path) -> Trust {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        Trust::Trusted
+    }
+
+    fn permission(&self, _request: &PermissionRequest) -> PermissionDecision {
+        PermissionDecision::Deny
+    }
+}
+
+fn interactive_args(extra: &[&str]) -> Args {
+    let argv = std::iter::once("ego".to_string())
+        .chain(extra.iter().map(|arg| arg.to_string()))
+        .collect();
+    let crate::cli::Invocation::Interactive(args) = crate::cli::parse(argv).unwrap() else {
+        panic!("the test invocation is interactive");
+    };
+    *args
+}
+
+#[test]
+fn only_an_interactive_non_bare_run_can_ask_for_trust() {
+    let seat = Arc::new(TrustingSeat {
+        asked: AtomicUsize::new(0),
+    });
+    let dyn_seat: Arc<dyn InteractiveSeat> = seat.clone();
+    let between = || {};
+    let interactive = Driver::Interactive {
+        seat: dyn_seat,
+        between: &between,
+    };
+    // A workspace with something to trust and a home of its own, so the
+    // routing under test is the only thing that decides whether the seat
+    // is consulted. What the *store* then does with the answer is
+    // `trust.rs`'s contract, not this one's.
+    let workspace = tempfile::tempdir().expect("a temp dir");
+    let home = tempfile::tempdir().expect("a temp dir");
+    std::fs::write(workspace.path().join("AGENTS.md"), "# here\n").expect("a temp dir is writable");
+    let root = workspace.path();
+    let home = Some(home.path());
+
+    assert_eq!(
+        run_trust(&interactive_args(&[]), &interactive, root, home, &Stderr),
+        Trust::Trusted
+    );
+    assert_eq!(seat.asked.load(Ordering::SeqCst), 1);
+
+    assert_eq!(
+        run_trust(
+            &interactive_args(&["--bare"]),
+            &interactive,
+            root,
+            home,
+            &Stderr
+        ),
+        Trust::Untrusted
+    );
+    assert_eq!(
+        seat.asked.load(Ordering::SeqCst),
+        1,
+        "--bare must skip the seat"
+    );
+
+    assert_eq!(
+        run_trust(&interactive_args(&[]), &Driver::Once, root, home, &Stderr),
+        Trust::Untrusted,
+        "headless has no seat to consult"
+    );
+    assert_eq!(seat.asked.load(Ordering::SeqCst), 1);
+}
+
+fn capabilities(osc: OscProfile) -> Capabilities {
+    Capabilities {
+        depth: Depth::TrueColor,
+        width: 80,
+        hyperlinks: true,
+        progress: true,
+        osc,
+    }
+}
+
+fn announce(osc: OscProfile, quiet: bool) -> (Stdout, Capabilities, bool) {
+    (Stdout::new(CancelToken::new()), capabilities(osc), quiet)
+}
+
+/// The reason any of this exists: TUICommander segments a pane into command
+/// blocks from 133 A/C/D and otherwise falls back to pattern-matching
+/// tool-call headers (`tuicommander/docs/FEATURES.md:187`). C opens the
+/// block, D closes it carrying the exit status, and nothing may come after
+/// D — anything that did would belong to the next command.
+#[test]
+fn the_block_opens_with_c_and_closes_with_d_carrying_the_status() {
+    let (out, capabilities, quiet) = announce(OscProfile::Standard, false);
+    let announce = Announce::new(&out, capabilities, quiet);
+
+    assert!(announce.preamble(Some("hello")).ends_with("\x1b]133;C\x07"));
+
+    let failed = announce.postamble(&RunTermination::TaskFailed, Duration::ZERO);
+    assert!(failed.ends_with("\x1b]133;D;1\x07"), "{failed:?}");
+    let done = announce.postamble(&RunTermination::Done, Duration::ZERO);
+    assert!(done.ends_with("\x1b]133;D;0\x07"), "{done:?}");
+}
+
+#[test]
+fn a_title_is_branded_once_and_closing_keeps_only_the_fixed_prefix() {
+    let (out, capabilities, quiet) = announce(OscProfile::Standard, false);
+    let announce = Announce::new(&out, capabilities, quiet);
+
+    assert_eq!(
+        announce.preamble(Some("explain the diff")),
+        "\x1b]0;ɛ । explain the diff\x07\x1b]9;4;3;0\x07\x1b]133;C\x07"
+    );
+    assert_eq!(
+        announce.preamble(None),
+        "\x1b]0;ɛ । εgo\x07\x1b]9;4;3;0\x07\x1b]133;C\x07"
+    );
+    assert_eq!(
+        announce.postamble(&RunTermination::Done, Duration::ZERO),
+        "\x1b]9;4;0;0\x07\x1b]0;ɛ । \x07\x1b]133;D;0\x07"
+    );
+}
+
+/// A progress indicator left set outlives the process that set it: the tab
+/// stays marked until the terminal is restarted. So it is cleared on the
+/// failure path too, and the failure is reported by 133 D instead.
+#[test]
+fn the_indicator_is_always_taken_down_however_the_run_ended() {
+    let (out, capabilities, quiet) = announce(OscProfile::Standard, false);
+    let announce = Announce::new(&out, capabilities, quiet);
+
+    assert!(
+        announce.preamble(None).contains("\x1b]9;4;3;0\x07"),
+        "a run of unknown length is indeterminate"
+    );
+    for termination in [
+        RunTermination::Done,
+        RunTermination::TaskFailed,
+        RunTermination::Signalled(Signal::Int),
+    ] {
+        let closing = announce.postamble(&termination, Duration::ZERO);
+        let state = if termination.exit_code() == 0 { 0 } else { 2 };
+        assert!(
+            closing.contains(&format!("\x1b]9;4;{state};0\x07")),
+            "{termination:?} left the indicator: {closing:?}"
+        );
+    }
+}
+
+/// §4.5, applied to the out-of-band channel. A JSON document with an OSC in
+/// it is not JSON, and the gate is what prevents that rather than a rule
+/// each call site remembers.
+#[test]
+fn a_machine_readable_run_announces_nothing_at_all() {
+    let out = Stdout::new(CancelToken::new());
+    let announce = Announce::new(&out, Capabilities::plain(), false);
+    assert_eq!(announce.preamble(Some("hello")), "");
+    assert_eq!(
+        announce.postamble(&RunTermination::Done, Duration::from_secs(3_600)),
+        ""
+    );
+}
+
+/// A notification is an interruption. It is worth it for a run the operator
+/// stopped watching, and it is noise for one they saw finish — so the
+/// duration decides, and `-q` overrules the duration.
+#[test]
+fn only_a_long_run_is_worth_interrupting_someone_over() {
+    let (out, capabilities, _) = announce(OscProfile::Standard, false);
+    let loud = Announce::new(&out, capabilities, false);
+
+    // `\x1b]9;εgo`, not `\x1b]9;` — OSC 9;4 is the progress indicator and
+    // shares the prefix.
+    assert!(
+        !loud
+            .postamble(&RunTermination::Done, NOTIFY_AFTER - Duration::from_secs(1))
+            .contains("\x1b]9;εgo"),
+        "a run somebody watched finish"
+    );
+    let long = loud.postamble(&RunTermination::Done, Duration::from_secs(252));
+    assert!(
+        long.contains("\x1b]9;εgo: done after 4m 12s\x07"),
+        "{long:?}"
+    );
+
+    let quiet = Announce::new(&out, capabilities, true);
+    assert!(
+        !quiet
+            .postamble(&RunTermination::Done, Duration::from_secs(252))
+            .contains("\x1b]9;εgo"),
+        "-q suppresses it at any duration"
+    );
+}
+
+/// The private protocol reaches TUIC and nowhere else, and it is the
+/// capability gate that decides — not a call site that checks a variable.
+#[test]
+fn only_tuic_is_told_what_ego_is_doing() {
+    let (out, standard, _) = announce(OscProfile::Standard, false);
+    let elsewhere = Announce::new(&out, standard, false);
+    assert!(!elsewhere.preamble(None).contains("7770"));
+
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    assert!(inside.preamble(None).contains("\x1b]7770;state=busy\x07"));
+    assert!(
+        inside
+            .postamble(&RunTermination::Done, Duration::ZERO)
+            .contains("\x1b]7770;state=idle\x07")
+    );
+}
+
+#[test]
+fn the_title_says_what_was_asked_and_never_says_a_dash() {
+    assert_eq!(title(Some("explain the diff")), "explain the diff");
+    // `-` is the spelling for "the prompt is on stdin".
+    assert_eq!(title(Some("-")), "εgo");
+    assert_eq!(title(None), "εgo");
+    assert_eq!(title(Some("   ")), "εgo");
+    // A prompt is often a paragraph; a tab is one line.
+    assert_eq!(title(Some("first line\nsecond line")), "first line");
+}
+
+/// Cut in cells, like everything else that reaches a terminal. A title cut
+/// by bytes puts a replacement character in the tab.
+#[test]
+fn a_long_title_is_cut_where_a_grapheme_ends() {
+    let flag = "\u{1f1ee}\u{1f1f9}";
+    let title = title(Some(&flag.repeat(40)));
+    assert!(!title.contains('\u{fffd}'));
+    assert_eq!(crate::render::line::cells(&title), 48);
+}
+
+#[test]
+fn a_duration_is_written_for_a_person() {
+    assert_eq!(duration(Duration::from_secs(9)), "9s");
+    assert_eq!(duration(Duration::from_secs(60)), "1m 0s");
+    assert_eq!(duration(Duration::from_secs(252)), "4m 12s");
+}
+
+#[test]
+fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
+    let owner = tempdir().expect("skill preflight owner");
+    let system = owner.path().join("system/skills");
+    let user = owner.path().join("user/skills");
+    let project = owner.path().join("project/skills");
+    for root in [&system, &user, &project] {
+        std::fs::create_dir_all(root).expect("skill root");
+    }
+    let explain = user.join("explain");
+    std::fs::create_dir_all(&explain).expect("skill directory");
+    std::fs::write(
+        explain.join("SKILL.md"),
+        "---\nname: explain\ndescription: Explain evidence.\n---\nExplain.\n",
+    )
+    .expect("skill file");
+    let discovery = crate::skill::SkillDiscovery::new(system, user.clone(), project, false);
+    let catalogue =
+        crate::skill::SkillCatalogue::discover(discovery, &["help", "skills", "hooks", "quit"])
+            .expect("skill catalogue");
+    let before = catalogue.capture().expect("initial capture");
+    let before_registry = tools(None, Some(before.core())).expect("initial tool registry");
+    std::fs::create_dir_all(user.join("new-valid")).expect("new skill directory");
+    std::fs::write(
+        user.join("new-valid/SKILL.md"),
+        "---\nname: new-valid\ndescription: New evidence.\n---\nNew.\n",
+    )
+    .expect("new skill file");
+    let prepared = catalogue.prepare_rescan().expect("prospective rescan");
+    let prospective = prepared.capture();
+    assert!(
+        prospective
+            .descriptors()
+            .iter()
+            .any(|spec| spec.name() == "new-valid")
+    );
+    let prospective_registry = tools(None, Some(prospective.core()))
+        .expect("prospective capture supplies model tool preflight");
+    assert!(
+        prospective_registry
+            .iter()
+            .any(|tool| tool.descriptor().name == "skill")
+    );
+
+    let selected = vec!["not-a-tool".to_owned()];
+    assert!(tools(Some(&selected), Some(prospective.core())).is_err());
+    let after = catalogue.capture().expect("capture after failed preflight");
+    assert!(std::sync::Arc::ptr_eq(&before.core(), &after.core()));
+    assert_eq!(before.snapshot_digest(), after.snapshot_digest());
+    let after_registry = tools(None, Some(after.core())).expect("unchanged registry");
+    assert_eq!(
+        before_registry
+            .iter()
+            .map(|tool| tool.descriptor().name)
+            .collect::<Vec<_>>(),
+        after_registry
+            .iter()
+            .map(|tool| tool.descriptor().name)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn hooks_listing_renders_the_exact_runtime_arc_with_active_skill_scope() {
+    let invocation = SkillInvocationId::new();
+    let source = HookSource::skill_entries_with_authority(
+        "skills/explain/SKILL.md",
+        invocation,
+        SkillSourceAuthority::User,
+        [HookConfigEntry::new(
+            HookLifecycle::PreToolUse,
+            None,
+            HookHandlerConfig::Prompt {
+                prompt: "private handler payload".to_owned(),
+                model: None,
+                timeout_seconds: None,
+            },
+        )],
+    );
+    let catalogue = HookCatalogue::admit_typed(&[], &[source], Trust::Trusted)
+        .expect("admitted hook catalogue");
+    let store: &'static HookCaptureStore = Box::leak(Box::new(HookCaptureStore));
+    let clock: &'static HookCaptureClock = Box::leak(Box::new(HookCaptureClock));
+    let sink: &'static NullSink = Box::leak(Box::new(NullSink));
+    let journal = SharedJournal::new(Journal::new(
+        SessionId::new(),
+        store,
+        clock,
+        sink,
+        Producer::Main,
+        SessionState::default(),
+    ));
+    let runtime = SessionHookState::new(
+        ego_core::hook::HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+        journal,
+        CancelToken::new(),
+        Instant::now() + Duration::from_secs(30),
+    )
+    .bind(Arc::new(HookCaptureInvoker));
+    let exact = runtime
+        .hook_state()
+        .catalogue_snapshot()
+        .expect("runtime hook catalogue snapshot");
+    let exact_again = runtime
+        .hook_state()
+        .catalogue_snapshot()
+        .expect("runtime hook catalogue snapshot remains stable");
+    assert!(Arc::ptr_eq(&exact, &exact_again));
+    let rendered = crate::hooks::render(exact.as_ref(), false).expect("render hooks");
+    assert!(rendered.contains(&invocation.to_string()));
+    assert!(rendered.contains("skill:"));
+    assert!(!rendered.contains("private handler payload"));
+}
+
+#[test]
+fn resume_plan_parses_one_answer_and_leaves_classification_pure() {
+    let model_tool = ItemId::new();
+    let (model_state, model_answer, model_turn, model_request_event) =
+        pending_resume_state(QuestionTarget::ModelTool {
+            tool_call: model_tool,
+        });
+    let model_before = model_state.clone();
+    let model_plan = plan_resume_answer(&model_state, std::slice::from_ref(&model_answer))
+        .expect("one model answer is planned");
+    assert_eq!(model_state, model_before);
+    match model_plan {
+        ResumePlan::Model {
+            answer,
+            continuation,
+            request_event,
+        } => {
+            assert_eq!(answer, QuestionAnswer::single("yes"));
+            assert_eq!(continuation.question, model_answer.id);
+            assert_eq!(continuation.turn, model_turn);
+            assert_eq!(continuation.tool_call, model_tool);
+            assert_eq!(request_event, model_request_event);
+        }
+        ResumePlan::Foreign { .. } => panic!("model answer was misclassified as foreign"),
+    }
+
+    let foreign_tool = ItemId::new();
+    let continuation_id = "mcp-generation-policy-restart";
+    let (foreign_state, foreign_answer, _, _) =
+        pending_resume_state(QuestionTarget::ForeignContinuation {
+            tool_call: foreign_tool,
+            continuation_id: continuation_id.to_owned(),
+        });
+    let foreign_before = foreign_state.clone();
+    let foreign_plan = plan_resume_answer(&foreign_state, std::slice::from_ref(&foreign_answer))
+        .expect("one foreign answer is planned");
+    assert_eq!(foreign_state, foreign_before);
+    match foreign_plan {
+        ResumePlan::Foreign {
+            question,
+            continuation_id: planned_id,
+            answer,
+        } => {
+            assert_eq!(question, foreign_answer.id);
+            assert_eq!(planned_id, continuation_id);
+            assert_eq!(answer, QuestionAnswer::single("yes"));
+        }
+        ResumePlan::Model { .. } => panic!("foreign answer was misclassified as model"),
+    }
+}
+
+#[test]
+fn frozen_rule_resolver_reuses_startup_layers_and_replaces_only_base_user_permissions() {
+    let system = ConfigLayer::parse(
+        ego_core::config::Source::System,
+        "[permissions]\nallow = [\"write(src/**)\"]\ndeny = [\"read(src/**)\"]\n",
+    )
+    .expect("system layer");
+    let user = ConfigLayer::parse(
+        ego_core::config::Source::User,
+        "[permissions]\nallow = [\"read(src/**)\"]\njudge = \"ollama/judge\"\n[profile.ci]\nmodel = \"ollama/ci\"\n",
+    )
+    .expect("user layer");
+    let project = ConfigLayer::parse(
+        ego_core::config::Source::Project,
+        "[permissions]\nallow = [\"read(src/private/**)\"]\n",
+    )
+    .expect("project layer");
+    let selection = GenerationPolicySelection::new(Mode::Plan, Ruleset::default());
+    let resolver = FrozenRuleResolver::new(
+        vec![system, user, project],
+        Trust::Trusted,
+        Some(("ci".to_owned(), ego_core::config::Source::Flags)),
+        selection,
+    );
+    let before = ego_core::config::RuleSnapshot {
+        target: ego_core::config::UserConfigTarget::Base,
+        permissions_present: true,
+        allow: vec![ego_core::permit::rule::Rule::load("read(src/**)").unwrap()],
+        deny: Vec::new(),
+    };
+    let after = ego_core::config::RuleSnapshot {
+        target: ego_core::config::UserConfigTarget::Base,
+        permissions_present: true,
+        allow: vec![ego_core::permit::rule::Rule::load("read(src/private/**)").unwrap()],
+        deny: Vec::new(),
+    };
+    let result = resolver
+        .resolve_rule_transaction(
+            &before,
+            &after,
+            &[ego_core::config::RuleMutation {
+                effect: ego_core::config::ManagedRuleEffect::Allow,
+                rule: ego_core::permit::rule::Rule::load("read(src/private/**)").unwrap(),
+            }],
+        )
+        .expect("frozen resolution");
+    assert_eq!(result.next.mode, Mode::Plan);
+    assert_eq!(result.next.ruleset.allow.len(), 1);
+    assert_eq!(
+        result.next.ruleset.allow[0].rule(),
+        &ego_core::permit::rule::Rule::load("read(src/private/**)").unwrap()
+    );
+    assert_eq!(
+        result.next.ruleset.allow[0].origins(),
+        ego_core::config::OriginSet::just(ego_core::config::Source::Project)
+    );
+    assert_eq!(result.next.ruleset.deny.len(), 1);
+    assert_eq!(
+        result.next.ruleset.deny[0].rule(),
+        &ego_core::permit::rule::Rule::load("read(src/**)").unwrap()
+    );
+    assert_eq!(
+        result.next.ruleset.deny[0].origins(),
+        ego_core::config::OriginSet::just(ego_core::config::Source::System)
+    );
+
+    let unchanged = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+    let unknown_profile = FrozenRuleResolver::new(
+        vec![
+            ConfigLayer::parse(
+                ego_core::config::Source::User,
+                "[profile.ci]\nmodel = \"ollama/ci\"\n",
+            )
+            .expect("profile fixture"),
+        ],
+        Trust::Trusted,
+        Some(("missing".to_owned(), ego_core::config::Source::Flags)),
+        unchanged.clone(),
+    );
+    let error = unknown_profile
+        .resolve_rule_transaction(&before, &after, &[])
+        .expect_err("unknown selected profile must fail closed");
+    assert!(matches!(
+        error,
+        crate::repl::policy_controls::PolicyControlError::Resolution { .. }
+    ));
+    assert_eq!(unchanged.snapshot().unwrap().mode, Mode::Default);
+    assert!(unchanged.staged_snapshot().unwrap().is_none());
+}
+
+#[test]
+fn captured_auto_preflight_has_closed_repeatable_outcomes_without_new_io() {
+    let cases = [
+        (CapturedAutoPreflight::MissingJudge, false),
+        (CapturedAutoPreflight::DeferredDynamic, true),
+        (CapturedAutoPreflight::Valid, true),
+        (
+            CapturedAutoPreflight::Refused {
+                diagnostic: "captured judge cannot encode request".to_owned(),
+            },
+            false,
+        ),
+    ];
+    for (state, accepted) in cases {
+        let preflight = CliAutoPreflight::new(state);
+        let first = preflight.validate_auto();
+        let second = preflight.validate_auto();
+        assert_eq!(first, second);
+        assert_eq!(first.is_ok(), accepted);
+        if !accepted {
+            assert!(matches!(
+                first,
+                Err(crate::repl::policy_controls::PolicyControlError::JudgeUnavailable { .. })
+            ));
+        }
+    }
+}
+
+#[derive(Default)]
+struct PolicyTextOutput(std::sync::Mutex<Vec<String>>, AtomicUsize);
+
+impl crate::output::Diagnostics for PolicyTextOutput {
+    fn note(&self, _message: &str) {}
+}
+
+impl crate::output::TextOutput for PolicyTextOutput {
+    fn write(&self, text: &str) {
+        self.0.lock().unwrap().push(text.to_owned());
+    }
+
+    fn line(&self, text: &str) {
+        self.0.lock().unwrap().push(text.to_owned());
+    }
+
+    fn finish(&self) {
+        self.1.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn real_remember_preview() -> crate::rules::RememberPreview {
+    crate::rules::RuleApplication::new(
+        Arc::new(UnusedStore),
+        ego_core::config::UserConfigTarget::Base,
+    )
+    .preview_remember(crate::rules::RememberRequest::new(
+        ego_core::permit::PreparedCall::new(
+            "read",
+            ego_core::permit::Op::Read {
+                path: ego_core::permit::CanonPath::new("/workspace/src/main.rs"),
+            },
+        ),
+        ego_core::config::ManagedRuleEffect::Allow,
+        ego_core::permit::CanonPath::new("/workspace"),
+    ))
+    .unwrap()
+}
+
+fn real_rule_receipt() -> crate::repl::policy_controls::RuleMutationReceipt {
+    let rule = ego_core::permit::rule::Rule::load("read(src/**)").unwrap();
+    let mutation = ego_core::config::RuleMutation {
+        effect: ego_core::config::ManagedRuleEffect::Allow,
+        rule: rule.clone(),
+    };
+    crate::repl::policy_controls::RuleMutationReceipt::from_atomic_facts(
+        ego_core::config::UserConfigMutationResult {
+            target: ego_core::config::UserConfigTarget::Base,
+            facts: ego_core::config::UserConfigMutationFacts::RuleTransaction {
+                request: Box::new(ego_core::config::UserConfigMutationFacts::Batch {
+                    changes: vec![mutation.clone()],
+                }),
+                before: ego_core::config::RuleSnapshot {
+                    target: ego_core::config::UserConfigTarget::Base,
+                    permissions_present: true,
+                    allow: vec![],
+                    deny: vec![],
+                },
+                after: ego_core::config::RuleSnapshot {
+                    target: ego_core::config::UserConfigTarget::Base,
+                    permissions_present: true,
+                    allow: vec![rule],
+                    deny: vec![],
+                },
+            },
+            changed: true,
+            publication: ego_core::config::UserConfigPublication::PublishedDurably,
+        },
+        vec![mutation],
+        vec![ego_core::config::rule_management::RuleMutationComparison {
+            stored_changed: true,
+            effective_changed: true,
+            authorities: vec![],
+        }],
+    )
+    .unwrap()
+}
+
+#[test]
+fn handle_policy_request_renders_list_explain_and_rule_without_confirmation() {
+    let output = PolicyTextOutput::default();
+    let mut applied = Vec::new();
+    let rules = ego_core::config::Ruleset::from_layer(
+        ego_core::config::PermCfg {
+            judge: None,
+            allow: vec![ego_core::permit::rule::Rule::load("read(src/**)").unwrap()],
+            deny: vec![],
+        },
+        ego_core::config::Source::Project,
+    );
+    let list = ego_core::config::rule_management::RuleManagement::rows(&rules);
+    let list_request =
+        PolicyControlRequest::Permission(crate::repl::policy_controls::PermissionInput::List);
+    let list_rows = crate::rules::render_list_rows(&list);
+    assert_eq!(
+        handle_policy_request(
+            list_request.clone(),
+            |request| {
+                applied.push(request);
+                Ok(PolicyControlOutcome::Permission(
+                    crate::repl::policy_controls::PermissionOutcome::List(list.clone()),
+                ))
+            },
+            &output,
+            |_preview| unreachable!("confirmation is not requested for list"),
+        )
+        .expect("list request"),
+        None
+    );
+    assert_eq!(*output.0.lock().unwrap(), list_rows);
+    assert_eq!(applied, vec![list_request]);
+
+    let call = ego_core::permit::PreparedCall::new(
+        "read",
+        ego_core::permit::Op::Read {
+            path: ego_core::permit::CanonPath::new("/workspace/src/main.rs"),
+        },
+    );
+    let explanation = ego_core::config::rule_management::RuleManagement::explain(
+        &call,
+        &rules,
+        std::path::Path::new("/workspace"),
+    );
+    let explain_request =
+        PolicyControlRequest::Permission(crate::repl::policy_controls::PermissionInput::Explain {
+            call: call.clone(),
+            workspace: ego_core::permit::CanonPath::new("/workspace"),
+        });
+    let explain_rows = crate::rules::render_explanation_rows(&call, &explanation);
+    let explain_output = PolicyTextOutput::default();
+    assert_eq!(
+        handle_policy_request(
+            explain_request.clone(),
+            |request| {
+                applied.push(request);
+                Ok(PolicyControlOutcome::Permission(
+                    crate::repl::policy_controls::PermissionOutcome::Explain(explanation.clone()),
+                ))
+            },
+            &explain_output,
+            |_preview| unreachable!("confirmation is not requested for explain"),
+        )
+        .expect("explain request"),
+        None
+    );
+    assert_eq!(*explain_output.0.lock().unwrap(), explain_rows);
+
+    let receipt = real_rule_receipt();
+    let rule_request = PolicyControlRequest::Rule(ego_core::config::RuleMutation {
+        effect: ego_core::config::ManagedRuleEffect::Allow,
+        rule: ego_core::permit::rule::Rule::load("read(src/**)").unwrap(),
+    });
+    let rule_rows = crate::rules::render_mutation_receipt_rows(
+        &receipt,
+        ego_core::config::ManagedRuleEffect::Allow,
+    );
+    let rule_output = PolicyTextOutput::default();
+    assert_eq!(
+        handle_policy_request(
+            rule_request.clone(),
+            |request| {
+                applied.push(request);
+                Ok(PolicyControlOutcome::Rule {
+                    receipt: receipt.clone(),
+                    staging: crate::repl::policy_controls::PolicyStageOutcome { changed: true },
+                })
+            },
+            &rule_output,
+            |_preview| unreachable!("confirmation is not requested for rule"),
+        )
+        .expect("rule request"),
+        None
+    );
+    assert_eq!(*rule_output.0.lock().unwrap(), rule_rows);
+    assert_eq!(applied.len(), 3);
+}
+
+#[test]
+fn handle_policy_request_remember_confirmed_applies_preview_once_in_order() {
+    let output = PolicyTextOutput::default();
+    let mut applied = Vec::new();
+    let request =
+        PolicyControlRequest::Permission(crate::repl::policy_controls::PermissionInput::Remember(
+            crate::rules::RememberRequest::new(
+                ego_core::permit::PreparedCall::new(
+                    "read",
+                    ego_core::permit::Op::Read {
+                        path: ego_core::permit::CanonPath::new("/workspace/src/main.rs"),
+                    },
+                ),
+                ego_core::config::ManagedRuleEffect::Allow,
+                ego_core::permit::CanonPath::new("/workspace"),
+            ),
+        ));
+    let preview = real_remember_preview();
+    let result = handle_policy_request(
+        request,
+        |request| {
+            applied.push(request);
+            if applied.len() == 1 {
+                Ok(PolicyControlOutcome::RememberPreview(preview.clone()))
+            } else {
+                Ok(PolicyControlOutcome::Rule {
+                    receipt: real_rule_receipt(),
+                    staging: crate::repl::policy_controls::PolicyStageOutcome { changed: true },
+                })
+            }
+        },
+        &output,
+        |confirmed_preview| {
+            assert_eq!(confirmed_preview, &preview);
+            assert_eq!(
+                *output.0.lock().unwrap(),
+                crate::rules::render_remember_preview_rows(&preview)
+            );
+            assert_eq!(output.1.load(Ordering::SeqCst), 1);
+            crate::repl::Confirmation::Confirmed
+        },
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.1.load(Ordering::SeqCst), 1);
+    assert_eq!(applied.len(), 2);
+    assert!(matches!(
+        &applied[0],
+        PolicyControlRequest::Permission(crate::repl::policy_controls::PermissionInput::Remember(
+            _
+        ))
+    ));
+    assert!(matches!(
+        &applied[1],
+        PolicyControlRequest::Permission(
+            crate::repl::policy_controls::PermissionInput::ConfirmRemember(observed)
+        ) if observed == &preview
+    ));
+    let mut expected_output = crate::rules::render_remember_preview_rows(&preview);
+    expected_output.extend(crate::rules::render_remember_result_rows(
+        &ego_core::config::UserConfigTarget::Base,
+        Some(&real_rule_receipt()),
+    ));
+    assert_eq!(*output.0.lock().unwrap(), expected_output);
+}
+
+#[test]
+fn handle_policy_request_declined_remember_does_not_apply_again() {
+    let output = PolicyTextOutput::default();
+    let preview = real_remember_preview();
+    let mut applies = 0;
+    let result = handle_policy_request(
+        PolicyControlRequest::Permission(crate::repl::policy_controls::PermissionInput::Remember(
+            crate::rules::RememberRequest::new(
+                ego_core::permit::PreparedCall::new(
+                    "read",
+                    ego_core::permit::Op::Read {
+                        path: ego_core::permit::CanonPath::new("/workspace/src/main.rs"),
+                    },
+                ),
+                ego_core::config::ManagedRuleEffect::Allow,
+                ego_core::permit::CanonPath::new("/workspace"),
+            ),
+        )),
+        |_request| {
+            applies += 1;
+            Ok(PolicyControlOutcome::RememberPreview(preview.clone()))
+        },
+        &output,
+        |_preview| crate::repl::Confirmation::Declined,
+    );
+    assert!(result.is_ok());
+    assert_eq!(applies, 1);
+    let mut expected_output = crate::rules::render_remember_preview_rows(&preview);
+    expected_output.extend(crate::rules::render_remember_result_rows(
+        &ego_core::config::UserConfigTarget::Base,
+        None,
+    ));
+    assert_eq!(*output.0.lock().unwrap(), expected_output);
+}
+
+#[test]
+fn handle_policy_request_propagates_confirmation_terminal_lines_without_second_apply() {
+    let output = PolicyTextOutput::default();
+    for propagated in [
+        crate::repl::Line::Ended,
+        crate::repl::Line::ExternalBreak("draft".to_owned()),
+    ] {
+        let preview = real_remember_preview();
+        let mut applies = 0;
+        let result = handle_policy_request(
+            PolicyControlRequest::Permission(
+                crate::repl::policy_controls::PermissionInput::Remember(
+                    crate::rules::RememberRequest::new(
+                        ego_core::permit::PreparedCall::new(
+                            "read",
+                            ego_core::permit::Op::Read {
+                                path: ego_core::permit::CanonPath::new("/workspace/src/main.rs"),
+                            },
+                        ),
+                        ego_core::config::ManagedRuleEffect::Allow,
+                        ego_core::permit::CanonPath::new("/workspace"),
+                    ),
+                ),
+            ),
+            |_request| {
+                applies += 1;
+                Ok(PolicyControlOutcome::RememberPreview(preview.clone()))
+            },
+            &output,
+            |_preview| crate::repl::Confirmation::Propagate(propagated.clone()),
+        );
+        assert_eq!(result.unwrap(), Some(propagated));
+        assert_eq!(applies, 1);
+    }
+}
+
+#[test]
+fn handle_policy_request_rejects_mismatched_request_and_outcome_without_rows() {
+    let output = PolicyTextOutput::default();
+    let result = handle_policy_request(
+        PolicyControlRequest::Permission(crate::repl::policy_controls::PermissionInput::List),
+        |_request| {
+            Ok(PolicyControlOutcome::Mode {
+                staging: crate::repl::policy_controls::PolicyStageOutcome { changed: false },
+            })
+        },
+        &output,
+        |_preview| unreachable!("mismatched outcome cannot request confirmation"),
+    );
+    assert!(result.is_err());
+    assert!(output.0.lock().unwrap().is_empty());
+}
+
+/// A chosen model has to reach the generation, not just the configuration.
+///
+/// The seat writes into two places that spell the same fact: `slug`, which
+/// the preflight builds its generation target from, and `effective.model`,
+/// which the rest of the turn reads. When only the second moved, every
+/// control test still passed — the host was answered with its pick and the
+/// session reported it — while every generation ran the model the run
+/// started with. Nothing on the control surface can see that, so the
+/// assertion has to be on the value the preflight is handed.
+#[test]
+fn a_chosen_model_moves_the_name_the_generation_is_built_from() {
+    use ego_core::config::{Mode, ModelRef, Trust};
+    use ego_core::control::{ControlSelect, SessionControlState};
+
+    let mut effective = ego_core::config::resolve(&[], Trust::Trusted, None).expect("empty config");
+    let mut slug = "started-with".to_owned();
+    let state = SessionControlState {
+        model: ControlSelect {
+            current: Some(ModelRef("started-with".to_owned())),
+            chosen: Some(ModelRef("picked".to_owned())),
+            available: Vec::new(),
+        },
+        effort: ControlSelect {
+            current: Some(ThinkingLevel::High),
+            chosen: Some(ThinkingLevel::High),
+            available: Vec::new(),
+        },
+        mode: ControlSelect {
+            current: Some(Mode::Plan),
+            chosen: Some(Mode::Plan),
+            available: Vec::new(),
+        },
+        sandbox: ControlSelect {
+            current: Some(ego_core::permit::Confinement::Workspace),
+            chosen: None,
+            available: Vec::new(),
+        },
+    };
+
+    apply_seat(&state, &mut effective, &mut slug);
+
+    assert_eq!(slug, "picked", "the name the generation is built from");
+    assert_eq!(effective.model, Some(ModelRef("picked".to_owned())));
+    assert_eq!(effective.thinking, Some(ThinkingLevel::High));
+    assert_eq!(effective.mode, Some(Mode::Plan));
+}
+
+/// What was not chosen is left exactly as configuration resolved it.
+/// Inheriting a default is not a decision, and a run that overwrote the
+/// resolved name with an unchosen one would claim a pick nobody made.
+#[test]
+fn an_unchosen_control_leaves_what_configuration_resolved_alone() {
+    use ego_core::config::{Mode, ModelRef, Trust};
+    use ego_core::control::{ControlSelect, SessionControlState};
+
+    let mut effective = ego_core::config::resolve(&[], Trust::Trusted, None).expect("empty config");
+    effective.model = Some(ego_core::config::ModelRef("configured".to_owned()));
+    let mut slug = "configured".to_owned();
+    let state = SessionControlState {
+        model: ControlSelect {
+            current: Some(ModelRef("configured".to_owned())),
+            chosen: None,
+            available: Vec::new(),
+        },
+        effort: ControlSelect {
+            current: Some(ThinkingLevel::Off),
+            chosen: None,
+            available: Vec::new(),
+        },
+        mode: ControlSelect {
+            current: Some(Mode::Default),
+            chosen: None,
+            available: Vec::new(),
+        },
+        sandbox: ControlSelect {
+            current: Some(ego_core::permit::Confinement::Workspace),
+            chosen: None,
+            available: Vec::new(),
+        },
+    };
+
+    apply_seat(&state, &mut effective, &mut slug);
+
+    assert_eq!(slug, "configured");
+    assert_eq!(
+        effective.model,
+        Some(ego_core::config::ModelRef("configured".to_owned()))
+    );
+}
