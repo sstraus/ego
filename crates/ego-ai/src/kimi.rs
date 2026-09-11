@@ -340,10 +340,10 @@ fn reasoning_efforts(
         .as_deref()
         .map(parse_effort)
         .transpose()?;
-    if let Some(default) = default {
-        if !accepted.contains(&default) {
-            return Err("default_effort is absent from valid_efforts".to_string());
-        }
+    if let Some(default) = default
+        && !accepted.contains(&default)
+    {
+        return Err("default_effort is absent from valid_efforts".to_string());
     }
     Ok((ReasoningEffortSupport::Only(accepted), default))
 }
