@@ -368,6 +368,17 @@ fn drain(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
     }
 }
 
+/// A raw PTY read may have already received a complete redraw while its reader
+/// thread still holds the chunk. A key assertion begins only after that queue
+/// is quiet, so an old marker cannot satisfy a later-key expectation.
+fn drain_until_quiet(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while let Ok(chunk) = receiver.recv_timeout(Duration::from_millis(100)) {
+        output.extend(chunk);
+        assert!(Instant::now() < deadline, "PTY redraw never became quiet");
+    }
+}
+
 fn count_exact_strings(value: &serde_json::Value, target: &str) -> usize {
     match value {
         serde_json::Value::String(value) => usize::from(value == target),
@@ -853,6 +864,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     input.write_all(b"\r\r").expect("model slash submit");
     input.flush().expect("model slash flush");
     until_normalized_or_generation(&reader, &mut output, slash_start, "Select model", &stub);
+    drain_until_quiet(&reader, &mut output);
     let slash_modal = normalized(&output[slash_start..]);
     assert!(slash_modal.contains("Select model"));
     let down_start = output.len();
@@ -864,14 +876,51 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         down_start,
         b"> 2. anthropic/claude-fable-5-1",
     );
+    drain_until_quiet(&reader, &mut output);
     let up_start = output.len();
     input.write_all(b"\x1b[A").expect("model picker up");
     input.flush().expect("model picker up flush");
     until_from(&reader, &mut output, up_start, b"> 1. ollama/qwen3");
-    let slash_close_start = output.len();
-    input.write_all(b"\x1b").expect("close slash modal");
-    input.flush().expect("close slash modal flush");
-    until_from(&reader, &mut output, slash_close_start, b"> ");
+    drain_until_quiet(&reader, &mut output);
+    let numeric_start = output.len();
+    input.write_all(b"2").expect("model picker number");
+    input.flush().expect("model picker number flush");
+    until_from(
+        &reader,
+        &mut output,
+        numeric_start,
+        b"> 2. anthropic/claude-fable-5-1",
+    );
+    drain_until_quiet(&reader, &mut output);
+    let restore_start = output.len();
+    input.write_all(b"\x1b[A").expect("model picker restore");
+    input.flush().expect("model picker restore flush");
+    until_from(&reader, &mut output, restore_start, b"> 1. ollama/qwen3");
+    drain_until_quiet(&reader, &mut output);
+    let enter_start = output.len();
+    input.write_all(b"\r").expect("model picker enter");
+    input.flush().expect("model picker enter flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        enter_start,
+        "Select reasoning for ollama/qwen3",
+    );
+    drain_until_quiet(&reader, &mut output);
+    // Discovery has no reasoning default: select Off before committing.
+    let reasoning_start = output.len();
+    input
+        .write_all(b"1")
+        .expect("model picker reasoning number");
+    input.flush().expect("model picker reasoning number flush");
+    until_from(&reader, &mut output, reasoning_start, b"> 1. Off");
+    drain_until_quiet(&reader, &mut output);
+    let slash_accept_start = output.len();
+    input
+        .write_all(b"\r")
+        .expect("model picker reasoning enter");
+    input.flush().expect("model picker reasoning enter flush");
+    until_from(&reader, &mut output, slash_accept_start, b"> ");
 
     let meta_start = output.len();
     // The PTY uses the parser-stable CSI-u wire spelling for Meta-P. It
@@ -880,11 +929,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     input.write_all(b"\x1b[112;33u").expect("Meta-P");
     input.flush().expect("Meta-P flush");
     until_normalized(&reader, &mut output, meta_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
     let meta_modal = normalized(&output[meta_start..]);
+    // Compare the complete latest menu, not the number of painter redraws.
     assert_eq!(
-        meta_modal.matches("Select model").count(),
-        slash_modal.matches("Select model").count(),
-        "Meta-P and /model must enter one live picker modal"
+        meta_modal.rsplit_once("Select model").unwrap().1,
+        slash_modal.rsplit_once("Select model").unwrap().1,
+        "Meta-P and /model must present the same complete picker"
     );
     let meta_close_start = output.len();
     input.write_all(b"\x1b").expect("close Meta-P modal");
@@ -1230,6 +1281,223 @@ fn busy_ctrl_c_cancels_work_and_idle_double_ctrl_c_exits() {
             .collect::<Vec<_>>(),
         vec![0, 1],
     );
+}
+
+fn bounded_exit(mut child: Box<dyn portable_pty::Child + Send + Sync>) -> portable_pty::ExitStatus {
+    let mut killer = child.clone_killer();
+    let (sender, receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let _ = sender.send(child.wait());
+    });
+    let status = match receiver.recv_timeout(PROGRESS_DEADLINE) {
+        Ok(status) => status.expect("child wait"),
+        Err(error) => {
+            killer.kill().expect("kill stalled child");
+            panic!("child did not exit within deadline: {error}");
+        }
+    };
+    waiter.join().expect("child waiter panicked");
+    status
+}
+
+#[test]
+fn startup_picker_escape_exits_without_saving_a_model() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_normalized(&reader, &mut output, 0, "Select model");
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"\x1b").expect("startup Escape");
+    input.flush().expect("startup Escape flush");
+    let status = bounded_exit(child);
+    assert_eq!(status.exit_code(), 130, "Escape must cancel startup");
+    drop(input);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+    assert!(stub.generations().is_empty());
+    assert!(!ego.home_path().join("config.toml").exists());
+}
+
+#[test]
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
+    let stub = Stub::start(Plan::default());
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# live surface fixture\n",
+    )
+    .expect("workspace fixture");
+    let first = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .conversing()
+        .env("OPENAI_API_KEY", "fixture-openai-key")
+        .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair
+        .slave
+        .spawn_command(first.pty_command())
+        .expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let picker_start = output.len();
+    until_normalized(&reader, &mut output, picker_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+
+    let down_start = output.len();
+    input.write_all(b"\x1b[B").expect("startup picker down");
+    input.flush().expect("startup picker down flush");
+    until_from(
+        &reader,
+        &mut output,
+        down_start,
+        b"> 2. anthropic/claude-haiku-4-5",
+    );
+    drain_until_quiet(&reader, &mut output);
+
+    let up_start = output.len();
+    input.write_all(b"\x1b[A").expect("startup picker up");
+    input.flush().expect("startup picker up flush");
+    until_from(
+        &reader,
+        &mut output,
+        up_start,
+        b"> 1. anthropic/claude-fable-5-1",
+    );
+    drain_until_quiet(&reader, &mut output);
+
+    let number_start = output.len();
+    input.write_all(b"1").expect("startup picker number one");
+    input.flush().expect("startup picker number one flush");
+    until_from(
+        &reader,
+        &mut output,
+        number_start,
+        b"> 1. anthropic/claude-fable-5-1",
+    );
+    drain_until_quiet(&reader, &mut output);
+    let chosen_start = output.len();
+    input.write_all(b"2").expect("startup picker number two");
+    input.flush().expect("startup picker number two flush");
+    until_from(
+        &reader,
+        &mut output,
+        chosen_start,
+        b"> 2. anthropic/claude-haiku-4-5",
+    );
+    drain_until_quiet(&reader, &mut output);
+
+    input.write_all(b"\r").expect("startup model accept");
+    input.flush().expect("startup model accept flush");
+    until_normalized(&reader, &mut output, chosen_start, "Select reasoning for");
+    drain_until_quiet(&reader, &mut output);
+    let reasoning_start = output.len();
+    input.write_all(b"1").expect("startup reasoning number");
+    input.flush().expect("startup reasoning number flush");
+    until_from(&reader, &mut output, reasoning_start, b"> 1.");
+    drain_until_quiet(&reader, &mut output);
+    let first_prompt = output.windows(2).filter(|window| *window == b"> ").count();
+    input.write_all(b"\r").expect("startup reasoning accept");
+    input.flush().expect("startup reasoning accept flush");
+    until_prompt_after(&reader, &mut output, first_prompt);
+    drain_until_quiet(&reader, &mut output);
+
+    let config = std::fs::read_to_string(home.path().join("config.toml"))
+        .expect("startup selection persisted atomically");
+    assert!(config.contains("model = \"anthropic/claude-haiku-4-5\""));
+    assert!(config.contains("thinking = \"off\""));
+
+    input.write_all(b"\x04").expect("first EOF");
+    input.flush().expect("first EOF flush");
+    let status = bounded_exit(child);
+    assert!(
+        status.success(),
+        "first interactive process failed: {status:?}"
+    );
+    drop(input);
+    reader_join.join().expect("first reader thread panicked");
+    writer_join.join().expect("first writer thread panicked");
+
+    let second = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .conversing()
+        .env("OPENAI_API_KEY", "fixture-openai-key")
+        .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("second pty");
+    let child = pair
+        .slave
+        .spawn_command(second.pty_command())
+        .expect("second spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("second writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("second reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    let restart_start = 0;
+    until_post_trust_prompt(&reader, &mut output, restart_start);
+    assert!(
+        !normalized(&output[restart_start..]).contains("Select model"),
+        "persisted selection must bypass the startup picker: {}",
+        normalized(&output[restart_start..]),
+    );
+
+    input.write_all(b"\x04").expect("second EOF");
+    input.flush().expect("second EOF flush");
+    let status = bounded_exit(child);
+    assert!(
+        status.success(),
+        "second interactive process failed: {status:?}"
+    );
+    drop(input);
+    reader_join.join().expect("second reader thread panicked");
+    writer_join.join().expect("second writer thread panicked");
 }
 
 #[test]

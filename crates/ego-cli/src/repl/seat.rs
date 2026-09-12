@@ -1154,7 +1154,13 @@ impl crate::run::InteractiveSeat for Seat {
 
     fn idle(&self) {
         if let SeatKind::Live(live) = &self.kind {
-            live.phase.set(EditPhase::Idle);
+            // The terminal owner alone leaves Modal, even if idle arrives late.
+            let _ = live.phase.0.compare_exchange(
+                EditPhase::Busy as u8,
+                EditPhase::Idle as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
             let mut status = live.status.lock().expect("surface status lock");
             status.activity = false;
             drop(status);
