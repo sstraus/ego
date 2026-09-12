@@ -24,13 +24,13 @@
 #
 # ## Which providers appear
 #
-# Only rows whose resolver is `Supplied` read this file: `openai`,
-# `anthropic`, `openrouter` and `gemini`. The other seven
-# rows in `ego_ai::conformance::final_provider_rows` enumerate their own models
-# from the provider (`ollama` from the daemon; `openai-codex`,
-# `github-copilot`, `xai-oauth`, `kimi-coding`, `minimax-oauth` and `nous` from
-# their subscription endpoints), so a row here would be a second answer to a
-# question the provider already answers.
+# Only rows whose resolver reads supplied facts appear here: `openai`,
+# `openai-codex`, `anthropic`, `openrouter` and `gemini`. The other six rows
+# in `ego_ai::conformance::final_provider_rows` enumerate their own models from
+# the provider (`ollama` from the daemon; `github-copilot`, `xai-oauth`,
+# `kimi-coding`, `minimax-oauth` and `nous` from their subscription endpoints),
+# so a row here would be a second answer to a question the provider already
+# answers.
 #
 # `gemini` is selectable under the published-contract decision in
 # `docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`.
@@ -49,12 +49,13 @@
 # test holds that. The revision is what a retirement error names, so a stale
 # constant would send an operator to the wrong catalogue.
 #
-# revision = 2026-09-08
+# revision = 2026-09-12
 
-# First-run policy selected on 2026-09-08; availability is still observed.
+# First-run policy selected on 2026-09-12; availability is still observed.
 # See docs/23-first-run-model-default-sources.md and the first-run ADR.
 [default_model]
 openai = "openai/gpt-5.6-sol"
+openai-codex = "openai-codex/gpt-5.6-sol"
 anthropic = "anthropic/claude-opus-5"
 gemini = "gemini/gemini-3.8-flash"
 
@@ -120,6 +121,29 @@ transport = "sse"
 kind = "supported"
 accepted_media_types = ["png", "jpeg", "webp", "gif"]
 max_images = 100
+
+# ---------------------------------------------------------------------------
+# openai-codex — read by `ego models` after `ego auth login openai-codex`.
+#
+# Sources read 2026-09-12:
+# - OpenAI's current gpt-5.6-sol model page: 1,050,000 API context / 128,000
+#   maximum output.
+# - The authenticated Codex model cache: 272,000 effective context for this
+#   subscription surface.
+#
+# The subscription ceiling deliberately uses the lower authenticated value.
+# See docs/decisions/2026-09-12-openai-codex-subscription-bootstrap-ceiling.md.
+[model."openai-codex/gpt-5.6-sol".capabilities]
+schema_version = 5
+max_context_tokens = 272000
+max_output_tokens = 128000
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "low"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
 
 [model."openai/gpt-5.6-terra".capabilities]
 schema_version = 5

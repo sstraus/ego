@@ -1285,16 +1285,17 @@ or configured model bypasses this first-run selection. Headless startup never
 chooses or persists a model; its refusal names detected providers and remedies
 using `--model` or `ego config set model`.
 
-The builtin layer exists so that a machine with an API key and no files can
-run. It carries only what each vendor publishes, cites the source and read
-date beside every provider's rows, and **states no prices**: a rate is the one
-fact whose staleness costs money instead of raising an error, so a run under a
-`--max-cost` ceiling with no operator rates still refuses with
-`NoPricingQuote`. Unknown price is not free price. It ships rows only for
-providers the selectable table already admits, and only for those whose
-resolver reads this file at all — `openai` and `anthropic`.  `openrouter` is
-selectable but stays operator-supplied: it proxies hundreds of third-party
-models under no citable contract. Everything else enumerates its own models.
+The builtin layer exists so that a machine with a configured credential and no
+files can run. It carries only release-pinned facts from each stated authority,
+cites the source and read date beside every provider's rows, and **states no
+prices**: a rate is the one fact whose staleness costs money instead of raising
+an error, so a run under a `--max-cost` ceiling with no operator rates still
+refuses with `NoPricingQuote`. Unknown price is not free price. It ships rows
+only for providers the selectable table already admits, and only for those
+whose resolver reads this file: `openai`, `openai-codex`, `anthropic`, and
+`gemini`. `openrouter` is selectable but stays operator-supplied: it proxies
+hundreds of third-party models under no citable contract. Ollama and the other
+subscription providers enumerate their own models.
 
 The `openai` rows are shipped and selectable. The row speaks the public
 Responses contract, and
@@ -1309,6 +1310,18 @@ body is a `400` from OpenAI on the first call. `ego models` lists the row as
 available once `OPENAI_API_KEY` resolves and as `missing_credential` when it
 does not.
 See `docs/decisions/2026-09-07-a-builtin-catalogue-layer-below-system-and-user.md`.
+
+`openai-codex/gpt-5.6-sol` is the current built-in ChatGPT/Codex subscription
+default. It becomes available after `ego auth login openai-codex` stores its
+OAuth credential; no user `models.toml` is needed. Its 128,000-token output
+ceiling is the public model fact, while its 272,000-token context ceiling is
+the smaller effective limit from the authenticated Codex catalogue, not the
+1,050,000-token Platform API limit. This makes preflight conservative for the
+actual subscription endpoint. The subscription has no built-in monetary rate;
+it uses subscription metering. Its currently expressible reasoning default is
+`low`; image input, opaque reasoning-state carryover, parallel tool calls, and
+hard tool limits are not claimed for the private subscription contract.
+See `docs/decisions/2026-09-12-openai-codex-subscription-bootstrap-ceiling.md`.
 
 A full entry, with every field the schema accepts:
 

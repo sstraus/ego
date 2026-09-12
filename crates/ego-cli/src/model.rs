@@ -751,6 +751,72 @@ mod tests {
         assert!(selectable().contains(&"openai-codex".to_owned()));
     }
 
+    /// A Codex login creates a subscription credential, not a `models.toml`.
+    ///
+    /// The builtin row must therefore take its current default through the
+    /// normal subscription resolver as far as request assembly without either
+    /// file layer.  This is deliberately distinct from the mapping-only test
+    /// above: that one supplies synthetic capabilities, while this one proves
+    /// the release-pinned facts are present and complete enough for preflight.
+    #[test]
+    fn an_openai_codex_request_assembles_from_the_builtin_catalogue_alone() {
+        let hosted = crate::facts::builtin_only();
+        let slug = ModelSlug::parse("openai-codex/gpt-5.6-sol").expect("a valid Codex slug");
+        assert!(
+            hosted
+                .iter()
+                .any(|(key, _)| key == "openai-codex/gpt-5.6-sol"),
+            "the builtin catalogue does not carry the Codex default",
+        );
+
+        let catalogue = catalogue_from_rows(
+            hosted,
+            mapped_rows(
+                ProviderRow::ollama_default(),
+                ProviderRow::openai(),
+                ProviderRow::anthropic_default(),
+            ),
+        );
+        let row = catalogue
+            .row("openai-codex")
+            .expect("openai-codex is selectable");
+        let credential = row
+            .credential
+            .resolve(&CodexCredentials)
+            .expect("the Codex fixture credential resolves");
+        let http: Arc<dyn Http> = Arc::new(NoHttp);
+        let resolved = futures::executor::block_on(catalogue.resolve(&slug, &http, &credential))
+            .expect("the builtin facts resolve the Codex default");
+        assert_eq!(resolved.capabilities.max_context_tokens, Some(272_000));
+        assert_eq!(resolved.capabilities.max_output_tokens, Some(128_000));
+        assert!(matches!(
+            resolved.metering,
+            ego_core::budget::Metering::Subscription { .. }
+        ));
+
+        let headers = credential.headers();
+        let target = RequestTarget::new(resolved.row.base(), &headers);
+        let built = resolved
+            .wire
+            .build_request(
+                &target,
+                &GenRequest {
+                    model: resolved.model.clone(),
+                    messages: Conversation::new(vec![Message::text(Role::User, "hello")])
+                        .expect("a valid Codex conversation"),
+                    tools: Vec::new(),
+                    thinking: ThinkingLevel::Low,
+                    max_output_tokens: Some(16),
+                    parallel_tool_calls: false,
+                },
+            )
+            .expect("the builtin Codex default is expressible");
+        assert_eq!(
+            built.url.as_str(),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+    }
+
     /// The API-key candidate is still not runnable.
     ///
     /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`

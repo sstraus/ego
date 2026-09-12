@@ -85,14 +85,15 @@ const SYSTEM_DIR: &str = "/etc/ego";
 /// rest do not.
 const BUILTIN: &str = include_str!("../catalogue/models.toml");
 
-/// The date every fact in [`BUILTIN`] was read from its vendor's contract.
+/// The date the compiled-in catalogue was last revised from its authorities.
 ///
 /// A date rather than a counter, because what a reader wants to know about a
-/// capability claim is *when somebody last checked*, and a monotonic integer
-/// answers a different question. It is what a retirement refusal names, so a
-/// test holds it equal to the `revision =` line in the file itself — a
-/// constant that had drifted would send an operator to the wrong catalogue.
-pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-08";
+/// capability claim is *when this release's catalogue was last checked*, and a
+/// monotonic integer answers a different question. It is what a retirement
+/// refusal names, so a test holds it equal to the `revision =` line in the
+/// file itself — a constant that had drifted would send an operator to the
+/// wrong catalogue.
+pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-12";
 
 /// One `models.toml`.
 #[derive(Debug, Default, Deserialize)]
@@ -585,7 +586,14 @@ transport = "sse"
         for slug in catalogue.model.keys() {
             let slug = ModelSlug::parse(slug).expect("every builtin key is a slug");
             assert!(
-                ["openai", "anthropic", "openrouter", "gemini"].contains(&slug.provider.as_str()),
+                [
+                    "openai",
+                    "openai-codex",
+                    "anthropic",
+                    "openrouter",
+                    "gemini"
+                ]
+                .contains(&slug.provider.as_str()),
                 "`{slug}` names a provider whose resolver does not read this file",
             );
         }

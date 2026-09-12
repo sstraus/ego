@@ -624,6 +624,37 @@ fn the_openai_row_reads_as_available_with_its_key_set_and_wants_only_that_key() 
     );
 }
 
+/// A successful subscription login must make its current default selectable
+/// without asking the operator to reconstruct model facts in `models.toml`.
+#[test]
+fn stored_openai_codex_credential_lists_the_builtin_default_on_a_fresh_home() {
+    let ego = Ego::nowhere();
+    ego.home_file(
+        "auth.json",
+        r#"{"openai-codex":{"type":"o_auth","access":"head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig"}}"#,
+    );
+
+    let listed = ego
+        .subcommand("models")
+        .args(["--provider", "openai-codex", "--refresh", "--json"])
+        .run();
+    assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
+
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&listed.stdout).expect("the model report is JSON");
+    let model = snapshot["models"]
+        .as_array()
+        .expect("the report carries models")
+        .iter()
+        .find(|model| model["slug"] == "openai-codex/gpt-5.6-sol")
+        .expect("a fresh Codex subscription home lists its builtin default");
+    assert_eq!(model["capabilities"]["max_context_tokens"], 272_000);
+    assert_eq!(model["capabilities"]["max_output_tokens"], 128_000);
+    assert_eq!(model["metering"], "subscription");
+    assert_eq!(model["provenance"]["authority"], "builtin");
+    assert_eq!(model["availability"]["status"], "available");
+}
+
 /// Selecting the row gets as far as the transport, which is the whole claim.
 ///
 /// The listing above and this run are the same decision on two surfaces, and

@@ -196,8 +196,9 @@ impl ModelResolver for Supplied {
     }
 }
 
-/// Operator-supplied capabilities under a provider subscription policy.
-/// Rates in `models.toml` cannot turn a flat-fee row back into currency.
+/// Builtin- or operator-supplied capabilities under a provider subscription
+/// policy. Rates in `models.toml` cannot turn a flat-fee row back into
+/// currency.
 #[derive(Debug)]
 pub struct SubscriptionSupplied {
     revision: &'static str,
