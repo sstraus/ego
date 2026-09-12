@@ -37,6 +37,13 @@ pub fn observed(workspace: PathBuf) -> String {
     text(&snapshot(workspace, home, &roots))
 }
 
+/// The same health snapshot rendered for a bounded interactive terminal.
+pub fn observed_with_width(workspace: PathBuf, width: usize) -> String {
+    let home = config::ego_home();
+    let roots = visible_roots(&workspace, home.as_ref());
+    text_with_width(&snapshot(workspace, home, &roots), width)
+}
+
 /// Ask every probe once.
 ///
 /// `pub` because both surfaces and the tests that bind them together need to
@@ -153,6 +160,16 @@ pub fn text(snapshot: &HealthSnapshot) -> String {
         }
     }
     lines.join("\n")
+}
+
+/// Wrap the canonical text projection without removing semantic bytes.
+pub fn text_with_width(snapshot: &HealthSnapshot, width: usize) -> String {
+    text(snapshot)
+        .lines()
+        .flat_map(|line| crate::render::Line::plain(line.replace('\t', "  ")).wrap(width.max(1)))
+        .map(|line| line.text())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn status_word(status: HealthStatus) -> &'static str {

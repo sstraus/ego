@@ -392,6 +392,25 @@ fn absent_thinking_flag_preserves_file_value_and_unknown_keys_fail_strictly() {
 }
 
 #[test]
+fn cli_model_and_thinking_override_persisted_picker_defaults() {
+    let persisted = ConfigLayer::parse(
+        Source::User,
+        "model = 'openai/gpt-5.6'\nthinking = 'medium'\n",
+    )
+    .unwrap();
+    let flags = ego_cli::config::flags_layer(Some("ollama/qwen3"), Some(ThinkingLevel::High));
+    let effective = ego_core::config::resolve(
+        &[persisted, flags],
+        ego_core::config::Trust::Untrusted,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(effective.model, Some(ModelRef("ollama/qwen3".to_owned())));
+    assert_eq!(effective.thinking, Some(ThinkingLevel::High));
+}
+
+#[test]
 fn escape_and_session_only_stage_without_user_config_mutation() {
     let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
     let escape_selection = selection();

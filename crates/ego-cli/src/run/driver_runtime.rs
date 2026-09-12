@@ -964,7 +964,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Doctor,
                                     )) => {
-                                        diagnostics.note(&crate::doctor::observed(root.clone()));
+                                        diagnostics.note(&crate::doctor::observed_with_width(
+                                            root.clone(),
+                                            seat.width(),
+                                        ));
                                         continue;
                                     }
                                     // To the transcript rather than to a file

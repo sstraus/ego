@@ -66,6 +66,8 @@ pub(super) const QUESTION_SELECTOR_COMMAND: &str = "ego:question-selector:";
 pub(super) const MODAL_ESCAPE_COMMAND: &str = "ego:modal-escape";
 const QUEUE_LABEL: &str =
     "Messages to be submitted after next tool call (press esc to interrupt and send immediately)";
+const ACTIVITY_LABEL: &str = "working — Esc cancels";
+const DOUBLE_CTRL_C_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Clone)]
 struct StatusBase {
@@ -254,6 +256,7 @@ fn repaint_status(status: &SharedStatus) {
 struct SurfaceStatus {
     queue: QueueStatus,
     drafts: usize,
+    activity: bool,
     notice: Option<String>,
     origin: InputOrigin,
     native_status: bool,
@@ -277,6 +280,7 @@ impl Default for SurfaceStatus {
         Self {
             queue: QueueStatus::default(),
             drafts: 0,
+            activity: false,
             notice: None,
             origin: InputOrigin::Typed,
             native_status: false,
@@ -699,6 +703,10 @@ impl Seat {
                 let line = live.input.recv().unwrap_or(Line::Ended);
                 if matches!(line, Line::Submitted(_)) {
                     live.phase.set(EditPhase::Busy);
+                    let mut status = live.status.lock().expect("surface status lock");
+                    status.activity = true;
+                    drop(status);
+                    repaint_status(&live.status);
                 }
                 line
             }
@@ -1117,6 +1125,13 @@ impl crate::run::InteractiveSeat for Seat {
         self.terminal
     }
 
+    fn width(&self) -> usize {
+        match &self.kind {
+            SeatKind::Live(live) => live.status.lock().expect("surface status lock").width,
+            SeatKind::Sequential(_) => 80,
+        }
+    }
+
     fn read_startup_model(
         &self,
         picker: Arc<Mutex<ModelPicker>>,
@@ -1130,12 +1145,20 @@ impl crate::run::InteractiveSeat for Seat {
             .set_availability(ActionId::Compact, Availability::Busy);
         if let SeatKind::Live(live) = &self.kind {
             live.phase.set(EditPhase::Busy);
+            let mut status = live.status.lock().expect("surface status lock");
+            status.activity = true;
+            drop(status);
+            repaint_status(&live.status);
         }
     }
 
     fn idle(&self) {
         if let SeatKind::Live(live) = &self.kind {
             live.phase.set(EditPhase::Idle);
+            let mut status = live.status.lock().expect("surface status lock");
+            status.activity = false;
+            drop(status);
+            repaint_status(&live.status);
         }
     }
 
@@ -1275,6 +1298,7 @@ fn own_terminal(
     } = owner;
     let mut pending_control = None;
     let mut active = false;
+    let mut idle_interrupt = None;
     let mut drafts = DraftStash::new(SessionId::new());
     loop {
         if matches!(pending_control.as_ref(), Some(Control::Activate { .. })) {
@@ -1380,6 +1404,22 @@ fn own_terminal(
                 if matches!(line, Line::Submitted(_) | Line::Ended) {
                     phase.set(EditPhase::Busy);
                 }
+                let line = if matches!(line, Line::Interrupted) && phase.get() == EditPhase::Idle {
+                    let now = std::time::Instant::now();
+                    if idle_interrupt.is_some_and(|previous| {
+                        now.duration_since(previous) <= DOUBLE_CTRL_C_WINDOW
+                    }) {
+                        Line::Ended
+                    } else {
+                        idle_interrupt = Some(now);
+                        Line::Interrupted
+                    }
+                } else {
+                    if !matches!(line, Line::Interrupted) {
+                        idle_interrupt = None;
+                    }
+                    line
+                };
                 let ended = matches!(line, Line::Ended);
                 if input.send(line).is_err() || (ended && failed) {
                     break;
@@ -1395,9 +1435,9 @@ mod permission;
 mod picker_surface;
 mod question;
 
-#[cfg(test)]
-use action_execution::apply_surface_effect;
 use action_execution::surface_line;
+#[cfg(test)]
+use action_execution::{apply_surface_effect, render_action_help};
 pub use edit_mode::SurfaceEditMode;
 pub(crate) use permission::Confirmation;
 #[cfg(test)]

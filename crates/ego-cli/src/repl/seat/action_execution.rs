@@ -1,5 +1,39 @@
 use super::*;
 
+pub(super) fn render_action_help(registry: &ActionRegistry, width: usize) -> String {
+    let mut logical = vec!["actions:".to_owned()];
+    logical.extend(registry.iter().map(|action| {
+        let shortcut = action
+            .shortcuts()
+            .first()
+            .map(|shortcut| format!(" [Meta-{shortcut}]"))
+            .unwrap_or_default();
+        match registry.availability(action.id()) {
+            Availability::Disabled { owner } => format!(
+                "/{}{shortcut} — {} [unavailable: {owner}]",
+                action.name(),
+                action.description_text()
+            ),
+            Availability::Busy => format!(
+                "/{}{shortcut} — {} [busy]",
+                action.name(),
+                action.description_text()
+            ),
+            Availability::Enabled => format!(
+                "/{}{shortcut} — {}",
+                action.name(),
+                action.description_text()
+            ),
+        }
+    }));
+    logical
+        .into_iter()
+        .flat_map(|row| crate::render::Line::plain(row).wrap(width.max(1)))
+        .map(|row| row.text())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(super) fn surface_line(
     editor: &mut Reedline,
     prompt: &dyn Prompt,
@@ -103,6 +137,27 @@ pub(super) fn surface_line(
             }
         }
         let Line::HostCommand(command) = line else {
+            if matches!(line, Line::Interrupted) && phase.get() == EditPhase::Busy {
+                match futures::executor::block_on(ingress.interrupt()) {
+                    Ok(queue) => {
+                        let mut current = status.lock().expect("surface status lock");
+                        current.queue = queue;
+                        if let Some(snapshot) = current.snapshot.as_mut() {
+                            snapshot.set_queue(queue);
+                        }
+                        current.notice = Some("cancelling active work".to_string());
+                        drop(current);
+                        repaint_status(status);
+                        return (Line::HostCommand(HostCommand::Interrupt), false);
+                    }
+                    Err(error) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some(error.to_string());
+                        repaint_status(status);
+                        continue;
+                    }
+                }
+            }
             if matches!(line, Line::Blank | Line::Interrupted) {
                 status.lock().expect("surface status lock").origin = InputOrigin::Typed;
             }
@@ -443,41 +498,10 @@ pub(super) fn apply_surface_effect(
             let help = {
                 let current = status.lock().expect("surface status lock");
                 current.actions.as_ref().map(|actions| {
-                    actions
-                        .registry
-                        .iter()
-                        .map(|action| {
-                            let shortcut = action
-                                .shortcuts()
-                                .first()
-                                .map(|shortcut| format!(" [Meta-{shortcut}]"))
-                                .unwrap_or_default();
-                            match actions.registry.availability(action.id()) {
-                                Availability::Disabled { owner } => {
-                                    format!(
-                                        "/{}{shortcut} — {} [unavailable: {owner}]",
-                                        action.name(),
-                                        action.description_text()
-                                    )
-                                }
-                                Availability::Busy => format!(
-                                    "/{}{shortcut} — {} [busy]",
-                                    action.name(),
-                                    action.description_text()
-                                ),
-                                Availability::Enabled => format!(
-                                    "/{}{shortcut} — {}",
-                                    action.name(),
-                                    action.description_text()
-                                ),
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                    render_action_help(&actions.registry, current.width.saturating_sub(4))
                 })
             };
-            status.lock().expect("surface status lock").notice =
-                help.map(|help| format!("actions: {help}"));
+            status.lock().expect("surface status lock").notice = help;
         }
         SurfaceActionEffect::Clear => {
             let buffer = editor.current_buffer_contents().to_string();

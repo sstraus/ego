@@ -610,6 +610,9 @@ impl Waiting {
 fn status_prefix(status: &SharedStatus) -> String {
     let status = status.lock().expect("surface status lock");
     let mut rows = Vec::new();
+    if status.activity {
+        rows.push(ACTIVITY_LABEL.to_string());
+    }
     if !status.native_status {
         if status.queue.pending_steers > 0 {
             rows.push(QUEUE_LABEL.to_string());

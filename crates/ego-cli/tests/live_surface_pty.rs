@@ -324,6 +324,44 @@ fn until_post_trust_prompt(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<
     }
 }
 
+fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, previous: usize) {
+    while output.windows(2).filter(|window| *window == b"> ").count() <= previous {
+        let chunk = receiver
+            .recv_timeout(PROGRESS_DEADLINE)
+            .unwrap_or_else(|error| {
+                drain(receiver, output);
+                panic!(
+                    "prompt count did not advance beyond {previous}: {error}; output: {:?}",
+                    normalized(output),
+                )
+            });
+        output.extend(chunk);
+    }
+}
+
+fn until_plain(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+) {
+    while !String::from_utf8_lossy(&strip_csi(&output[start..]))
+        .replace("\r\n", "\n")
+        .contains(needle)
+    {
+        let chunk = receiver
+            .recv_timeout(PROGRESS_DEADLINE)
+            .unwrap_or_else(|error| {
+                drain(receiver, output);
+                panic!(
+                    "plain PTY wait failed for {needle:?}: {error}; output: {:?}",
+                    String::from_utf8_lossy(&strip_csi(&output[start..])),
+                )
+            });
+        output.extend(chunk);
+    }
+}
+
 fn drain(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
     while let Ok(chunk) = receiver.try_recv() {
         output.extend(chunk);
@@ -817,6 +855,19 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     until_normalized_or_generation(&reader, &mut output, slash_start, "Select model", &stub);
     let slash_modal = normalized(&output[slash_start..]);
     assert!(slash_modal.contains("Select model"));
+    let down_start = output.len();
+    input.write_all(b"\x1b[B").expect("model picker down");
+    input.flush().expect("model picker down flush");
+    until_from(
+        &reader,
+        &mut output,
+        down_start,
+        b"> 2. anthropic/claude-fable-5-1",
+    );
+    let up_start = output.len();
+    input.write_all(b"\x1b[A").expect("model picker up");
+    input.flush().expect("model picker up flush");
+    until_from(&reader, &mut output, up_start, b"> 1. ollama/qwen3");
     let slash_close_start = output.len();
     input.write_all(b"\x1b").expect("close slash modal");
     input.flush().expect("close slash modal flush");
@@ -1084,6 +1135,203 @@ fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
         vec![0, 0, 1],
         "the second typed follow-up is delivered once"
     );
+}
+
+#[test]
+fn busy_ctrl_c_cancels_work_and_idle_double_ctrl_c_exits() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            paced_line("ACTIVE-WORK", Duration::from_millis(500)),
+            Reply::Sse(text("AFTER-CANCEL")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "cancel this turn",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_prompt_after(&reader, &mut output, prompt_count);
+    until_normalized(&reader, &mut output, 0, "ACTIVE-WORK");
+    let cancel_start = output.len();
+    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+    input.write_all(b"\x03").expect("busy Ctrl-C");
+    input.flush().expect("busy Ctrl-C flush");
+    until_normalized(&reader, &mut output, cancel_start, "cancelling active work");
+    until_prompt_after(&reader, &mut output, prompt_count);
+
+    let post_cancel_start = output.len();
+    input
+        .write_all(b"after cancel\r")
+        .expect("post-cancel prompt");
+    input.flush().expect("post-cancel prompt flush");
+    until_normalized(&reader, &mut output, cancel_start, "AFTER-CANCEL");
+    until_plain(&reader, &mut output, post_cancel_start, "AFTER-CANCEL\n> ");
+    input.write_all(b"\x03").expect("first idle Ctrl-C");
+    input.flush().expect("first idle Ctrl-C flush");
+    thread::sleep(Duration::from_millis(50));
+    input.write_all(b"\x03").expect("second idle Ctrl-C");
+    input.flush().expect("second idle Ctrl-C flush");
+
+    drop(input);
+    drop(pair);
+    let mut killer = child.clone_killer();
+    let (status_sender, status_receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let status = child.wait();
+        status_sender.send(status).expect("status receiver dropped");
+    });
+    let status = match status_receiver.recv_timeout(PROGRESS_DEADLINE) {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => panic!("wait failed: {error}"),
+        Err(error) => {
+            killer.kill().expect("kill timed out child");
+            panic!("idle double Ctrl-C did not exit: {error}")
+        }
+    };
+    assert!(status.success(), "interactive process failed: {status:?}");
+    waiter.join().expect("waiter thread panicked");
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2);
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, "after cancel"))
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+    );
+}
+
+#[test]
+fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_prompt_after(&reader, &mut output, prompt_count);
+
+    for width in [80, 60, 40] {
+        let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+        pair.master
+            .resize(PtySize {
+                rows: 40,
+                cols: width,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("resize");
+        until_prompt_after(&reader, &mut output, prompt_count);
+
+        let help_start = output.len();
+        let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+        input.write_all(b"/help\r\r").expect("help command");
+        input.flush().expect("help command flush");
+        until_normalized_without_new_generation(
+            &reader,
+            &mut output,
+            help_start,
+            "/version —",
+            &stub,
+            0,
+        );
+        until_prompt_after(&reader, &mut output, prompt_count);
+
+        let doctor_start = output.len();
+        let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+        input.write_all(b"/doctor\r\r").expect("doctor command");
+        input.flush().expect("doctor command flush");
+        until_normalized_without_new_generation(
+            &reader,
+            &mut output,
+            doctor_start,
+            "acp.extension:hold",
+            &stub,
+            0,
+        );
+        until_prompt_after(&reader, &mut output, prompt_count);
+    }
+
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    drop(input);
+    drop(pair);
+    let mut killer = child.clone_killer();
+    let (status_sender, status_receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let status = child.wait();
+        status_sender.send(status).expect("status receiver dropped");
+    });
+    let status = match status_receiver.recv_timeout(PROGRESS_DEADLINE) {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => panic!("wait failed: {error}"),
+        Err(error) => {
+            killer.kill().expect("kill timed out child");
+            panic!("interactive process did not exit: {error}")
+        }
+    };
+    assert!(status.success(), "interactive process failed: {status:?}");
+    waiter.join().expect("waiter thread panicked");
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+    assert!(stub.generations().is_empty());
 }
 
 #[test]

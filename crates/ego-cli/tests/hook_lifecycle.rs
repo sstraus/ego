@@ -685,6 +685,52 @@ fn model_switch_owner_persists_and_installs_only_after_pre_gate() {
 }
 
 #[test]
+fn session_only_picker_switch_installs_without_persisting() {
+    let selection = Arc::new(GenerationSelection::new(
+        ModelRef("openai/old".to_owned()),
+        ThinkingLevel::Medium,
+    ));
+    let config = Arc::new(ConfigStore {
+        selection: Arc::clone(&selection),
+        publications: Arc::new(Mutex::new(0)),
+    });
+    let mut picker =
+        ModelPicker::for_selection(catalogue(), Arc::clone(&selection), config.clone());
+    ActionSink::invoke(
+        &mut picker,
+        LocalAction {
+            id: ActionId::Model,
+            busy: false,
+        },
+    );
+    picker.input(PickerInput::Number(1)).expect("new model");
+    picker.input(PickerInput::Enter).expect("model focus");
+    picker.input(PickerInput::Number(1)).expect("off effort");
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) = picker
+        .input(PickerInput::SessionOnly)
+        .expect("staged session switch")
+    else {
+        panic!("picker must stage a typed model-switch request");
+    };
+    assert!(!request.is_persistent());
+    let owner = RunModelSwitchOwner::new(
+        Arc::clone(&selection),
+        config.clone(),
+        runtime(RecordingPort::default()),
+        TurnId::new(),
+        None,
+    );
+
+    futures::executor::block_on(owner.apply(request)).expect("session switch applies");
+
+    assert_eq!(config.publications(), 0);
+    assert_eq!(
+        selection.snapshot().expect("selection").identity,
+        ModelRef("openai/new".to_owned())
+    );
+}
+
+#[test]
 fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_commit() {
     let blocked_selection = Arc::new(GenerationSelection::new(
         ModelRef("openai/old".to_owned()),

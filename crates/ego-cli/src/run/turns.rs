@@ -80,6 +80,9 @@ pub trait Reads {
 /// The two explicit decisions only a human-driven run may make.
 pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn has_human(&self) -> bool;
+    fn width(&self) -> usize {
+        80
+    }
     /// Collect a persistent model choice before the first run is materialized.
     fn read_startup_model(
         &self,

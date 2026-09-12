@@ -141,6 +141,55 @@ fn long_queue_status_uses_the_unsliced_indicator_path() {
 }
 
 #[test]
+fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        activity: true,
+        ..SurfaceStatus::default()
+    }));
+    let waiting = Waiting::new(status);
+
+    assert_eq!(
+        waiting
+            .render_prompt_indicator(PromptEditMode::Emacs)
+            .as_ref(),
+        "working — Esc cancels | > "
+    );
+}
+
+#[test]
+fn help_uses_registry_rows_and_preserves_them_at_narrow_widths() {
+    let registry = ActionRegistry::final_surface();
+    let expected = registry
+        .iter()
+        .flat_map(|action| [action.name(), action.description_text()])
+        .collect::<Vec<_>>();
+
+    for width in [80, 60, 40] {
+        let rendered = render_action_help(&registry, width);
+        let compact = rendered
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(
+            rendered
+                .lines()
+                .all(|line| crate::render::line::cells(line) <= width),
+            "help exceeded {width} cells:\n{rendered}"
+        );
+        for value in &expected {
+            let value = value
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            assert!(
+                compact.contains(&value),
+                "registry value {value:?} was lost at width {width}:\n{rendered}"
+            );
+        }
+    }
+}
+
+#[test]
 fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let phase = SurfacePhase::new(EditPhase::Idle);
     let (input_sender, input) = bounded(CHANNEL_CAPACITY);

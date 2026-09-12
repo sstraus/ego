@@ -816,6 +816,15 @@ menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
 reason rather than becoming model input or silently disappearing.
 
+Arguments that do not belong to a selected local action are usage errors, not
+model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;
+configuration remains explicit through `ego mcp add|rm|ls`, and `/mcp add`
+points to that root syntax without consuming a provider turn.
+
+`/help` renders one row per action from that registry and `/doctor` wraps the
+shared health snapshot at the live terminal width. Both preserve every field
+at 80, 60, and 40 columns instead of relying on terminal reflow.
+
 `/mode`, `/plan`, `/yolo`, and `/permissions` are argument-free local modal
 actions. A direct-argument form such as `/mode edits` or `/permissions allow
 ...` is rejected as action usage and never submitted as a prompt. `/mode`
@@ -887,7 +896,7 @@ bounded channels.
 
 | Surface | Current | Note |
 |---|---|---|
-| Input line, history, multiline | **yes** | reedline. `Ctrl+C` abandons the line and keeps the session; `Ctrl+D` ends it |
+| Input line, history, multiline | **yes** | reedline. Active `Ctrl+C` requests cancellation and reports it immediately. Idle `Ctrl+C` abandons the line; a second idle `Ctrl+C` within 500 ms exits. `Ctrl+D` ends it |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+V | legacy image action unavailable | M5 removes the special image placeholder; the final surface leaves text paste to the terminal/editor and uses `--attach` for images |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |

@@ -83,6 +83,61 @@ fn the_interactive_surface_and_the_command_render_one_diagnosis() {
 }
 
 #[test]
+fn width_bounded_text_preserves_every_non_whitespace_character() {
+    let scratch = scratch();
+    let snapshot = observed(scratch.path());
+    let expected = doctor::text(&snapshot)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+
+    for width in [80, 60, 40] {
+        let rendered = doctor::text_with_width(&snapshot, width);
+        assert!(
+            rendered
+                .lines()
+                .all(|line| ego_cli::render::line::cells(line) <= width),
+            "doctor exceeded {width} cells:\n{rendered}"
+        );
+        assert_eq!(
+            rendered
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>(),
+            expected,
+            "doctor lost information at width {width}"
+        );
+    }
+}
+
+#[test]
+fn width_bounded_text_preserves_the_complete_health_snapshot() {
+    let scratch = scratch();
+    let snapshot = observed(scratch.path());
+    let canonical = doctor::text(&snapshot);
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+    };
+
+    for width in [80, 60, 40] {
+        let rendered = doctor::text_with_width(&snapshot, width);
+        assert!(
+            rendered
+                .lines()
+                .all(|line| ego_cli::render::line::cells(line) <= width),
+            "doctor exceeded {width} cells:\n{rendered}"
+        );
+        assert_eq!(
+            compact(&rendered),
+            compact(&canonical),
+            "doctor lost semantic characters at width {width}"
+        );
+    }
+}
+
+#[test]
 fn every_section_is_named_even_when_it_had_nothing_to_say() {
     let scratch = scratch();
     let workspace = scratch.path();
