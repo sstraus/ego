@@ -756,12 +756,21 @@ impl ActionRegistry {
                     }
                 };
             }
-            if boundary == command.len()
-                && let Some(id) = self
-                    .resolve_slash(name)
-                    .or_else(|| self.resolve_alias(name))
+            if let Some(id) = self
+                .resolve_slash(name)
+                .or_else(|| self.resolve_alias(name))
             {
-                return Dispatch::Action(id);
+                return if boundary == command.len() {
+                    Dispatch::Action(id)
+                } else if id == ActionId::Mcp {
+                    Dispatch::Refused {
+                        reason: "usage: /mcp (inspect only); add servers with `ego mcp add NAME ...`",
+                    }
+                } else {
+                    Dispatch::Refused {
+                        reason: "this interactive action takes no arguments; use /help for local syntax",
+                    }
+                };
             }
             let capture = match self.skill_capture() {
                 Ok(Some(capture)) => capture,

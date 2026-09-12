@@ -266,6 +266,37 @@ fn until_normalized_or_generation(
     }
 }
 
+fn until_normalized_without_new_generation(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+    stub: &Stub,
+    generation_count: usize,
+) {
+    while !normalized(&output[start..]).contains(needle) {
+        let generations = stub.generations();
+        if generations.len() != generation_count {
+            drain(receiver, output);
+            panic!(
+                "PTY input changed provider generation count while waiting for {needle:?}; expected {generation_count}, generations: {generations:?}; output: {:?}",
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = receiver
+            .recv_timeout(PROGRESS_DEADLINE)
+            .unwrap_or_else(|error| {
+                drain(receiver, output);
+                panic!(
+                    "PTY wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
+                    stub.generations(),
+                    normalized(&output[start..]),
+                )
+            });
+        output.extend(chunk);
+    }
+}
+
 fn until_post_trust_prompt(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
     loop {
         let suffix = &output[start..];
@@ -901,6 +932,158 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     waiter.join().expect("waiter thread panicked");
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+}
+
+#[test]
+fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
+    let seed = "argv seed";
+    let first = "typed follow-up one";
+    let second = "typed follow-up two";
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("ARGV-SEED-REPLY")),
+            Reply::Sse(text("FOLLOW-UP-ONE-REPLY")),
+            Reply::Sse(text("FOLLOW-UP-TWO-REPLY")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        seed,
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let post_trust_start = output.len();
+    // An argv seed can complete before Reedline finishes its cursor-position
+    // handshake. Sending the first typed line merely because provider output
+    // arrived races that handshake and the terminal consumes the input as its
+    // cursor response. The first post-trust DSR followed by a prompt is the
+    // observable boundary at which typed input is safe.
+    until_post_trust_prompt(&reader, &mut output, post_trust_start);
+    until_normalized(&reader, &mut output, 0, "ARGV-SEED-REPLY");
+
+    let help_start = output.len();
+    // The first Enter accepts Reedline's active slash completion and the
+    // second submits the completed command.
+    input.write_all(b"/help\r\r").expect("local help command");
+    input.flush().expect("local help flush");
+    until_normalized_without_new_generation(&reader, &mut output, help_start, "actions:", &stub, 1);
+    until_post_trust_prompt(&reader, &mut output, help_start);
+
+    let refusal_start = output.len();
+    input
+        .write_all(b"/mcp add\r\r")
+        .expect("unsupported MCP command");
+    input.flush().expect("unsupported MCP command flush");
+    until_normalized_without_new_generation(
+        &reader,
+        &mut output,
+        refusal_start,
+        "ego mcp add NAME",
+        &stub,
+        1,
+    );
+    until_post_trust_prompt(&reader, &mut output, refusal_start);
+
+    input.write_all(first.as_bytes()).expect("first follow-up");
+    input.write_all(b"\r").expect("first follow-up submit");
+    input.flush().expect("first follow-up flush");
+    until_normalized(&reader, &mut output, refusal_start, "FOLLOW-UP-ONE-REPLY");
+
+    input
+        .write_all(second.as_bytes())
+        .expect("second follow-up");
+    input.write_all(b"\r").expect("second follow-up submit");
+    input.flush().expect("second follow-up flush");
+    until_normalized(&reader, &mut output, refusal_start, "FOLLOW-UP-TWO-REPLY");
+
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    drop(input);
+    drop(pair);
+    let mut killer = child.clone_killer();
+    let (status_sender, status_receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let status = child.wait();
+        status_sender.send(status).expect("status receiver dropped");
+    });
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    let status = loop {
+        drain(&reader, &mut output);
+        match status_receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(Ok(status)) => break status,
+            Ok(Err(error)) => panic!("wait failed: {error}"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("child waiter disconnected"),
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                drain(&reader, &mut output);
+                killer.kill().expect("kill timed out child");
+                match status_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("killed child did not exit")
+                {
+                    Ok(status) => break status,
+                    Err(error) => panic!("wait after kill failed: {error}"),
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    };
+    assert!(status.success(), "interactive process failed: {status:?}");
+    waiter.join().expect("waiter thread panicked");
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 3);
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, seed))
+            .collect::<Vec<_>>(),
+        vec![1, 1, 1],
+        "the argv seed is retained once in context and never replayed"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, first))
+            .collect::<Vec<_>>(),
+        vec![0, 1, 1],
+        "the first typed follow-up is delivered once and retained"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, second))
+            .collect::<Vec<_>>(),
+        vec![0, 0, 1],
+        "the second typed follow-up is delivered once"
+    );
 }
 
 #[test]

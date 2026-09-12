@@ -217,6 +217,18 @@ fn typed_and_bracketed_paste_origins_are_distinct_even_with_identical_text() {
 }
 
 #[test]
+fn typed_local_action_arguments_are_refused_before_provider_dispatch() {
+    let registry = ActionRegistry::final_surface();
+
+    assert_eq!(
+        registry.classify(registry.submit("/mcp add", InputOrigin::Typed)),
+        Dispatch::Refused {
+            reason: "usage: /mcp (inspect only); add servers with `ego mcp add NAME ...`",
+        }
+    );
+}
+
+#[test]
 fn one_selector_supports_single_multi_free_and_numbered_fallback() {
     for kind in [SelectorKind::Single, SelectorKind::Multiple] {
         let mut selector = Selector::new(kind, ["alpha", "beta"]);
