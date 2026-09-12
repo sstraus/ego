@@ -91,8 +91,6 @@ struct WireRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
     reasoning: WireReasoning,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -219,7 +217,6 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         reasoning: WireReasoning {
             effort: reasoning_effort(req.thinking),
         },
-        max_output_tokens: req.max_output_tokens,
     };
     Ok(serde_json::to_vec(&wire).expect("WireRequest serialises"))
 }

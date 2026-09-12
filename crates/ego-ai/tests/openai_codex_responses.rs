@@ -48,7 +48,7 @@ fn the_path_is_codex_responses_not_chat_completions() {
     assert_eq!(body["tools"][0]["type"], "function");
     assert_eq!(body["tools"][0]["name"], "read");
     assert_eq!(body["reasoning"]["effort"], "medium");
-    assert_eq!(body["max_output_tokens"], 1024);
+    assert!(body.get("max_output_tokens").is_none());
     assert!(body.get("messages").is_none());
 }
 
