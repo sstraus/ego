@@ -33,9 +33,10 @@ pub use foreign::{
     Resolver, Subject, TransportError, TransportFailure,
 };
 pub use fs::{Fs, FsError, GuardedEffects, GuardedIo, IoDenied, McpHttpClaim, PathResolver};
+pub(crate) use grant::PermissionPresentationInput;
 pub use grant::{
-    Authorized, Classification, Escalation, Pending, PermissionRequest, Permit, PermitDenied,
-    PolicyDenied, PolicyEngine, Resolution,
+    Authorized, Classification, Escalation, Pending, PermissionPresentation, PermissionRequest,
+    Permit, PermitDenied, PolicyDenied, PolicyEngine, Resolution,
 };
 pub use path::CanonPath;
 pub use prepared_call::{

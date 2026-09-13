@@ -13,6 +13,7 @@ pub mod selector;
 pub mod status;
 pub mod surface;
 
+pub(crate) use policy_controls::PermissionRuleApplication;
 pub(crate) use seat::Confirmation;
 pub(crate) use seat::effective_statusline_segments;
 pub(crate) use seat::render_action_help;
@@ -71,6 +72,7 @@ pub enum HostCommand {
     ModalEscape,
     ModelPicker(String),
     QuestionSelector(String),
+    PermissionDecision(String),
 }
 
 impl HostCommand {
@@ -97,6 +99,9 @@ impl HostCommand {
         }
         if let Some(input) = command.strip_prefix(seat::MODEL_PICKER_COMMAND) {
             return Some(Self::ModelPicker(input.to_string()));
+        }
+        if let Some(input) = command.strip_prefix(seat::PERMISSION_DECISION_COMMAND) {
+            return Some(Self::PermissionDecision(input.to_string()));
         }
         command
             .strip_prefix(seat::QUESTION_SELECTOR_COMMAND)
@@ -347,6 +352,14 @@ mod live_surface_red {
         assert_eq!(
             HostCommand::from_editor("ego:action:permissions".to_owned()),
             Some(HostCommand::Action(ActionId::Permissions))
+        );
+    }
+
+    #[test]
+    fn immediate_permission_key_is_never_interpreted_as_prompt_text() {
+        assert_eq!(
+            HostCommand::from_editor(format!("{}allow", seat::PERMISSION_DECISION_COMMAND)),
+            Some(HostCommand::PermissionDecision("allow".to_owned()))
         );
     }
 

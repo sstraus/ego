@@ -14,6 +14,7 @@ use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::approver::{Approver, HumanApprover, ModeApprover, PermissionDecision, Verdict};
 use super::authority::{Authority, RuleAuthority};
@@ -26,7 +27,8 @@ use super::prepared_call::{Change, Op, OpName, PreparedCall};
 use super::rule::RuleId;
 use super::scope::Scope;
 use super::spawn::SpawnSpec;
-use crate::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
+use crate::config::rule_management::{RememberPlan, RuleManagement};
+use crate::config::{ManagedRuleEffect, Mode, OriginSet, Ruleset, Source, SourcedRule};
 use crate::event::id::ItemId;
 use crate::store::evidence::EvidenceRead;
 
@@ -679,6 +681,52 @@ pub struct PermissionRequest {
     tool: String,
     ops: Vec<Op>,
     why: Escalation,
+    presentation: Option<Box<PermissionPresentation>>,
+}
+
+/// Display-only facts retained for a human permission decision.
+///
+/// This value deliberately contains no permit, scope, config store, mutation
+/// handle, or policy-selection authority. The parameters and schema are the
+/// exact admitted input, while risk and rule candidates are derived from the
+/// already-canonical prepared call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPresentation {
+    parameters: Value,
+    schema: Value,
+    risk: super::analysis::RiskAssessment,
+    remember: Result<RememberPlan, String>,
+}
+
+impl PermissionPresentation {
+    pub fn parameters(&self) -> &Value {
+        &self.parameters
+    }
+
+    pub fn schema(&self) -> &Value {
+        &self.schema
+    }
+
+    pub fn risk(&self) -> &super::analysis::RiskAssessment {
+        &self.risk
+    }
+
+    pub fn remember_plan(&self) -> Result<&RememberPlan, &str> {
+        self.remember.as_ref().map_err(String::as_str)
+    }
+}
+
+/// The exact admitted input before policy combines it with canonical effects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PermissionPresentationInput {
+    parameters: Value,
+    schema: Value,
+}
+
+impl PermissionPresentationInput {
+    pub(crate) fn new(parameters: Value, schema: Value) -> Self {
+        Self { parameters, schema }
+    }
 }
 
 impl PermissionRequest {
@@ -695,6 +743,7 @@ impl PermissionRequest {
             tool: tool.into(),
             ops,
             why,
+            presentation: None,
         }
     }
 
@@ -711,6 +760,10 @@ impl PermissionRequest {
 
     pub fn why(&self) -> &Escalation {
         &self.why
+    }
+
+    pub fn presentation(&self) -> Option<&PermissionPresentation> {
+        self.presentation.as_deref()
     }
 }
 
@@ -860,6 +913,11 @@ impl Pending {
     pub fn request(&self) -> &PermissionRequest {
         &self.ask
     }
+
+    fn with_escalation(mut self, why: Escalation) -> Self {
+        self.ask.why = why;
+        self
+    }
 }
 
 /// What [`PolicyEngine::classify`] concluded.
@@ -969,6 +1027,35 @@ impl PolicyEngine {
             allow: permissions.allow,
             deny: permissions.deny,
             human: None,
+        }
+    }
+
+    /// Classify an effect call while retaining only the display facts needed
+    /// if it reaches the human party.
+    pub(crate) fn classify_presented(
+        &self,
+        call: PreparedCall,
+        input: PermissionPresentationInput,
+    ) -> Classification {
+        match self.classify(call) {
+            Classification::Ask(mut pending) => {
+                let remember = RuleManagement::remember(
+                    &pending.call,
+                    ManagedRuleEffect::Allow,
+                    self.workspace.as_path(),
+                )
+                .map_err(|error| {
+                    format!("this call cannot be represented by a persistent rule: {error}")
+                });
+                pending.ask.presentation = Some(Box::new(PermissionPresentation {
+                    parameters: input.parameters,
+                    schema: input.schema,
+                    risk: super::analysis::assess(&pending.call),
+                    remember,
+                }));
+                Classification::Ask(pending)
+            }
+            settled => settled,
         }
     }
 
@@ -1191,7 +1278,7 @@ impl PolicyEngine {
                         by: Authority::Mode { mode: self.mode },
                     }))
                 } else {
-                    Resolution::Ask(self.pending(pending.call, why))
+                    Resolution::Ask(pending.with_escalation(why))
                 }
             }
         }
@@ -1270,6 +1357,7 @@ impl PolicyEngine {
                 tool: call.tool().to_owned(),
                 ops: call.ops().to_vec(),
                 why,
+                presentation: None,
             },
             call,
         }
@@ -1589,6 +1677,99 @@ mod tests {
 
     use super::*;
 
+    mod permission_presentation_red {
+        use super::*;
+        use crate::config::rule_management::OmittedDimension;
+        use crate::permit::analysis::{RiskClass, RiskReason};
+        use crate::permit::{HttpRequest, HttpRequestDigest};
+
+        #[test]
+        fn pending_permission_retains_exact_input_risk_and_canonical_rule_facts() {
+            let params = json!({
+                "path": "notes.txt",
+                "contents": "hello",
+                "metadata": { "source": "model" }
+            });
+            let schema = json!({
+                "type": "object",
+                "required": ["path", "contents"],
+                "properties": {
+                    "path": { "type": "string" },
+                    "contents": { "type": "string" },
+                    "metadata": { "type": "object" }
+                }
+            });
+            let call = PreparedCall::new(
+                "write",
+                Op::Write {
+                    path: CanonPath::new("/ws/notes.txt"),
+                    change: Change::Whole(b"hello".to_vec()),
+                },
+            );
+            let engine =
+                PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
+
+            let Classification::Ask(pending) = engine.classify_presented(
+                call,
+                PermissionPresentationInput::new(params.clone(), schema.clone()),
+            ) else {
+                panic!("an uncovered write in default mode must ask");
+            };
+            let Resolution::Ask(pending) = block_on(engine.settle(pending)) else {
+                panic!("default mode must preserve the question for the human");
+            };
+            let presentation = pending
+                .request()
+                .presentation()
+                .expect("effect-tool questions carry a presentation");
+
+            assert_eq!(presentation.parameters(), &params);
+            assert_eq!(presentation.schema(), &schema);
+            assert_eq!(presentation.risk().class, RiskClass::Bounded);
+            assert_eq!(presentation.risk().reasons, vec![RiskReason::ScopedWrite]);
+            let plan = presentation
+                .remember_plan()
+                .expect("a workspace write is representable");
+            assert_eq!(plan.candidates.len(), 1);
+            assert!(plan.candidates[0].to_string().contains("/ws/notes.txt"));
+            assert_eq!(plan.omitted, vec![OmittedDimension::Change]);
+        }
+
+        #[test]
+        fn network_permission_exposes_its_canonical_widening_fact() {
+            let target = NetworkTarget::new("example.com", 443).unwrap();
+            let call = PreparedCall::new(
+                "http",
+                Op::Connect {
+                    target,
+                    request_digest: HttpRequestDigest::of(&HttpRequest::get("/").unwrap()),
+                },
+            );
+            let engine =
+                PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
+
+            let Classification::Ask(pending) = engine.classify_presented(
+                call,
+                PermissionPresentationInput::new(
+                    json!({ "url": "https://example.com" }),
+                    json!({ "type": "object" }),
+                ),
+            ) else {
+                panic!("an uncovered connection in default mode must ask");
+            };
+
+            let plan = pending
+                .request()
+                .presentation()
+                .unwrap()
+                .remember_plan()
+                .expect("a literal endpoint is representable");
+            assert_eq!(plan.candidates.len(), 1);
+            assert_eq!(plan.candidates[0].to_string(), "net(example.com:443)");
+            assert_eq!(plan.omitted, vec![OmittedDimension::RequestDigest]);
+        }
+    }
+
     #[test]
     fn analysis_model_cannot_lower_high_risk_or_create_authority_outside_auto() {
         use crate::permit::analysis::{RiskClass, RiskReason, assess};
@@ -1820,6 +2001,7 @@ mod tests {
                 op: OpName::Write,
                 path: CanonPath::new("/ws/out.txt"),
             },
+            presentation: None,
         };
 
         assert_eq!(
@@ -1861,6 +2043,7 @@ mod tests {
                 op: OpName::Read,
                 path: CanonPath::new("/ws/read.txt"),
             },
+            presentation: None,
         };
 
         assert_eq!(

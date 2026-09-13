@@ -1003,7 +1003,6 @@ pub(super) fn preflight_judge(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CapturedAutoPreflight {
-    MissingJudge,
     DeferredDynamic,
     Valid,
     Refused { diagnostic: String },
@@ -1021,7 +1020,10 @@ impl CliAutoPreflight {
     /// Capture only supplied request-shape facts. Dynamic facts defer to generation preflight.
     pub(super) fn capture(effective: &Effective, confinement: &RunConfinement) -> Self {
         let Some(identity) = effective.judge.as_ref() else {
-            return Self::new(CapturedAutoPreflight::MissingJudge);
+            // Deterministic low/bounded calls do not need an advisory model.
+            // Unknown work remains unresolved later, at the existing human
+            // boundary, rather than making an otherwise-local startup fail.
+            return Self::new(CapturedAutoPreflight::Valid);
         };
         let profile = match model::supplied_request_profile(identity) {
             Ok(Some(profile)) => profile,
@@ -1051,9 +1053,6 @@ impl CliAutoPreflight {
 
     pub(super) fn validate(&self) -> Result<(), String> {
         match &self.state {
-            CapturedAutoPreflight::MissingJudge => {
-                Err("`auto` mode requires `[permissions] judge = \"provider/model\"`".to_owned())
-            }
             CapturedAutoPreflight::Refused { diagnostic } => Err(diagnostic.clone()),
             CapturedAutoPreflight::DeferredDynamic | CapturedAutoPreflight::Valid => Ok(()),
         }
@@ -1161,11 +1160,6 @@ pub(super) async fn generation_preflight_inner(
     let http = Arc::new(ProviderHttpAdapter::new(proof_ports)) as Arc<dyn ego_ai::http::Http>;
 
     let mode = effective.mode.unwrap_or(Mode::Default);
-    if mode == Mode::Auto && effective.judge.is_none() {
-        return Err(RunTermination::UsageError {
-            message: "`auto` mode requires `[permissions] judge = \"provider/model\"`".to_string(),
-        });
-    }
     let judge_identity = effective.judge.clone();
     let source = Arc::new(model::CliGenerationModelSource::new(
         ego_core::config::ModelRef(slug),
@@ -1233,7 +1227,7 @@ pub(super) async fn generation_preflight_inner(
     }
     let capabilities = main.capabilities.clone();
     let judge_available = effective.judge.is_some();
-    if mode == Mode::Auto {
+    if mode == Mode::Auto && judge_available {
         let judge = bound
             .resolve(GenerationModelRequest::new(GenerationRole::Judge))
             .await

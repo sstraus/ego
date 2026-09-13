@@ -502,8 +502,9 @@ pub(super) fn apply_surface_effect(
         }
         SurfaceActionEffect::Yolo => {
             let mut controller = PolicyControlController::new();
-            controller.begin_yolo();
-            return confirm_yolo(editor, phase, status, busy, &mut controller);
+            return controller
+                .select_mode(Mode::Yolo)
+                .map(|request| Line::HostCommand(HostCommand::Policy(request)));
         }
         SurfaceActionEffect::Permissions => {
             return choose_permission_action(editor, phase, status, busy);

@@ -464,6 +464,8 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
         "ollama/qwen3",
         "--session-id",
         support::FIXTURE_SESSION_ID,
+        "--mode",
+        "default",
         "--sandbox",
         "off",
     ]);
@@ -531,6 +533,16 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
         "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
     );
     provider_gate.release();
+    until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
+    until_with_context(&reader, &mut output, b"[y] allow [n] deny [e] edit", || {
+        let requests = stub.requests();
+        let paths: Vec<_> = requests
+            .iter()
+            .map(|request| request.path.clone())
+            .collect();
+        format!("stub request paths: {paths:?}")
+    });
+    let resize_start = output.len();
     pair.master
         .resize(PtySize {
             rows: 8,
@@ -539,17 +551,13 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             pixel_height: 0,
         })
         .expect("resize");
-
-    until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
-    until_with_context(&reader, &mut output, b"allow/deny/amend", || {
-        let requests = stub.requests();
-        let paths: Vec<_> = requests
-            .iter()
-            .map(|request| request.path.clone())
-            .collect();
-        format!("stub request paths: {paths:?}")
-    });
-    input.write_all(b"allow\r").expect("permission answer");
+    until_from(
+        &reader,
+        &mut output,
+        resize_start,
+        b"[y] allow [n] deny [e] edit",
+    );
+    input.write_all(b"y").expect("immediate permission answer");
     input.flush().expect("permission answer flush");
     until(&reader, &mut output, b"NEWEST-DRAFT-RECEIVED");
     input
@@ -616,8 +624,24 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     assert!(output.windows(8).any(|window| window == b"\x1b[?2004h"));
     assert!(output.windows(8).any(|window| window == b"\x1b[?2004l"));
 
+    let rendered = normalized(&output);
+    for fact in [
+        "Call: \"write\"",
+        "Reason:",
+        "Operations:",
+        "Risk: Bounded",
+        "Parameters:",
+        "Remember would add:",
+        "widening for operation 0",
+    ] {
+        assert!(
+            rendered.contains(fact),
+            "permission presentation omitted {fact:?}: {rendered}"
+        );
+    }
+
     let streamed = find(&output, b"STREAMED-BEFORE-TOOL");
-    let permission = find(&output, b"allow/deny/amend");
+    let permission = find(&output, b"[y] allow [n] deny [e] edit");
     let draft_received = find(&output, b"NEWEST-DRAFT-RECEIVED");
     let older_draft_received = find(&output, b"OLDER-DRAFT-RECEIVED");
     assert!(streamed < permission);
@@ -655,6 +679,65 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             .to_ascii_lowercase()
             .contains("1 unsent draft"),
         "exit must report the exact unsent-draft count rather than silently discarding it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "local-path-exec",
+                "exec",
+                r#"{"argv":["wiz-run","stories-cli.js","list"],"cwd":null,"timeout_ms":1000}"#,
+            )),
+            Reply::Sse(text("LOCAL-PATH-EXEC-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "yolo",
+        "--sandbox",
+        "off",
+    ]);
+    let executable = ego.home_file(
+        ".local/bin/wiz-run",
+        "#!/bin/sh\nprintf '%s\\n' WIZ-RUN-FROM-LOCAL-PATH\n",
+    );
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("local executable metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("make local fixture executable");
+    let path = format!("{}:/usr/bin:/bin", executable.parent().unwrap().display());
+
+    let finished = ego
+        .env("PATH", &path)
+        .run_pty("run the local story command");
+
+    assert_eq!(finished.code, Some(0), "{}", finished.stdout);
+    assert!(finished.stdout.contains("LOCAL-PATH-EXEC-DONE"));
+    assert!(
+        !finished.stdout.contains("[y] allow"),
+        "yolo must not stop for a second confirmation: {}",
+        finished.stdout
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2);
+    assert!(
+        generations[1]
+            .to_string()
+            .contains("WIZ-RUN-FROM-LOCAL-PATH"),
+        "the executable found on effective PATH did not run: {}",
+        generations[1]
     );
 }
 
@@ -1171,10 +1254,12 @@ fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
     );
     until_post_trust_prompt(&reader, &mut output, refusal_start);
 
+    let first_follow_up_start = output.len();
     input.write_all(first.as_bytes()).expect("first follow-up");
     input.write_all(b"\r").expect("first follow-up submit");
     input.flush().expect("first follow-up flush");
     until_normalized(&reader, &mut output, refusal_start, "FOLLOW-UP-ONE-REPLY");
+    until_post_trust_prompt(&reader, &mut output, first_follow_up_start);
 
     input
         .write_all(second.as_bytes())
@@ -1651,22 +1736,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     }
 
     submit_local_action(&reader, &mut output, &mut input, &stub, "plan", None);
-    let yolo_start = output.len();
-    input.write_all(b"/yolo\r").expect("yolo command");
-    input.flush().expect("yolo command flush");
-    until_normalized_without_new_generation(
-        &reader,
-        &mut output,
-        yolo_start,
-        "Type yolo to confirm relaxed execution policy",
-        &stub,
-        0,
-    );
-    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
-    input.write_all(b"no\r").expect("decline yolo");
-    input.flush().expect("decline yolo flush");
-    until_prompt_after(&reader, &mut output, prompt_count);
-    drain_until_quiet(&reader, &mut output);
+    submit_local_action(&reader, &mut output, &mut input, &stub, "yolo", None);
 
     for (command, expected) in [
         ("mcp", Some("mcp:")),

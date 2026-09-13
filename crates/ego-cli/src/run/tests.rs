@@ -1210,7 +1210,6 @@ fn frozen_rule_resolver_reuses_startup_layers_and_replaces_only_base_user_permis
 #[test]
 fn captured_auto_preflight_has_closed_repeatable_outcomes_without_new_io() {
     let cases = [
-        (CapturedAutoPreflight::MissingJudge, false),
         (CapturedAutoPreflight::DeferredDynamic, true),
         (CapturedAutoPreflight::Valid, true),
         (
@@ -1272,6 +1271,49 @@ fn real_remember_preview() -> crate::rules::RememberPreview {
         ego_core::permit::CanonPath::new("/workspace"),
     ))
     .unwrap()
+}
+
+#[test]
+fn presented_remember_uses_the_atomic_owner_once_and_stages_the_written_rule() {
+    use crate::repl::policy_controls::PermissionRuleApplication as _;
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+    let owner = PolicyApplicationOwner::new(
+        selection.clone(),
+        Arc::new(ego_tools::config::OsUserConfigStore::new(
+            Arc::new(ego_tools::store::OsIo),
+            &path,
+        )),
+        Arc::new(CliAutoPreflight::new(CapturedAutoPreflight::Valid)),
+        Arc::new(FrozenRuleResolver::new(
+            Vec::new(),
+            Trust::Trusted,
+            None,
+            selection.clone(),
+        )),
+    );
+    let preview = real_remember_preview();
+
+    let receipt = owner
+        .remember_allow(preview.plan().clone())
+        .expect("the displayed plan is one atomic transaction");
+
+    assert_eq!(
+        receipt,
+        "RESULT\tstored_changed\teffective_changed\tuser\tpublished_durably"
+    );
+    let stored = std::fs::read_to_string(&path).unwrap();
+    assert!(stored.contains("read(/workspace/src/main.rs)"));
+    let staged = selection.staged_snapshot().unwrap().unwrap();
+    assert!(
+        staged
+            .ruleset
+            .allow
+            .iter()
+            .any(|rule| rule.rule().to_string() == "read(/workspace/src/main.rs)")
+    );
 }
 
 fn real_rule_receipt() -> crate::repl::policy_controls::RuleMutationReceipt {

@@ -14,7 +14,7 @@ fn compact(args: &[&str]) -> Result<CompactArgs, String> {
 }
 
 #[test]
-fn compact_requires_a_source_and_explicit_request_id() {
+fn compact_accepts_an_advanced_request_id_override() {
     let args = compact(&["ego", "compact", SOURCE, "--request-id", REQUEST])
         .expect("valid compact invocation");
     assert_eq!(args.source.to_string(), SOURCE);
@@ -49,14 +49,9 @@ fn compact_preserves_output_and_root_selection_flags() {
 }
 
 #[test]
-fn compact_refuses_an_implicit_request_id() {
-    let result = parse(
-        ["ego", "compact", SOURCE]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-    );
-    assert!(result.is_err());
+fn compact_mints_a_non_nil_request_id_when_not_overridden() {
+    let args = compact(&["ego", "compact", SOURCE]).expect("ordinary compact invocation");
+    assert!(!args.request_id.uuid().is_nil());
 }
 
 #[test]
@@ -76,7 +71,7 @@ fn compact_has_no_alias_or_run_command_mode() {
 }
 
 #[test]
-fn compact_requires_a_real_session_id_and_request_id() {
+fn compact_requires_a_real_session_id_and_rejects_an_invalid_override() {
     for value in ["not-a-session", "00000000-0000-0000-0000-000000000000"] {
         let result = parse(
             ["ego", "compact", value, "--request-id", REQUEST]

@@ -34,7 +34,7 @@ ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspa
                               --name and --goal are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
 ego fork <ID>                 branch a session
-ego compact <ID> --request-id UUID
+ego compact <ID> [--request-id UUID]
                               publish one idempotent checkpoint target
 ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
                 [-C DIR] [--session-dir DIR]
@@ -282,9 +282,10 @@ the final grammar.
 
 ```
     --mode M            plan|default|auto|edits|yolo   shortcuts: --plan, --yolo
-                        auto = judge model evaluates the canonical call and
-                        allows/denies/escalates (permissions.judge in config:
-                        a cheap tier like gpt-5.6-luna or GLM, or local ollama)
+                        trusted interactive sessions default to auto when no
+                        mode is configured; deterministic low/bounded calls
+                        need no judge, while unknown calls may use the
+                        configured judge and otherwise escalate
     --sandbox S         ro|workspace|off             (off = classifier only)
     --allow RULE        repeatable   e.g. --allow 'exec(git *)' --allow 'net(api.github.com)'
     --deny RULE         repeatable; deny beats allow
@@ -854,16 +855,28 @@ reflow or attaching multiline output to the composer.
 actions. A direct-argument form such as `/mode edits` or `/permissions allow
 ...` is rejected as action usage and never submitted as a prompt. `/mode`
 selects one of `plan`, `default`, `auto`, `edits`, or `yolo` for this session;
-`/plan` stages plan idempotently. Every transition into yolo, whether selected
-through `/mode` or `/yolo`, requires the operator to type the exact lowercase
-confirmation `yolo`; cancel, Ctrl-C, EOF, or other input changes neither active
-nor staged state. Selecting auto first validates the configured judge and its
-current model/request without a provider effect; failure changes nothing.
+`/plan` stages plan idempotently. `/yolo`, the Yolo palette action, and Yolo
+selected through `/mode` stage yolo directly and produce one receipt; they do
+not open a second confirmation ritual. Selecting auto validates a configured
+judge and its current model/request without a provider effect; deterministic
+local calls remain available when no judge is configured.
 `/permissions`
 exposes the same list, allow, deny, revoke, remember, and explain services and
 DTOs as the root `rules` command. List/explain use the session's
 already-admitted ruleset; mutations always target base user config, never the
-active profile or `EGO_PROFILE`.
+active profile or `EGO_PROFILE`. Remember and explain select an admitted tool,
+then edit its schema-derived fields with exact values prefilled; nested shapes
+remain in one prefilled JSON fallback instead of requiring a whole call to be
+typed as JSON.
+
+An unresolved permission modal separates the call, reason, canonical
+operations, risk, exact parameters, derived rule candidates, and every
+widening. `y`, `n`, `e`, and `r` act immediately. `e` edits the same prefilled
+schema-derived form and sends the result through full preparation and policy
+classification again. `r` applies the displayed allow-rule plan through the
+single atomic config owner and then allows the current call; it never asks for
+the tool, JSON, or a second confirmation. A write or staging failure is shown
+and denies the call.
 
 A mode or rule change takes effect only at the next generation boundary,
 after the preceding provider attempt, complete sibling tool batch, permission
@@ -1092,16 +1105,17 @@ contract are in
 #### Transition identity, output, and host parity
 
 Both `/compact` and the headless spelling invoke one
-`CompactionTransitionService`. `/compact` mints a fresh request ID. The exact
-headless grammar is:
+`CompactionTransitionService`. They mint a fresh request ID by default. The
+optional `--request-id` is an advanced retry override that reuses a known
+idempotency identity. The exact headless grammar is:
 
 ```
-ego compact ID --request-id UUID [--output text|json|jsonl]
+ego compact ID [--request-id UUID] [--output text|json|jsonl]
             [-C DIR] [--session-dir DIR]
 ```
 
-There is no alias and no implicit request ID. The target is deterministically
-derived from the request ID; that same value is the
+There is no alias. The target is deterministically derived from the request
+ID; that same value is the
 `successor_start_request_id` a later Main start uses to adopt the event-first
 target. Repeating the same request after a lost response inspects and confirms
 the matching target without another checkpoint generation or charge. Reusing

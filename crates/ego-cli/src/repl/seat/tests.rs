@@ -3,6 +3,17 @@ use crate::repl::policy_controls::PolicyControlRequest;
 use crossterm::event::KeyEvent;
 use std::io::{self, BufReader, Cursor, Read};
 
+struct TestPermissionRules;
+
+impl PermissionRuleApplication for TestPermissionRules {
+    fn remember_allow(
+        &self,
+        _plan: ego_core::config::rule_management::RememberPlan,
+    ) -> Result<String, crate::repl::policy_controls::PolicyControlError> {
+        Ok("remembered".into())
+    }
+}
+
 // The sequential adapter consumes BufRead input without constructing
 // Reedline or probing terminal cursor state.
 #[test]
@@ -106,7 +117,7 @@ fn every_populated_statusline_preset_states_the_workspace_posture() {
 }
 
 #[test]
-fn the_plain_permission_vocabulary_includes_amend() {
+fn the_plain_permission_vocabulary_matches_the_immediate_keys() {
     for (raw, expected) in [
         ("allow", PermissionWord::Allow),
         ("deny", PermissionWord::Deny),
@@ -114,10 +125,15 @@ fn the_plain_permission_vocabulary_includes_amend() {
         (" A ", PermissionWord::Allow),
         ("d", PermissionWord::Deny),
         ("m", PermissionWord::Amend),
+        ("e", PermissionWord::Amend),
+        ("r", PermissionWord::Remember),
+        ("remember", PermissionWord::Remember),
+        ("yes", PermissionWord::Allow),
+        ("no", PermissionWord::Deny),
     ] {
         assert_eq!(parse_permission(raw), Some(expected), "{raw:?}");
     }
-    for invalid in ["", "yes", "no", "approve", "cancel"] {
+    for invalid in ["", "approve", "cancel"] {
         assert_eq!(parse_permission(invalid), None, "{invalid:?}");
     }
 }
@@ -170,6 +186,22 @@ fn multiline_notice_stands_above_the_composer() {
             .render_prompt_indicator(PromptEditMode::Emacs)
             .as_ref(),
         "Commands\n  /help  Show help\n> "
+    );
+}
+
+#[test]
+fn modal_prompt_does_not_embed_a_live_status_notice() {
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        notice: Some("unrelated status".to_owned()),
+        ..SurfaceStatus::default()
+    }));
+    let prompt = Question::new("allow call? [y/n] ".to_owned(), status);
+
+    assert_eq!(
+        prompt
+            .render_prompt_indicator(PromptEditMode::Emacs)
+            .as_ref(),
+        "allow call? [y/n] "
     );
 }
 
@@ -234,6 +266,64 @@ fn control_commands_do_not_dismiss_a_local_result() {
     assert_eq!(
         status.lock().unwrap().notice.as_deref(),
         Some("1 unsent draft")
+    );
+}
+
+#[test]
+fn permission_modal_decisions_are_immediate_and_only_explicit_keys_can_approve() {
+    let phase = SurfacePhase::new(EditPhase::Modal);
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        permission_modal: true,
+        ..SurfaceStatus::default()
+    }));
+    let mut mode = SurfaceEditMode::with_status(Emacs::default(), phase, Arc::clone(&status));
+    let key = |code| {
+        ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+            .expect("key event")
+    };
+
+    assert_eq!(
+        mode.parse_event(key(KeyCode::Char('y'))),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}allow"))
+    );
+    assert_eq!(
+        mode.parse_event(key(KeyCode::Char('n'))),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}deny"))
+    );
+    assert_eq!(
+        mode.parse_event(key(KeyCode::Char('e'))),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}amend"))
+    );
+    assert_eq!(mode.parse_event(key(KeyCode::Enter)), ReedlineEvent::None);
+    assert_eq!(
+        mode.parse_event(
+            ReedlineRawEvent::try_from(Event::Paste("y".into())).expect("paste event")
+        ),
+        ReedlineEvent::None
+    );
+    assert_eq!(
+        mode.parse_event(key(KeyCode::Esc)),
+        ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.to_string())
+    );
+    assert_eq!(
+        mode.parse_event(
+            ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )))
+            .expect("Ctrl-C event")
+        ),
+        ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.to_string())
+    );
+    assert_eq!(
+        mode.parse_event(key(KeyCode::Char('r'))),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}remember"))
+    );
+    status.lock().unwrap().permission_modal = false;
+    assert_ne!(
+        mode.parse_event(key(KeyCode::Char('y'))),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}allow")),
+        "a key delivered after modal ownership ended must not approve"
     );
 }
 
@@ -359,7 +449,7 @@ fn enabling_policy_controls_without_catalogue_leaves_permissions_disabled() {
             Availability::Disabled { .. }
         ));
     }
-    seat.enable_policy_controls();
+    seat.enable_policy_controls(Arc::new(TestPermissionRules));
     for action in [ActionId::Mode, ActionId::Plan, ActionId::Yolo] {
         assert_eq!(registry.availability(action), Availability::Enabled);
     }

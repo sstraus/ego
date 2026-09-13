@@ -4242,8 +4242,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Ok(prepared) => prepared,
             Err(refusal) => return Ok(answered(false, refusal)),
         };
-        let (tool, mut prepared) = match prepared {
-            PreparedToolCall::Effect { tool, call } => (tool, call),
+        let (tool, mut prepared, mut presentation) = match prepared {
+            PreparedToolCall::Effect {
+                tool,
+                call,
+                presentation,
+            } => (tool, call, presentation),
             PreparedToolCall::HumanInput(request) => {
                 return self.run_question(turn, call, request).await;
             }
@@ -4496,7 +4500,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut identity_refreshes = 0;
         let authorized = loop {
             let authorized = loop {
-                match self.tools.authorize(policy, prepared) {
+                match self
+                    .tools
+                    .authorize_presented(policy, prepared, presentation.clone())
+                {
                     Classification::Settled(Ok(authorized)) => {
                         self.decided(turn, call, &hook_selector, true, authorized.by().clone())
                             .await?;
@@ -4665,7 +4672,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                                 tool: request.tool().to_string(),
                                             },
                                         )?;
-                                        prepared = match self
+                                        (prepared, presentation) = match self
                                             .tools
                                             .prepare_amendment(tool.as_ref(), params)
                                         {
@@ -4731,11 +4738,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                         tool: request.tool().to_string(),
                                     },
                                 )?;
-                                prepared = match self.tools.prepare_amendment(tool.as_ref(), params)
-                                {
-                                    Ok(prepared) => prepared,
-                                    Err(refusal) => return Ok(answered(false, refusal)),
-                                };
+                                (prepared, presentation) =
+                                    match self.tools.prepare_amendment(tool.as_ref(), params) {
+                                        Ok(prepared) => prepared,
+                                        Err(refusal) => return Ok(answered(false, refusal)),
+                                    };
                             }
                         }
                     }

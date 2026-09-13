@@ -13,8 +13,8 @@ use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::mcp::ToolExecution;
 use crate::permit::{
     Authorized, CanonPath, Classification, DuplexSpawner, Fs, GuardedEffects, GuardedIo, OneHop,
-    Op, Pending, PolicyEngine, PrepareCtx, PreparedCall, ProcessExecutor, Resolution, Resolver,
-    Tool, ToolError,
+    Op, Pending, PermissionPresentationInput, PolicyEngine, PrepareCtx, PreparedCall,
+    ProcessExecutor, Resolution, Resolver, Tool, ToolError,
 };
 use crate::store::blob::BlobStore;
 use crate::store::evidence::EvidenceStore;
@@ -69,6 +69,7 @@ pub(crate) enum PreparedToolCall {
     Effect {
         tool: std::sync::Arc<dyn Tool>,
         call: PreparedCall,
+        presentation: PermissionPresentationInput,
     },
     HumanInput(crate::question::QuestionRequest),
     Skill {
@@ -435,14 +436,16 @@ impl<'a> Tools<'a> {
         registered: RegisteredTool,
         args: &str,
     ) -> Result<PreparedToolCall, String> {
-        let name = registered.descriptor().name;
-        let params = serde_json::from_str(args).map_err(|error| {
+        let descriptor = registered.descriptor();
+        let name = descriptor.name;
+        let params: Value = serde_json::from_str(args).map_err(|error| {
             format!("{name} was called with arguments that are not JSON: {error}")
         })?;
         match &registered {
             RegisteredTool::Effect(tool) => Ok(PreparedToolCall::Effect {
                 tool: std::sync::Arc::clone(tool),
-                call: self.prepare_params(tool.as_ref(), params)?,
+                call: self.prepare_params(tool.as_ref(), params.clone())?,
+                presentation: PermissionPresentationInput::new(params, descriptor.parameters),
             }),
             RegisteredTool::HumanInput(tool) => {
                 tool.parse(params).map(PreparedToolCall::HumanInput)
@@ -498,12 +501,15 @@ impl<'a> Tools<'a> {
     /// The tool is fixed to the one that raised the question. Only its
     /// parameters may change, and they cross the same typed preparation and
     /// canonicalisation boundary as model-supplied parameters.
-    pub fn prepare_amendment(
+    pub(crate) fn prepare_amendment(
         &self,
         tool: &dyn Tool,
         params: Value,
-    ) -> Result<PreparedCall, String> {
-        self.prepare_params(tool, params)
+    ) -> Result<(PreparedCall, PermissionPresentationInput), String> {
+        let schema = serde_json::to_value(tool.descriptor().schema)
+            .map_err(|error| format!("tool schema could not be rendered: {error}"))?;
+        let call = self.prepare_params(tool, params.clone())?;
+        Ok((call, PermissionPresentationInput::new(params, schema)))
     }
 
     fn prepare_params(&self, tool: &dyn Tool, params: Value) -> Result<PreparedCall, String> {
@@ -550,6 +556,15 @@ impl<'a> Tools<'a> {
     /// was refused.
     pub fn authorize(&self, policy: &PolicyEngine, call: PreparedCall) -> Classification {
         policy.classify(call)
+    }
+
+    pub(crate) fn authorize_presented(
+        &self,
+        policy: &PolicyEngine,
+        call: PreparedCall,
+        presentation: PermissionPresentationInput,
+    ) -> Classification {
+        policy.classify_presented(call, presentation)
     }
 
     /// Stage two and a half: put a question the rules did not settle to the

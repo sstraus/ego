@@ -25,7 +25,7 @@ use super::actions::{
 };
 use super::keys::{Intercept, intercept};
 use super::policy_controls::{
-    ModalInput, PermissionInput, PolicyControlController, PolicyControlRequest,
+    PermissionInput, PermissionRuleApplication, PolicyControlController, PolicyControlRequest,
 };
 use super::selector::{Selector, SelectorKey, SelectorKind, SelectorOption, SelectorValue};
 use super::status::{
@@ -34,7 +34,7 @@ use super::status::{
 };
 use super::surface::InteractivePainter;
 use super::{BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, answer};
-use crate::cli::{managed_rule, managed_rule_effect, managed_rule_id, rule_arguments};
+use crate::cli::{managed_rule, managed_rule_effect, managed_rule_id};
 use crate::model::{GenerationSelection, GenerationSelectionSnapshot};
 use crate::model_picker::{
     ModelPicker, ModelPickerView, PickerFocus, PickerInput, PickerInputOutcome, PickerOutcome,
@@ -64,6 +64,7 @@ pub(super) const ACTION_COMMAND: &str = "ego:action:";
 const ACTION_MENU: &str = "ego_action_menu";
 pub(super) const MODEL_PICKER_COMMAND: &str = "ego:model-picker:";
 pub(super) const QUESTION_SELECTOR_COMMAND: &str = "ego:question-selector:";
+pub(super) const PERMISSION_DECISION_COMMAND: &str = "ego:permission-decision:";
 pub(super) const MODAL_ESCAPE_COMMAND: &str = "ego:modal-escape";
 const QUEUE_LABEL: &str =
     "Messages to be submitted after next tool call (press esc to interrupt and send immediately)";
@@ -373,6 +374,8 @@ struct SurfaceStatus {
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
     model_selection: Option<Arc<GenerationSelection>>,
     question_selector: Option<Arc<Mutex<Selector>>>,
+    permission_modal: bool,
+    permission_rules: Option<Arc<dyn PermissionRuleApplication>>,
     cursor_selectors: bool,
     mcp_actions: Option<McpSurfaceActions>,
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
@@ -397,6 +400,8 @@ impl Default for SurfaceStatus {
             model_picker: None,
             model_selection: None,
             question_selector: None,
+            permission_modal: false,
+            permission_rules: None,
             cursor_selectors: false,
             mcp_actions: None,
             surface_effect: Arc::new(Mutex::new(None)),
@@ -1076,12 +1081,16 @@ impl Seat {
     }
 
     /// Enable policy controls after their application owner and catalogue exist.
-    pub(crate) fn enable_policy_controls(&self) {
+    pub(crate) fn enable_policy_controls(&self, rules: Arc<dyn PermissionRuleApplication>) {
         for action in [ActionId::Mode, ActionId::Plan, ActionId::Yolo] {
             self.registry
                 .set_availability(action, Availability::Enabled);
         }
         if let SeatKind::Live(live) = &self.kind {
+            live.status
+                .lock()
+                .expect("surface status lock")
+                .permission_rules = Some(rules);
             if live
                 .status
                 .lock()
@@ -1645,15 +1654,15 @@ pub(crate) use permission::Confirmation;
 use permission::{PermissionMenuId, STATUSLINE_PRESETS, permission_menu};
 use permission::{
     StatuslineChoice, choose_permission_action, choose_policy_mode, choose_statusline_preset,
-    configure_statusline, confirm_surface_action, confirm_yolo,
+    configure_statusline, confirm_surface_action,
 };
 use picker_surface::run_model_picker;
+use question::{
+    PermissionEditOutcome, Question, Waiting, answer_control, edit_permission_parameters,
+    enter_modal, leave_modal, parse_trust, question_selector_key, question_selector_prompt,
+};
 #[cfg(test)]
 use question::{PermissionWord, parse_permission};
-use question::{
-    Question, Waiting, answer_control, enter_modal, leave_modal, parse_trust,
-    question_selector_key, question_selector_prompt,
-};
 
 #[cfg(test)]
 mod tests;

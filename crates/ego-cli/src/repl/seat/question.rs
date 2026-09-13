@@ -121,7 +121,11 @@ pub(super) fn answer_control(
         Compaction(Sender<bool>, bool),
         Trust(Sender<Trust>, Trust),
         WindowsUnconfined(Sender<bool>, bool),
-        Permission(oneshot::Sender<PermissionDecision>, PermissionDecision),
+        Permission(
+            oneshot::Sender<PermissionDecision>,
+            PermissionDecision,
+            Option<String>,
+        ),
         Question(oneshot::Sender<QuestionOutcome>, QuestionOutcome),
     }
 
@@ -214,17 +218,64 @@ pub(super) fn answer_control(
             )
         }
         Control::Permission { request, reply } => {
-            let prompt = Question::new(
-                format!("{request}. [allow/deny/amend] "),
-                Arc::clone(surface.status),
-            );
+            surface
+                .status
+                .lock()
+                .expect("surface status lock")
+                .permission_modal = true;
+            let prompt = Question::new(permission_prompt(&request), Arc::clone(surface.status));
+            let mut notice = None;
             let decision = loop {
                 match modal_line(editor, surface, &prompt) {
+                    Line::HostCommand(HostCommand::PermissionDecision(decision)) => {
+                        match parse_permission(&decision) {
+                            Some(PermissionWord::Allow) => break PermissionDecision::Allow,
+                            Some(PermissionWord::Deny) => break PermissionDecision::Deny,
+                            Some(PermissionWord::Amend) => {
+                                surface
+                                    .status
+                                    .lock()
+                                    .expect("surface status lock")
+                                    .permission_modal = false;
+                                break amendment(editor, surface, &request);
+                            }
+                            Some(PermissionWord::Remember) => {
+                                match remember_permission(surface.status, &request) {
+                                    Ok(receipt) => {
+                                        notice = Some(receipt);
+                                        break PermissionDecision::Allow;
+                                    }
+                                    Err(error) => {
+                                        notice = Some(format!("remember failed: {error}"));
+                                        break PermissionDecision::Deny;
+                                    }
+                                }
+                            }
+                            None => continue,
+                        }
+                    }
                     Line::Submitted(answer) => match parse_permission(&answer) {
                         Some(PermissionWord::Allow) => break PermissionDecision::Allow,
                         Some(PermissionWord::Deny) => break PermissionDecision::Deny,
                         Some(PermissionWord::Amend) => {
-                            break amendment(editor, surface);
+                            surface
+                                .status
+                                .lock()
+                                .expect("surface status lock")
+                                .permission_modal = false;
+                            break amendment(editor, surface, &request);
+                        }
+                        Some(PermissionWord::Remember) => {
+                            match remember_permission(surface.status, &request) {
+                                Ok(receipt) => {
+                                    notice = Some(receipt);
+                                    break PermissionDecision::Allow;
+                                }
+                                Err(error) => {
+                                    notice = Some(format!("remember failed: {error}"));
+                                    break PermissionDecision::Deny;
+                                }
+                            }
                         }
                         None => continue,
                     },
@@ -237,7 +288,11 @@ pub(super) fn answer_control(
                     Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
                 }
             };
-            (Reply::Permission(reply, decision), EditPhase::Busy, true)
+            (
+                Reply::Permission(reply, decision, notice),
+                EditPhase::Busy,
+                true,
+            )
         }
         Control::Question {
             id: _id,
@@ -265,6 +320,11 @@ pub(super) fn answer_control(
     }
 
     leave_modal(editor, phase, surface.status, saved, after);
+    surface
+        .status
+        .lock()
+        .expect("surface status lock")
+        .permission_modal = false;
     match reply {
         Reply::Compaction(sender, confirmed) => {
             let _ = sender.send(confirmed);
@@ -275,7 +335,11 @@ pub(super) fn answer_control(
         Reply::WindowsUnconfined(sender, accepted) => {
             let _ = sender.send(accepted);
         }
-        Reply::Permission(sender, decision) => {
+        Reply::Permission(sender, decision, notice) => {
+            if let Some(notice) = notice {
+                surface.status.lock().expect("surface status lock").notice = Some(notice);
+                repaint_status(surface.status);
+            }
             let _ = sender.send(decision);
         }
         Reply::Question(sender, outcome) => {
@@ -545,26 +609,448 @@ fn modal_line(editor: &mut Reedline, surface: &mut ModalSurface<'_>, prompt: &dy
     .0
 }
 
-fn amendment(editor: &mut Reedline, surface: &mut ModalSurface<'_>) -> PermissionDecision {
-    let prompt = Question::new(
-        "New JSON parameters: ".to_string(),
-        Arc::clone(surface.status),
-    );
+fn amendment(
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
+    request: &PermissionRequest,
+) -> PermissionDecision {
+    let Some(presentation) = request.presentation() else {
+        surface.status.lock().expect("surface status lock").notice =
+            Some("this permission request has no editable parameters".into());
+        repaint_status(surface.status);
+        return PermissionDecision::Deny;
+    };
+    let mut form = match PermissionEditForm::new(
+        presentation.schema().clone(),
+        presentation.parameters().clone(),
+    ) {
+        Ok(form) => form,
+        Err(error) => {
+            surface.status.lock().expect("surface status lock").notice = Some(error);
+            repaint_status(surface.status);
+            return PermissionDecision::Deny;
+        }
+    };
     loop {
-        match modal_line(editor, surface, &prompt) {
-            Line::Submitted(raw) => match serde_json::from_str(&raw) {
-                Ok(params) => return PermissionDecision::Amend { params },
-                Err(_) => continue,
-            },
-            Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
-                return PermissionDecision::Deny;
+        for index in 0..form.fields.len() {
+            loop {
+                let field = &form.fields[index];
+                let prompt = format!("{}: ", field.name);
+                match prefilled_modal_line(editor, surface, &prompt, &field.raw) {
+                    Line::Submitted(raw) => match form.set_field(index, raw) {
+                        Ok(()) => break,
+                        Err(error) => inline_permission_error(surface.status, error),
+                    },
+                    Line::Blank => match form.set_field(index, String::new()) {
+                        Ok(()) => break,
+                        Err(error) => inline_permission_error(surface.status, error),
+                    },
+                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                        return PermissionDecision::Deny;
+                    }
+                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        return PermissionDecision::Deny;
+                    }
+                    Line::Refused(_) | Line::HostCommand(_) => continue,
+                }
             }
-            Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
-                return PermissionDecision::Deny;
+        }
+        if form.has_fallback() {
+            loop {
+                let raw = form.fallback_json();
+                match prefilled_modal_line(
+                    editor,
+                    surface,
+                    "Nested or additional parameters (JSON): ",
+                    &raw,
+                ) {
+                    Line::Submitted(raw) => match form.set_fallback(&raw) {
+                        Ok(()) => break,
+                        Err(error) => inline_permission_error(surface.status, error),
+                    },
+                    Line::Blank => match form.set_fallback("{}") {
+                        Ok(()) => break,
+                        Err(error) => inline_permission_error(surface.status, error),
+                    },
+                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                        return PermissionDecision::Deny;
+                    }
+                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        return PermissionDecision::Deny;
+                    }
+                    Line::Refused(_) | Line::HostCommand(_) => continue,
+                }
             }
-            Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
+        }
+        match form.validate() {
+            Ok(params) => return PermissionDecision::Amend { params },
+            Err(error) => inline_permission_error(surface.status, error),
         }
     }
+}
+
+pub(super) enum PermissionEditOutcome {
+    Value(serde_json::Map<String, serde_json::Value>),
+    Cancelled,
+    Propagate(Line),
+}
+
+pub(super) fn edit_permission_parameters(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    busy: bool,
+    schema: serde_json::Value,
+    parameters: serde_json::Value,
+) -> PermissionEditOutcome {
+    let mut form = match PermissionEditForm::new(schema, parameters) {
+        Ok(form) => form,
+        Err(error) => {
+            inline_permission_error(status, error);
+            return PermissionEditOutcome::Cancelled;
+        }
+    };
+    let saved = enter_modal(editor, phase, status);
+    let outcome = 'edit: loop {
+        for index in 0..form.fields.len() {
+            loop {
+                let field = &form.fields[index];
+                editor.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(field.raw.clone()),
+                ]);
+                let prompt = Question::new(format!("{}: ", field.name), Arc::clone(status));
+                match answer(false, editor.read_line(&prompt)) {
+                    Line::Submitted(raw) => match form.set_field(index, raw) {
+                        Ok(()) => break,
+                        Err(error) => inline_permission_error(status, error),
+                    },
+                    Line::Blank => match form.set_field(index, String::new()) {
+                        Ok(()) => break,
+                        Err(error) => inline_permission_error(status, error),
+                    },
+                    line @ (Line::Ended | Line::ExternalBreak(_)) => {
+                        break 'edit PermissionEditOutcome::Propagate(line);
+                    }
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        break 'edit PermissionEditOutcome::Cancelled;
+                    }
+                    Line::Refused(_) | Line::HostCommand(_) => continue,
+                }
+            }
+        }
+        if form.has_fallback() {
+            loop {
+                editor.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(form.fallback_json()),
+                ]);
+                let prompt = Question::new(
+                    "Nested or additional parameters (JSON): ".into(),
+                    Arc::clone(status),
+                );
+                match answer(false, editor.read_line(&prompt)) {
+                    Line::Submitted(raw) => match form.set_fallback(&raw) {
+                        Ok(()) => break,
+                        Err(error) => inline_permission_error(status, error),
+                    },
+                    Line::Blank => match form.set_fallback("{}") {
+                        Ok(()) => break,
+                        Err(error) => inline_permission_error(status, error),
+                    },
+                    line @ (Line::Ended | Line::ExternalBreak(_)) => {
+                        break 'edit PermissionEditOutcome::Propagate(line);
+                    }
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        break 'edit PermissionEditOutcome::Cancelled;
+                    }
+                    Line::Refused(_) | Line::HostCommand(_) => continue,
+                }
+            }
+        }
+        match form.validate() {
+            Ok(serde_json::Value::Object(parameters)) => {
+                break PermissionEditOutcome::Value(parameters);
+            }
+            Ok(_) => unreachable!("permission forms validate only objects"),
+            Err(error) => inline_permission_error(status, error),
+        }
+    };
+    leave_modal(
+        editor,
+        phase,
+        status,
+        saved,
+        if busy {
+            EditPhase::Busy
+        } else {
+            EditPhase::Idle
+        },
+    );
+    outcome
+}
+
+fn prefilled_modal_line(
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
+    prompt: &str,
+    value: &str,
+) -> Line {
+    editor.run_edit_commands(&[
+        EditCommand::Clear,
+        EditCommand::InsertString(value.to_owned()),
+    ]);
+    modal_line(
+        editor,
+        surface,
+        &Question::new(prompt.to_owned(), Arc::clone(surface.status)),
+    )
+}
+
+fn inline_permission_error(status: &SharedStatus, error: impl std::fmt::Display) {
+    status.lock().expect("surface status lock").notice =
+        Some(format!("invalid tool parameters: {error}"));
+    repaint_status(status);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionFieldKind {
+    String,
+    Integer,
+    Number,
+    Boolean,
+    StringArray,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PermissionEditField {
+    name: String,
+    kind: PermissionFieldKind,
+    nullable: bool,
+    required: bool,
+    was_present: bool,
+    was_null: bool,
+    raw: String,
+}
+
+struct PermissionEditForm {
+    schema: serde_json::Value,
+    fields: Vec<PermissionEditField>,
+    fallback: serde_json::Map<String, serde_json::Value>,
+    fallback_available: bool,
+}
+
+impl PermissionEditForm {
+    fn new(schema: serde_json::Value, parameters: serde_json::Value) -> Result<Self, String> {
+        let serde_json::Value::Object(parameters) = parameters else {
+            return Err("editable tool parameters must be a JSON object".into());
+        };
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let required = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let mut fallback = parameters.clone();
+        let mut fields = Vec::new();
+        let mut unsupported = false;
+        for (name, property) in &properties {
+            let Some((kind, nullable)) = permission_field_kind(name, property) else {
+                unsupported = true;
+                if required.contains(name.as_str()) && !fallback.contains_key(name) {
+                    fallback.insert(name.clone(), serde_json::Value::Null);
+                }
+                continue;
+            };
+            let current = parameters.get(name);
+            let raw = match render_permission_field(kind, current) {
+                Some(raw) => raw,
+                None => {
+                    unsupported = true;
+                    continue;
+                }
+            };
+            fallback.remove(name);
+            fields.push(PermissionEditField {
+                name: name.clone(),
+                kind,
+                nullable,
+                required: required.contains(name.as_str()),
+                was_present: current.is_some(),
+                was_null: current == Some(&serde_json::Value::Null),
+                raw,
+            });
+        }
+        Ok(Self {
+            schema,
+            fields,
+            fallback,
+            fallback_available: unsupported || properties.is_empty(),
+        })
+    }
+
+    fn set_field(&mut self, index: usize, raw: String) -> Result<(), String> {
+        let field = self
+            .fields
+            .get_mut(index)
+            .ok_or_else(|| "the edited field is no longer available".to_owned())?;
+        parse_permission_field(field, &raw)?;
+        field.raw = raw;
+        Ok(())
+    }
+
+    fn has_fallback(&self) -> bool {
+        self.fallback_available || !self.fallback.is_empty()
+    }
+
+    fn fallback_json(&self) -> String {
+        serde_json::to_string_pretty(&self.fallback).expect("a JSON object always serializes")
+    }
+
+    fn set_fallback(&mut self, raw: &str) -> Result<(), String> {
+        self.fallback = serde_json::from_str(raw)
+            .map_err(|error| format!("nested parameters are not a JSON object: {error}"))?;
+        Ok(())
+    }
+
+    fn value(&self) -> Result<serde_json::Value, String> {
+        let mut value = self.fallback.clone();
+        for field in &self.fields {
+            if let Some(parsed) = parse_permission_field(field, &field.raw)? {
+                value.insert(field.name.clone(), parsed);
+            } else {
+                value.remove(&field.name);
+            }
+        }
+        Ok(serde_json::Value::Object(value))
+    }
+
+    fn validate(&self) -> Result<serde_json::Value, String> {
+        let value = self.value()?;
+        let request = QuestionRequest::new(
+            "Edit tool parameters",
+            QuestionMode::Form {
+                schema: self.schema.clone(),
+            },
+            Vec::new(),
+            false,
+        );
+        let raw = serde_json::to_string(&value).expect("JSON parameters always serialize");
+        QuestionAnswer::from_json(&request, &raw)
+            .map(|_| value)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn permission_field_kind(
+    name: &str,
+    schema: &serde_json::Value,
+) -> Option<(PermissionFieldKind, bool)> {
+    let mut types = match schema.get("type")? {
+        serde_json::Value::String(kind) => vec![kind.as_str()],
+        serde_json::Value::Array(kinds) => {
+            kinds.iter().filter_map(serde_json::Value::as_str).collect()
+        }
+        _ => return None,
+    };
+    let nullable = types.contains(&"null");
+    types.retain(|kind| *kind != "null");
+    let kind = match types.as_slice() {
+        ["string"] => PermissionFieldKind::String,
+        ["integer"] => PermissionFieldKind::Integer,
+        ["number"] => PermissionFieldKind::Number,
+        ["boolean"] => PermissionFieldKind::Boolean,
+        ["array"]
+            if name == "argv"
+                && schema
+                    .pointer("/items/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("string") =>
+        {
+            PermissionFieldKind::StringArray
+        }
+        _ => return None,
+    };
+    Some((kind, nullable))
+}
+
+fn render_permission_field(
+    kind: PermissionFieldKind,
+    value: Option<&serde_json::Value>,
+) -> Option<String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Some(String::new()),
+        Some(serde_json::Value::String(value)) if kind == PermissionFieldKind::String => {
+            Some(value.clone())
+        }
+        Some(serde_json::Value::Number(value))
+            if matches!(
+                kind,
+                PermissionFieldKind::Integer | PermissionFieldKind::Number
+            ) =>
+        {
+            Some(value.to_string())
+        }
+        Some(serde_json::Value::Bool(value)) if kind == PermissionFieldKind::Boolean => {
+            Some(value.to_string())
+        }
+        Some(serde_json::Value::Array(values)) if kind == PermissionFieldKind::StringArray => {
+            let values = values
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            Some(shell_words::join(values))
+        }
+        _ => None,
+    }
+}
+
+fn parse_permission_field(
+    field: &PermissionEditField,
+    raw: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    if raw.is_empty() && !field.required && !field.was_present {
+        return Ok(None);
+    }
+    if raw.is_empty() && field.was_null && field.nullable {
+        return Ok(Some(serde_json::Value::Null));
+    }
+    let value = match field.kind {
+        PermissionFieldKind::String => serde_json::Value::String(raw.to_owned()),
+        PermissionFieldKind::Integer => serde_json::Value::Number(
+            raw.parse::<i64>()
+                .map_err(|_| format!("{} must be an integer", field.name))?
+                .into(),
+        ),
+        PermissionFieldKind::Number => {
+            let value = raw
+                .parse::<f64>()
+                .map_err(|_| format!("{} must be a number", field.name))?;
+            serde_json::Number::from_f64(value)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| format!("{} must be a finite number", field.name))?
+        }
+        PermissionFieldKind::Boolean => serde_json::Value::Bool(
+            raw.parse::<bool>()
+                .map_err(|_| format!("{} must be true or false", field.name))?,
+        ),
+        PermissionFieldKind::StringArray => serde_json::Value::Array(
+            shell_words::split(raw)
+                .map_err(|error| format!("{} is not a valid argument line: {error}", field.name))?
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    };
+    Ok(Some(value))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,6 +1058,7 @@ pub(super) enum PermissionWord {
     Allow,
     Deny,
     Amend,
+    Remember,
 }
 
 pub(super) fn parse_trust(answer: &str) -> Option<Trust> {
@@ -584,11 +1071,85 @@ pub(super) fn parse_trust(answer: &str) -> Option<Trust> {
 
 pub(super) fn parse_permission(answer: &str) -> Option<PermissionWord> {
     match answer.trim().to_ascii_lowercase().as_str() {
-        "a" | "allow" => Some(PermissionWord::Allow),
-        "d" | "deny" => Some(PermissionWord::Deny),
-        "m" | "amend" => Some(PermissionWord::Amend),
+        "a" | "allow" | "y" | "yes" => Some(PermissionWord::Allow),
+        "d" | "deny" | "n" | "no" => Some(PermissionWord::Deny),
+        "m" | "amend" | "e" | "edit" => Some(PermissionWord::Amend),
+        "r" | "remember" => Some(PermissionWord::Remember),
         _ => None,
     }
+}
+
+fn remember_permission(
+    status: &SharedStatus,
+    request: &PermissionRequest,
+) -> Result<String, String> {
+    let presentation = request
+        .presentation()
+        .ok_or_else(|| "this permission request has no presentation facts".to_owned())?;
+    let plan = presentation.remember_plan().map_err(str::to_owned)?.clone();
+    let application = status
+        .lock()
+        .map_err(|_| "the permission surface is unavailable".to_owned())?
+        .permission_rules
+        .clone()
+        .ok_or_else(|| "the atomic permission-rule application is unavailable".to_owned())?;
+    application
+        .remember_allow(plan)
+        .map_err(|error| error.to_string())
+}
+
+fn permission_prompt(request: &PermissionRequest) -> String {
+    let rendered = request.to_string();
+    let operations = rendered.lines().skip(1).collect::<Vec<_>>().join("\n");
+    let mut rows = vec![
+        format!(
+            "Call: {}",
+            serde_json::to_string(request.tool()).expect("a tool name always serializes")
+        ),
+        format!(
+            "Reason: {}",
+            serde_json::to_string(&request.why().to_string())
+                .expect("a permission reason always serializes")
+        ),
+    ];
+    if !operations.is_empty() {
+        rows.push(format!("Operations:\n{operations}"));
+    }
+    if let Some(presentation) = request.presentation() {
+        rows.push(format!(
+            "Risk: {:?} ({})",
+            presentation.risk().class,
+            presentation
+                .risk()
+                .reasons
+                .iter()
+                .map(|reason| format!("{reason:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        rows.push(format!(
+            "Parameters:\n{}",
+            serde_json::to_string_pretty(presentation.parameters())
+                .expect("JSON parameters always serialize")
+        ));
+        match presentation.remember_plan() {
+            Ok(plan) => {
+                rows.push("Remember would add:".into());
+                rows.extend(
+                    plan.candidate_rows()
+                        .map(|(operation, rule)| format!("- operation {operation}: {rule}")),
+                );
+                for (operation, dimension) in plan.omission_rows() {
+                    rows.push(format!(
+                        "- widening for operation {operation}: omits {dimension:?}"
+                    ));
+                }
+            }
+            Err(error) => rows.push(format!("Remember unavailable: {error}")),
+        }
+    }
+    rows.push("[y] allow [n] deny [e] edit [r] remember ".into());
+    rows.join("\n")
 }
 
 /// The prompt: two characters and nothing else.
@@ -668,8 +1229,9 @@ impl Prompt for Waiting {
 /// Kept wholly in the indicator because Reedline's large-buffer path measures
 /// wrapped prompt rows but skips `prompt_str_left` by logical newlines. A long
 /// one-line question can therefore be measured off-screen and then sliced to
-/// empty. The indicator uses the post-prompt offset and preserves the complete
-/// canonical request and answer vocabulary at narrow widths.
+/// empty. Modal content deliberately does not borrow the live-status prefix:
+/// the status row and the question have independent ownership and a changing
+/// notice must never become part of an approval prompt.
 pub(super) struct Question {
     text: String,
     status: SharedStatus,
@@ -691,7 +1253,7 @@ impl Prompt for Question {
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
-        Cow::Owned(format!("{}{}", status_prefix(&self.status), self.text))
+        Cow::Borrowed(&self.text)
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
@@ -700,5 +1262,99 @@ impl Prompt for Question {
 
     fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
         Cow::Owned(format!("(search: {}) ", search.term))
+    }
+}
+
+#[cfg(test)]
+mod permission_edit_form_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn exec_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["argv"],
+            "properties": {
+                "argv": { "type": "array", "items": { "type": "string" } },
+                "cwd": { "type": ["string", "null"] },
+                "timeout_ms": { "type": ["integer", "null"], "minimum": 1 },
+                "environment": { "type": "object" }
+            },
+            "additionalProperties": false
+        })
+    }
+
+    #[test]
+    fn exec_arguments_are_structured_and_nested_values_stay_in_prefilled_fallback() {
+        let form = PermissionEditForm::new(
+            exec_schema(),
+            json!({
+                "argv": ["wiz-run", "stories-cli.js", "show", "regression_case"],
+                "cwd": "/workspace",
+                "timeout_ms": 30000,
+                "environment": { "LANG": "C" }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            form.fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.kind, field.raw.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "argv",
+                    PermissionFieldKind::StringArray,
+                    "wiz-run stories-cli.js show regression_case"
+                ),
+                ("cwd", PermissionFieldKind::String, "/workspace"),
+                ("timeout_ms", PermissionFieldKind::Integer, "30000"),
+            ]
+        );
+        assert_eq!(
+            serde_json::Value::Object(form.fallback.clone()),
+            json!({ "environment": { "LANG": "C" } })
+        );
+        assert!(form.has_fallback());
+        assert_eq!(
+            form.validate().unwrap(),
+            json!({
+                "argv": ["wiz-run", "stories-cli.js", "show", "regression_case"],
+                "cwd": "/workspace",
+                "timeout_ms": 30000,
+                "environment": { "LANG": "C" }
+            })
+        );
+    }
+
+    #[test]
+    fn field_edits_parse_without_json_and_schema_errors_remain_typed() {
+        let mut form = PermissionEditForm::new(
+            exec_schema(),
+            json!({ "argv": ["cargo", "test"], "cwd": null, "timeout_ms": null }),
+        )
+        .unwrap();
+        let argv = form
+            .fields
+            .iter()
+            .position(|field| field.name == "argv")
+            .unwrap();
+        let timeout = form
+            .fields
+            .iter()
+            .position(|field| field.name == "timeout_ms")
+            .unwrap();
+
+        form.set_field(argv, "cargo test -p ego-core".into())
+            .unwrap();
+        assert!(form.set_field(timeout, "soon".into()).is_err());
+        form.set_field(timeout, "0".into()).unwrap();
+        assert!(form.validate().unwrap_err().contains("form answer"));
+        form.set_field(timeout, "1000".into()).unwrap();
+        assert_eq!(
+            form.validate().unwrap()["argv"],
+            json!(["cargo", "test", "-p", "ego-core"])
+        );
     }
 }

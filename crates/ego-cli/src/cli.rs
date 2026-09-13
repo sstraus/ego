@@ -71,7 +71,7 @@ pub enum Invocation {
     Usage(Box<UsageArgs>),
     /// `ego fork ID` — create a target at the source's latest durable idle boundary.
     Fork(Box<ForkArgs>),
-    /// `ego compact ID --request-id UUID` — publish one deterministic successor.
+    /// `ego compact ID [--request-id UUID]` — publish one deterministic successor.
     Compact(Box<CompactArgs>),
     /// `ego export ID` — render one local or structurally sanitized transcript.
     Export(Box<ExportArgs>),
@@ -447,7 +447,10 @@ pub struct ForkArgs {
     pub output: Output,
 }
 
-/// The exact deterministic headless compaction request.
+/// The exact deterministic headless compaction request. The parser mints the
+/// request identity when an ordinary caller does not supply an advanced retry
+/// override, so downstream compaction stays deterministic without exposing a
+/// UUID ritual in the normal command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactArgs {
     pub source: SessionId,
@@ -1257,12 +1260,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                         "the compaction source must not be the nil session id".to_owned(),
                     ));
                 }
-                let request_id = RequestId::from_str(&parsed.request_id).map_err(|error| {
-                    UsageError(format!(
-                        "`{}` is not a compaction request id: {error}",
-                        parsed.request_id
-                    ))
-                })?;
+                let request_id = match parsed.request_id {
+                    Some(request_id) => RequestId::from_str(&request_id).map_err(|error| {
+                        UsageError(format!(
+                            "`{request_id}` is not a compaction request id: {error}"
+                        ))
+                    })?,
+                    None => RequestId::from_uuid(uuid::Uuid::now_v7()),
+                };
                 if request_id.uuid().is_nil() {
                     return Err(UsageError(
                         "the compaction request id must not be nil".to_owned(),

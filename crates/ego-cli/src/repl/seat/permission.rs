@@ -52,6 +52,15 @@ enum PermissionField {
     Propagate(Line),
 }
 
+enum PermissionCallField {
+    Value {
+        call: ego_core::permit::PreparedCall,
+        workspace: CanonPath,
+    },
+    Cancelled(String),
+    Propagate(Line),
+}
+
 pub(super) fn choose_permission_action(
     editor: &mut Reedline,
     phase: &SurfacePhase,
@@ -190,35 +199,40 @@ fn build_permission_request(
             PolicyControlRequest::Permission(PermissionInput::Revoke(id))
         }
         PermissionMenuId::Remember => {
-            let raw_effect = field!("Rule effect (allow or deny): ");
+            let raw_effect = match select_permission_value(
+                editor,
+                phase,
+                status,
+                busy,
+                "Choose rule effect",
+                &[("allow", "Allow"), ("deny", "Deny")],
+            ) {
+                PermissionField::Value(value) => value,
+                PermissionField::Cancelled => return None,
+                PermissionField::Propagate(line) => return Some(line),
+            };
             let effect = match managed_rule_effect(&raw_effect) {
                 Ok(effect) => effect,
                 Err(error) => return permission_failure(status, error),
             };
-            let name = field!("Tool name: ");
-            let raw_arguments = field!("Tool arguments (JSON object): ");
-            let arguments = match rule_arguments(&raw_arguments) {
-                Ok(arguments) => arguments,
-                Err(error) => return permission_failure(status, error),
-            };
-            let (call, workspace) = match prepare_permission_call(status, &name, &arguments) {
-                Ok(prepared) => prepared,
-                Err(error) => return permission_failure(status, error),
+            let (call, workspace) = match read_permission_call(editor, phase, status, busy) {
+                PermissionCallField::Value { call, workspace } => (call, workspace),
+                PermissionCallField::Cancelled(error) => {
+                    return permission_failure(status, error);
+                }
+                PermissionCallField::Propagate(line) => return Some(line),
             };
             PolicyControlRequest::Permission(PermissionInput::Remember(RememberRequest::new(
                 call, effect, workspace,
             )))
         }
         PermissionMenuId::Explain => {
-            let name = field!("Tool name: ");
-            let raw_arguments = field!("Tool arguments (JSON object): ");
-            let arguments = match rule_arguments(&raw_arguments) {
-                Ok(arguments) => arguments,
-                Err(error) => return permission_failure(status, error),
-            };
-            let (call, workspace) = match prepare_permission_call(status, &name, &arguments) {
-                Ok(prepared) => prepared,
-                Err(error) => return permission_failure(status, error),
+            let (call, workspace) = match read_permission_call(editor, phase, status, busy) {
+                PermissionCallField::Value { call, workspace } => (call, workspace),
+                PermissionCallField::Cancelled(error) => {
+                    return permission_failure(status, error);
+                }
+                PermissionCallField::Propagate(line) => return Some(line),
             };
             PolicyControlRequest::Permission(PermissionInput::Explain { call, workspace })
         }
@@ -256,11 +270,7 @@ fn read_permission_field(
     field
 }
 
-fn prepare_permission_call(
-    status: &SharedStatus,
-    name: &str,
-    arguments: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(ego_core::permit::PreparedCall, CanonPath), String> {
+fn permission_tools(status: &SharedStatus) -> Result<(Vec<Arc<dyn Tool>>, CanonPath), String> {
     let (actions, cwd) = {
         let current = status.lock().map_err(|_| "surface status is unavailable")?;
         let actions = current
@@ -288,9 +298,164 @@ fn prepare_permission_call(
         .cloned()
         .collect::<Vec<Arc<dyn Tool>>>();
     admitted.extend(capture.tools().iter().cloned());
-    prepare_from_catalogue(name, arguments, &workspace, &OsFs, &admitted)
-        .map(|call| (call, workspace))
-        .map_err(|error| error.to_string())
+    Ok((admitted, workspace))
+}
+
+fn read_permission_call(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    busy: bool,
+) -> PermissionCallField {
+    let (tools, workspace) = match permission_tools(status) {
+        Ok(tools) => tools,
+        Err(error) => return PermissionCallField::Cancelled(error),
+    };
+    let choices = tools
+        .iter()
+        .map(|tool| {
+            let descriptor = tool.descriptor();
+            (descriptor.name.clone(), descriptor.description.clone())
+        })
+        .collect::<Vec<_>>();
+    let borrowed = choices
+        .iter()
+        .map(|(id, label)| (id.as_str(), label.as_str()))
+        .collect::<Vec<_>>();
+    let name = match select_permission_value(
+        editor,
+        phase,
+        status,
+        busy,
+        "Choose admitted tool",
+        &borrowed,
+    ) {
+        PermissionField::Value(value) => value,
+        PermissionField::Cancelled => {
+            return PermissionCallField::Cancelled("tool selection was cancelled".into());
+        }
+        PermissionField::Propagate(line) => return PermissionCallField::Propagate(line),
+    };
+    let tool = tools
+        .iter()
+        .find(|tool| tool.descriptor().name == name)
+        .cloned();
+    let Some(tool) = tool else {
+        return PermissionCallField::Cancelled("the selected tool is no longer admitted".into());
+    };
+    let schema = match serde_json::to_value(tool.descriptor().schema) {
+        Ok(schema) => schema,
+        Err(error) => {
+            return PermissionCallField::Cancelled(format!(
+                "tool schema could not be rendered: {error}"
+            ));
+        }
+    };
+    let arguments = match edit_permission_parameters(
+        editor,
+        phase,
+        status,
+        busy,
+        schema,
+        serde_json::json!({}),
+    ) {
+        PermissionEditOutcome::Value(arguments) => arguments,
+        PermissionEditOutcome::Cancelled => {
+            return PermissionCallField::Cancelled("tool parameter editing was cancelled".into());
+        }
+        PermissionEditOutcome::Propagate(line) => return PermissionCallField::Propagate(line),
+    };
+    let call = match prepare_from_catalogue(&name, &arguments, &workspace, &OsFs, &tools) {
+        Ok(call) => call,
+        Err(error) => return PermissionCallField::Cancelled(error.to_string()),
+    };
+    PermissionCallField::Value { call, workspace }
+}
+
+fn select_permission_value(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    busy: bool,
+    prompt: &str,
+    choices: &[(&str, &str)],
+) -> PermissionField {
+    if choices.is_empty() {
+        return PermissionField::Cancelled;
+    }
+    let request = QuestionRequest::new(
+        prompt,
+        QuestionMode::Single,
+        choices
+            .iter()
+            .map(|(id, label)| QuestionOption::new(*id, *label))
+            .collect(),
+        false,
+    );
+    let selector = Arc::new(Mutex::new(Selector::with_options(
+        SelectorKind::Single,
+        request
+            .options
+            .iter()
+            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone())),
+    )));
+    let saved = enter_modal(editor, phase, status);
+    status
+        .lock()
+        .expect("surface status lock")
+        .question_selector = Some(Arc::clone(&selector));
+    repaint_status(status);
+    let result = loop {
+        let question = Question::new(
+            question_selector_prompt(&request, &selector),
+            Arc::clone(status),
+        );
+        match answer(false, editor.read_line(&question)) {
+            Line::HostCommand(HostCommand::QuestionSelector(command)) => {
+                let Some(key) = question_selector_key(&command) else {
+                    continue;
+                };
+                let mut selector = selector.lock().expect("permission value selector lock");
+                selector.key(key);
+                if key == SelectorKey::Escape {
+                    break PermissionField::Cancelled;
+                }
+                if key != SelectorKey::Enter {
+                    drop(selector);
+                    repaint_status(status);
+                    continue;
+                }
+                let Some(SelectorValue::Single(id)) = selector.result() else {
+                    continue;
+                };
+                break PermissionField::Value(id.clone());
+            }
+            line @ (Line::Ended | Line::ExternalBreak(_)) => {
+                break PermissionField::Propagate(line);
+            }
+            Line::Submitted(_)
+            | Line::Blank
+            | Line::Interrupted
+            | Line::Refused(_)
+            | Line::HostCommand(_) => break PermissionField::Cancelled,
+        }
+    };
+    status
+        .lock()
+        .expect("surface status lock")
+        .question_selector = None;
+    leave_modal(
+        editor,
+        phase,
+        status,
+        saved,
+        if busy {
+            EditPhase::Busy
+        } else {
+            EditPhase::Idle
+        },
+    );
+    result
 }
 
 fn permission_failure(status: &SharedStatus, error: impl std::fmt::Display) -> Option<Line> {
@@ -391,64 +556,12 @@ pub(super) fn choose_policy_mode(
     );
 
     match choice {
-        PolicyModeChoice::Selected(mode) => match controller.select_mode(mode) {
-            Some(request) => Some(Line::HostCommand(HostCommand::Policy(request))),
-            None => confirm_yolo(editor, phase, status, busy, &mut controller),
-        },
+        PolicyModeChoice::Selected(mode) => controller
+            .select_mode(mode)
+            .map(|request| Line::HostCommand(HostCommand::Policy(request))),
         PolicyModeChoice::Cancelled => None,
         PolicyModeChoice::Propagate(line) => Some(line),
     }
-}
-
-pub(super) fn confirm_yolo(
-    editor: &mut Reedline,
-    phase: &SurfacePhase,
-    status: &SharedStatus,
-    busy: bool,
-    controller: &mut PolicyControlController,
-) -> Option<Line> {
-    let saved = enter_modal(editor, phase, status);
-    let prompt = Question::new(
-        "Type yolo to confirm relaxed execution policy: ".to_owned(),
-        Arc::clone(status),
-    );
-    let outcome = match answer(false, editor.read_line(&prompt)) {
-        Line::Submitted(value) => controller.confirm_yolo(ModalInput::Text(value)),
-        Line::Interrupted | Line::HostCommand(HostCommand::Interrupt) => {
-            controller.confirm_yolo(ModalInput::CtrlC)
-        }
-        Line::Ended => controller.confirm_yolo(ModalInput::Eof),
-        Line::ExternalBreak(buffer) => {
-            let _ = controller.confirm_yolo(ModalInput::Cancel);
-            leave_modal(
-                editor,
-                phase,
-                status,
-                saved,
-                if busy {
-                    EditPhase::Busy
-                } else {
-                    EditPhase::Idle
-                },
-            );
-            return Some(Line::ExternalBreak(buffer));
-        }
-        Line::Blank | Line::Refused(_) | Line::HostCommand(_) => {
-            controller.confirm_yolo(ModalInput::Cancel)
-        }
-    };
-    leave_modal(
-        editor,
-        phase,
-        status,
-        saved,
-        if busy {
-            EditPhase::Busy
-        } else {
-            EditPhase::Idle
-        },
-    );
-    outcome.map(|request| Line::HostCommand(HostCommand::Policy(request)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

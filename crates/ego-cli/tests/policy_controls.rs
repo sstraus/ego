@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use ego_cli::repl::actions::{ActionId, ActionKind, ActionRegistry, Dispatch, InputOrigin};
 use ego_cli::repl::policy_controls::{
-    FrozenPolicyResolver, GenerationPolicySelection, ModalInput, PermissionInput,
-    PolicyApplicationOwner, PolicyControlController, PolicyControlError, PolicyControlRequest,
-    PreflightPort, RememberPreview, RememberRequest, RuleMutationReceipt,
+    FrozenPolicyResolver, GenerationPolicySelection, PermissionInput, PolicyApplicationOwner,
+    PolicyControlController, PolicyControlError, PolicyControlRequest, PreflightPort,
+    RememberPreview, RememberRequest, RuleMutationReceipt,
 };
 use ego_core::config::{
     ManagedConfigKey, Mode, RuleMutation, RuleSnapshot, Ruleset, Source, UserConfigError,
@@ -249,23 +249,10 @@ fn presenter_mode_selector_has_exact_values_and_emits_plan_each_time() {
 }
 
 #[test]
-fn presenter_yolo_requires_exact_lowercase_and_cancel_paths_emit_no_request() {
-    for input in [
-        ModalInput::Cancel,
-        ModalInput::CtrlC,
-        ModalInput::Eof,
-        ModalInput::Text("YOLO".into()),
-        ModalInput::Text("yolo ".into()),
-    ] {
-        let mut presenter = PolicyControlController::new();
-        presenter.begin_yolo();
-        assert_eq!(presenter.confirm_yolo(input), None);
-    }
-
+fn presenter_yolo_stages_directly_without_a_confirmation_state() {
     let mut presenter = PolicyControlController::new();
-    presenter.begin_yolo();
     assert_eq!(
-        presenter.confirm_yolo(ModalInput::Text("yolo".into())),
+        presenter.select_mode(Mode::Yolo),
         Some(PolicyControlRequest::SetMode(Mode::Yolo))
     );
 }

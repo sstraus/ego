@@ -126,7 +126,8 @@ pub(super) struct ForkCommand {
     pub(super) common: Common,
 }
 
-/// `ego compact ID --request-id UUID` — no implicit idempotency identity.
+/// `ego compact ID [--request-id UUID]` — the ordinary command mints its
+/// idempotency identity; an advanced caller may retain a known identity.
 #[derive(Debug, Parser)]
 #[command(
     name = "ego compact",
@@ -137,7 +138,7 @@ pub(super) struct CompactCommand {
     pub(super) source: String,
 
     #[arg(long = "request-id")]
-    pub(super) request_id: String,
+    pub(super) request_id: Option<String>,
 
     #[command(flatten)]
     pub(super) common: Common,

@@ -56,6 +56,12 @@ impl EditMode for SurfaceEditMode {
         } else {
             false
         };
+        let permission_modal = self.phase.get() == EditPhase::Modal
+            && self
+                .status
+                .lock()
+                .expect("surface status lock")
+                .permission_modal;
 
         if self.phase.get() != EditPhase::Modal && dismisses_notice(&raw) {
             self.status.lock().expect("surface status lock").notice = None;
@@ -113,6 +119,29 @@ impl EditMode for SurfaceEditMode {
                     question_selector_command("escape")
                 }
                 Event::Resize(_, _) => ReedlineEvent::None,
+                _ => ReedlineEvent::None,
+            };
+        }
+
+        if permission_modal {
+            return match &raw {
+                Event::Key(key) if key.modifiers.is_empty() => match key.code {
+                    KeyCode::Char('y' | 'Y') => permission_decision_command("allow"),
+                    KeyCode::Char('n' | 'N') => permission_decision_command("deny"),
+                    KeyCode::Char('e' | 'E') => permission_decision_command("amend"),
+                    KeyCode::Char('r' | 'R') => permission_decision_command("remember"),
+                    KeyCode::Enter => ReedlineEvent::None,
+                    KeyCode::Esc => {
+                        ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.to_string())
+                    }
+                    _ => ReedlineEvent::None,
+                },
+                Event::Key(key)
+                    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.to_string())
+                }
+                Event::Resize(_, _) | Event::Paste(_) => ReedlineEvent::None,
                 _ => ReedlineEvent::None,
             };
         }
@@ -201,4 +230,8 @@ fn picker_command(command: &str) -> ReedlineEvent {
 
 fn question_selector_command(command: &str) -> ReedlineEvent {
     ReedlineEvent::ExecuteHostCommand(format!("{QUESTION_SELECTOR_COMMAND}{command}"))
+}
+
+fn permission_decision_command(command: &str) -> ReedlineEvent {
+    ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}{command}"))
 }

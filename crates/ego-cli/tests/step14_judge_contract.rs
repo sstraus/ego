@@ -556,24 +556,20 @@ fn inexpressible_judge_wire_refuses_before_generation_or_session_creation() {
 }
 
 #[test]
-fn auto_without_a_judge_configuration_fails_before_any_judge_attempt() {
+fn auto_without_a_judge_configuration_starts_without_an_advisory_generation() {
     let stub = Stub::start(Plan::default());
     let finished = auto_args(Ego::against(&stub)).run();
 
     assert_eq!(
         finished.code,
-        Some(2),
-        "missing judge configuration was accepted"
-    );
-    assert!(
-        finished.stderr.contains("requires") && finished.stderr.contains("judge"),
-        "missing judge failure did not name the required configuration: {}",
+        Some(0),
+        "deterministic auto work without a judge did not start: {}",
         finished.stderr
     );
-    assert_eq!(
-        stub.generations().len(),
-        0,
-        "a missing judge must not reach a provider"
+    assert!(
+        stub.generations().len() == 1,
+        "a missing judge must not produce an advisory generation: {:?}",
+        stub.generations()
     );
 }
 

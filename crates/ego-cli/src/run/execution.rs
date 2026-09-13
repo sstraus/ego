@@ -52,6 +52,7 @@ async fn resolve_invocation_phase(
                 diagnostics,
             )
             .map_err(usage)?;
+            enable_trusted_interactive_auto(&mut settings, driver);
             let auto_preflight = Arc::new(CliAutoPreflight::capture(
                 &settings.effective,
                 &settings.confinement,
@@ -88,6 +89,18 @@ async fn resolve_invocation_phase(
                 chosen_session: Some(chosen_session),
             })
         }
+    }
+}
+
+/// The terminal's normal trusted-workspace flow is automatic analysis. An
+/// explicit command/config choice remains authoritative, and noninteractive
+/// runs keep their existing default because they have no human fallback.
+fn enable_trusted_interactive_auto(settings: &mut Settings, driver: &Driver<'_>) {
+    if settings.trust == Trust::Trusted
+        && settings.effective.mode.is_none()
+        && matches!(driver, Driver::Interactive { seat, .. } if seat.has_human())
+    {
+        settings.effective.mode = Some(Mode::Auto);
     }
 }
 
@@ -691,8 +704,9 @@ async fn prepare_generation_phase(
         }
         _ => None,
     };
-    if let (Some(status), Some(_)) = (host.status.as_ref(), policy_application.as_ref()) {
-        status.seat.enable_policy_controls();
+    if let (Some(status), Some(owner)) = (host.status.as_ref(), policy_application.as_ref()) {
+        let rules: Arc<dyn repl::PermissionRuleApplication> = owner.clone();
+        status.seat.enable_policy_controls(rules);
     }
     Ok((generation, policy_application))
 }

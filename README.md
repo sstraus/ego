@@ -111,9 +111,11 @@ cargo run -p ego-cli -- -m ollama/qwen3
 ```
 
 εgo asks whether to trust project files before reading project config or
-ambient instructions. Permission questions accept `allow`, `deny`, or `amend`;
-an amendment is a complete JSON object containing the tool's replacement
-parameters. `Ctrl+D` ends the session.
+ambient instructions. In a trusted interactive workspace, deterministic local
+low/bounded calls use automatic analysis without a ritual confirmation; high,
+unknown, external, credential, or irreversible effects retain their existing
+decision paths. `/yolo` switches the session policy immediately; `Ctrl+D` ends
+the session.
 
 For a headless one-shot whose stdout can be piped:
 

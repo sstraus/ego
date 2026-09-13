@@ -5,7 +5,9 @@
 
 use std::sync::{Arc, RwLock};
 
-use ego_core::config::rule_management::{EffectiveRule, RuleExplanation, RuleMutationComparison};
+use ego_core::config::rule_management::{
+    EffectiveRule, RememberPlan, RuleExplanation, RuleMutationComparison,
+};
 use ego_core::config::{
     Mode, RuleMutation, RuleSnapshot, Ruleset, UserConfigStore, UserConfigTarget,
 };
@@ -26,15 +28,6 @@ const MODE_OPTIONS: [Mode; 5] = [
     Mode::Edits,
     Mode::Yolo,
 ];
-
-/// One input delivered while the presenter owns a confirmation modal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModalInput {
-    Cancel,
-    CtrlC,
-    Eof,
-    Text(String),
-}
 
 /// A read-only operation over the generation's admitted permission rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,51 +50,28 @@ pub enum PolicyControlRequest {
     Permission(PermissionInput),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum ModalState {
-    #[default]
-    Idle,
-    ConfirmingYolo,
+/// The live seat's narrow bridge to the one CLI-owned atomic rule writer.
+pub trait PermissionRuleApplication: Send + Sync {
+    fn remember_allow(&self, plan: RememberPlan) -> Result<String, PolicyControlError>;
 }
 
 /// Presenter-owned modal state for the interactive policy controls.
 #[derive(Debug, Default)]
-pub struct PolicyControlController {
-    modal: ModalState,
-}
+pub struct PolicyControlController;
 
 impl PolicyControlController {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     pub fn mode_options(&self) -> [Mode; 5] {
         MODE_OPTIONS
     }
 
-    /// Select a mode, opening confirmation instead of emitting `yolo`.
+    /// Stage the selected mode. Choosing an explicit mode is already an
+    /// intentional local control action, including the relaxed `yolo` mode.
     pub fn select_mode(&mut self, mode: Mode) -> Option<PolicyControlRequest> {
-        if mode == Mode::Yolo {
-            self.begin_yolo();
-            return None;
-        }
-        self.modal = ModalState::Idle;
         Some(PolicyControlRequest::SetMode(mode))
-    }
-
-    pub fn begin_yolo(&mut self) {
-        self.modal = ModalState::ConfirmingYolo;
-    }
-
-    /// Consume one confirmation modal. Only the exact word `yolo` emits.
-    pub fn confirm_yolo(&mut self, input: ModalInput) -> Option<PolicyControlRequest> {
-        let modal = std::mem::take(&mut self.modal);
-        match (modal, input) {
-            (ModalState::ConfirmingYolo, ModalInput::Text(value)) if value == "yolo" => {
-                Some(PolicyControlRequest::SetMode(Mode::Yolo))
-            }
-            _ => None,
-        }
     }
 }
 
@@ -496,6 +466,25 @@ impl PolicyApplicationOwner {
             .selection
             .stage(resolution.next.mode, resolution.next.ruleset)?;
         Ok((receipt, staging))
+    }
+}
+
+impl PermissionRuleApplication for PolicyApplicationOwner {
+    fn remember_allow(&self, plan: RememberPlan) -> Result<String, PolicyControlError> {
+        let preview = RememberPreview::presented_allow(plan);
+        let PolicyControlOutcome::Rule { receipt, .. } =
+            self.apply_permission(PermissionInput::ConfirmRemember(preview))?
+        else {
+            return Err(PolicyControlError::RuleManagement {
+                diagnostic: "remembering a presented call returned a non-rule outcome".into(),
+            });
+        };
+        let mut rows =
+            crate::rules::render_remember_result_rows(&UserConfigTarget::Base, Some(&receipt));
+        if let Some(warning) = crate::rules::publication_warning_text(&receipt.publication()) {
+            rows.push(warning);
+        }
+        Ok(rows.join("; "))
     }
 }
 
