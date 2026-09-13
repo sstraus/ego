@@ -1,18 +1,17 @@
 {
   "body": {
-    "model": "gpt-5.6-sol",
-    "stream": true,
-    "store": false,
     "input": [
       {
-        "role": "user",
-        "content": "Reply with the single word: ok"
+        "content": "Reply with the single word: ok",
+        "role": "user"
       }
     ],
+    "model": "gpt-5.6-sol",
     "reasoning": {
       "effort": "medium"
     },
-    "max_output_tokens": 16
+    "store": false,
+    "stream": true
   },
   "header_names": [
     "content-type",
