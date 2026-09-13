@@ -1,5 +1,6 @@
 use super::*;
 use crate::repl::policy_controls::PolicyControlRequest;
+use crossterm::event::KeyEvent;
 use std::io::{self, BufReader, Cursor, Read};
 
 // The sequential adapter consumes BufRead input without constructing
@@ -157,6 +158,113 @@ fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
 }
 
 #[test]
+fn multiline_notice_stands_above_the_composer() {
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        notice: Some("Commands\n  /help  Show help".to_owned()),
+        ..SurfaceStatus::default()
+    }));
+    let waiting = Waiting::new(status);
+
+    assert_eq!(
+        waiting
+            .render_prompt_indicator(PromptEditMode::Emacs)
+            .as_ref(),
+        "Commands\n  /help  Show help\n> "
+    );
+}
+
+#[test]
+fn help_routes_to_scrollback_instead_of_becoming_a_multiline_prompt() {
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::new(
+        ActionRegistry::final_surface(),
+    ))));
+
+    let line = apply_surface_effect(
+        &mut editor,
+        &phase,
+        &status,
+        SurfaceActionEffect::Help,
+        false,
+    );
+
+    assert_eq!(
+        line,
+        Some(Line::HostCommand(HostCommand::Action(ActionId::Help)))
+    );
+    assert_eq!(status.lock().unwrap().notice, None);
+}
+
+#[test]
+fn typing_dismisses_a_local_result_while_the_turn_phase_is_busy() {
+    let phase = SurfacePhase::new(EditPhase::Busy);
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        notice: Some("Commands\n  /help  Show help".to_owned()),
+        ..SurfaceStatus::default()
+    }));
+    let mut mode = SurfaceEditMode::with_status(Emacs::default(), phase, Arc::clone(&status));
+    let key = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+        KeyCode::Char('n'),
+        KeyModifiers::NONE,
+    )))
+    .expect("key event");
+
+    mode.parse_event(key);
+
+    assert_eq!(status.lock().unwrap().notice, None);
+}
+
+#[test]
+fn control_commands_do_not_dismiss_a_local_result() {
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        notice: Some("1 unsent draft".to_owned()),
+        ..SurfaceStatus::default()
+    }));
+    let mut mode = SurfaceEditMode::with_status(Emacs::default(), phase, Arc::clone(&status));
+    let eof = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL,
+    )))
+    .expect("key event");
+
+    mode.parse_event(eof);
+
+    assert_eq!(
+        status.lock().unwrap().notice.as_deref(),
+        Some("1 unsent draft")
+    );
+}
+
+#[test]
+fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
+    use ego_core::config::{StatusSegmentName as Segment, StatuslineLayer};
+
+    assert_eq!(
+        effective_statusline_segments(None),
+        vec![
+            Segment::Model,
+            Segment::Effort,
+            Segment::Mode,
+            Segment::Context,
+            Segment::Queue,
+            Segment::Drafts,
+            Segment::Interrupt,
+            Segment::Cwd,
+            Segment::Git,
+            Segment::Trust,
+        ]
+    );
+    assert!(
+        effective_statusline_segments(Some(&StatuslineLayer {
+            segments: Some(Vec::new()),
+        }))
+        .is_empty()
+    );
+}
+
+#[test]
 fn help_uses_registry_rows_and_preserves_them_at_narrow_widths() {
     let registry = ActionRegistry::final_surface();
     let expected = registry
@@ -166,6 +274,20 @@ fn help_uses_registry_rows_and_preserves_them_at_narrow_widths() {
 
     for width in [80, 60, 40] {
         let rendered = render_action_help(&registry, width);
+        for section in [
+            "Discover",
+            "Model",
+            "Control",
+            "Session",
+            "Integrations",
+            "Surface",
+        ] {
+            assert!(
+                rendered.lines().any(|line| line == section),
+                "missing {section:?} section at width {width}:\n{rendered}"
+            );
+        }
+        assert!(rendered.ends_with('─'));
         let compact = rendered
             .chars()
             .filter(|character| !character.is_whitespace())
@@ -210,6 +332,7 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
                 &registry,
             )))),
             git_worker: Mutex::new(None),
+            output_owner: Mutex::new(None),
             owner: Mutex::new(None),
         }),
         terminal: true,

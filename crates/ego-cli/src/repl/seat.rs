@@ -13,8 +13,9 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use reedline::{
     ColumnarMenu, Completer, CompletionResult, EditCommand, EditMode, Emacs, ExternalPrinter,
-    KeyCode, KeyModifiers, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline,
-    ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Span, Suggestion, default_emacs_keybindings,
+    KeyCode, KeyModifiers, Menu, MenuBuilder, MenuEvent, Painter, Prompt, PromptEditMode,
+    PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Span, Suggestion,
+    default_emacs_keybindings,
 };
 
 use super::actions::{
@@ -175,6 +176,9 @@ impl Completer for ActionCompleter {
         if filter.contains(char::is_whitespace) {
             return CompletionResult::fresh(Vec::<Suggestion>::new());
         }
+        if position == line.len() && self.registry.resolve_slash(filter).is_some() {
+            return CompletionResult::fresh(Vec::<Suggestion>::new());
+        }
         let mut suggestions = self
             .registry
             .menu(filter)
@@ -207,6 +211,105 @@ impl Completer for ActionCompleter {
             },
         ));
         CompletionResult::fresh(suggestions)
+    }
+}
+
+/// Reedline 0.44 keeps a completion menu active after its values become empty.
+/// For an exact action that makes the next Enter accept an empty menu instead
+/// of submitting the command. This adapter preserves ColumnarMenu behavior and
+/// closes it only when the authoritative completer has no remaining choice.
+struct ActionMenu {
+    inner: ColumnarMenu,
+}
+
+impl ActionMenu {
+    fn new(inner: ColumnarMenu) -> Self {
+        Self { inner }
+    }
+}
+
+impl Menu for ActionMenu {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn indicator(&self) -> &str {
+        self.inner.indicator()
+    }
+
+    fn is_active(&self) -> bool {
+        self.inner.is_active()
+    }
+
+    fn set_active(&mut self, active: bool) {
+        self.inner.set_active(active);
+    }
+
+    fn clear_input(&mut self) {
+        self.inner.clear_input();
+    }
+
+    fn reset_position(&mut self) {
+        self.inner.reset_position();
+    }
+
+    fn menu_event(&mut self, event: MenuEvent) {
+        self.inner.menu_event(event);
+    }
+
+    fn can_quick_complete(&self) -> bool {
+        self.inner.can_quick_complete()
+    }
+
+    fn can_partially_complete(
+        &mut self,
+        values_updated: bool,
+        editor: &mut reedline::Editor,
+        completer: &mut dyn Completer,
+    ) -> bool {
+        self.inner
+            .can_partially_complete(values_updated, editor, completer)
+    }
+
+    fn update_values(&mut self, editor: &mut reedline::Editor, completer: &mut dyn Completer) {
+        self.inner.update_values(editor, completer);
+        if self.inner.get_values().is_empty() {
+            self.inner.menu_event(MenuEvent::Deactivate);
+        }
+    }
+
+    fn update_working_details(
+        &mut self,
+        editor: &mut reedline::Editor,
+        completer: &mut dyn Completer,
+        painter: &Painter,
+    ) {
+        self.inner
+            .update_working_details(editor, completer, painter);
+    }
+
+    fn replace_in_buffer(&self, editor: &mut reedline::Editor) {
+        self.inner.replace_in_buffer(editor);
+    }
+
+    fn menu_required_lines(&self, terminal_columns: u16) -> u16 {
+        self.inner.menu_required_lines(terminal_columns)
+    }
+
+    fn menu_string(&self, available_lines: u16, use_ansi_coloring: bool) -> String {
+        self.inner.menu_string(available_lines, use_ansi_coloring)
+    }
+
+    fn min_rows(&self) -> u16 {
+        self.inner.min_rows()
+    }
+
+    fn get_values(&self) -> &[Suggestion] {
+        self.inner.get_values()
+    }
+
+    fn set_cursor_pos(&mut self, cursor: (u16, u16)) {
+        self.inner.set_cursor_pos(cursor);
     }
 }
 
@@ -411,6 +514,27 @@ pub struct StatusSetup {
     pub git: Option<Arc<dyn GitFactsSource>>,
 }
 
+pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentName] = &[
+    ego_core::config::StatusSegmentName::Model,
+    ego_core::config::StatusSegmentName::Effort,
+    ego_core::config::StatusSegmentName::Mode,
+    ego_core::config::StatusSegmentName::Context,
+    ego_core::config::StatusSegmentName::Queue,
+    ego_core::config::StatusSegmentName::Drafts,
+    ego_core::config::StatusSegmentName::Interrupt,
+    ego_core::config::StatusSegmentName::Cwd,
+    ego_core::config::StatusSegmentName::Git,
+    ego_core::config::StatusSegmentName::Trust,
+];
+
+pub(crate) fn effective_statusline_segments(
+    configured: Option<&ego_core::config::StatuslineLayer>,
+) -> Vec<ego_core::config::StatusSegmentName> {
+    configured
+        .and_then(|statusline| statusline.segments.clone())
+        .unwrap_or_else(|| DEFAULT_STATUSLINE_SEGMENTS.to_vec())
+}
+
 /// Local and durable input that still exists when the session exits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExitCounts {
@@ -451,8 +575,18 @@ impl SurfacePhase {
 }
 
 /// The bounded, row-framing producer handed to interactive renderers.
+enum SurfaceSender {
+    Direct(Sender<String>),
+    Pumped(Sender<SurfaceMessage>),
+}
+
+enum SurfaceMessage {
+    Row(String),
+    Barrier(Sender<()>),
+}
+
 pub struct SurfaceOutput {
-    sender: Sender<String>,
+    sender: SurfaceSender,
     pending: String,
     cancel: CancelToken,
 }
@@ -460,10 +594,48 @@ pub struct SurfaceOutput {
 impl SurfaceOutput {
     pub fn new(sender: Sender<String>, cancel: CancelToken) -> Self {
         Self {
-            sender,
+            sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             cancel,
         }
+    }
+
+    pub(super) fn pumped(
+        external: Sender<String>,
+        cancel: CancelToken,
+    ) -> (Self, std::thread::JoinHandle<()>) {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let pump_cancel = cancel.clone();
+        let owner = std::thread::Builder::new()
+            .name("ego-output-pump".to_string())
+            .spawn(move || {
+                while let Ok(message) = receiver.recv() {
+                    match message {
+                        SurfaceMessage::Row(row) => {
+                            if external.send(row).is_err() {
+                                pump_cancel.cancel(CancelCause::Host);
+                                break;
+                            }
+                        }
+                        SurfaceMessage::Barrier(reply) => {
+                            if external.send(String::new()).is_err() {
+                                pump_cancel.cancel(CancelCause::Host);
+                                break;
+                            }
+                            let _ = reply.send(());
+                        }
+                    }
+                }
+            })
+            .expect("output pump thread");
+        (
+            Self {
+                sender: SurfaceSender::Pumped(sender),
+                pending: String::new(),
+                cancel,
+            },
+            owner,
+        )
     }
 
     pub fn write(&mut self, text: &str) -> Result<(), SendError<String>> {
@@ -481,18 +653,30 @@ impl SurfaceOutput {
             self.send(row)?;
         }
 
-        // `finish` is the barrier before the terminal owner's shutdown. The
-        // capacity-one queue makes this empty sentinel wait until Reedline has
-        // taken the preceding row. Reedline drains the queue in one loop and
-        // an empty string has no visible lines, so the sole owner is committed
-        // to painting prior output without introducing another terminal writer.
-        self.send(String::new())
+        match &self.sender {
+            SurfaceSender::Direct(_) => self.send(String::new()),
+            SurfaceSender::Pumped(sender) => {
+                let (reply, answer) = bounded(0);
+                let result = sender
+                    .send(SurfaceMessage::Barrier(reply))
+                    .map_err(|_| SendError(String::new()))
+                    .and_then(|()| answer.recv().map_err(|_| SendError(String::new())));
+                result.inspect_err(|_| self.cancel.cancel(CancelCause::Host))
+            }
+        }
     }
 
     fn send(&self, row: String) -> Result<(), SendError<String>> {
-        self.sender.send(row).inspect_err(|_| {
-            self.cancel.cancel(CancelCause::Host);
-        })
+        let result = match &self.sender {
+            SurfaceSender::Direct(sender) => sender.send(row),
+            SurfaceSender::Pumped(sender) => {
+                let failed = row.clone();
+                sender
+                    .send(SurfaceMessage::Row(row))
+                    .map_err(|_| SendError(failed))
+            }
+        };
+        result.inspect_err(|_| self.cancel.cancel(CancelCause::Host))
     }
 }
 
@@ -544,6 +728,7 @@ struct LiveSeat {
     phase: SurfacePhase,
     status: SharedStatus,
     git_worker: Mutex<Option<GitWorker>>,
+    output_owner: Mutex<Option<std::thread::JoinHandle<()>>>,
     owner: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -636,9 +821,10 @@ impl Seat {
             .with_completer(Box::new(ActionCompleter {
                 registry: Arc::clone(&registry),
             }))
-            .with_menu(ReedlineMenu::EngineCompleter(Box::new(
+            .with_quick_completions(true)
+            .with_menu(ReedlineMenu::EngineCompleter(Box::new(ActionMenu::new(
                 ColumnarMenu::default().with_name(ACTION_MENU),
-            )))
+            ))))
             .use_bracketed_paste(true);
 
         let painter = Arc::new(InteractivePainter::live(editor.repaint_signal()));
@@ -648,7 +834,7 @@ impl Seat {
             status.cursor_selectors = true;
         }
         let printer = ExternalPrinter::new(CHANNEL_CAPACITY);
-        let output = SurfaceOutput::new(printer.sender(), cancel.clone());
+        let (output, output_owner) = SurfaceOutput::pumped(printer.sender(), cancel.clone());
         let startup_output = printer.receiver().clone();
         let break_signal = Arc::new(AtomicBool::new(false));
         let (input_sender, input) = bounded(CHANNEL_CAPACITY);
@@ -686,6 +872,7 @@ impl Seat {
                     phase,
                     status,
                     git_worker: Mutex::new(None),
+                    output_owner: Mutex::new(Some(output_owner)),
                     owner: Mutex::new(Some(owner)),
                 }),
                 terminal,
@@ -773,6 +960,9 @@ impl Seat {
             return;
         };
         if let Some(owner) = live.owner.lock().expect("terminal owner lock").take() {
+            let _ = owner.join();
+        }
+        if let Some(owner) = live.output_owner.lock().expect("output owner lock").take() {
             let _ = owner.join();
         }
         if let Some(worker) = live.git_worker.lock().expect("Git worker lock").take() {
@@ -1132,6 +1322,10 @@ impl crate::run::InteractiveSeat for Seat {
         }
     }
 
+    fn action_help(&self) -> String {
+        render_action_help(&self.registry, self.width().saturating_sub(4))
+    }
+
     fn read_startup_model(
         &self,
         picker: Arc<Mutex<ModelPicker>>,
@@ -1441,9 +1635,10 @@ mod permission;
 mod picker_surface;
 mod question;
 
-use action_execution::surface_line;
 #[cfg(test)]
-use action_execution::{apply_surface_effect, render_action_help};
+use action_execution::apply_surface_effect;
+pub(crate) use action_execution::render_action_help;
+use action_execution::surface_line;
 pub use edit_mode::SurfaceEditMode;
 pub(crate) use permission::Confirmation;
 #[cfg(test)]

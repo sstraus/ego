@@ -94,7 +94,7 @@ fn readable(raw: &str) -> String {
         let line = undouble(line.trim());
         // A bare marker is a prompt this harness happened to catch mid-draw,
         // with nothing typed into it yet.
-        if line == ">" || line == "…" {
+        if line == ">" || line == "…" || is_prompt_repaint(&line) {
             continue;
         }
         if line.is_empty() || lines.last().is_some_and(|last| *last == line) {
@@ -106,6 +106,13 @@ fn readable(raw: &str) -> String {
         .into_iter()
         .map(|line| format!("{line}\n"))
         .collect::<String>()
+}
+
+fn is_prompt_repaint(line: &str) -> bool {
+    line.replace("working — Esc cancels |", "")
+        .replace('>', "")
+        .trim()
+        .is_empty()
 }
 
 /// Drop a repaint that landed on the same line as the draw it replaced.
@@ -155,6 +162,13 @@ fn strip_escapes(raw: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&plain).into_owned()
+}
+
+#[test]
+fn readable_discards_status_prompt_repaints_but_keeps_transcript_rows() {
+    let raw = "hello\r\nworking — Esc cancels | > working — Esc cancels | >\r\nanswer\r\n> ";
+
+    assert_eq!(readable(raw), "hello\nanswer\n");
 }
 
 fn golden_path(case: &str) -> std::path::PathBuf {

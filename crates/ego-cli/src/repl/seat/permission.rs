@@ -521,18 +521,7 @@ pub(super) const STATUSLINE_PRESETS: [(&str, &str, &[ego_core::config::StatusSeg
         (
             "default",
             "Default — model, effort, mode, context, queue, drafts, interrupt, cwd, git, trust",
-            &[
-                Segment::Model,
-                Segment::Effort,
-                Segment::Mode,
-                Segment::Context,
-                Segment::Queue,
-                Segment::Drafts,
-                Segment::Interrupt,
-                Segment::Cwd,
-                Segment::Git,
-                Segment::Trust,
-            ],
+            DEFAULT_STATUSLINE_SEGMENTS,
         ),
         (
             "full",

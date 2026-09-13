@@ -348,13 +348,14 @@ fn the_table_renders_a_timestamp_a_person_can_read() {
     );
 }
 
-/// The epoch itself, and a date after a leap day, because the civil-from-days
-/// arithmetic is the one part of this file that is easy to get subtly wrong
-/// and impossible to notice: a wrong day in a listing looks like a listing.
+/// A missing timestamp is visibly absent rather than impersonating the Unix
+/// epoch. Real timestamps still exercise the leap-day edge of the calendar
+/// conversion.
 #[test]
 fn the_calendar_arithmetic_holds_at_the_edges() {
     let at = |millis| catalogue::table(&[meta(1, "/ws", millis)], false)[1].clone();
-    assert!(at(0).contains("1970-01-01 00:00"), "{}", at(0));
+    assert!(!at(0).contains("1970-01-01"), "{}", at(0));
+    assert!(at(0).contains('—'), "{}", at(0));
     // 2024-02-29T23:59:00Z — a leap day, and the last minute of it.
     assert!(
         at(1_709_251_140_000).contains("2024-02-29 23:59"),

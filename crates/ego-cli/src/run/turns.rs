@@ -83,6 +83,12 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn width(&self) -> usize {
         80
     }
+    fn action_help(&self) -> String {
+        crate::repl::render_action_help(
+            &crate::repl::actions::ActionRegistry::final_surface(),
+            self.width().saturating_sub(4),
+        )
+    }
     /// Collect a persistent model choice before the first run is materialized.
     fn read_startup_model(
         &self,

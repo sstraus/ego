@@ -122,7 +122,7 @@ async fn open_scope_phase(
         })
     {
         host.diagnostics.note(&format!(
-            "ego {} · model {model} · /help for commands · Alt-P for the model picker",
+            "ego {} · {model}\n     /help commands · Alt-P models",
             env!("CARGO_PKG_VERSION")
         ));
     }
@@ -744,13 +744,9 @@ fn activate_session_phase<'store, S: EventSink>(
                 mode: materialized.mode,
                 cwd: materialized.cwd.clone(),
                 trust: materialized.skill_trust,
-                segments: materialized
-                    .effective
-                    .ui
-                    .statusline
-                    .as_ref()
-                    .and_then(|statusline| statusline.segments.clone())
-                    .unwrap_or_default(),
+                segments: repl::effective_statusline_segments(
+                    materialized.effective.ui.statusline.as_ref(),
+                ),
                 width: status.width,
                 native: status.native,
                 git: Some(Arc::new(repl::status::GitCommand::status(

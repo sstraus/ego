@@ -1,8 +1,51 @@
 use super::*;
 
-pub(super) fn render_action_help(registry: &ActionRegistry, width: usize) -> String {
-    let mut logical = vec!["actions:".to_owned()];
-    logical.extend(registry.iter().map(|action| {
+pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> String {
+    const SECTIONS: [(&str, &[ActionId]); 6] = [
+        (
+            "Discover",
+            &[ActionId::Help, ActionId::Doctor, ActionId::Version],
+        ),
+        (
+            "Model",
+            &[ActionId::Model, ActionId::Thinking, ActionId::Usage],
+        ),
+        (
+            "Control",
+            &[
+                ActionId::Mode,
+                ActionId::Plan,
+                ActionId::Yolo,
+                ActionId::Permissions,
+            ],
+        ),
+        (
+            "Session",
+            &[
+                ActionId::Sessions,
+                ActionId::New,
+                ActionId::Fork,
+                ActionId::Compact,
+                ActionId::Name,
+                ActionId::Goal,
+                ActionId::Export,
+            ],
+        ),
+        (
+            "Integrations",
+            &[
+                ActionId::Mcp,
+                ActionId::Tools,
+                ActionId::Skills,
+                ActionId::Hooks,
+            ],
+        ),
+        (
+            "Surface",
+            &[ActionId::Statusline, ActionId::Clear, ActionId::Quit],
+        ),
+    ];
+    let render = |action: &crate::repl::actions::ActionRegistration| {
         let shortcut = action
             .shortcuts()
             .first()
@@ -20,15 +63,27 @@ pub(super) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 action.description_text()
             ),
             Availability::Enabled => format!(
-                "/{}{shortcut} — {}",
+                "  /{}{shortcut}  {}",
                 action.name(),
                 action.description_text()
             ),
         }
-    }));
+    };
+    let limit = width.max(1);
+    let mut logical = vec!["εgo commands".to_owned()];
+    for (section, ids) in SECTIONS {
+        logical.push(section.to_owned());
+        logical.extend(
+            registry
+                .iter()
+                .filter(|action| ids.contains(&action.id()))
+                .map(&render),
+        );
+    }
+    logical.push("─".repeat(limit));
     logical
         .into_iter()
-        .flat_map(|row| crate::render::Line::plain(row).wrap(width.max(1)))
+        .flat_map(|row| crate::render::Line::plain(row).wrap(limit))
         .map(|row| row.text())
         .collect::<Vec<_>>()
         .join("\n")
@@ -495,13 +550,7 @@ pub(super) fn apply_surface_effect(
             );
         }
         SurfaceActionEffect::Help => {
-            let help = {
-                let current = status.lock().expect("surface status lock");
-                current.actions.as_ref().map(|actions| {
-                    render_action_help(&actions.registry, current.width.saturating_sub(4))
-                })
-            };
-            status.lock().expect("surface status lock").notice = help;
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Help)));
         }
         SurfaceActionEffect::Clear => {
             let buffer = editor.current_buffer_contents().to_string();

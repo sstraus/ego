@@ -626,6 +626,8 @@ fn status_prefix(status: &SharedStatus) -> String {
     }
     if rows.is_empty() {
         String::new()
+    } else if rows.iter().any(|row| row.contains('\n')) {
+        format!("{}\n", rows.join("\n"))
     } else {
         format!("{} | ", rows.join(" | "))
     }

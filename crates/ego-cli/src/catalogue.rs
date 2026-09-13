@@ -238,6 +238,9 @@ pub(crate) fn plain_table(rows: Vec<Vec<String>>) -> Vec<String> {
 /// must not be two implementations of one calendar. What stays here is only
 /// the shape `ego ls` prints: minute precision, no seconds, no `T`.
 fn stamp(millis: u64) -> String {
+    if millis == 0 {
+        return "—".to_string();
+    }
     let at = Timestamp::from_millis(millis).civil();
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}",

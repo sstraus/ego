@@ -1,5 +1,6 @@
 mod support;
 
+use ego_cli::repl::actions::ActionRegistry;
 use portable_pty::{NativePtySystem, PtySize, PtySystem};
 use std::{
     io::{self, Read, Write},
@@ -324,6 +325,33 @@ fn until_post_trust_prompt(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<
     }
 }
 
+fn submit_local_action(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    input: &mut impl Write,
+    stub: &Stub,
+    command: &str,
+    expected: Option<&str>,
+) {
+    let start = output.len();
+    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+    input
+        .write_all(format!("/{command}\r").as_bytes())
+        .unwrap_or_else(|error| panic!("write /{command}: {error}"));
+    input
+        .flush()
+        .unwrap_or_else(|error| panic!("flush /{command}: {error}"));
+    if let Some(expected) = expected {
+        until_normalized_without_new_generation(receiver, output, start, expected, stub, 0);
+    }
+    until_prompt_after(receiver, output, prompt_count);
+    drain_until_quiet(receiver, output);
+    assert!(
+        stub.generations().is_empty(),
+        "/{command} leaked into a provider generation"
+    );
+}
+
 fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, previous: usize) {
     while output.windows(2).filter(|window| *window == b"> ").count() <= previous {
         let chunk = receiver
@@ -333,29 +361,6 @@ fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, 
                 panic!(
                     "prompt count did not advance beyond {previous}: {error}; output: {:?}",
                     normalized(output),
-                )
-            });
-        output.extend(chunk);
-    }
-}
-
-fn until_plain(
-    receiver: &mpsc::Receiver<Vec<u8>>,
-    output: &mut Vec<u8>,
-    start: usize,
-    needle: &str,
-) {
-    while !String::from_utf8_lossy(&strip_csi(&output[start..]))
-        .replace("\r\n", "\n")
-        .contains(needle)
-    {
-        let chunk = receiver
-            .recv_timeout(PROGRESS_DEADLINE)
-            .unwrap_or_else(|error| {
-                drain(receiver, output);
-                panic!(
-                    "plain PTY wait failed for {needle:?}: {error}; output: {:?}",
-                    String::from_utf8_lossy(&strip_csi(&output[start..])),
                 )
             });
         output.extend(chunk);
@@ -563,7 +568,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     let unsent_stash_start = output.len();
     input.write_all(b"\x13").expect("stash unsent draft");
     input.flush().expect("stash unsent draft flush");
-    until_from(&reader, &mut output, unsent_stash_start, b"> ");
+    until_post_trust_prompt(&reader, &mut output, unsent_stash_start);
     input.write_all(b"\x04").expect("EOF");
     input.flush().expect("EOF flush");
     until_normalized(&reader, &mut output, 0, "1 unsent draft");
@@ -852,8 +857,8 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     );
 
     let slash_start = output.len();
-    // The first Enter accepts the active completion; the second submits the
-    // now-complete slash command through the live action ingress.
+    // An exact registered action submits with the same single Enter as a
+    // normal prompt, even while its completion menu is active.
     input.write_all(b"/").expect("slash prefix");
     input.flush().expect("slash prefix flush");
     until_normalized_or_generation(&reader, &mut output, slash_start, "model", &stub);
@@ -861,7 +866,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     input.write_all(b"model").expect("model slash suffix");
     input.flush().expect("model slash suffix flush");
     until_normalized(&reader, &mut output, suffix_start, "/model");
-    input.write_all(b"\r\r").expect("model slash submit");
+    input.write_all(b"\r").expect("model slash submit");
     input.flush().expect("model slash flush");
     until_normalized_or_generation(&reader, &mut output, slash_start, "Select model", &stub);
     drain_until_quiet(&reader, &mut output);
@@ -955,6 +960,33 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     input.write_all(b"\x1b").expect("close slash menu");
     input.flush().expect("close slash menu flush");
     until_from(&reader, &mut output, menu_close_start, b"> ");
+    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+    input.write_all(b"\x03").expect("clear slash prefix");
+    input.flush().expect("clear slash prefix flush");
+    until_prompt_after(&reader, &mut output, prompt_count);
+
+    let partial_start = output.len();
+    input.write_all(b"/hel\r").expect("partial help command");
+    input.flush().expect("partial help flush");
+    drain_until_quiet(&reader, &mut output);
+    assert!(stub.generations().is_empty());
+    assert!(
+        !normalized(&output[partial_start..]).contains("Exit the interactive session"),
+        "a partial slash must complete without executing the action"
+    );
+    input
+        .write_all(b"\r")
+        .expect("submit completed help command");
+    input.flush().expect("completed help flush");
+    until_normalized_without_new_generation(
+        &reader,
+        &mut output,
+        partial_start,
+        "Exit the interactive session",
+        &stub,
+        0,
+    );
+    until_post_trust_prompt(&reader, &mut output, partial_start);
 
     let pasted_start = output.len();
     input
@@ -962,6 +994,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         .expect("pasted slash");
     input.flush().expect("pasted slash flush");
     until_normalized(&reader, &mut output, pasted_start, "PASTED-SLASH-PROMPT");
+    drain_until_quiet(&reader, &mut output);
+    assert!(
+        output[pasted_start..]
+            .windows(2)
+            .any(|window| window == b"> "),
+        "the composer must remain available after the pasted prompt"
+    );
     assert!(
         !normalized(&output[pasted_start..]).contains("Select model"),
         "pasted slash text stays a prompt instead of opening the picker"
@@ -1043,7 +1082,7 @@ fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
     let second = "typed follow-up two";
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(text("ARGV-SEED-REPLY")),
+            Reply::Sse(text("ARGV-SEED-FIRST\nARGV-SEED-SECOND")),
             Reply::Sse(text("FOLLOW-UP-ONE-REPLY")),
             Reply::Sse(text("FOLLOW-UP-TWO-REPLY")),
         ],
@@ -1087,19 +1126,39 @@ fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
     // cursor response. The first post-trust DSR followed by a prompt is the
     // observable boundary at which typed input is safe.
     until_post_trust_prompt(&reader, &mut output, post_trust_start);
-    until_normalized(&reader, &mut output, 0, "ARGV-SEED-REPLY");
+    until_normalized(&reader, &mut output, 0, "ARGV-SEED-SECOND");
+    drain_until_quiet(&reader, &mut output);
+    let visible =
+        String::from_utf8_lossy(&strip_csi(&output[post_trust_start..])).replace("\r\n", "\n");
+    let first_at = visible.find("ARGV-SEED-FIRST").expect("first streamed row");
+    let second_at = visible
+        .find("ARGV-SEED-SECOND")
+        .expect("final streamed row");
+    assert!(
+        first_at < second_at,
+        "streamed rows changed order: {visible:?}"
+    );
+    assert!(
+        !visible[first_at..second_at].contains("\n> "),
+        "the idle composer appeared before the final streamed row: {visible:?}"
+    );
 
     let help_start = output.len();
-    // The first Enter accepts Reedline's active slash completion and the
-    // second submits the completed command.
-    input.write_all(b"/help\r\r").expect("local help command");
+    input.write_all(b"/help\r").expect("local help command");
     input.flush().expect("local help flush");
-    until_normalized_without_new_generation(&reader, &mut output, help_start, "actions:", &stub, 1);
+    until_normalized_without_new_generation(
+        &reader,
+        &mut output,
+        help_start,
+        "/quit  Exit the interactive session",
+        &stub,
+        1,
+    );
     until_post_trust_prompt(&reader, &mut output, help_start);
 
     let refusal_start = output.len();
     input
-        .write_all(b"/mcp add\r\r")
+        .write_all(b"/mcp add\r")
         .expect("unsupported MCP command");
     input.flush().expect("unsupported MCP command flush");
     until_normalized_without_new_generation(
@@ -1238,13 +1297,12 @@ fn busy_ctrl_c_cancels_work_and_idle_double_ctrl_c_exits() {
     until_normalized(&reader, &mut output, cancel_start, "cancelling active work");
     until_prompt_after(&reader, &mut output, prompt_count);
 
-    let post_cancel_start = output.len();
     input
         .write_all(b"after cancel\r")
         .expect("post-cancel prompt");
     input.flush().expect("post-cancel prompt flush");
     until_normalized(&reader, &mut output, cancel_start, "AFTER-CANCEL");
-    until_plain(&reader, &mut output, post_cancel_start, "AFTER-CANCEL\n> ");
+    drain_until_quiet(&reader, &mut output);
     input.write_all(b"\x03").expect("first idle Ctrl-C");
     input.flush().expect("first idle Ctrl-C flush");
     thread::sleep(Duration::from_millis(50));
@@ -1501,6 +1559,153 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
 }
 
 #[test]
+fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
+    const COMMANDS: [&str; 24] = [
+        "help",
+        "model",
+        "thinking",
+        "mode",
+        "plan",
+        "yolo",
+        "permissions",
+        "mcp",
+        "sessions",
+        "fork",
+        "compact",
+        "clear",
+        "usage",
+        "statusline",
+        "export",
+        "doctor",
+        "quit",
+        "new",
+        "name",
+        "goal",
+        "tools",
+        "skills",
+        "hooks",
+        "version",
+    ];
+    assert_eq!(ActionRegistry::final_surface().names(), COMMANDS);
+
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# registered action PTY fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_prompt_after(&reader, &mut output, prompt_count);
+
+    submit_local_action(
+        &reader,
+        &mut output,
+        &mut input,
+        &stub,
+        "help",
+        Some("εgo commands"),
+    );
+
+    for (command, prompt) in [
+        ("model", "Select model"),
+        ("thinking", "Select reasoning for"),
+        ("mode", "Choose execution mode"),
+        ("permissions", "Choose permission operation"),
+        ("statusline", "Choose status-line setup"),
+    ] {
+        let start = output.len();
+        input
+            .write_all(format!("/{command}\r").as_bytes())
+            .unwrap_or_else(|error| panic!("write /{command}: {error}"));
+        input.flush().expect("modal action flush");
+        until_normalized_without_new_generation(&reader, &mut output, start, prompt, &stub, 0);
+        let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+        input.write_all(b"\x1b").expect("cancel modal action");
+        input.flush().expect("cancel modal action flush");
+        until_prompt_after(&reader, &mut output, prompt_count);
+        drain_until_quiet(&reader, &mut output);
+    }
+
+    submit_local_action(&reader, &mut output, &mut input, &stub, "plan", None);
+    let yolo_start = output.len();
+    input.write_all(b"/yolo\r").expect("yolo command");
+    input.flush().expect("yolo command flush");
+    until_normalized_without_new_generation(
+        &reader,
+        &mut output,
+        yolo_start,
+        "Type yolo to confirm relaxed execution policy",
+        &stub,
+        0,
+    );
+    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+    input.write_all(b"no\r").expect("decline yolo");
+    input.flush().expect("decline yolo flush");
+    until_prompt_after(&reader, &mut output, prompt_count);
+    drain_until_quiet(&reader, &mut output);
+
+    for (command, expected) in [
+        ("mcp", Some("mcp:")),
+        ("sessions", Some("UPDATED")),
+        ("fork", None),
+        ("compact", None),
+        ("clear", None),
+        ("usage", Some("usage as_of=")),
+        ("export", None),
+        ("doctor", Some("acp.extension:hold")),
+        ("new", None),
+        ("name", None),
+        ("goal", None),
+        ("tools", Some("tools:")),
+        ("skills", None),
+        ("hooks", None),
+        ("version", Some("ego 0.1.0")),
+    ] {
+        submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
+    }
+
+    let quit_start = output.len();
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drain(&reader, &mut output);
+    assert!(
+        normalized(&output[quit_start..]).contains("unsent drafts"),
+        "/quit did not render its explicit exit accounting"
+    );
+    assert!(stub.generations().is_empty());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+}
+
+#[test]
 fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub).conversing().args([
@@ -1550,13 +1755,13 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
 
         let help_start = output.len();
         let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
-        input.write_all(b"/help\r\r").expect("help command");
+        input.write_all(b"/help\r").expect("help command");
         input.flush().expect("help command flush");
         until_normalized_without_new_generation(
             &reader,
             &mut output,
             help_start,
-            "/version —",
+            "Surface",
             &stub,
             0,
         );
@@ -1564,7 +1769,7 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
 
         let doctor_start = output.len();
         let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
-        input.write_all(b"/doctor\r\r").expect("doctor command");
+        input.write_all(b"/doctor\r").expect("doctor command");
         input.flush().expect("doctor command flush");
         until_normalized_without_new_generation(
             &reader,

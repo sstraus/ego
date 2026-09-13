@@ -807,7 +807,9 @@ maintainer-selected surface; a missing implementation remains required work rath
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
 checks are projections of one action registry rather than parallel command
-implementations.
+implementations. An exact registered action executes with one `Enter`; a
+partial completion remains inert until explicitly submitted, and pasted slash
+text remains ordinary prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
 24-command action registry: a typed complete slash is classified as an action,
@@ -821,9 +823,11 @@ model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;
 configuration remains explicit through `ego mcp add|rm|ls`, and `/mcp add`
 points to that root syntax without consuming a provider turn.
 
-`/help` renders one row per action from that registry and `/doctor` wraps the
-shared health snapshot at the live terminal width. Both preserve every field
-at 80, 60, and 40 columns instead of relying on terminal reflow.
+`/help` renders task-oriented Discover, Model, Control, Session, Integrations
+and Surface groups from that registry into transcript scrollback. `/doctor`
+wraps the shared health snapshot at the live terminal width. Both preserve
+every field at 120, 80, 60, and 40 columns instead of relying on terminal
+reflow or attaching multiline output to the composer.
 
 `/mode`, `/plan`, `/yolo`, and `/permissions` are argument-free local modal
 actions. A direct-argument form such as `/mode edits` or `/permissions allow
@@ -900,7 +904,7 @@ bounded channels.
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+V | legacy image action unavailable | M5 removes the special image placeholder; the final surface leaves text paste to the terminal/editor and uses `--attach` for images |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
-| Slash commands | **partly** | one shared 24-command registry drives typed-slash classification, completion, menu, help, and dispatch. Enabled actions have installed local handlers; unavailable actions remain registered and name their owning subsystem |
+| Slash commands | **yes** | one shared 24-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
 | Ctrl-S drafts, prompt queue, steering | **yes** | exact LIFO drafts, durable FIFO busy input, safe-boundary steering, expedited Esc delivery, replay, and exit accounting |
 | Model/question menus and status line | **yes** | the shared model picker, typed question path, and width-aware status projection are live |
@@ -910,12 +914,14 @@ bounded channels.
 ### 6.3 Live composer, drafts, queue, and steering
 
 The composer remains editable while a provider streams, a tool runs, or the
-harness waits at an interactive boundary. Renderer output enters the
-interactive surface through a bounded channel; reedline's external printer
-appends it above the composer and restores the exact buffer and cursor. In
-interactive mode reedline is therefore the terminal writer. In headless modes
-the existing renderer remains the writer. There is never one of each writing
-the same terminal.
+harness waits at an interactive boundary. Renderer output enters a seat-owned
+output pump; only that pump may block on reedline's bounded external-printer
+channel. Reedline appends rows above the composer and restores the exact buffer
+and cursor. A finish barrier commits every accepted row before the next idle
+prompt, so control input remains responsive without reordering the transcript.
+In interactive mode reedline is therefore the terminal writer. In headless
+modes the existing renderer remains the writer. There is never one of each
+writing the same terminal.
 
 `Ctrl-S` with a non-empty composer pushes the exact multiline buffer onto a
 session-local LIFO draft stash and clears the composer. `Ctrl-S` with an empty
@@ -947,8 +953,9 @@ its real outcome is recorded; every not-yet-run sibling call closes with an
 explicit interrupted result. Only after the complete batch and interrupted
 turn are durable are all unacknowledged steers replayed in FIFO order as one
 fresh user turn. Repeated `Esc` with the same tail is idempotent; a later tail
-can extend the durable expedited prefix. `Esc` with no pending input retains
-ordinary interrupt behaviour.
+can extend the durable expedited prefix. `Esc` with no pending input requests
+ordinary cancellation immediately, including while output is under terminal
+backpressure.
 
 The three input states do not overlap. A **Draft** is a local LIFO editor stash.
 A durable **PendingSteer** is FIFO input accepted during a busy regular turn. A
@@ -1012,6 +1019,10 @@ second override language:
 [ui.statusline]
 segments = ["model", "effort", "mode", "context", "queue", "drafts", "interrupt", "cwd", "git", "trust"]
 ```
+
+When `ui.statusline.segments` is absent, the surface uses that `default` order
+in memory and does not mutate configuration. An explicitly stored empty list
+is distinct and disables the row.
 
 `/statusline` offers named setup presets but writes that ordered list. An empty
 list disables the row. When width is insufficient, lower-priority segments

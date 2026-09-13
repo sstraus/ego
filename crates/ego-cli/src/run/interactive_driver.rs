@@ -555,7 +555,13 @@ pub(super) async fn interactive_through(
         picker: None,
         model_config_store: None,
     };
-    let between = || text_sink.finish();
+    let between = || {
+        text_sink.finish();
+        // A terminal output queue is asynchronous. Its empty sentinel is the
+        // barrier that commits the final answer row before `seat.idle()` may
+        // repaint a fresh composer for the next turn.
+        output.finish();
+    };
     let ended = match execute(
         args,
         |_| &text_sink as &dyn EventSink,

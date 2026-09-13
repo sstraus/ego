@@ -14,6 +14,8 @@ pub mod status;
 pub mod surface;
 
 pub(crate) use seat::Confirmation;
+pub(crate) use seat::effective_statusline_segments;
+pub(crate) use seat::render_action_help;
 pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };
@@ -352,6 +354,13 @@ mod live_surface_red {
     fn edit_mode_submits_busy_input_to_the_host_and_delegates_idle_and_characters() {
         let phase = SurfacePhase::new(EditPhase::Busy);
         let mut mode = SurfaceEditMode::new(Emacs::default(), phase.clone());
+        let escape =
+            ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+                .unwrap();
+        assert_eq!(
+            mode.parse_event(escape),
+            ReedlineEvent::ExecuteHostCommand(INTERRUPT_COMMAND.to_string())
+        );
         let enter = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
             KeyCode::Enter,
             KeyModifiers::NONE,
@@ -410,5 +419,46 @@ mod live_surface_red {
             cancel.cause(),
             Some(ego_core::event::domain::CancelCause::Host)
         );
+    }
+
+    #[test]
+    fn live_output_pump_keeps_generation_production_cancellable_and_finish_is_a_barrier() {
+        let (external, rendered) = crossbeam::channel::bounded(1);
+        let cancel = ego_core::turn::CancelToken::new();
+        let (mut output, pump) = SurfaceOutput::pumped(external, cancel);
+
+        output.write("first\nsecond\nthird").unwrap();
+
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                output.finish().unwrap();
+                done_tx.send(()).unwrap();
+            });
+            assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+            assert_eq!(rendered.recv().unwrap(), "first\n");
+            assert_eq!(rendered.recv().unwrap(), "second\n");
+            assert_eq!(rendered.recv().unwrap(), "third");
+            assert_eq!(rendered.recv().unwrap(), "");
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        });
+        drop(rendered);
+        pump.join().expect("output pump thread panicked");
+    }
+
+    #[test]
+    fn live_output_pump_failure_cancels_the_host() {
+        let (external, rendered) = crossbeam::channel::bounded(1);
+        drop(rendered);
+        let cancel = ego_core::turn::CancelToken::new();
+        let (mut output, pump) = SurfaceOutput::pumped(external, cancel.clone());
+
+        output.write("undeliverable").unwrap();
+        assert!(output.finish().is_err());
+        assert_eq!(
+            cancel.cause(),
+            Some(ego_core::event::domain::CancelCause::Host)
+        );
+        pump.join().expect("output pump thread panicked");
     }
 }

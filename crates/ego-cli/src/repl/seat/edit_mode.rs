@@ -57,6 +57,10 @@ impl EditMode for SurfaceEditMode {
             false
         };
 
+        if self.phase.get() != EditPhase::Modal && dismisses_notice(&raw) {
+            self.status.lock().expect("surface status lock").notice = None;
+        }
+
         match &raw {
             Event::Paste(_) if !picker_open && !question_selector_open => {
                 self.status.lock().expect("surface status lock").origin =
@@ -155,15 +159,7 @@ impl EditMode for SurfaceEditMode {
                 Intercept::SubmitBusy if self.phase.get() == EditPhase::Busy => {
                     return ReedlineEvent::ExecuteHostCommand(BUSY_SUBMIT_COMMAND.to_string());
                 }
-                Intercept::Interrupt
-                    if self
-                        .status
-                        .lock()
-                        .expect("surface status lock")
-                        .queue
-                        .pending_steers
-                        > 0 =>
-                {
+                Intercept::Interrupt if self.phase.get() == EditPhase::Busy => {
                     return ReedlineEvent::ExecuteHostCommand(INTERRUPT_COMMAND.to_string());
                 }
                 Intercept::Editor | Intercept::SubmitBusy | Intercept::Interrupt => {}
@@ -181,6 +177,21 @@ impl EditMode for SurfaceEditMode {
 
     fn edit_mode(&self) -> PromptEditMode {
         self.editor.edit_mode()
+    }
+}
+
+fn dismisses_notice(event: &Event) -> bool {
+    match event {
+        Event::Paste(_) => true,
+        Event::Key(key)
+            if matches!(
+                key.code,
+                KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+            ) =>
+        {
+            key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+        }
+        _ => false,
     }
 }
 
