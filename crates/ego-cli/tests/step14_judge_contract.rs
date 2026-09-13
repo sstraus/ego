@@ -139,6 +139,16 @@ fn auto_args(ego: Ego) -> Ego {
     ])
 }
 
+fn run_without_durable_analysis(ego: Ego) -> support::Finished {
+    let cache = ego.home_path().join("permission-analysis/v1.json");
+    let finished = ego.run();
+    assert!(
+        !cache.exists(),
+        "a failed judge attempt created a durable opinion"
+    );
+    finished
+}
+
 fn hosted_auto_run(stub: &Stub) -> Ego {
     let ego = Ego::against(stub);
     ego.home_file(
@@ -279,6 +289,94 @@ fn auto_allow_uses_one_toolless_judge_and_then_executes_the_exact_call() {
         Some(true),
         MODEL,
         &["main", "judge", "main"],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn two_process_sessions_reuse_one_paid_analysis_and_mint_fresh_audit_authority() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            exec_request(),
+            judge_response("allow", "one exact observed image"),
+            Reply::Sse(text("first done")),
+            exec_request(),
+            Reply::Sse(text("second done")),
+        ],
+        ..Plan::default()
+    });
+    let build = || {
+        Ego::at(home.path(), workspace.path(), Some(&stub))
+            .env("ANTHROPIC_API_KEY", "sk-test")
+            .args([
+                "--model",
+                HOSTED_MODEL,
+                "--thinking",
+                "off",
+                "--mode",
+                "auto",
+                "--sandbox",
+                "off",
+                "--output",
+                "json",
+                "Ask",
+            ])
+    };
+    let first = build();
+    first.home_file(
+        "config.toml",
+        "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
+    );
+    first.home_file("models.toml", ANTHROPIC_FACTS);
+    let finished = first.run();
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    let cache_path = home.path().join("permission-analysis/v1.json");
+    let before = std::fs::read(&cache_path).expect("complete image analysis was persisted");
+    let finished = build().run();
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    assert_eq!(
+        stub.generations().len(),
+        5,
+        "the second session must not generate a judge opinion"
+    );
+    assert_eq!(
+        std::fs::read(cache_path).unwrap(),
+        before,
+        "a hit must not rewrite the cache"
+    );
+    let mut decisions = Vec::new();
+    let mut judge_generations = 0;
+    for session in std::fs::read_dir(home.path().join("sessions")).unwrap() {
+        let session = session.unwrap();
+        let path = session.path().join("events.jsonl");
+        if !path.is_file() {
+            continue;
+        }
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            let event = &record["payload"]["event"];
+            if event["kind"]["kind"] == "GenerationStarted" && event["kind"]["role"] == "judge" {
+                judge_generations += 1;
+            }
+            if event["kind"]["kind"] == "PermissionDecided" {
+                assert_eq!(event["kind"]["allowed"], true);
+                decisions.push((session.file_name(), event["kind"]["by"]["by"].clone()));
+            }
+        }
+    }
+    assert_eq!(judge_generations, 1);
+    assert_eq!(decisions.len(), 2);
+    assert_ne!(
+        decisions[0].0, decisions[1].0,
+        "the permits belong to distinct sessions"
+    );
+    assert!(decisions.iter().any(|(_, authority)| authority == "judge"));
+    assert!(
+        decisions
+            .iter()
+            .any(|(_, authority)| authority == "cached_judge")
     );
 }
 
@@ -550,7 +648,7 @@ fn malformed_judge_responses_escalate_without_repair_or_a_second_attempt() {
 
     for body in malformed {
         let stub = Stub::start(plan(Reply::Sse(text(body)), None));
-        let finished = auto_run(&stub).run();
+        let finished = run_without_durable_analysis(auto_run(&stub));
 
         assert_eq!(
             finished.code,
@@ -571,7 +669,7 @@ fn a_judge_tool_call_is_uncertainty_not_permission() {
         Reply::Sse(tool_call("judge-tool", "read", r#"{"path":"/etc/hosts"}"#)),
         None,
     ));
-    let finished = auto_run(&stub).run();
+    let finished = run_without_durable_analysis(auto_run(&stub));
 
     assert_eq!(
         finished.code,
@@ -590,7 +688,7 @@ fn judge_provider_failure_escalates_once_without_retrying_or_executing() {
     let stub = Stub::start(plan(Reply::Status(500), None));
     let ego = auto_run(&stub);
     let config = ego.home_file("config.toml", "[permissions]\njudge = \"ollama/qwen3\"\n");
-    let finished = ego.run();
+    let finished = run_without_durable_analysis(ego);
 
     assert_eq!(
         finished.code,
@@ -612,7 +710,7 @@ fn judge_aggregate_output_cap_escalates_and_never_parses_a_prefix() {
         "x".repeat(16 * 1024)
     );
     let stub = Stub::start(plan(Reply::Sse(text(&oversized)), None));
-    let finished = auto_run(&stub).run();
+    let finished = run_without_durable_analysis(auto_run(&stub));
 
     assert_eq!(
         finished.code,
@@ -630,7 +728,7 @@ fn judge_aggregate_output_cap_escalates_and_never_parses_a_prefix() {
 fn truncated_judge_stream_escalates_after_one_settled_attempt() {
     let truncated = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"{\\\"verdict\\\":\\\"allow\\\"\"},\"finish_reason\":null}]}\n\n";
     let stub = Stub::start(plan(Reply::Sse(truncated.to_string()), None));
-    let finished = auto_run(&stub).run();
+    let finished = run_without_durable_analysis(auto_run(&stub));
 
     assert_eq!(
         finished.code,
@@ -650,7 +748,7 @@ fn judge_reservation_uses_the_shared_budget_gate_and_budget_exits_before_judge_c
         judge_response("allow", "this response must never be requested"),
         Some(Reply::Sse(text("done"))),
     ));
-    let finished = hosted_auto_run(&stub).run();
+    let finished = run_without_durable_analysis(hosted_auto_run(&stub));
 
     assert_eq!(
         finished.code,

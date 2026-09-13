@@ -290,6 +290,27 @@ the final grammar.
     --deny RULE         repeatable; deny beats allow
 ```
 
+Auto analysis reuses an opinion only for the same executable content and
+identity, interpreter/script observations, exact arguments, captured cwd and
+environment, workspace trust/boundary, generation policy, confinement and
+measured backend capabilities, and resolved judge/prompt revision. Risk is
+recomputed on every call: deterministic low/bounded native operations settle
+without a paid judge; high requires human judgment; unknown stays unknown
+even when the judge allows it. Dynamic shell/import/package behavior is never
+safe merely because of its executable name. The judge receives argument
+lengths/digests rather than source or environment values.
+
+Analysis lives outside the workspace and transcript at
+`$EGO_HOME/permission-analysis/v1.json` (private 0700 directory, 0600 file on
+Unix; at most 1024 entries and 4 MiB). Hits do not write or generate a new judge
+opinion. Cache failures are misses with diagnostics; an opinion never grants
+a persistent rule or bypasses a new deny, plan mode or the workspace boundary.
+Deleting this advisory document only causes future analysis to run again.
+Incomplete identity cannot reuse allow. The captured target and environment
+are used for execution; observed movement triggers one fresh preparation and
+policy pass. Repeated movement executes nothing. A pathname race after the
+final check remains possible; ego does not copy executable files.
+
 A rule's head names an **effect** and never a tool: `exec(git *)`, not
 `bash(git *)`. A tool-named rule's coverage is a function of the tool
 inventory, so every new tool that shells out is a silent hole in every rule

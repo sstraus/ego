@@ -19,6 +19,11 @@ use crate::event::hook::HookId;
 use crate::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
 use crate::store::evidence::EvidenceRead;
 
+pub(crate) fn frame(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+}
+
 /// One canonical operation a `Tool::execute` intends to perform.
 ///
 /// [`GuardedIo`](super::GuardedIo) covers both the filesystem operations and
@@ -414,6 +419,19 @@ impl PreparedCall {
         &self.ops
     }
 
+    /// Acquisition changes only the spawn observation, not delegation provenance.
+    pub(crate) fn observe_processes(
+        mut self,
+        process: &dyn super::ProcessExecutor,
+    ) -> Result<Self, super::ProcessError> {
+        for op in &mut self.ops {
+            if let Op::Spawn { spec } = op {
+                *spec = process.observe(spec)?;
+            }
+        }
+        Ok(self)
+    }
+
     pub fn into_parts(self) -> (String, Vec<Op>) {
         (self.tool, self.ops)
     }
@@ -593,8 +611,131 @@ impl PreparedCall {
     /// without exposing their values.
     pub fn authority_fingerprint(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"ego:prepared-call:v2\0");
-        digest.update(format!("{self:?}").as_bytes());
+        frame(&mut digest, b"ego:prepared-call:v3");
+        frame(&mut digest, self.tool.as_bytes());
+        frame(
+            &mut digest,
+            &[match self.provenance {
+                PreparedCallProvenance::Native => 0,
+                PreparedCallProvenance::CapturedForeign => 1,
+            }],
+        );
+        frame(&mut digest, &(self.ops.len() as u64).to_be_bytes());
+        for op in &self.ops {
+            frame(&mut digest, op.name().to_string().as_bytes());
+            // Reuse the existing versioned native-byte subject codec.
+            frame(
+                &mut digest,
+                &serde_json::to_vec(&op.subject(&CanonPath::new("/")))
+                    .expect("closed subject codec"),
+            );
+            match op {
+                Op::List { pattern, .. } => frame(&mut digest, pattern.as_bytes()),
+                Op::Search { query, .. } => frame(&mut digest, query.as_bytes()),
+                Op::Write { change, .. } => match change {
+                    Change::Whole(bytes) => {
+                        frame(&mut digest, b"whole");
+                        frame(&mut digest, bytes);
+                    }
+                    Change::Replace {
+                        old_string,
+                        new_string,
+                    } => {
+                        frame(&mut digest, b"replace");
+                        frame(&mut digest, old_string.as_bytes());
+                        frame(&mut digest, new_string.as_bytes());
+                    }
+                },
+                Op::Spawn { spec } => {
+                    for binding in spec.env_policy().exact_bindings() {
+                        frame(&mut digest, binding.name().as_os_str().as_encoded_bytes());
+                        frame(&mut digest, binding.expose_value().expose_secret_bytes());
+                        frame(&mut digest, &[u8::from(binding.value_os_string().is_ok())]);
+                    }
+                    frame(&mut digest, &[u8::from(spec.identity().is_some())]);
+                    if let Some(identity) = spec.identity() {
+                        frame(
+                            &mut digest,
+                            identity.target.as_path().as_os_str().as_encoded_bytes(),
+                        );
+                        frame(&mut digest, &[u8::from(identity.dynamic_code)]);
+                        frame(&mut digest, &(identity.files.len() as u64).to_be_bytes());
+                        for file in &identity.files {
+                            frame(
+                                &mut digest,
+                                file.named.as_path().as_os_str().as_encoded_bytes(),
+                            );
+                            frame(
+                                &mut digest,
+                                file.resolved.as_path().as_os_str().as_encoded_bytes(),
+                            );
+                            frame(&mut digest, &[u8::from(file.content.is_some())]);
+                            if let Some(content) = &file.content {
+                                frame(&mut digest, content);
+                            }
+                            frame(&mut digest, &file.platform);
+                        }
+                        use super::analysis::IdentityFailure;
+                        frame(
+                            &mut digest,
+                            &identity
+                                .failures
+                                .iter()
+                                .map(|failure| match failure {
+                                    IdentityFailure::Unavailable => 0,
+                                    IdentityFailure::Resolution => 1,
+                                    IdentityFailure::Read => 2,
+                                    IdentityFailure::Changed => 3,
+                                    IdentityFailure::UnsupportedPlatform => 4,
+                                    IdentityFailure::ScriptUnresolved => 5,
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                }
+                Op::Opaque { transport, .. } => {
+                    frame(&mut digest, transport.to_string().as_bytes())
+                }
+                Op::Connect { request_digest, .. } => {
+                    frame(&mut digest, b"request");
+                    frame(&mut digest, request_digest.as_bytes());
+                }
+                Op::ProtocolConnect { .. } => frame(&mut digest, b"protocol"),
+                Op::SecretEgress { authority } => {
+                    frame(&mut digest, authority.hook.to_string().as_bytes());
+                    frame(&mut digest, authority.request_digest.as_bytes());
+                    frame(
+                        &mut digest,
+                        &serde_json::to_vec(&(&authority.sources, &authority.header_sinks))
+                            .expect("string lists"),
+                    );
+                }
+                Op::Read { .. } | Op::ReadEvidence { .. } => {}
+            }
+        }
+        frame(&mut digest, &[u8::from(self.mcp.is_some())]);
+        if let Some(envelope) = &self.mcp {
+            frame(
+                &mut digest,
+                &serde_json::to_vec(&(&envelope.subject, envelope.operation, &envelope.admission))
+                    .expect("closed MCP identity"),
+            );
+            frame(&mut digest, envelope.transport_fingerprint.as_bytes());
+            frame(&mut digest, envelope.transport.to_string().as_bytes());
+            frame(&mut digest, &envelope.parameters);
+        }
+        frame(&mut digest, &[u8::from(self.hook_http.is_some())]);
+        if let Some(envelope) = &self.hook_http {
+            frame(&mut digest, envelope.hook.to_string().as_bytes());
+            frame(
+                &mut digest,
+                super::ForeignTransportTarget::http(envelope.route.clone())
+                    .to_string()
+                    .as_bytes(),
+            );
+            frame(&mut digest, envelope.request_digest.as_bytes());
+            frame(&mut digest, &[u8::from(envelope.secret.is_some())]);
+        }
         digest.finalize().into()
     }
 

@@ -538,10 +538,9 @@ mod permit {
         let cases = [
             (Mode::Plan, Answer::Refused),
             (Mode::Default, Answer::Asked),
-            // PolicyEngine owns only the mode ceiling. TurnLoop inserts a
-            // separately resolved judge after this question and before the
-            // human seat, so the policy seam itself remains an Ask here.
-            (Mode::Auto, Answer::Asked),
+            // The deterministic bounded native write settles after the mode
+            // seat without consulting the optional judge.
+            (Mode::Auto, Answer::Authorized),
             (Mode::Edits, Answer::Authorized),
             (Mode::Yolo, Answer::Authorized),
         ];

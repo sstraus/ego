@@ -197,7 +197,8 @@ pub(super) async fn drive_execution<S: EventSink>(
             } else {
                 loop_
             };
-            loop_.with_execution_observation($observation, $probe_evidence)
+            super::composition::with_permission_analysis(loop_, skill_trust)
+                .with_execution_observation($observation, $probe_evidence)
         }};
     }
 
@@ -1358,7 +1359,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                     exec_caps: observation.capabilities(),
                                                 });
                                             }
-                                            let mut compaction = compaction
+                                            let mut compaction =
+                                                super::composition::with_permission_analysis(
+                                                    compaction,
+                                                    skill_trust,
+                                                )
                                                 .with_execution_observation(
                                                     observation,
                                                     probe_evidence,

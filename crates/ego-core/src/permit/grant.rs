@@ -1178,7 +1178,22 @@ impl PolicyEngine {
                 &pending.ask.why,
                 by,
             ))),
-            Verdict::Escalate { why } => Resolution::Ask(self.pending(pending.call, why)),
+            Verdict::Escalate { why } => {
+                if self.mode == Mode::Auto
+                    && super::analysis::assess(pending.call()).class
+                        <= super::analysis::RiskClass::Bounded
+                {
+                    let call = pending.call;
+                    let permit = self.mint(scope_of(&call));
+                    Resolution::Settled(Ok(Authorized {
+                        call,
+                        permit,
+                        by: Authority::Mode { mode: self.mode },
+                    }))
+                } else {
+                    Resolution::Ask(self.pending(pending.call, why))
+                }
+            }
         }
     }
 
@@ -1190,6 +1205,11 @@ impl PolicyEngine {
         outcome: &super::judge::JudgeOutcome,
         by: Authority,
     ) -> Resolution {
+        if self.mode != Mode::Auto
+            || super::analysis::assess(pending.call()).class == super::analysis::RiskClass::High
+        {
+            return Resolution::Ask(pending);
+        }
         match outcome {
             super::judge::JudgeOutcome::Allow { .. } => {
                 let call = pending.call;
@@ -1568,6 +1588,46 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn analysis_model_cannot_lower_high_risk_or_create_authority_outside_auto() {
+        use crate::permit::analysis::{RiskClass, RiskReason, assess};
+        use crate::permit::judge::JudgeOutcome;
+        let target = NetworkTarget::new("example.com", 443).unwrap();
+        let call = PreparedCall::hook_http(
+            crate::event::hook::HookId::parse(&format!("h1:{}", "11".repeat(32))).unwrap(),
+            crate::permit::HttpRoute::new(crate::permit::HttpScheme::Https, target.clone())
+                .unwrap(),
+            &HttpRequest::get("/").unwrap(),
+            vec!["credential".into()],
+        );
+        let risk = assess(&call);
+        assert_eq!(risk.class, RiskClass::High);
+        assert!(risk.reasons.contains(&RiskReason::SecretRelease));
+        for mode in [Mode::Auto, Mode::Plan, Mode::Default] {
+            let engine = PolicyEngine::new(CanonPath::new("/ws"), mode, Ruleset::default());
+            let pending = engine.pending(
+                call.clone(),
+                Escalation::NoRuleCoversSubject {
+                    op: OpName::SecretEgress,
+                    subject: Subject::Network(target.clone()),
+                },
+            );
+            assert!(matches!(
+                engine.settle_judge(
+                    pending,
+                    &JudgeOutcome::Allow {
+                        reason: "safe".into()
+                    },
+                    Authority::CachedJudge {
+                        model: crate::config::ModelRef("provider/model".into()),
+                        analysis: "11".repeat(32)
+                    }
+                ),
+                Resolution::Ask(_)
+            ));
+        }
+    }
     use crate::mcp::ToolExecution;
     use crate::permit::fake::{FakeFs, FakeWriteTool};
     use crate::permit::{

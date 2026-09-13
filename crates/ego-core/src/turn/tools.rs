@@ -513,6 +513,27 @@ impl<'a> Tools<'a> {
         };
         tool.prepare(params, &ctx)
             .map_err(|err: ToolError| err.to_string())
+            .and_then(|call| {
+                call.observe_processes(self.effects.process)
+                    .map_err(|error| error.to_string())
+            })
+    }
+
+    pub(crate) fn revalidate_processes(&self, call: &PreparedCall) -> Result<(), String> {
+        for op in call.ops() {
+            if let Op::Spawn { spec } = op {
+                self.effects
+                    .process
+                    .revalidate(spec)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn refresh_processes(&self, call: PreparedCall) -> Result<PreparedCall, String> {
+        call.observe_processes(self.effects.process)
+            .map_err(|error| error.to_string())
     }
 
     /// Stage two: ask policy what this call may do.

@@ -107,6 +107,19 @@ struct Attempt {
     >,
 }
 
+impl Attempt {
+    fn into_run(self) -> Result<Run, ProcessError> {
+        let (ports, observation, _) = self.outcome?;
+        Ok(Run {
+            _evidence_root: self.evidence_root,
+            evidence: self.evidence,
+            ports,
+            observation,
+            cancel: self.cancel,
+        })
+    }
+}
+
 struct ConfigFixture {
     evidence_root: tempfile::TempDir,
     session: SessionId,
@@ -173,14 +186,15 @@ fn open_run(
     preview: usize,
 ) -> Result<Run, ProcessError> {
     let attempt = attempt_run(level, offline, workspace, hard_cap, preview);
-    let (ports, observation, _) = attempt.outcome?;
-    Ok(Run {
-        _evidence_root: attempt.evidence_root,
-        evidence: attempt.evidence,
-        ports,
-        observation,
-        cancel: attempt.cancel,
-    })
+    if let Err(ProcessError::MissingCapabilities(missing)) = &attempt.outcome
+        && let Some(reference) = missing.probe_evidence()
+    {
+        eprintln!(
+            "confinement probe evidence: {}",
+            String::from_utf8_lossy(&read_evidence_pages(&attempt.evidence, reference))
+        );
+    }
+    attempt.into_run()
 }
 
 /// The one way a host may decline to demonstrate a confinement guarantee.
@@ -663,6 +677,38 @@ fn guarded_exec_runs_the_exact_argv_without_reparse_or_mutation() {
     assert!(debug.contains("literal * ; $(false)"));
 }
 
+#[cfg(unix)]
+#[test]
+fn analyzed_target_mutation_executes_neither_old_nor_replacement_image() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("image");
+    let old_marker = directory.path().join("old-marker");
+    let new_marker = directory.path().join("new-marker");
+    std::fs::write(&image, b"#!/bin/sh\nprintf old > \"$1\"\n").unwrap();
+    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root = CanonPath::new(std::fs::canonicalize(directory.path()).unwrap());
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let spec = SpawnSpec::new(
+        vec![
+            image.clone().into_os_string(),
+            old_marker.clone().into_os_string(),
+            new_marker.clone().into_os_string(),
+        ],
+        Some(root),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let captured = run.ports.process().observe(&spec).unwrap();
+    assert!(captured.identity().unwrap().complete());
+    std::fs::write(&image, b"#!/bin/sh\nprintf new > \"$2\"\n").unwrap();
+    let error = block_on(run.ports.process().execute(&captured)).unwrap_err();
+    assert!(error.to_string().contains("identity changed"));
+    assert!(!old_marker.exists());
+    assert!(!new_marker.exists());
+}
+
 #[test]
 fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_identity() {
     let root = cwd();
@@ -721,7 +767,24 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     assert_eq!(prepared_spec.argv()[0], OsString::from(executable_text));
     assert_eq!(prepared_spec.cwd(), Some(&root));
     assert_eq!(prepared_spec.timeout(), Some(Duration::from_millis(1000)));
-    assert_eq!(prepared_spec.env_policy(), &EnvPolicy::Inherited);
+    let EnvPolicy::Exact { bindings, .. } = prepared_spec.env_policy() else {
+        panic!("preparation must capture one exact environment before policy");
+    };
+    let expected_environment = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(bindings.len(), expected_environment.len());
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| binding.value_os_string().ok().as_ref()
+                == expected_environment.get(binding.name().as_os_str())),
+        "captured environment must contain the exact native values"
+    );
+    #[cfg(unix)]
+    assert!(
+        prepared_spec
+            .identity()
+            .is_some_and(|identity| identity.complete())
+    );
     let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
         panic!("the exact prepared exec must be authorized by its rule");
     };
@@ -2231,6 +2294,56 @@ fn udp_control(ip: std::net::IpAddr) -> (String, NetworkControl) {
     (endpoint, NetworkControl::Udp(socket))
 }
 
+#[cfg(target_os = "macos")]
+fn open_offline_control_run(workspace: CanonPath, nonloopback: std::net::IpAddr) -> Option<Run> {
+    let attempt = attempt_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
+    if let Err(ProcessError::MissingCapabilities(missing)) = &attempt.outcome {
+        assert_eq!(missing.required(), ExecCaps::NO_IP_NETWORK);
+        if std::env::var_os(BACKEND_ABSENT).is_some() {
+            return None;
+        }
+        let reference = missing
+            .probe_evidence()
+            .expect("measured refusal has evidence");
+        let bytes = read_evidence_pages(&attempt.evidence, reference);
+        let transcript = std::str::from_utf8(&bytes).expect("probe transcript is UTF-8");
+        let records: Vec<serde_json::Value> = transcript
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("probe record is JSON"))
+            .collect();
+        // The early host check is not a lease on network availability. Identity
+        // acquisition can take time. Re-establish this existing prerequisite
+        // at refusal, without accepting a failed confined half as host evidence.
+        let control_ran = records.iter().any(|record| {
+            record["suite"] == "offline.tcp-nonloopback.control" && record["outcome"] == "ok"
+        });
+        let receiver_failed = records
+            .iter()
+            .any(|record| record["suite"] == "offline.tcp-nonloopback.control.receiver");
+        let confined_ran = records
+            .iter()
+            .any(|record| record["suite"] == "offline.tcp-nonloopback");
+        assert!(
+            control_ran && receiver_failed && !confined_ran,
+            "offline failed without an unpaired host control: {transcript}"
+        );
+        assert!(
+            !non_loopback_control_pairs(nonloopback),
+            "independent host control still works; confinement must be demonstrated: {transcript}"
+        );
+        assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+        eprintln!(
+            "note: non-loopback pairing became unavailable during measurement; verified precise refusal against a fresh independent control"
+        );
+        return None;
+    }
+    Some(
+        attempt
+            .into_run()
+            .unwrap_or_else(|error| panic!("offline run failed: {error}")),
+    )
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
@@ -2285,17 +2398,19 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
         );
         execute(&baseline, network_spec.clone()).expect("paired network control must work");
 
-        // Accepting a refusal here as an outcome would make the whole test
-        // vacuous: a regression that stopped offline working anywhere would
-        // still pass. `open_confined_run` refuses that trade — it panics
-        // unless this host has declared it has no backend at all.
-        if let Some(offline) =
-            open_confined_run(Confinement::Off, true, workspace, 1024 * 1024, 1024)
-        {
+        // A refusal alone never passes. macOS additionally checks whether
+        // the independent network prerequisite changed during measurement.
+        #[cfg(target_os = "macos")]
+        let offline = open_offline_control_run(workspace, nonloopback);
+        #[cfg(not(target_os = "macos"))]
+        let offline = open_confined_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
+        if let Some(offline) = offline {
             assert!(
                 execute(&offline, network_spec).is_err(),
                 "offline child reached an IP endpoint"
             );
+        } else {
+            return;
         }
         match control {
             NetworkControl::Tcp(listener) => drop(listener),

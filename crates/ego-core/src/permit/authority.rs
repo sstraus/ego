@@ -93,4 +93,6 @@ pub enum Authority {
         model: ModelRef,
         attempt: AttemptRef,
     },
+    /// A previously generated opinion was reapplied after fresh policy checks.
+    CachedJudge { model: ModelRef, analysis: String },
 }

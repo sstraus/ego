@@ -2,6 +2,19 @@
 
 use super::*;
 
+pub(super) fn with_permission_analysis<'session: 'turn, 'turn>(
+    loop_: TurnLoop<'session, 'turn>,
+    trust: Trust,
+) -> TurnLoop<'session, 'turn> {
+    match crate::config::ego_home() {
+        Some(home) => loop_.with_permission_analysis_cache(
+            Arc::new(ego_tools::permission_analysis_cache::FilePermissionAnalysisCache::new(&home)),
+            trust,
+        ),
+        None => loop_,
+    }
+}
+
 pub(super) fn deadline(spec: &str) -> Result<Duration, UsageError> {
     crate::cli::duration_seconds(spec).map(Duration::from_secs)
 }

@@ -314,6 +314,7 @@ pub struct SpawnSpec {
     cwd: Option<CanonPath>,
     timeout: Option<Duration>,
     env: EnvPolicy,
+    identity: Option<Arc<super::analysis::ExecutionIdentity>>,
 }
 
 impl SpawnSpec {
@@ -346,6 +347,7 @@ impl SpawnSpec {
             cwd,
             timeout,
             env,
+            identity: None,
         })
     }
 
@@ -363,6 +365,21 @@ impl SpawnSpec {
 
     pub fn env_policy(&self) -> &EnvPolicy {
         &self.env
+    }
+
+    pub fn identity(&self) -> Option<&super::analysis::ExecutionIdentity> {
+        self.identity.as_deref()
+    }
+
+    /// Bind host acquisition without changing the user argv used by rules.
+    pub fn with_execution_identity(
+        mut self,
+        env: EnvPolicy,
+        identity: super::analysis::ExecutionIdentity,
+    ) -> Self {
+        self.env = env;
+        self.identity = Some(Arc::new(identity));
+        self
     }
 }
 
@@ -940,6 +957,16 @@ impl std::error::Error for RunConfinementError {}
 
 /// Host process execution behind the permit-checking facade.
 pub trait ProcessExecutor: Send + Sync {
+    /// An adapter that cannot observe identity leaves it incomplete, never
+    /// inventing facts that could support reusable approval.
+    fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
+        Ok(spec.clone())
+    }
+
+    fn revalidate(&self, _spec: &SpawnSpec) -> Result<(), ProcessError> {
+        Ok(())
+    }
+
     fn execute<'a>(
         &'a self,
         spec: &'a SpawnSpec,

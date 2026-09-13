@@ -248,6 +248,7 @@ pub(super) async fn drive_headless_turn(
         Some(elicitor) => loop_.with_elicitor(elicitor),
         None => loop_,
     };
+    let loop_ = super::composition::with_permission_analysis(loop_, hook_trust);
     let mut loop_ = if judge_available {
         loop_.with_judge(JudgeContext {
             confinement: confinement.clone(),

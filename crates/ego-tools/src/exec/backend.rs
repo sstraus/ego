@@ -85,11 +85,15 @@ pub(crate) fn prefixed_command(
         .argv()
         .first()
         .ok_or_else(|| ProcessError::Invariant("an admitted SpawnSpec had empty argv".into()))?;
+    let executable = spec.identity().map_or(executable.as_os_str(), |identity| {
+        identity.target.as_path().as_os_str()
+    });
     let mut command = match prefix.program {
         Some(wrapper) => {
             let mut command = Command::new(wrapper);
             command.args(prefix.args_before_target);
-            command.args(spec.argv());
+            command.arg(executable);
+            command.args(&spec.argv()[1..]);
             command
         }
         None => {
@@ -106,6 +110,12 @@ pub(crate) fn prefixed_command(
     if let Some(cwd) = spec.cwd() {
         command.current_dir(cwd.as_path());
     }
+    command.env_clear();
+    command.envs(environment(spec)?);
+    Ok(command)
+}
+
+pub(super) fn environment(spec: &SpawnSpec) -> Result<Vec<(OsString, OsString)>, ProcessError> {
     let snapshot = match spec.env_policy() {
         EnvPolicy::Exact { bindings, .. } => bindings
             .iter()
@@ -120,9 +130,7 @@ pub(crate) fn prefixed_command(
             .filter(|(name, _)| admitted_name(name, policy))
             .collect::<Vec<_>>(),
     };
-    command.env_clear();
-    command.envs(snapshot);
-    Ok(command)
+    Ok(snapshot)
 }
 
 fn admitted_name(name: &OsStr, policy: &EnvPolicy) -> bool {
@@ -141,13 +149,13 @@ fn contains_name(names: &[ego_core::permit::EnvName], candidate: &OsStr) -> bool
 }
 
 #[cfg(windows)]
-fn env_name_eq(left: &OsStr, right: &OsStr) -> bool {
+pub(super) fn env_name_eq(left: &OsStr, right: &OsStr) -> bool {
     left.to_string_lossy()
         .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
 #[cfg(not(windows))]
-fn env_name_eq(left: &OsStr, right: &OsStr) -> bool {
+pub(super) fn env_name_eq(left: &OsStr, right: &OsStr) -> bool {
     left == right
 }
 

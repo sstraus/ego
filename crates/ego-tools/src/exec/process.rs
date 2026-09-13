@@ -142,6 +142,10 @@ pub(crate) async fn execute(
         }
     };
 
+    if let Err(error) = super::identity::revalidate(spec) {
+        let _ = abort_writers([stdout_writer, stderr_writer]).await;
+        return Err(error);
+    }
     let mut child = match ManagedChild::spawn(command) {
         Ok(child) => child,
         Err(error) => {

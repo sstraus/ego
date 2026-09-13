@@ -884,6 +884,11 @@ pub struct TurnLoop<'session, 'turn> {
     settlement_currency: crate::cost::CurrencyCode,
     config: TurnConfig,
     judge: Option<JudgeContext>,
+    analysis_cache: Option<(
+        Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
+        crate::config::Trust,
+    )>,
+    analysis_observation: Option<ExecObservation>,
     execution_observation: Option<(ExecObservation, Option<crate::store::evidence::EvidenceRef>)>,
     tools: Tools<'turn>,
     ancestor: Option<Conversation>,
@@ -1007,6 +1012,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             settlement_currency,
             config: runtime.config,
             judge: None,
+            analysis_cache: None,
+            analysis_observation: None,
             execution_observation: None,
             tools,
             ancestor: None,
@@ -1030,6 +1037,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         self
     }
 
+    pub fn with_permission_analysis_cache(
+        mut self,
+        cache: Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
+        trust: crate::config::Trust,
+    ) -> Self {
+        self.analysis_cache = Some((cache, trust));
+        self
+    }
+
     /// Replace the run's generation policy source during construction.
     pub fn with_policy_source(mut self, source: Arc<dyn GenerationPolicySource>) -> Self {
         self.policy_source = source;
@@ -1042,6 +1058,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         observation: ExecObservation,
         probe_evidence: Option<crate::store::evidence::EvidenceRef>,
     ) -> Self {
+        self.analysis_observation = Some(observation.clone());
         self.execution_observation = Some((observation, probe_evidence));
         self
     }
@@ -3862,10 +3879,17 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     async fn judge_pending(
         &mut self,
         policy: &PolicyEngine,
+        policy_snapshot: &GenerationPolicySnapshot,
         turn: TurnId,
         pending: &Pending,
     ) -> Result<JudgeRun, StoreError> {
         if policy.mode() != Mode::Auto {
+            return Ok(JudgeRun::Unavailable);
+        }
+        use crate::permit::analysis::{
+            AnalysisOpinion, RiskClass, assess, cache_key, complete_identity,
+        };
+        if assess(pending.call()).class == RiskClass::High {
             return Ok(JudgeRun::Unavailable);
         }
         let Some(judge) = self.judge.as_ref() else {
@@ -3909,6 +3933,70 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             request_model: profile.request_model.clone(),
             max_output_tokens: profile.output_ceiling(),
         };
+        let cache = self.analysis_cache.clone();
+        let key = cache.as_ref().zip(self.analysis_observation.as_ref()).map(
+            |((_, trust), observation)| {
+                cache_key(
+                    pending.call(),
+                    &policy_snapshot.digest(),
+                    observation,
+                    *trust,
+                    &config,
+                )
+            },
+        );
+        let lease = if let Some(((cache, _), key)) = cache.as_ref().zip(key) {
+            match await_controlled(
+                &self.journal,
+                &self.cancel,
+                &mut self.control,
+                turn,
+                cache.acquire(key),
+                InterruptDisposition::Return,
+            )
+            .await
+            {
+                Controlled::Completed(Ok(lease)) => Some(lease),
+                Controlled::Completed(Err(message)) => {
+                    tracing::warn!(%message, "permission analysis cache unavailable");
+                    None
+                }
+                Controlled::Interrupted => {
+                    return Ok(JudgeRun::Ended(ExitReason::Cancelled(
+                        self.cancel.cause().unwrap_or(CancelCause::User),
+                    )));
+                }
+                Controlled::Failed(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        if let Some(lease) = &lease {
+            match lease.lookup() {
+                Ok(Some(opinion)) if opinion.reusable(complete_identity(pending.call())) => {
+                    let reason = "reused identity-bound analysis opinion".to_owned();
+                    let outcome = match opinion {
+                        AnalysisOpinion::Allow => JudgeOutcome::Allow { reason },
+                        AnalysisOpinion::Deny => JudgeOutcome::Deny { reason },
+                        AnalysisOpinion::Escalate => JudgeOutcome::Escalate { reason },
+                    };
+                    let analysis = key
+                        .expect("lease has a key")
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    return Ok(JudgeRun::Decided {
+                        outcome,
+                        by: Authority::CachedJudge {
+                            model: config.identity,
+                            analysis,
+                        },
+                    });
+                }
+                Err(message) => tracing::warn!(%message, "permission analysis cache miss"),
+                _ => {}
+            }
+        }
         let input = JudgeInput::new(
             pending.call(),
             &confinement,
@@ -4093,7 +4181,22 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             )));
         }
 
-        let outcome = decoder.finish();
+        let decoded = decoder.finish_valid();
+        if let (Ok(outcome), Some(lease)) = (&decoded, &lease) {
+            let opinion = match outcome {
+                JudgeOutcome::Allow { .. } => AnalysisOpinion::Allow,
+                JudgeOutcome::Deny { .. } => AnalysisOpinion::Deny,
+                JudgeOutcome::Escalate { .. } => AnalysisOpinion::Escalate,
+            };
+            if opinion.reusable(complete_identity(pending.call()))
+                && let Err(message) = lease.insert(opinion)
+            {
+                tracing::warn!(%message, "permission analysis cache publication failed");
+            }
+        }
+        let outcome = decoded.unwrap_or_else(|reason| JudgeOutcome::Escalate {
+            reason: reason.to_owned(),
+        });
         let by = Authority::Judge {
             model: config.identity,
             attempt: reference,
@@ -4390,193 +4493,44 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             return Ok(answered(false, "blocked by PreToolUse hook".to_owned()));
         }
         let hook_selector = prepared.tool().to_owned();
+        let mut identity_refreshes = 0;
         let authorized = loop {
-            match self.tools.authorize(policy, prepared) {
-                Classification::Settled(Ok(authorized)) => {
-                    self.decided(turn, call, &hook_selector, true, authorized.by().clone())
-                        .await?;
-                    break authorized;
-                }
-                Classification::Settled(Err(denial)) => {
-                    self.decided(turn, call, &hook_selector, false, denial.authority())
-                        .await?;
-                    return Ok(ToolOutcome::Refused { denial });
-                }
-                Classification::Ask(pending) => {
-                    let resolution = await_controlled(
-                        &self.journal,
-                        &self.cancel,
-                        &mut self.control,
-                        turn,
-                        self.tools.settle(policy, pending),
-                        InterruptDisposition::Return,
-                    )
-                    .await;
-                    let resolution = match resolution {
-                        Controlled::Completed(resolution) => resolution,
-                        Controlled::Interrupted => {
-                            self.decided(turn, call, &hook_selector, false, Authority::Party)
-                                .await?;
-                            return Ok(answered(false, "interrupted: permission denied".into()));
-                        }
-                        Controlled::Failed(cause) => return Err(cause),
-                    };
-                    match resolution {
-                        Resolution::Settled(Ok(authorized)) => {
-                            self.decided(turn, call, &hook_selector, true, authorized.by().clone())
-                                .await?;
-                            break authorized;
-                        }
-                        Resolution::Settled(Err(denial)) => {
-                            self.decided(turn, call, &hook_selector, false, denial.authority())
-                                .await?;
-                            return Ok(ToolOutcome::Refused { denial });
-                        }
-                        Resolution::Ask(pending) => {
-                            if !self.requested(turn, call, pending.request()).await? {
+            let authorized = loop {
+                match self.tools.authorize(policy, prepared) {
+                    Classification::Settled(Ok(authorized)) => {
+                        self.decided(turn, call, &hook_selector, true, authorized.by().clone())
+                            .await?;
+                        break authorized;
+                    }
+                    Classification::Settled(Err(denial)) => {
+                        self.decided(turn, call, &hook_selector, false, denial.authority())
+                            .await?;
+                        return Ok(ToolOutcome::Refused { denial });
+                    }
+                    Classification::Ask(pending) => {
+                        let resolution = await_controlled(
+                            &self.journal,
+                            &self.cancel,
+                            &mut self.control,
+                            turn,
+                            self.tools.settle(policy, pending),
+                            InterruptDisposition::Return,
+                        )
+                        .await;
+                        let resolution = match resolution {
+                            Controlled::Completed(resolution) => resolution,
+                            Controlled::Interrupted => {
+                                self.decided(turn, call, &hook_selector, false, Authority::Party)
+                                    .await?;
                                 return Ok(answered(
                                     false,
-                                    "blocked by PermissionRequest hook".to_owned(),
+                                    "interrupted: permission denied".into(),
                                 ));
                             }
-                            let pending = match self.judge_pending(policy, turn, &pending).await? {
-                                JudgeRun::Unavailable => pending,
-                                JudgeRun::Ended(ExitReason::Cancelled(_)) => {
-                                    self.decided(
-                                        turn,
-                                        call,
-                                        &hook_selector,
-                                        false,
-                                        Authority::Party,
-                                    )
-                                    .await?;
-                                    return Ok(answered(
-                                        false,
-                                        "interrupted: permission denied".into(),
-                                    ));
-                                }
-                                JudgeRun::Ended(reason) => return Ok(ToolOutcome::Ended(reason)),
-                                JudgeRun::Decided { outcome, by } => {
-                                    self.judge_decided(
-                                        turn,
-                                        call,
-                                        &hook_selector,
-                                        &outcome,
-                                        by.clone(),
-                                    )
-                                    .await?;
-                                    match self.tools.settle_judge(policy, pending, &outcome, by) {
-                                        Resolution::Settled(Ok(authorized)) => break authorized,
-                                        Resolution::Settled(Err(denial)) => {
-                                            return Ok(ToolOutcome::Refused { denial });
-                                        }
-                                        Resolution::Ask(pending) => pending,
-                                        Resolution::HumanSettled { .. }
-                                        | Resolution::Reclassify { .. } => {
-                                            unreachable!(
-                                                "a judge cannot produce a human resolution"
-                                            )
-                                        }
-                                    }
-                                }
-                            };
-                            let decision = await_controlled(
-                                &self.journal,
-                                &self.cancel,
-                                &mut self.control,
-                                turn,
-                                self.tools.decide(policy, call.item, pending),
-                                InterruptDisposition::Return,
-                            )
-                            .await;
-                            let decision = match decision {
-                                Controlled::Completed(decision) => decision,
-                                Controlled::Interrupted => {
-                                    self.decided(
-                                        turn,
-                                        call,
-                                        &hook_selector,
-                                        false,
-                                        Authority::Party,
-                                    )
-                                    .await?;
-                                    return Ok(answered(
-                                        false,
-                                        "interrupted: permission denied".into(),
-                                    ));
-                                }
-                                Controlled::Failed(cause) => return Err(cause),
-                            };
-                            match decision {
-                                Resolution::Ask(pending) => {
-                                    return Ok(ToolOutcome::Unanswerable { pending });
-                                }
-                                Resolution::HumanSettled { result, .. } => match result {
-                                    Ok(authorized) => {
-                                        self.decided(
-                                            turn,
-                                            call,
-                                            &hook_selector,
-                                            true,
-                                            authorized.by().clone(),
-                                        )
-                                        .await?;
-                                        break authorized;
-                                    }
-                                    Err(denial) => {
-                                        self.decided(
-                                            turn,
-                                            call,
-                                            &hook_selector,
-                                            false,
-                                            denial.authority(),
-                                        )
-                                        .await?;
-                                        return Ok(ToolOutcome::Refused { denial });
-                                    }
-                                },
-                                Resolution::Reclassify { request, params } => {
-                                    self.permission(
-                                        turn,
-                                        call,
-                                        EventKind::PermissionAmended {
-                                            tool: request.tool().to_string(),
-                                        },
-                                    )?;
-                                    prepared =
-                                        match self.tools.prepare_amendment(tool.as_ref(), params) {
-                                            Ok(prepared) => prepared,
-                                            Err(refusal) => return Ok(answered(false, refusal)),
-                                        };
-                                }
-                                Resolution::Settled(result) => match result {
-                                    Ok(authorized) => {
-                                        self.decided(
-                                            turn,
-                                            call,
-                                            &hook_selector,
-                                            true,
-                                            authorized.by().clone(),
-                                        )
-                                        .await?;
-                                        break authorized;
-                                    }
-                                    Err(denial) => {
-                                        self.decided(
-                                            turn,
-                                            call,
-                                            &hook_selector,
-                                            false,
-                                            denial.authority(),
-                                        )
-                                        .await?;
-                                        return Ok(ToolOutcome::Refused { denial });
-                                    }
-                                },
-                            }
-                        }
-                        Resolution::HumanSettled { result, .. } => match result {
-                            Ok(authorized) => {
+                            Controlled::Failed(cause) => return Err(cause),
+                        };
+                        match resolution {
+                            Resolution::Settled(Ok(authorized)) => {
                                 self.decided(
                                     turn,
                                     call,
@@ -4587,28 +4541,218 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                 .await?;
                                 break authorized;
                             }
-                            Err(denial) => {
+                            Resolution::Settled(Err(denial)) => {
                                 self.decided(turn, call, &hook_selector, false, denial.authority())
                                     .await?;
                                 return Ok(ToolOutcome::Refused { denial });
                             }
-                        },
-                        Resolution::Reclassify { request, params } => {
-                            self.permission(
-                                turn,
-                                call,
-                                EventKind::PermissionAmended {
-                                    tool: request.tool().to_string(),
-                                },
-                            )?;
-                            prepared = match self.tools.prepare_amendment(tool.as_ref(), params) {
-                                Ok(prepared) => prepared,
-                                Err(refusal) => return Ok(answered(false, refusal)),
-                            };
+                            Resolution::Ask(pending) => {
+                                if !self.requested(turn, call, pending.request()).await? {
+                                    return Ok(answered(
+                                        false,
+                                        "blocked by PermissionRequest hook".to_owned(),
+                                    ));
+                                }
+                                let pending = match self
+                                    .judge_pending(policy, policy_snapshot, turn, &pending)
+                                    .await?
+                                {
+                                    JudgeRun::Unavailable => pending,
+                                    JudgeRun::Ended(ExitReason::Cancelled(_)) => {
+                                        self.decided(
+                                            turn,
+                                            call,
+                                            &hook_selector,
+                                            false,
+                                            Authority::Party,
+                                        )
+                                        .await?;
+                                        return Ok(answered(
+                                            false,
+                                            "interrupted: permission denied".into(),
+                                        ));
+                                    }
+                                    JudgeRun::Ended(reason) => {
+                                        return Ok(ToolOutcome::Ended(reason));
+                                    }
+                                    JudgeRun::Decided { outcome, by } => {
+                                        self.judge_decided(
+                                            turn,
+                                            call,
+                                            &hook_selector,
+                                            &outcome,
+                                            by.clone(),
+                                        )
+                                        .await?;
+                                        match self.tools.settle_judge(policy, pending, &outcome, by)
+                                        {
+                                            Resolution::Settled(Ok(authorized)) => {
+                                                break authorized;
+                                            }
+                                            Resolution::Settled(Err(denial)) => {
+                                                return Ok(ToolOutcome::Refused { denial });
+                                            }
+                                            Resolution::Ask(pending) => pending,
+                                            Resolution::HumanSettled { .. }
+                                            | Resolution::Reclassify { .. } => {
+                                                unreachable!(
+                                                    "a judge cannot produce a human resolution"
+                                                )
+                                            }
+                                        }
+                                    }
+                                };
+                                let decision = await_controlled(
+                                    &self.journal,
+                                    &self.cancel,
+                                    &mut self.control,
+                                    turn,
+                                    self.tools.decide(policy, call.item, pending),
+                                    InterruptDisposition::Return,
+                                )
+                                .await;
+                                let decision = match decision {
+                                    Controlled::Completed(decision) => decision,
+                                    Controlled::Interrupted => {
+                                        self.decided(
+                                            turn,
+                                            call,
+                                            &hook_selector,
+                                            false,
+                                            Authority::Party,
+                                        )
+                                        .await?;
+                                        return Ok(answered(
+                                            false,
+                                            "interrupted: permission denied".into(),
+                                        ));
+                                    }
+                                    Controlled::Failed(cause) => return Err(cause),
+                                };
+                                match decision {
+                                    Resolution::Ask(pending) => {
+                                        return Ok(ToolOutcome::Unanswerable { pending });
+                                    }
+                                    Resolution::HumanSettled { result, .. } => match result {
+                                        Ok(authorized) => {
+                                            self.decided(
+                                                turn,
+                                                call,
+                                                &hook_selector,
+                                                true,
+                                                authorized.by().clone(),
+                                            )
+                                            .await?;
+                                            break authorized;
+                                        }
+                                        Err(denial) => {
+                                            self.decided(
+                                                turn,
+                                                call,
+                                                &hook_selector,
+                                                false,
+                                                denial.authority(),
+                                            )
+                                            .await?;
+                                            return Ok(ToolOutcome::Refused { denial });
+                                        }
+                                    },
+                                    Resolution::Reclassify { request, params } => {
+                                        self.permission(
+                                            turn,
+                                            call,
+                                            EventKind::PermissionAmended {
+                                                tool: request.tool().to_string(),
+                                            },
+                                        )?;
+                                        prepared = match self
+                                            .tools
+                                            .prepare_amendment(tool.as_ref(), params)
+                                        {
+                                            Ok(prepared) => prepared,
+                                            Err(refusal) => return Ok(answered(false, refusal)),
+                                        };
+                                    }
+                                    Resolution::Settled(result) => match result {
+                                        Ok(authorized) => {
+                                            self.decided(
+                                                turn,
+                                                call,
+                                                &hook_selector,
+                                                true,
+                                                authorized.by().clone(),
+                                            )
+                                            .await?;
+                                            break authorized;
+                                        }
+                                        Err(denial) => {
+                                            self.decided(
+                                                turn,
+                                                call,
+                                                &hook_selector,
+                                                false,
+                                                denial.authority(),
+                                            )
+                                            .await?;
+                                            return Ok(ToolOutcome::Refused { denial });
+                                        }
+                                    },
+                                }
+                            }
+                            Resolution::HumanSettled { result, .. } => match result {
+                                Ok(authorized) => {
+                                    self.decided(
+                                        turn,
+                                        call,
+                                        &hook_selector,
+                                        true,
+                                        authorized.by().clone(),
+                                    )
+                                    .await?;
+                                    break authorized;
+                                }
+                                Err(denial) => {
+                                    self.decided(
+                                        turn,
+                                        call,
+                                        &hook_selector,
+                                        false,
+                                        denial.authority(),
+                                    )
+                                    .await?;
+                                    return Ok(ToolOutcome::Refused { denial });
+                                }
+                            },
+                            Resolution::Reclassify { request, params } => {
+                                self.permission(
+                                    turn,
+                                    call,
+                                    EventKind::PermissionAmended {
+                                        tool: request.tool().to_string(),
+                                    },
+                                )?;
+                                prepared = match self.tools.prepare_amendment(tool.as_ref(), params)
+                                {
+                                    Ok(prepared) => prepared,
+                                    Err(refusal) => return Ok(answered(false, refusal)),
+                                };
+                            }
                         }
                     }
                 }
+            };
+            if let Err(diagnostic) = self.tools.revalidate_processes(authorized.call()) {
+                if identity_refreshes == 1 {
+                    return Ok(answered(false, diagnostic));
+                }
+                identity_refreshes += 1;
+                prepared = match self.tools.refresh_processes(authorized.into_parts().0) {
+                    Ok(refreshed) => refreshed,
+                    Err(diagnostic) => return Ok(answered(false, diagnostic)),
+                };
+                continue;
             }
+            break authorized;
         };
         let resume_context = call.capture_authority.resume_context(
             self.hook_runtime.as_ref(),

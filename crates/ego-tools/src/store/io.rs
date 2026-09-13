@@ -130,6 +130,14 @@ pub enum AtomicReplacePublication {
 
 /// The filesystem operations the durable session adapters need, and nothing else.
 pub trait StoreIo: Send + Sync {
+    /// Atomically publish a private advisory document. Unsupported adapters
+    /// report a cache miss; they must not silently publish with wider permissions.
+    fn replace_atomic_private(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private atomic publication unavailable",
+        ))
+    }
     /// Create a new private staging file, refusing an existing name.
     fn create_new(&self, _path: &Path) -> io::Result<()> {
         Err(io::Error::new(
@@ -339,6 +347,15 @@ fn replace_atomic_publication_with(
     bytes: &[u8],
     barrier: Barrier,
 ) -> io::Result<ReplacePublication> {
+    replace_atomic_publication_with_privacy(path, bytes, barrier, false)
+}
+
+fn replace_atomic_publication_with_privacy(
+    path: &Path,
+    bytes: &[u8],
+    barrier: Barrier,
+    private: bool,
+) -> io::Result<ReplacePublication> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -352,12 +369,33 @@ fn replace_atomic_publication_with(
     // do.
     {
         use std::io::Write;
-        let mut file = fs::File::create(&tmp_path)?;
-        file.write_all(bytes)?;
-        barrier.apply(&file)?;
+        let mut file = if private {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(&tmp_path)?
+        } else {
+            fs::File::create(&tmp_path)?
+        };
+        if let Err(error) = file.write_all(bytes).and_then(|()| barrier.apply(&file)) {
+            drop(file);
+            if private {
+                let _ = fs::remove_file(&tmp_path);
+            }
+            return Err(error);
+        }
     }
 
-    fs::rename(&tmp_path, path)?;
+    if let Err(error) = fs::rename(&tmp_path, path) {
+        if private {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        return Err(error);
+    }
 
     // Then fsync the *directory*, which is what actually makes the
     // rename durable: the file's own contents are already on stable
@@ -492,6 +530,12 @@ fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
 pub struct OsIo;
 
 impl StoreIo for OsIo {
+    fn replace_atomic_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        match replace_atomic_publication_with_privacy(path, bytes, Barrier::Fsync, true)? {
+            ReplacePublication::PublishedDurably => Ok(()),
+            ReplacePublication::PublishedDurabilityUncertain(error) => Err(error),
+        }
+    }
     fn create_new(&self, path: &Path) -> io::Result<()> {
         create_new(path)
     }

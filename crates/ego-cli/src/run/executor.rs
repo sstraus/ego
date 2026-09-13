@@ -586,7 +586,8 @@ impl CliCompactionCommand {
                 exec_caps: observation.capabilities(),
             });
         }
-        loop_ = loop_.with_execution_observation(observation, probe_evidence);
+        loop_ = super::composition::with_permission_analysis(loop_, Trust::Untrusted)
+            .with_execution_observation(observation, probe_evidence);
         let target_tools = registry.iter().map(RegisteredTool::descriptor).collect();
         let prepared = loop_.prepare_compaction(system, target_tools).await?;
         let state = loop_

@@ -208,6 +208,9 @@ impl HttpRoute {
 pub struct HttpRequestDigest([u8; 32]);
 
 impl HttpRequestDigest {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
     pub fn of(request: &HttpRequest) -> Self {
         let mut hasher = Sha256::new();
         hash_http_frame(&mut hasher, b"ego.http-request");

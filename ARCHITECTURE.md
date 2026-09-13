@@ -339,13 +339,29 @@ second human-input boundary.
    canonical intent, the matching rule ID and any unenforced remainder without
    executing. Grammar published before persistent rules ship (M1 gate).
 3. **Judge** — the `auto` backend: an unresolved sensitive action is evaluated
-   by a configured judge model receiving the canonical `PreparedCall`;
+   by a configured judge model receiving a content-minimal projection of the canonical `PreparedCall`;
    verdict allow / deny / escalate-to-human, with the reasoning recorded in
    the audit event. The judge is decoupled from the main model
    (`permissions.judge = "openai/gpt-5.6-luna"`, a GLM, or `ollama/qwen3`
    for private/air-gapped loops) — just another `Generator` call with its own
    budget line. Judge unavailable or uncertain ⇒ ask the human; headless ⇒
    exit 3.
+   Deterministic risk orders high, unknown, bounded, low; high always reaches
+   the human seat and a model cannot lower it. Process names never establish
+   safety. Auto settles deterministic low/bounded native operations without a
+   paid judge after the mode stage. Reusable analysis binds full executable content, platform identity,
+   interpreter/script observations, native argv, captured cwd/environment,
+   generation policy, measured confinement/backend/capabilities, workspace
+   trust and judge/prompt revision. Recompute risk and policy on every hit;
+   cache opinions only, mint fresh permits and record fresh call audits.
+   The bounded private `$EGO_HOME/permission-analysis/v1.json` document uses
+   atomic StoreIo publication and a short merge lease, with process-local
+   generation coalescing. Cache failure is diagnostic/miss. Incomplete identity
+   cannot support reusable allow. The guarded process path launches the
+   captured target/environment and revalidates identity before spawn; one
+   automatic re-observation returns through policy. Repeated movement executes
+   nothing. Pathname races after the final check and runtime dynamic loading
+   are not claimed to be eliminated. See the 2026-09-13 auto-permission ADR.
 4. **Execution backends** — OS confinement of tool subprocesses behind a
    trait sized for growth (I4):
 

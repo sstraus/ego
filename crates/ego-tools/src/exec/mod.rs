@@ -2,6 +2,7 @@
 
 mod backend;
 mod editor_process;
+mod identity;
 #[cfg(target_os = "linux")]
 mod landlock;
 mod null;
@@ -284,6 +285,13 @@ impl GuardedExec {
 }
 
 impl ProcessExecutor for GuardedExec {
+    fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
+        identity::capture(spec)
+    }
+
+    fn revalidate(&self, spec: &SpawnSpec) -> Result<(), ProcessError> {
+        identity::revalidate(spec)
+    }
     fn execute<'a>(
         &'a self,
         spec: &'a SpawnSpec,

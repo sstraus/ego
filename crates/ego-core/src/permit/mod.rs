@@ -4,6 +4,7 @@
 //! §3.4 (permissions and sandbox). Effects are governed by a permit minted
 //! only by the policy engine, never by a tool's own declaration.
 
+pub mod analysis;
 mod approver;
 mod authority;
 pub mod fake;

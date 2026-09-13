@@ -1,7 +1,5 @@
 //! Content-minimal request and strict response decoder for the auto-mode judge.
 
-use std::ffi::OsStr;
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -17,6 +15,13 @@ pub const JUDGE_REASON_MAX_BYTES: usize = 1024;
 
 const JUDGE_INSTRUCTIONS: &str = "Decide only from the canonical authority facts in the user JSON. Return exactly one JSON object with verdict allow, deny, or escalate and a string reason. Use escalate when the bounded facts are insufficient.";
 const TRUNCATION_MARKER: &str = "…[truncated]";
+
+pub(crate) fn prompt_revision() -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ego:judge:content-minimal-v2\0");
+    digest.update(JUDGE_INSTRUCTIONS.as_bytes());
+    digest.finalize().into()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JudgeConfig {
@@ -126,22 +131,27 @@ impl JudgeDecoder {
     }
 
     pub fn finish(self) -> JudgeOutcome {
+        self.finish_valid().unwrap_or_else(escalate)
+    }
+
+    /// Only a valid explicit verdict may enter durable advisory storage.
+    pub fn finish_valid(self) -> Result<JudgeOutcome, &'static str> {
         if let Some(reason) = self.uncertain {
-            return escalate(reason);
+            return Err(reason);
         }
         if self.terminal != Some(StopReason::Stop) {
-            return escalate("judge response was incomplete");
+            return Err("judge response was incomplete");
         }
         let response = match serde_json::from_slice::<JudgeResponse>(&self.response) {
             Ok(response) => response,
-            Err(_) => return escalate("judge response was not one strict JSON verdict"),
+            Err(_) => return Err("judge response was not one strict JSON verdict"),
         };
         let reason = bounded_reason(response.reason);
-        match response.verdict {
+        Ok(match response.verdict {
             JudgeVerdict::Allow => JudgeOutcome::Allow { reason },
             JudgeVerdict::Deny => JudgeOutcome::Deny { reason },
             JudgeVerdict::Escalate => JudgeOutcome::Escalate { reason },
-        }
+        })
     }
 }
 
@@ -197,6 +207,7 @@ impl From<&RunConfinement> for CanonicalConfinement {
 struct CanonicalCall {
     tool: String,
     operations: Vec<CanonicalOp>,
+    risk: super::analysis::RiskAssessment,
 }
 
 impl From<&PreparedCall> for CanonicalCall {
@@ -204,6 +215,7 @@ impl From<&PreparedCall> for CanonicalCall {
         Self {
             tool: call.tool().to_owned(),
             operations: call.ops().iter().map(CanonicalOp::from).collect(),
+            risk: super::analysis::assess(call),
         }
     }
 }
@@ -229,7 +241,7 @@ enum CanonicalOp {
         change: CanonicalChange,
     },
     Spawn {
-        argv: Vec<String>,
+        argv: Vec<CanonicalArgument>,
         cwd: Option<String>,
         timeout_ms: Option<u128>,
         environment: CanonicalEnvironment,
@@ -279,7 +291,10 @@ impl From<&Op> for CanonicalOp {
                 argv: spec
                     .argv()
                     .iter()
-                    .map(|argument| canonical_os(argument))
+                    .map(|argument| CanonicalArgument {
+                        bytes: argument.as_encoded_bytes().len(),
+                        sha256: digest(argument.as_encoded_bytes()),
+                    })
                     .collect(),
                 cwd: spec.cwd().map(ToString::to_string),
                 timeout_ms: spec.timeout().map(|timeout| timeout.as_millis()),
@@ -310,6 +325,12 @@ impl From<&Op> for CanonicalOp {
             },
         }
     }
+}
+
+#[derive(Serialize)]
+struct CanonicalArgument {
+    bytes: usize,
+    sha256: String,
 }
 
 #[derive(Serialize)]
@@ -394,46 +415,6 @@ fn digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut encoded = String::with_capacity(64);
     for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing into a String cannot fail");
-    }
-    encoded
-}
-
-#[cfg(unix)]
-fn canonical_os(value: &OsStr) -> String {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    value.to_str().map_or_else(
-        || format!("unix-bytes:{}", hex(value.as_bytes())),
-        ToOwned::to_owned,
-    )
-}
-
-#[cfg(windows)]
-fn canonical_os(value: &OsStr) -> String {
-    use std::os::windows::ffi::OsStrExt as _;
-
-    value.to_str().map_or_else(
-        || {
-            let bytes = value
-                .encode_wide()
-                .flat_map(u16::to_le_bytes)
-                .collect::<Vec<_>>();
-            format!("windows-utf16le:{}", hex(&bytes))
-        },
-        ToOwned::to_owned,
-    )
-}
-
-#[cfg(not(any(unix, windows)))]
-fn canonical_os(value: &OsStr) -> String {
-    value.to_string_lossy().into_owned()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
         use std::fmt::Write as _;
         write!(&mut encoded, "{byte:02x}").expect("writing into a String cannot fail");
     }

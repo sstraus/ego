@@ -132,8 +132,14 @@ fn judge_request_is_toolless_and_contains_only_canonical_authority_facts() {
     assert!(!request.parallel_tool_calls);
     assert_eq!(request.thinking, ThinkingLevel::Off);
     assert_eq!(request.max_output_tokens, Some(512));
-    assert!(encoded.contains("/usr/bin/printf"));
-    assert!(encoded.contains("argv-native"));
+    assert!(!encoded.contains("/usr/bin/printf"));
+    assert!(!encoded.contains("argv-native"));
+    let argv = &canonical_json(&request)["call"]["operations"][0]["argv"];
+    assert_eq!(argv.as_array().unwrap().len(), 2);
+    assert_eq!(argv[0]["bytes"], "/usr/bin/printf".len());
+    assert_eq!(argv[1]["bytes"], "argv-native".len());
+    assert_eq!(argv[0]["sha256"].as_str().unwrap().len(), 64);
+    assert_ne!(argv[0]["sha256"], argv[1]["sha256"]);
     assert!(encoded.contains("workspace"));
     assert!(encoded.contains("offline"));
     assert!(encoded.contains("EGO_CONTRACT_SECRET"));

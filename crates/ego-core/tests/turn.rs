@@ -6338,10 +6338,391 @@ mod turn {
             );
         }
 
+        #[derive(Default)]
+        struct AnalysisCache(
+            Mutex<std::collections::HashMap<[u8; 32], ego_core::permit::analysis::AnalysisOpinion>>,
+        );
+
+        struct AnalysisLease<'a>(&'a AnalysisCache, [u8; 32]);
+        impl ego_core::permit::analysis::AnalysisLease for AnalysisLease<'_> {
+            fn lookup(
+                &self,
+            ) -> Result<Option<ego_core::permit::analysis::AnalysisOpinion>, String> {
+                Ok(self.0.0.lock().unwrap().get(&self.1).copied())
+            }
+            fn insert(
+                &self,
+                opinion: ego_core::permit::analysis::AnalysisOpinion,
+            ) -> Result<(), String> {
+                self.0.0.lock().unwrap().insert(self.1, opinion);
+                Ok(())
+            }
+        }
+        impl ego_core::permit::analysis::PermissionAnalysisCache for AnalysisCache {
+            fn acquire(
+                &self,
+                key: [u8; 32],
+            ) -> BoxFuture<
+                '_,
+                Result<Box<dyn ego_core::permit::analysis::AnalysisLease + '_>, String>,
+            > {
+                Box::pin(async move {
+                    Ok(Box::new(AnalysisLease(self, key))
+                        as Box<dyn ego_core::permit::analysis::AnalysisLease>)
+                })
+            }
+        }
+
+        #[derive(Default)]
+        struct ObservedProcess {
+            calls: AtomicUsize,
+            observations: AtomicUsize,
+            movement: AtomicUsize,
+            incomplete: bool,
+        }
+        impl ProcessExecutor for ObservedProcess {
+            fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
+                use ego_core::permit::analysis::{
+                    ExecutableFileIdentity, ExecutionIdentity, IdentityFailure,
+                };
+                self.observations.fetch_add(1, Ordering::SeqCst);
+                let path = CanonPath::new("/bin/image");
+                let identity = ExecutionIdentity {
+                    target: path.clone(),
+                    files: vec![ExecutableFileIdentity {
+                        named: path.clone(),
+                        resolved: path,
+                        content: Some([self.movement.load(Ordering::SeqCst) as u8; 32]),
+                        platform: b"test-platform".to_vec(),
+                    }],
+                    failures: if self.incomplete {
+                        vec![IdentityFailure::Unavailable]
+                    } else {
+                        Vec::new()
+                    },
+                    dynamic_code: true,
+                };
+                Ok(spec
+                    .clone()
+                    .with_execution_identity(EnvPolicy::exact(Vec::new()).unwrap(), identity))
+            }
+            fn revalidate(&self, _spec: &SpawnSpec) -> Result<(), ProcessError> {
+                if self
+                    .movement
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    Err(ProcessError::Invariant("observed movement".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            fn execute<'a>(
+                &'a self,
+                _spec: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(ToolResult::builtin("executed")) })
+            }
+        }
+
+        struct AnalysisSource {
+            main: AtomicUsize,
+            verdict: String,
+            trace: GenerationTrace,
+        }
+        impl GenerationModelSource for AnalysisSource {
+            fn resolve<'a>(
+                &'a self,
+                request: GenerationModelRequest,
+            ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+                Box::pin(async move {
+                    let judge = request.role() == GenerationRole::Judge;
+                    let events = if judge {
+                        vec![
+                            AiEvent::TextDelta {
+                                text: self.verdict.clone(),
+                            },
+                            AiEvent::Stop(StopReason::Stop),
+                        ]
+                    } else if self.main.fetch_add(1, Ordering::SeqCst) == 0 {
+                        vec![
+                            AiEvent::ToolCall {
+                                call_id: "process".into(),
+                                name: "exec".into(),
+                                args: r#"{"argv":["image","arg"]}"#.into(),
+                            },
+                            AiEvent::Stop(StopReason::ToolUse),
+                        ]
+                    } else {
+                        vec![AiEvent::Stop(StopReason::Stop)]
+                    };
+                    Ok(profile(
+                        if judge { "openai/judge" } else { "openai/main" },
+                        judge,
+                        events,
+                        &self.trace,
+                        Some(1024),
+                    ))
+                })
+            }
+        }
+
+        fn analysis_session(
+            cache: Arc<AnalysisCache>,
+            process: Arc<ObservedProcess>,
+            trace: GenerationTrace,
+            verdict: &str,
+            mode: Mode,
+            deny: bool,
+        ) -> Vec<DomainEvent> {
+            let mut fx = Fixture::new(Vec::new()).with_exec_tool();
+            fx.set_mode(mode);
+            fx.process = process;
+            if deny {
+                fx = fx.with_rules(&[], &["exec(image *)"]);
+            }
+            let source = Arc::new(AnalysisSource {
+                main: AtomicUsize::new(0),
+                verdict: verdict.into(),
+                trace,
+            });
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let runtime = GenerationRuntime {
+                policy_source: fx.policy_source.clone(),
+                source,
+                gate: fx.gate.borrow().clone(),
+                config: TurnConfig {
+                    system: None,
+                    token_ceiling: None,
+                    retry: 0,
+                    fallbacks: Vec::new(),
+                },
+                admission: Arc::new(EvidenceAdmissionService::new()),
+                invocation: RunInvocationId::new(),
+            };
+            let observation = ego_core::permit::ExecObservation::new(
+                ego_core::permit::BackendIdentity::new("test", "1"),
+                ExecCaps::READ_SCOPED,
+                "11".repeat(32).try_into().unwrap(),
+            );
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                runtime,
+                tools,
+            )
+            .with_judge(judge_context())
+            .with_execution_observation(observation, None)
+            .with_permission_analysis_cache(cache, Trust::Trusted);
+            block_on(turn.run("run the process")).unwrap();
+            drop(turn);
+            fx.store.events()
+        }
+
         #[test]
-        fn auto_write_judge_allow_resolves_fresh_judge_and_executes_the_prepared_write() {
-            let mut fx = Fixture::new(vec![]).with_write_tool();
+        fn analysis_two_sessions_generate_once_and_mint_fresh_call_audits() {
+            let cache = Arc::new(AnalysisCache::default());
+            let process = Arc::new(ObservedProcess::default());
+            let trace = GenerationTrace::default();
+            let verdict = r#"{"verdict":"allow","reason":"bounded by confinement"}"#;
+            let first = analysis_session(
+                cache.clone(),
+                process.clone(),
+                trace.clone(),
+                verdict,
+                Mode::Auto,
+                false,
+            );
+            let second = analysis_session(
+                cache,
+                process.clone(),
+                trace.clone(),
+                verdict,
+                Mode::Auto,
+                false,
+            );
+            assert_eq!(
+                trace
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.model == "judge")
+                    .count(),
+                1
+            );
+            assert_eq!(process.calls.load(Ordering::SeqCst), 2);
+            assert!(first.iter().any(|event| matches!(
+                event.kind,
+                EventKind::PermissionDecided {
+                    by: Some(Authority::Judge { .. }),
+                    allowed: Some(true),
+                    ..
+                }
+            )));
+            assert!(second.iter().any(|event| matches!(
+                event.kind,
+                EventKind::PermissionDecided {
+                    by: Some(Authority::CachedJudge { .. }),
+                    allowed: Some(true),
+                    ..
+                }
+            )));
+            assert_ne!(first[0].env.turn, second[0].env.turn);
+        }
+
+        #[test]
+        fn analysis_invalid_output_and_incomplete_allow_are_not_reused_but_escalation_is() {
+            for (verdict, incomplete, expected_generations, expected_executions) in [
+                ("{", false, 2, 0),
+                (r#"{"verdict":"allow","reason":"ok"}"#, true, 2, 2),
+                (r#"{"verdict":"escalate","reason":"unknown"}"#, false, 1, 0),
+            ] {
+                let cache = Arc::new(AnalysisCache::default());
+                let process = Arc::new(ObservedProcess {
+                    incomplete,
+                    ..Default::default()
+                });
+                let trace = GenerationTrace::default();
+                for _ in 0..2 {
+                    analysis_session(
+                        cache.clone(),
+                        process.clone(),
+                        trace.clone(),
+                        verdict,
+                        Mode::Auto,
+                        false,
+                    );
+                }
+                assert_eq!(
+                    trace
+                        .requests
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|request| request.model == "judge")
+                        .count(),
+                    expected_generations
+                );
+                assert_eq!(process.calls.load(Ordering::SeqCst), expected_executions);
+            }
+        }
+
+        #[test]
+        fn analysis_refreshes_once_and_repeated_movement_executes_nothing() {
+            for (movement, executions) in [(1, 1), (2, 0)] {
+                let cache = Arc::new(AnalysisCache::default());
+                let process = Arc::new(ObservedProcess {
+                    movement: AtomicUsize::new(movement),
+                    ..Default::default()
+                });
+                let trace = GenerationTrace::default();
+                analysis_session(
+                    cache,
+                    process.clone(),
+                    trace,
+                    r#"{"verdict":"allow","reason":"ok"}"#,
+                    Mode::Auto,
+                    false,
+                );
+                assert_eq!(process.calls.load(Ordering::SeqCst), executions);
+                assert_eq!(process.observations.load(Ordering::SeqCst), 2);
+            }
+        }
+
+        #[test]
+        fn analysis_plan_and_yolo_skip_optional_generation() {
+            for (mode, executions) in [(Mode::Plan, 0), (Mode::Yolo, 1)] {
+                let process = Arc::new(ObservedProcess::default());
+                let trace = GenerationTrace::default();
+                analysis_session(
+                    Arc::new(AnalysisCache::default()),
+                    process.clone(),
+                    trace.clone(),
+                    r#"{"verdict":"allow","reason":"ok"}"#,
+                    mode,
+                    false,
+                );
+                assert_eq!(process.calls.load(Ordering::SeqCst), executions);
+                assert_eq!(
+                    trace
+                        .requests
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|request| request.model == "judge")
+                        .count(),
+                    0
+                );
+            }
+        }
+
+        #[test]
+        fn analysis_cached_allow_cannot_pass_a_new_deny_or_plan_mode() {
+            let cache = Arc::new(AnalysisCache::default());
+            let process = Arc::new(ObservedProcess::default());
+            let trace = GenerationTrace::default();
+            let verdict = r#"{"verdict":"allow","reason":"ok"}"#;
+            analysis_session(
+                cache.clone(),
+                process.clone(),
+                trace.clone(),
+                verdict,
+                Mode::Auto,
+                false,
+            );
+            analysis_session(
+                cache.clone(),
+                process.clone(),
+                trace.clone(),
+                verdict,
+                Mode::Auto,
+                true,
+            );
+            analysis_session(
+                cache,
+                process.clone(),
+                trace.clone(),
+                verdict,
+                Mode::Plan,
+                false,
+            );
+            assert_eq!(process.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                trace
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.model == "judge")
+                    .count(),
+                1
+            );
+        }
+
+        #[test]
+        fn auto_process_judge_allow_resolves_fresh_judge_and_executes_the_prepared_process() {
+            let mut fx = Fixture::new(vec![]).with_exec_tool();
             fx.set_mode(Mode::Auto);
+            let process = Arc::new(ObservedProcess::default());
+            fx.process = process.clone();
             let trace = GenerationTrace::default();
             let source = Arc::new(
                 ScriptedGenerationSource::new([
@@ -6351,8 +6732,8 @@ mod turn {
                         vec![
                             AiEvent::ToolCall {
                                 call_id: "call-write".into(),
-                                name: "fake_write".into(),
-                                args: r#"{"path":"/ws/out","contents":"ok"}"#.into(),
+                                name: "exec".into(),
+                                args: r#"{"argv":["image","arg"]}"#.into(),
                             },
                             AiEvent::Stop(StopReason::ToolUse),
                         ],
@@ -6466,7 +6847,7 @@ mod turn {
                     "generate:main",
                 ]
             );
-            assert_eq!(fx.fs.read(&CanonPath::new("/ws/out")).unwrap(), b"ok");
+            assert_eq!(process.calls.load(Ordering::SeqCst), 1);
             let events = fx.store.events();
             let judge_attempt = events
                 .iter()
@@ -6699,7 +7080,7 @@ mod turn {
 
         #[test]
         fn judge_expressibility_refusal_escalates_after_only_main_attempt() {
-            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let mut fx = Fixture::new(vec![]).with_exec_tool();
             fx.set_mode(Mode::Auto);
             let trace = GenerationTrace::default();
             let source = Arc::new(
@@ -6710,8 +7091,8 @@ mod turn {
                         vec![
                             AiEvent::ToolCall {
                                 call_id: "write".into(),
-                                name: "fake_write".into(),
-                                args: r#"{"path":"/ws/out","contents":"ok"}"#.into(),
+                                name: "exec".into(),
+                                args: r#"{"argv":["image","arg"]}"#.into(),
                             },
                             AiEvent::Stop(StopReason::ToolUse),
                         ],
@@ -6880,8 +7261,8 @@ mod turn {
         }
 
         #[test]
-        fn unresolved_write_without_judge_context_is_headless_and_does_not_resolve_judge() {
-            let mut fx = Fixture::new(vec![]).with_write_tool();
+        fn unresolved_process_without_judge_context_is_headless_and_does_not_resolve_judge() {
+            let mut fx = Fixture::new(vec![]).with_exec_tool();
             fx.set_mode(Mode::Auto);
             let trace = GenerationTrace::default();
             let source = Arc::new(
@@ -6891,8 +7272,8 @@ mod turn {
                     vec![
                         AiEvent::ToolCall {
                             call_id: "write".into(),
-                            name: "fake_write".into(),
-                            args: r#"{"path":"/ws/out","contents":"ok"}"#.into(),
+                            name: "exec".into(),
+                            args: r#"{"argv":["image","arg"]}"#.into(),
                         },
                         AiEvent::Stop(StopReason::ToolUse),
                     ],
@@ -7027,7 +7408,7 @@ mod turn {
                 GenerationModelErrorClass::Provider,
                 GenerationModelErrorClass::Internal,
             ] {
-                let mut fx = Fixture::new(vec![]).with_write_tool();
+                let mut fx = Fixture::new(vec![]).with_exec_tool();
                 fx.set_mode(Mode::Auto);
                 let trace = GenerationTrace::default();
                 let source = Arc::new(
@@ -7038,8 +7419,8 @@ mod turn {
                             vec![
                                 AiEvent::ToolCall {
                                     call_id: "write".into(),
-                                    name: "fake_write".into(),
-                                    args: r#"{"path":"/ws/out","contents":"ok"}"#.into(),
+                                    name: "exec".into(),
+                                    args: r#"{"argv":["image","arg"]}"#.into(),
                                 },
                                 AiEvent::Stop(StopReason::ToolUse),
                             ],
@@ -7129,8 +7510,9 @@ mod turn {
 
         #[test]
         fn judge_pending_cancellation_has_no_judge_attempt_or_reservation() {
-            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let mut fx = Fixture::new(vec![]).with_exec_tool();
             fx.set_mode(Mode::Auto);
+            let cache = Arc::new(AnalysisCache::default());
             let trace = GenerationTrace::default();
             let (source, ready) = ScriptedGenerationSource::new([
                 Ok(profile(
@@ -7139,8 +7521,8 @@ mod turn {
                     vec![
                         AiEvent::ToolCall {
                             call_id: "write".into(),
-                            name: "fake_write".into(),
-                            args: r#"{"path":"/ws/out","contents":"ok"}"#.into(),
+                            name: "exec".into(),
+                            args: r#"{"argv":["image","arg"]}"#.into(),
                         },
                         AiEvent::Stop(StopReason::ToolUse),
                     ],
@@ -7190,7 +7572,8 @@ mod turn {
                 tools,
             )
             .with_judge(judge_context())
-            .with_interactive_control(&mut control);
+            .with_interactive_control(&mut control)
+            .with_permission_analysis_cache(cache.clone(), Trust::Trusted);
             let active = turn.run("write");
             let drive = async move {
                 ready.await.expect("Judge resolution reached pending");
@@ -7228,11 +7611,12 @@ mod turn {
             )));
             assert_eq!(outstanding(&gate), Some(usd("0")));
             assert_eq!(committed(&gate), Some(usd("0.06144")));
+            assert!(cache.0.lock().unwrap().is_empty());
         }
 
         #[test]
         fn judge_capability_gap_is_headless_without_judge_attempt() {
-            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let mut fx = Fixture::new(vec![]).with_exec_tool();
             fx.set_mode(Mode::Auto);
             let trace = GenerationTrace::default();
             let mut judge = profile_with_settings(
@@ -7254,8 +7638,8 @@ mod turn {
                         vec![
                             AiEvent::ToolCall {
                                 call_id: "write".into(),
-                                name: "fake_write".into(),
-                                args: r#"{"path":"/ws/out","contents":"ok"}"#.into(),
+                                name: "exec".into(),
+                                args: r#"{"argv":["image","arg"]}"#.into(),
                             },
                             AiEvent::Stop(StopReason::ToolUse),
                         ],

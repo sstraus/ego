@@ -397,6 +397,18 @@ async fn paired_tcp(
         return false;
     }
     let sentinel = sentinel(endpoint);
+    let receiver_failure = |reason: String| {
+        evidence.log.record(ProbeRecord {
+            suite: format!("{control}.receiver"),
+            root: suite.root.to_path_buf(),
+            argv: network_probe_argv("tcp", endpoint, &sentinel)
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect(),
+            outcome: reason,
+        });
+        false
+    };
     if !probe(
         baseline,
         evidence.clone(),
@@ -419,7 +431,7 @@ async fn paired_tcp(
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            Err(_) => return false,
+            Err(error) => return receiver_failure(format!("accept failed: {error}")),
         }
     };
     if stream.set_nonblocking(false).is_err()
@@ -427,11 +439,14 @@ async fn paired_tcp(
             .set_read_timeout(Some(Duration::from_millis(250)))
             .is_err()
     {
-        return false;
+        return receiver_failure("receiver socket configuration failed".into());
     }
     let mut received = vec![0_u8; sentinel.len()];
-    if stream.read_exact(&mut received).is_err() || received != sentinel.as_bytes() {
-        return false;
+    if let Err(error) = stream.read_exact(&mut received) {
+        return receiver_failure(format!("sentinel read failed: {error}"));
+    }
+    if received != sentinel.as_bytes() {
+        return receiver_failure("sentinel mismatch".into());
     }
     if probe(
         backend,
