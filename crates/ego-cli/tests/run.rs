@@ -674,7 +674,10 @@ fn a_symlinked_instruction_file_is_still_refused_by_name() {
     let ego = Ego::against(&stub);
     let target = ego.file("AGENTS.md", "Prefer tabs.");
     let link = target.with_file_name("house-rules.md");
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&target, &link).expect("a temp dir accepts a symlink");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&target, &link).expect("a temp dir accepts a file symlink");
 
     let finished = ego
         .args([
