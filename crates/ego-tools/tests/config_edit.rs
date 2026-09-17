@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -69,6 +70,7 @@ fn one_store_prepares_candidate_and_publishes_only_after_opaque_cas() {
     let edit = authority.prepare_edit().unwrap();
     let candidate_path = edit.candidate_path().to_owned();
     assert_eq!(fs::read(&candidate_path).unwrap(), original.as_bytes());
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(&candidate_path).unwrap().permissions().mode() & 0o777,
         0o600
@@ -95,11 +97,14 @@ fn simultaneous_prepares_are_distinct_private_sibling_candidates() {
     let first = authority.prepare_edit().unwrap();
     let second = authority.prepare_edit().unwrap();
     assert_ne!(first.candidate_path(), second.candidate_path());
-    for path in [first.candidate_path(), second.candidate_path()] {
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+    #[cfg(unix)]
+    {
+        for path in [first.candidate_path(), second.candidate_path()] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
     authority.discard_edit(first).unwrap();
     authority.discard_edit(second).unwrap();
