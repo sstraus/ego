@@ -443,14 +443,28 @@ pub async fn stop_signal(deadline: Option<std::time::Instant>) -> CancelCause {
             None => std::future::pending().await,
         }
     };
+    tokio::select! {
+        cause = process_signal() => cause,
+        () = deadline => CancelCause::Timeout,
+    }
+}
+
+#[cfg(unix)]
+async fn process_signal() -> CancelCause {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("a process may always listen for SIGTERM");
-
     tokio::select! {
         _ = tokio::signal::ctrl_c() => CancelCause::User,
         _ = term.recv() => CancelCause::Host,
-        () = deadline => CancelCause::Timeout,
     }
+}
+
+#[cfg(windows)]
+async fn process_signal() -> CancelCause {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("a process may always listen for Ctrl-C");
+    CancelCause::User
 }
 
 /// The text of the last assistant message in the session.
