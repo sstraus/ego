@@ -1,5 +1,6 @@
 //! Contracts for ACP's listener-owned transport lifecycle.
 
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,7 +16,9 @@ use ego_core::endpoint::{PublicBind, Requested, admit};
 use ego_listen::{ConnectionGate, ConnectionLimits, bind};
 use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
@@ -148,6 +151,7 @@ impl ConnectTo<Agent> for InitializingClient {
     }
 }
 
+#[cfg(unix)]
 async fn initialize_local(
     path: &str,
     initialized: Arc<AtomicUsize>,
@@ -469,6 +473,7 @@ async fn authenticated_websocket_initialize_uses_the_sdk_client() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn local_byte_streams_initialize_and_sequential_connections_get_fresh_factories() {
     let mut path = PathBuf::from(std::env::var("HOME").unwrap());
     path.push("Gits/.tmp/ego-acp-tests");
