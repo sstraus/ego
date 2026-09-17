@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! contract for the process/editor half of `ego config edit`.
 
 use std::fs;
