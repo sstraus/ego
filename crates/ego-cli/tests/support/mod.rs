@@ -654,6 +654,23 @@ impl Places {
         ego.fixture_default_thinking = true;
         ego
     }
+
+    pub fn file(&self, name: &str, contents: &str) -> PathBuf {
+        let path = self.workspace.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("a temp dir is writable");
+        }
+        std::fs::write(&path, contents).expect("a temp dir is writable");
+        path
+    }
+
+    pub fn home_path(&self) -> &Path {
+        self.home.path()
+    }
+
+    pub fn workspace_path(&self) -> &Path {
+        self.workspace.path()
+    }
 }
 
 /// An invocation of the real binary, in a workspace of its own.
