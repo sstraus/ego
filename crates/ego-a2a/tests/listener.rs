@@ -7,6 +7,7 @@
 //! the request is looked at — which is a property of the composed listener and
 //! of nothing smaller.
 
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -15,7 +16,9 @@ use ego_a2a::serve::{WELL_KNOWN_AGENT_CARD_PATH, serve_on};
 use ego_core::endpoint::{Admitted, PublicBind, Requested, admit};
 use ego_listen::{ConnectionGate, ConnectionLimits};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 
 const TOKEN: &str = "listener-test-token";
@@ -97,6 +100,7 @@ async fn listening() -> Running {
 ///
 /// Under `~/Gits` deliberately: `CLAUDE.md` keeps test paths out of the per-user
 /// temp dir on this machine.
+#[cfg(unix)]
 async fn listening_locally(name: &str) -> (PathBuf, Running) {
     let mut path = PathBuf::from(std::env::var("HOME").expect("HOME is set"));
     path.push("Gits/.tmp/ego-a2a-tests");
@@ -384,6 +388,7 @@ async fn a_body_that_is_not_a_jsonrpc_envelope_is_a_parse_error() {
 /// The unification, end to end: the same routes, the same card, over the
 /// endpoint kind the operating system authenticates instead of a credential.
 #[tokio::test]
+#[cfg(unix)]
 async fn a_local_endpoint_serves_its_owner_with_no_credential_anywhere() {
     let (path, running) = listening_locally("card").await;
     let stream = UnixStream::connect(&path)
@@ -407,6 +412,7 @@ async fn a_local_endpoint_serves_its_owner_with_no_credential_anywhere() {
 /// A bearer token is not a second way in on an endpoint the transport already
 /// answered for, and presenting a wrong one is not a way to be refused.
 #[tokio::test]
+#[cfg(unix)]
 async fn a_local_endpoint_ignores_the_authorization_header_entirely() {
     let (path, running) = listening_locally("header").await;
     for authorization in ["Bearer not-the-token", "Basic whatever", ""] {
