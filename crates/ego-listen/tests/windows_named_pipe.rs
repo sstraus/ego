@@ -95,8 +95,8 @@ fn assert_owner_only_pipe_dacl<H: AsRawHandle>(pipe: &H, current_sid: &Sid) {
     );
     assert_eq!(
         ace.mask(),
-        AccessRights::GenericAll,
-        "the named-pipe DACL grants exactly GENERIC_ALL"
+        AccessRights::FileAllAccess,
+        "the named-pipe DACL maps GENERIC_ALL to exactly FILE_ALL_ACCESS"
     );
     assert_eq!(
         ace.sid(),
@@ -109,7 +109,7 @@ fn assert_owner_only_pipe_dacl<H: AsRawHandle>(pipe: &H, current_sid: &Sid) {
         .expect("the kernel descriptor serializes to SDDL")
         .to_string_lossy()
         .into_owned();
-    let expected_dacl = format!("P(A;;GA;;;{current_sid})");
+    let expected_dacl = format!("P(A;;FA;;;{current_sid})");
     assert!(
         sddl.split_once("D:")
             .is_some_and(|(_, dacl)| dacl == expected_dacl),

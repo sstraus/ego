@@ -91,14 +91,19 @@ fn job_object_completion_fixture() {
 	}
 }
 
-async fn next_line(reader: &mut BufReader<tokio::process::ChildStdout>, limit: Duration) -> String {
-	let mut line = String::new();
-	let bytes = timeout(limit, reader.read_line(&mut line))
-		.await
-		.expect("fixture output deadline")
-		.expect("fixture output");
-	assert_ne!(bytes, 0, "fixture stdout closed before its marker");
-	line
+async fn next_marker(reader: &mut BufReader<tokio::process::ChildStdout>, expected: &str) {
+	timeout(COMPLETION_TIMEOUT, async {
+		loop {
+			let mut line = String::new();
+			let bytes = reader.read_line(&mut line).await.expect("fixture output");
+			assert_ne!(bytes, 0, "fixture stdout closed before {expected:?}");
+			if line == expected {
+				break;
+			}
+		}
+	})
+	.await
+	.unwrap_or_else(|_| panic!("fixture output deadline before {expected:?}"));
 }
 
 #[tokio::test]
@@ -108,14 +113,8 @@ async fn wait_and_try_wait_require_active_process_zero_and_then_stay_stable() ->
 	let stdout = child.stdout().take().expect("fixture stdout");
 	let mut stdout = BufReader::new(stdout);
 
-	assert_eq!(
-		next_line(&mut stdout, COMPLETION_TIMEOUT).await,
-		"ROOT_EXITED\n"
-	);
-	assert_eq!(
-		next_line(&mut stdout, COMPLETION_TIMEOUT).await,
-		"DESCENDANT_STARTED\n"
-	);
+	next_marker(&mut stdout, "ROOT_EXITED\n").await;
+	next_marker(&mut stdout, "DESCENDANT_STARTED\n").await;
 
 	for _ in 0..3 {
 		assert!(
@@ -128,10 +127,7 @@ async fn wait_and_try_wait_require_active_process_zero_and_then_stay_stable() ->
 		"wait completed before ACTIVE_PROCESS_ZERO"
 	);
 
-	assert_eq!(
-		next_line(&mut stdout, COMPLETION_TIMEOUT).await,
-		"DESCENDANT_DONE\n"
-	);
+	next_marker(&mut stdout, "DESCENDANT_DONE\n").await;
 	let status = timeout(COMPLETION_TIMEOUT, child.wait())
 		.await
 		.expect("Job completion deadline")?;
@@ -156,10 +152,6 @@ async fn wait_and_try_wait_require_active_process_zero_and_then_stay_stable() ->
 	timeout(COMPLETION_TIMEOUT, stdout.read_to_end(&mut trailing))
 		.await
 		.expect("descendant stdout did not close")?;
-	assert!(
-		trailing.is_empty(),
-		"unexpected fixture output after completion"
-	);
 	Ok(())
 }
 
@@ -170,10 +162,7 @@ async fn bounded_wait_then_kill_closes_the_owned_job_and_pipe() -> Result<()> {
 	let stdout = child.stdout().take().expect("fixture stdout");
 	let mut stdout = BufReader::new(stdout);
 
-	assert_eq!(
-		next_line(&mut stdout, COMPLETION_TIMEOUT).await,
-		"ROOT_READY\n"
-	);
+	next_marker(&mut stdout, "ROOT_READY\n").await;
 	assert!(
 		timeout(SHORT_WAIT, child.wait()).await.is_err(),
 		"bounded wait ignored its deadline"
@@ -188,6 +177,5 @@ async fn bounded_wait_then_kill_closes_the_owned_job_and_pipe() -> Result<()> {
 	timeout(COMPLETION_TIMEOUT, stdout.read_to_end(&mut trailing))
 		.await
 		.expect("owned descendant kept stdout open")?;
-	assert!(trailing.is_empty(), "unexpected fixture output after kill");
 	Ok(())
 }

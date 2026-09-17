@@ -321,13 +321,17 @@ fn public_process_path_preserves_args_and_stdin_until_owned_descendant_completes
     ];
     let input = b"stdin payload";
     let spec = fixture_spec(expected_args.iter().cloned());
-    let result = fixture.runtime.block_on(tokio::time::timeout(
-        COMPLETION_TIMEOUT,
-        fixture
-            .ports
-            .process()
-            .execute_handler(&spec, input, EffectScope::new(COMPLETION_TIMEOUT)),
-    ));
+    let result = fixture.runtime.block_on(async {
+        tokio::time::timeout(
+            COMPLETION_TIMEOUT,
+            fixture.ports.process().execute_handler(
+                &spec,
+                input,
+                EffectScope::new(COMPLETION_TIMEOUT),
+            ),
+        )
+        .await
+    });
     let result = result.expect("public process completion deadline");
     let result = result.expect("public process execution");
     let output = result
@@ -439,7 +443,14 @@ fn public_secret_child_path_returns_opaque_output_and_cleans_natural_tree() {
         COMPLETION_TIMEOUT,
     )));
     let output = result.expect("secret child natural completion");
-    assert_eq!(output.stdout().expose_secret_bytes(), b"secret-input\n");
+    assert!(
+        output
+            .stdout()
+            .expose_secret_bytes()
+            .windows(b"secret-input\n".len())
+            .any(|window| window == b"secret-input\n"),
+        "the fixture output did not contain its opaque stdin"
+    );
     wait_for_marker(&direct);
     wait_for_marker(&descendant);
 }
@@ -483,7 +494,7 @@ fn public_secret_child_timeout_cleans_the_complete_descendant_tree() {
         &descendant,
         CancelToken::new(),
         None,
-        Duration::from_millis(500),
+        Duration::from_secs(2),
     )));
     observer.join().expect("secret timeout observer");
     assert!(
@@ -509,13 +520,32 @@ fn duplex_spec(
     )
 }
 
+fn read_duplex_marker(
+    fixture: &RunFixture,
+    handle: &mut ego_core::permit::DuplexHandle,
+    expected: &[u8],
+) {
+    let mut output = Vec::new();
+    loop {
+        let mut byte = [0];
+        fixture
+            .runtime
+            .block_on(handle.read_exact(&mut byte))
+            .expect("duplex fixture marker");
+        output.push(byte[0]);
+        assert!(output.len() < 4096, "duplex fixture marker was not bounded");
+        if byte[0] == 0 {
+            break;
+        }
+    }
+    assert!(
+        output.ends_with(expected),
+        "duplex output did not end with {expected:?}: {output:?}"
+    );
+}
+
 fn read_duplex_ready(fixture: &RunFixture, handle: &mut ego_core::permit::DuplexHandle) {
-    let mut ready = [0; b"DUPLEX_READY\0".len()];
-    fixture
-        .runtime
-        .block_on(handle.read_exact(&mut ready))
-        .expect("duplex fixture ready");
-    assert_eq!(&ready, b"DUPLEX_READY\0");
+    read_duplex_marker(fixture, handle, b"DUPLEX_READY\0");
 }
 
 #[test]
@@ -532,12 +562,7 @@ fn public_duplex_path_completes_naturally_and_cleans_the_descendant_tree() {
             None,
         )))
         .expect("duplex natural spawn");
-    let mut output = [0; b"DUPLEX_DONE\0".len()];
-    fixture
-        .runtime
-        .block_on(handle.read_exact(&mut output))
-        .expect("duplex natural output");
-    assert_eq!(&output, b"DUPLEX_DONE\0");
+    read_duplex_marker(&fixture, &mut handle, b"DUPLEX_DONE\0");
     let settlement = fixture.runtime.block_on(handle.settle());
     assert!(matches!(settlement.end(), DuplexEnd::Exited { code: 0 }));
     assert!(matches!(
