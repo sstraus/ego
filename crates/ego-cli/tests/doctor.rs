@@ -20,6 +20,11 @@ use tempfile::{TempDir, tempdir};
 use ego_cli::doctor;
 use ego_core::health::{HealthSection, HealthStatus};
 
+#[cfg(not(windows))]
+const PRIVATE_MACHINE_PATH: &str = "/Users/someone/.ssh/id_ed25519";
+#[cfg(windows)]
+const PRIVATE_MACHINE_PATH: &str = r"C:\Users\someone\.ssh\id_ed25519";
+
 /// An empty workspace with an empty `EGO_HOME` inside it.
 ///
 /// Held by the caller, because dropping it deletes it — and every assertion
@@ -355,6 +360,6 @@ fn a_detail_may_name_a_visible_root_and_nothing_else_on_the_machine() {
     // The case the redaction rule exists for: a path an operator would paste
     // into a public issue without noticing what it says about their machine.
     ego_cli::doctor::visible_roots(workspace, Some(&home));
-    ego_core::health::HealthDetail::sanitized("probe", "/Users/someone/.ssh/id_ed25519", &roots)
+    ego_core::health::HealthDetail::sanitized("probe", PRIVATE_MACHINE_PATH, &roots)
         .expect_err("a path outside every visible root must be refused, not printed");
 }
