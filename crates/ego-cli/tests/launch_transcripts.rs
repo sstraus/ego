@@ -100,6 +100,12 @@ fn readable(raw: &str) -> String {
         if line.is_empty() || lines.last().is_some_and(|last| *last == line) {
             continue;
         }
+        if lines
+            .last()
+            .is_some_and(|last| line.len() > last.len() && line.starts_with(last.as_str()))
+        {
+            lines.pop();
+        }
         lines.push(line);
     }
     lines
@@ -150,6 +156,24 @@ fn strip_escapes(raw: &str) -> String {
                     }
                     continue;
                 }
+                b']' => {
+                    index += 2;
+                    while index < bytes.len() {
+                        if bytes[index] == b'\x07' {
+                            index += 1;
+                            break;
+                        }
+                        if index + 1 < bytes.len()
+                            && bytes[index] == b'\x1b'
+                            && bytes[index + 1] == b'\\'
+                        {
+                            index += 2;
+                            break;
+                        }
+                        index += 1;
+                    }
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -166,9 +190,9 @@ fn strip_escapes(raw: &str) -> String {
 
 #[test]
 fn readable_discards_status_prompt_repaints_but_keeps_transcript_rows() {
-    let raw = "hello\r\nworking — Esc cancels | > working — Esc cancels | >\r\nanswer\r\n> ";
+    let raw = "\x1b]0;C:\\ego.exe\x07Trust files? [y/N]\r\nTrust files? [y/N] yes\r\nhello\r\nworking — Esc cancels | > working — Esc cancels | >\r\nanswer\r\n> ";
 
-    assert_eq!(readable(raw), "hello\nanswer\n");
+    assert_eq!(readable(raw), "Trust files? [y/N] yes\nhello\nanswer\n");
 }
 
 fn golden_path(case: &str) -> std::path::PathBuf {

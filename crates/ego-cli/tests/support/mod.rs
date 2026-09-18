@@ -56,6 +56,39 @@ fn windows_system_environment() -> Vec<(&'static str, OsString)> {
         .collect()
 }
 
+#[cfg(not(windows))]
+fn ready_prompt_count(output: &[u8]) -> usize {
+    output
+        .windows(2)
+        .filter(|window| *window == b"> ")
+        .count()
+        .saturating_sub(1)
+}
+
+#[cfg(windows)]
+fn ready_prompt_count(output: &[u8]) -> usize {
+    const DSR_QUERY: &[u8] = b"\x1b[6n";
+    const PLAIN_PROMPT: &[u8] = b"> ";
+    const ANSI_PROMPT: &[u8] = b">\x1b[K";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+    let after_dsr = output
+        .windows(DSR_QUERY.len())
+        .rposition(|window| window == DSR_QUERY)
+        .map_or(0, |position| position + DSR_QUERY.len());
+    let ready = &output[after_dsr..];
+    (0..ready.len())
+        .filter(|&position| {
+            let tail = &ready[position..];
+            let prompt = tail.starts_with(PLAIN_PROMPT) || tail.starts_with(ANSI_PROMPT);
+            prompt
+                && tail
+                    .windows(SHOW_CURSOR.len())
+                    .any(|window| window == SHOW_CURSOR)
+        })
+        .count()
+}
+
 /// What the stub answers a `/v1/chat/completions` request with.
 #[derive(Debug, Clone)]
 pub enum Reply {
@@ -971,8 +1004,10 @@ impl Ego {
             })
             .expect("pty");
         let mut child = pair.slave.spawn_command(self.pty_command()).expect("spawn");
-        let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("writer")));
-        let reader = pair.master.try_clone_reader().expect("reader");
+        let master = pair.master;
+        drop(pair.slave);
+        let writer = Arc::new(Mutex::new(master.take_writer().expect("writer")));
+        let reader = master.try_clone_reader().expect("reader");
         let (chunks, received) = std::sync::mpsc::channel();
         let responder = Arc::clone(&writer);
         let reader = std::thread::spawn(move || {
@@ -1045,15 +1080,12 @@ impl Ego {
                 writer.flush().expect("startup answer flush");
                 trust_answered = true;
             }
-            let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
-            if !submitted && prompt_count > 1 {
-                // Two renders of the idle prompt, not one. Reedline draws
-                // once, *then* reads the cursor-position report this harness
-                // owes it, and redraws. Typing into the gap between those two
-                // is typing into the terminal's answer to that query: the
-                // line is swallowed and the session sits idle for ever. The
-                // second render is the only evidence, from out here, that the
-                // handshake is over and the editor is reading for us.
+            let prompt_count = ready_prompt_count(&output);
+            if !submitted && prompt_count > 0 {
+                // Unix PTYs need the second plain prompt render. ConPTY emits
+                // one ANSI-cleared prompt after its cursor-position query.
+                // `ready_prompt_count` encodes those observed handshakes while
+                // exposing the same monotonically increasing count here.
                 let mut writer = writer.lock().expect("pty writer lock");
                 writer
                     .write_all(input.as_bytes())
@@ -1071,6 +1103,7 @@ impl Ego {
         }
         drop(writer);
         let status = child.wait().expect("child ran");
+        drop(master);
         let output = reader.join().expect("pty reader thread");
         Finished {
             code: Some(status.exit_code() as i32),
