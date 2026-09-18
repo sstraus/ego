@@ -253,19 +253,16 @@ fn parse_source(spec: &str, cwd: &Path) -> Result<Source, UsageError> {
             "--attach requires a non-empty path or HTTPS URL".to_string(),
         ));
     }
+    let path = PathBuf::from(spec);
+    if path.is_absolute() {
+        return Ok(Source::Path(path));
+    }
     match Url::parse(spec) {
         Ok(url) => {
             validate_https_url(&url)?;
             Ok(Source::Https(url))
         }
-        Err(url::ParseError::RelativeUrlWithoutBase) => {
-            let path = PathBuf::from(spec);
-            Ok(Source::Path(if path.is_absolute() {
-                path
-            } else {
-                cwd.join(path)
-            }))
-        }
+        Err(url::ParseError::RelativeUrlWithoutBase) => Ok(Source::Path(cwd.join(path))),
         Err(error) => Err(UsageError(format!(
             "--attach value `{spec}` is neither an explicit path nor a valid HTTPS URL: {error}"
         ))),
