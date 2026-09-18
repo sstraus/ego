@@ -3,7 +3,7 @@
 use std::ffi::{OsStr, OsString};
 
 use ego_core::permit::{
-    BackendIdentity, EnvPolicy, ExecCaps, ProcessError, RunConfinement, SpawnSpec,
+    BackendIdentity, EnvName, EnvPolicy, ExecCaps, ProcessError, RunConfinement, SpawnSpec,
 };
 use tokio::process::Command;
 
@@ -127,7 +127,11 @@ pub(super) fn environment(spec: &SpawnSpec) -> Result<Vec<(OsString, OsString)>,
             })
             .collect::<Result<Vec<_>, _>>()?,
         policy => std::env::vars_os()
-            .filter(|(name, _)| admitted_name(name, policy))
+            // Windows exposes pseudo-variables such as `=C:` for per-drive
+            // working directories. Rust cannot install them through
+            // `Command::env`, and the spawn contract carries an explicit cwd,
+            // so they are not part of the executable environment authority.
+            .filter(|(name, _)| admitted_name(name, policy) && EnvName::new(name.clone()).is_ok())
             .collect::<Vec<_>>(),
     };
     Ok(snapshot)
