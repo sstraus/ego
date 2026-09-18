@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 mod run_fixture;
 
 type Controller = run_fixture::Controller;
+const OUTSIDE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/mcp-outside-root");
 
 fn call(name: &str, body: Value) -> McpServerToolCall {
     McpServerToolCall::new(
@@ -189,7 +190,7 @@ fn run_enforces_root_model_budget_mode_and_concurrency_ceilings_before_controlle
     let (controller, executor) = run_fixture::mcp_controller_fixture();
     let server = server(controller.clone());
     for body in [
-        json!({"request_id":"00000000-0000-0000-0000-000000000062","root":"/tmp","prompt":"x"}),
+        json!({"request_id":"00000000-0000-0000-0000-000000000062","root":OUTSIDE_ROOT,"prompt":"x"}),
         json!({"request_id":"00000000-0000-0000-0000-000000000063","root":run_fixture::ROOT,"prompt":"x","model":"model/other"}),
         json!({"request_id":"00000000-0000-0000-0000-000000000064","root":run_fixture::ROOT,"prompt":"x","budget":"101k"}),
         json!({"request_id":"00000000-0000-0000-0000-000000000065","root":run_fixture::ROOT,"prompt":"x","mode":"yolo"}),
