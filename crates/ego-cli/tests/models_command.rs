@@ -672,6 +672,8 @@ fn selecting_the_openai_row_reaches_the_transport_rather_than_a_gate() {
     let refused = Ego::nowhere()
         .env("OPENAI_API_KEY", "sk-test")
         .args([
+            "--sandbox",
+            "off",
             "--model",
             "openai/gpt-5.6-sol",
             "--session-id",
