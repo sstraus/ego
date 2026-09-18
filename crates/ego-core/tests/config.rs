@@ -1214,8 +1214,13 @@ mod instructions {
         let prompt = system_prompt(&set, Path::new("/ws"), &Selection::Ambient)
             .expect("two files contributed");
 
-        let quoted: Vec<&str> = prompt.sources.iter().map(|d| d.path.as_str()).collect();
-        assert_eq!(quoted, ["/ws/AGENTS.md", "/ws/crates/AGENTS.md"]);
+        let quoted: Vec<&Path> = prompt
+            .sources
+            .iter()
+            .map(|descriptor| Path::new(&descriptor.path))
+            .collect();
+        let loaded: Vec<&Path> = set.loaded.iter().map(|file| file.path.as_path()).collect();
+        assert_eq!(quoted, loaded);
         for (source, instruction) in prompt.sources.iter().zip(&set.loaded) {
             assert!(
                 prompt.text.contains(&instruction.text),
