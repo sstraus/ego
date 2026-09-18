@@ -19,8 +19,10 @@ use futures::future::BoxFuture;
 use super::{OneShotHttpTransport, canonical_is_loopback};
 use crate::exec::HttpCallTimeout;
 
+const TEST_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/http-tests");
+
 fn offline_confinement() -> RunConfinement {
-    RunConfinement::new(Confinement::Off, true, CanonPath::new("/workspace"))
+    RunConfinement::new(Confinement::Off, true, CanonPath::new(TEST_ROOT))
         .expect("offline test confinement")
 }
 

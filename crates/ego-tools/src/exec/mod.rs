@@ -670,6 +670,8 @@ mod tests {
     use super::backend::{Backend, LaunchPrefix};
     use super::{policy_digest, policy_digest_with_runtime_roots};
 
+    const TEST_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/exec-policy");
+
     struct IdentityBackend {
         identity: BackendIdentity,
     }
@@ -698,7 +700,7 @@ mod tests {
 
     #[test]
     fn policy_digest_frames_delimiter_bearing_backend_identity_fields() {
-        let policy = policy("/workspace");
+        let policy = policy(TEST_ROOT);
         let first = IdentityBackend {
             identity: BackendIdentity::new("backend|alpha", "revision"),
         };
@@ -724,8 +726,11 @@ mod tests {
 
     #[test]
     fn policy_digest_distinguishes_raw_concatenation_collision_records() {
-        let first_policy = policy("/x/a");
-        let second_policy = policy("/x/ab");
+        let first_policy = policy(concat!(env!("CARGO_MANIFEST_DIR"), "/target/exec-policy-a"));
+        let second_policy = policy(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/target/exec-policy-ab"
+        ));
         let first = IdentityBackend {
             identity: BackendIdentity::new("bc", "d"),
         };
@@ -747,7 +752,7 @@ mod tests {
         let backend = IdentityBackend {
             identity: BackendIdentity::new("backend", "revision"),
         };
-        let policy = policy("/workspace");
+        let policy = policy(TEST_ROOT);
         let empty = policy_digest_with_runtime_roots(&policy, &backend, &[])
             .expect("empty runtime-root vector");
         let one =
