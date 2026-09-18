@@ -18,6 +18,10 @@ mod support;
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
 const OTHER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
 const WRONG_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
+#[cfg(not(windows))]
+const MCP_COMMAND: &str = "/bin/true";
+#[cfg(windows)]
+const MCP_COMMAND: &str = r"C:\Windows\System32\cmd.exe";
 const regression_case_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
 
 async fn regression_case_phase<T>(name: &str, operation: impl Future<Output = T>) -> T {
@@ -867,7 +871,7 @@ async fn failed_mcp_admission_does_not_publish_a_fork_child() {
                 "cwd": ROOT,
                 "mcpServers": [{
                     "name": "refused-server",
-                    "command": "/bin/true",
+                    "command": MCP_COMMAND,
                     "args": [],
                     "env": [],
                 }],
