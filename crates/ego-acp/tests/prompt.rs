@@ -71,6 +71,10 @@ const SOME_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt
 const FIRST_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-first");
 const SECOND_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-second");
 const OTHER_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-other");
+#[cfg(not(windows))]
+const MCP_COMMAND: &str = "/bin/true";
+#[cfg(windows)]
+const MCP_COMMAND: &str = r"C:\Windows\System32\cmd.exe";
 
 fn workspace_file_uri(name: &str) -> String {
     format!(
@@ -1729,7 +1733,7 @@ async fn session_new_accepts_mcp_servers_without_advertising_unsupported_capabil
                 "cwd": WORKSPACE,
                 "mcpServers": [{
                     "name": "files",
-                    "command": "/bin/true",
+                    "command": MCP_COMMAND,
                     "args": [],
                     "env": [{ "name": "TOKEN", "value": "session-secret" }]
                 }],
@@ -1787,7 +1791,7 @@ async fn session_new_retains_stdio_and_http_transport_material_losslessly() {
                 "mcpServers": [
                     {
                         "name": "files",
-                        "command": "/bin/true",
+                        "command": MCP_COMMAND,
                         "args": ["--stdio"],
                         "env": [{ "name": "TOKEN", "value": "session-secret" }]
                     },
@@ -1821,7 +1825,7 @@ async fn invalid_supplied_mcp_servers_are_rejected_atomically_before_session_ins
         }),
         serde_json::json!({
             "name": "duplicate-env",
-            "command": "/bin/true",
+            "command": MCP_COMMAND,
             "args": [],
             "env": [
                 { "name": "TOKEN", "value": "one" },
@@ -1898,7 +1902,7 @@ async fn supplied_mcp_authority_survives_prompt_continuations() {
                 "mcpServers": [
                     {
                         "name": "files",
-                        "command": "/bin/true",
+                        "command": MCP_COMMAND,
                         "args": ["--stdio"],
                         "env": [{ "name": "TOKEN", "value": "session-secret" }]
                     },
@@ -1939,7 +1943,7 @@ async fn supplied_mcp_authority_survives_prompt_continuations() {
     assert_eq!(requests[0].len(), 2);
     let stdio = serde_json::to_value(&requests[0][0]).expect("stdio server serializes");
     assert_eq!(stdio["name"], "files");
-    assert_eq!(stdio["command"], "/bin/true");
+    assert_eq!(stdio["command"], MCP_COMMAND);
     assert_eq!(stdio["env"][0]["name"], "TOKEN");
     assert_eq!(stdio["env"][0]["value"], "session-secret");
     let http = serde_json::to_value(&requests[0][1]).expect("HTTP server serializes");
@@ -1987,7 +1991,7 @@ async fn mcp_admission_failure_leaves_session_unknown_and_uninserted() {
                 "cwd": WORKSPACE,
                 "mcpServers": [{
                     "name": "files",
-                    "command": "/bin/true",
+                    "command": MCP_COMMAND,
                     "args": [],
                     "env": []
                 }],
