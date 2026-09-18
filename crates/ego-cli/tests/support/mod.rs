@@ -23,6 +23,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,29 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use portable_pty::{NativePtySystem, PtySize, PtySystem};
+
+#[cfg(not(windows))]
+fn fixture_path() -> OsString {
+    OsString::from("/usr/bin:/bin")
+}
+
+#[cfg(windows)]
+fn fixture_path() -> OsString {
+    std::env::var_os("PATH").unwrap_or_default()
+}
+
+#[cfg(not(windows))]
+fn windows_system_environment() -> Vec<(&'static str, OsString)> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn windows_system_environment() -> Vec<(&'static str, OsString)> {
+    ["SystemRoot", "WINDIR"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+        .collect()
+}
 
 /// What the stub answers a `/v1/chat/completions` request with.
 #[derive(Debug, Clone)]
@@ -765,7 +789,10 @@ impl Ego {
         command.env_clear();
         command.env("HOME", &self.home);
         command.env("EGO_HOME", &self.home);
-        command.env("PATH", "/usr/bin:/bin");
+        command.env("PATH", fixture_path());
+        for (key, value) in windows_system_environment() {
+            command.env(key, value);
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }
@@ -1230,7 +1257,10 @@ impl Ego {
         command.env_clear();
         command.env("HOME", &self.home);
         command.env("EGO_HOME", &self.home);
-        command.env("PATH", "/usr/bin:/bin");
+        command.env("PATH", fixture_path());
+        for (key, value) in windows_system_environment() {
+            command.env(key, value);
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }
