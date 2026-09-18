@@ -89,7 +89,10 @@ fn an_acp_host_is_handed_the_status_of_a_refused_catalogue_and_none_of_its_body(
         ..Plan::default()
     });
     let ego = Harness::against(&stub);
-    ego.home_file("config.toml", "model = \"ollama/qwen3\"\n");
+    ego.home_file(
+        "config.toml",
+        "model = \"ollama/qwen3\"\nsandbox = \"off\"\n",
+    );
     let workspace = ego.workspace_path().to_owned();
     let running = Harness::at(ego.home_path(), &workspace, Some(&stub))
         .subcommand("acp")
