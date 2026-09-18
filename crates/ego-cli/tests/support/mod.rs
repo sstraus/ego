@@ -995,6 +995,22 @@ impl Ego {
     /// so a startup admission can be tested without teaching every caller
     /// about PTY cursor handshakes.
     pub fn run_pty_responding(self, prompt: &str, answer: &str, input: &str) -> Finished {
+        self.run_pty_script(prompt, answer, Some(input))
+    }
+
+    /// Run a conversation whose first turn is already present in argv, then
+    /// close the terminal at the first idle prompt.
+    pub fn run_pty_seeded(self) -> Finished {
+        self.run_pty_responding_seeded("Trust project files", "yes")
+    }
+
+    /// Answer one startup modal for an argv-seeded conversation, then close
+    /// the terminal at the first idle prompt.
+    pub fn run_pty_responding_seeded(self, prompt: &str, answer: &str) -> Finished {
+        self.run_pty_script(prompt, answer, None)
+    }
+
+    fn run_pty_script(self, prompt: &str, answer: &str, input: Option<&str>) -> Finished {
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows: 24,
@@ -1082,13 +1098,20 @@ impl Ego {
             }
             let prompt_count = ready_prompt_count(&output);
             if !submitted && prompt_count > 0 {
+                if input.is_none() {
+                    let mut writer = writer.lock().expect("pty writer lock");
+                    writer.write_all(b"\x04").expect("interactive EOF");
+                    writer.flush().expect("interactive EOF flush");
+                    eof_sent = true;
+                    continue;
+                }
                 // Unix PTYs need the second plain prompt render. ConPTY emits
                 // one ANSI-cleared prompt after its cursor-position query.
                 // `ready_prompt_count` encodes those observed handshakes while
                 // exposing the same monotonically increasing count here.
                 let mut writer = writer.lock().expect("pty writer lock");
                 writer
-                    .write_all(input.as_bytes())
+                    .write_all(input.expect("the scripted branch has input").as_bytes())
                     .expect("interactive script");
                 writer.write_all(b"\r").expect("interactive submit");
                 writer.flush().expect("interactive script flush");

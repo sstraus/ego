@@ -22,6 +22,14 @@ fn direct(places: &Places, stub: &Stub) -> Ego {
     places.ego(stub).args(["--model", MODEL])
 }
 
+fn human<const N: usize>(places: &Places, stub: &Stub, args: [&str; N]) -> Ego {
+    places
+        .ego(stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3"])
+        .args(args)
+}
+
 fn output(finished: &Finished) -> String {
     format!("{}\n{}", finished.stdout, finished.stderr)
 }
@@ -134,17 +142,13 @@ fn human_explicit_off_proceeds_without_an_acknowledgement_prompt() {
     let places = Places::new();
     let stub = Stub::start(Default::default());
 
-    let finished = places
-        .ego(&stub)
-        .args([
-            "--model",
-            MODEL,
-            "--sandbox",
-            "off",
-            "--session-id",
-            FIXTURE_SESSION_ID,
-        ])
-        .run_pty("hello");
+    let finished = human(
+        &places,
+        &stub,
+        ["--sandbox", "off", "--session-id", FIXTURE_SESSION_ID],
+    )
+    .arg("hello")
+    .run_pty_seeded();
 
     assert_eq!(finished.code, Some(0), "{}", output(&finished));
     assert!(!output(&finished).contains(UNCONFINED_PROMPT));
@@ -161,10 +165,9 @@ fn human_configured_off_proceeds_without_rewriting_configuration() {
     let config = "model = \"ollama/qwen3\"\nsandbox = \"off\"\n";
     let config_path = places.ego(&stub).home_file("config.toml", config);
 
-    let finished = places
-        .ego(&stub)
-        .args(["--model", MODEL, "--session-id", FIXTURE_SESSION_ID])
-        .run_pty("hello");
+    let finished = human(&places, &stub, ["--session-id", FIXTURE_SESSION_ID])
+        .arg("hello")
+        .run_pty_seeded();
 
     assert_eq!(finished.code, Some(0), "{}", output(&finished));
     assert!(!output(&finished).contains(UNCONFINED_PROMPT));
@@ -184,10 +187,7 @@ fn human_explicit_workspace_preserves_the_truthful_capability_refusal() {
     let places = Places::new();
     let stub = Stub::start(Default::default());
 
-    let finished = places
-        .ego(&stub)
-        .args(["--model", MODEL, "--sandbox", "workspace"])
-        .run_pty_to_exit();
+    let finished = human(&places, &stub, ["--sandbox", "workspace"]).run_pty_to_exit();
     let text = output(&finished);
 
     assert_eq!(finished.code, Some(2), "{text}");
@@ -209,10 +209,7 @@ fn human_explicit_ro_preserves_the_truthful_capability_refusal() {
     let places = Places::new();
     let stub = Stub::start(Default::default());
 
-    let finished = places
-        .ego(&stub)
-        .args(["--model", MODEL, "--sandbox", "ro"])
-        .run_pty_to_exit();
+    let finished = human(&places, &stub, ["--sandbox", "ro"]).run_pty_to_exit();
     let text = output(&finished);
 
     assert_eq!(finished.code, Some(2), "{text}");
@@ -228,10 +225,7 @@ fn offline_refusal_is_preserved_even_when_unconfined_is_explicit() {
     let places = Places::new();
     let stub = Stub::start(Default::default());
 
-    let finished = places
-        .ego(&stub)
-        .args(["--model", MODEL, "--sandbox", "off", "--offline"])
-        .run_pty_to_exit();
+    let finished = human(&places, &stub, ["--sandbox", "off", "--offline"]).run_pty_to_exit();
     let text = output(&finished);
 
     assert_eq!(finished.code, Some(2), "{text}");
@@ -245,10 +239,7 @@ fn human_implicit_offline_refuses_without_an_acknowledgement_prompt() {
     let places = Places::new();
     let stub = Stub::start(Default::default());
 
-    let finished = places
-        .ego(&stub)
-        .args(["--model", MODEL, "--offline"])
-        .run_pty_to_exit();
+    let finished = human(&places, &stub, ["--offline"]).run_pty_to_exit();
     let text = output(&finished);
 
     assert_eq!(finished.code, Some(2), "{text}");
@@ -268,7 +259,7 @@ fn human_configured_workspace_preserves_the_truthful_capability_refusal() {
         "model = \"ollama/qwen3\"\nsandbox = \"workspace\"\n",
     );
 
-    let finished = places.ego(&stub).args(["--model", MODEL]).run_pty_to_exit();
+    let finished = human(&places, &stub, []).run_pty_to_exit();
     let text = output(&finished);
 
     assert_eq!(finished.code, Some(2), "{text}");
@@ -285,10 +276,9 @@ fn implicit_default_prompts_once_per_canonical_workspace_and_records_yes() {
     let config = "model = \"ollama/qwen3\"\n";
     let config_path = places.ego(&stub).home_file("config.toml", config);
 
-    let first = places
-        .ego(&stub)
-        .args(["--model", MODEL, "--session-id", FIXTURE_SESSION_ID])
-        .run_pty_responding(UNCONFINED_PROMPT, "yes", "hello");
+    let first = human(&places, &stub, ["--session-id", FIXTURE_SESSION_ID])
+        .arg("hello")
+        .run_pty_responding_seeded(UNCONFINED_PROMPT, "yes");
     assert_eq!(first.code, Some(0), "{}", output(&first));
     assert_unconfined_prompt(&first);
     assert!(
@@ -296,17 +286,18 @@ fn implicit_default_prompts_once_per_canonical_workspace_and_records_yes() {
         "yes must change this invocation to off"
     );
 
-    let second = places
-        .ego(&stub)
-        .args([
+    let second = human(
+        &places,
+        &stub,
+        [
             "-C",
             ".",
-            "--model",
-            MODEL,
             "--session-id",
             "0198c7f4-9c1f-7a2b-8c3d-4e5f60718294",
-        ])
-        .run_pty("hello");
+        ],
+    )
+    .arg("hello")
+    .run_pty_seeded();
     assert_eq!(second.code, Some(0), "{}", output(&second));
     assert!(!output(&second).contains(UNCONFINED_PROMPT));
     assert_eq!(
@@ -322,10 +313,7 @@ fn implicit_default_no_refuses_before_provider_or_persistence_effects() {
     let places = Places::new();
     let stub = Stub::start(Default::default());
 
-    let finished = places
-        .ego(&stub)
-        .args(["--model", MODEL])
-        .run_pty_responding_to_exit(UNCONFINED_PROMPT, "no");
+    let finished = human(&places, &stub, []).run_pty_responding_to_exit(UNCONFINED_PROMPT, "no");
     let text = output(&finished);
 
     assert_eq!(finished.code, Some(2), "{text}");
@@ -344,10 +332,9 @@ fn corrupt_acknowledgement_warns_asks_again_and_is_not_overwritten() {
         .home_file("unconfined.json", "{ not json\n");
     let before = fs::read(&corrupt).expect("corrupt ledger is readable");
 
-    let finished = places
-        .ego(&stub)
-        .args(["--model", MODEL])
-        .run_pty_responding(UNCONFINED_PROMPT, "yes", "hello");
+    let finished = human(&places, &stub, [])
+        .arg("hello")
+        .run_pty_responding_seeded(UNCONFINED_PROMPT, "yes");
     let text = output(&finished);
 
     assert_eq!(finished.code, Some(0), "{text}");
@@ -374,10 +361,9 @@ fn accepted_answer_with_write_failure_warns_and_proceeds_once() {
     fs::create_dir(&lock).expect("the lock path can be made unwritable");
     let before = fs::read(&ledger).expect("ledger is readable");
 
-    let first = places
-        .ego(&stub)
-        .args(["--model", MODEL])
-        .run_pty_responding(UNCONFINED_PROMPT, "yes", "hello");
+    let first = human(&places, &stub, [])
+        .arg("hello")
+        .run_pty_responding_seeded(UNCONFINED_PROMPT, "yes");
     let first_text = output(&first);
     assert_eq!(first.code, Some(0), "{first_text}");
     assert!(
@@ -390,10 +376,7 @@ fn accepted_answer_with_write_failure_warns_and_proceeds_once() {
         "write failure is not a refusal for this invocation"
     );
 
-    let second = places
-        .ego(&stub)
-        .args(["--model", MODEL])
-        .run_pty_responding_to_exit(UNCONFINED_PROMPT, "no");
+    let second = human(&places, &stub, []).run_pty_responding_to_exit(UNCONFINED_PROMPT, "no");
     assert_eq!(second.code, Some(2), "{}", output(&second));
     assert_unconfined_prompt(&second);
 }
@@ -405,10 +388,11 @@ fn acknowledgement_does_not_mutate_user_configuration_or_trust() {
     let config = "model = \"ollama/qwen3\"\n";
     let config_path = places.ego(&stub).home_file("config.toml", config);
     places.file("AGENTS.md", "# already trusted by this fixture\n");
-    let digest = inventory_digest(places.workspace_path()).expect("instructions are inventoried");
+    let workspace = fs::canonicalize(places.workspace_path()).expect("canonical workspace");
+    let digest = inventory_digest(&workspace).expect("instructions are inventoried");
     let mut workspaces = serde_json::Map::new();
     workspaces.insert(
-        places.workspace_path().display().to_string(),
+        workspace.display().to_string(),
         serde_json::json!({"decision": "trusted", "digest": digest}),
     );
     let trust = format!(
@@ -417,10 +401,9 @@ fn acknowledgement_does_not_mutate_user_configuration_or_trust() {
     );
     let trust_path = places.ego(&stub).home_file("trust.json", &trust);
 
-    let finished = places
-        .ego(&stub)
-        .args(["--model", MODEL])
-        .run_pty_responding(UNCONFINED_PROMPT, "yes", "hello");
+    let finished = human(&places, &stub, [])
+        .arg("hello")
+        .run_pty_responding_seeded(UNCONFINED_PROMPT, "yes");
 
     assert_eq!(finished.code, Some(0), "{}", output(&finished));
     assert_unconfined_prompt(&finished);
