@@ -15,6 +15,11 @@ use support::{
     Ego as HarnessEgo, Places as HarnessPlaces, Plan, Reply, Stub, costing, paced, text, tool_call,
 };
 
+#[cfg(not(windows))]
+const HOSTS_PATH: &str = "/etc/hosts";
+#[cfg(windows)]
+const HOSTS_PATH: &str = r"C:\Windows\System32\drivers\etc\hosts";
+
 /// This suite isolates the CLI/provider contract from host sandbox
 /// availability. Step 14's dedicated sandbox contract owns the workspace
 /// default, capability probing, and fail-closed behavior.
@@ -266,7 +271,7 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
         completions: vec![Reply::Sse(tool_call(
             "call_a",
             "read",
-            "{\"path\":\"/etc/hosts\"}",
+            &serde_json::json!({ "path": HOSTS_PATH }).to_string(),
         ))],
         ..Plan::default()
     });
@@ -288,7 +293,7 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
     assert_eq!(report["exit_reason"], "permission");
     let denied = report["denied"].as_str().expect("§4.4 requires the action");
     assert!(
-        denied.contains("read") && denied.contains("/etc/hosts"),
+        denied.contains("read") && denied.contains(HOSTS_PATH),
         "a script handed exit 3 and no subject has been told nothing: {denied}"
     );
     // And *who* refused, which is what picks the remedy. §4.4 offers three
@@ -1409,7 +1414,7 @@ fn a_permission_nobody_can_grant_exits_three_without_ever_prompting() {
         completions: vec![Reply::Sse(tool_call(
             "call_a",
             "read",
-            "{\"path\":\"/etc/hosts\"}",
+            &serde_json::json!({ "path": HOSTS_PATH }).to_string(),
         ))],
         ..Plan::default()
     });
@@ -1601,6 +1606,7 @@ fn a_run_that_outlives_its_timeout_exits_124() {
 /// ended — so the code comes from the same `after_turn` mapping every other
 /// ending goes through.
 #[test]
+#[cfg(unix)]
 fn the_two_signals_with_a_documented_code_produce_it() {
     for (signal, code) in [("INT", 130), ("TERM", 143)] {
         let stub = Stub::start(Plan {
