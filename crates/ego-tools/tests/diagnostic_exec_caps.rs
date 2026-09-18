@@ -6,17 +6,25 @@
 
 use std::future::Future;
 use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ego_core::event::domain::CancelCause;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ego_core::event::id::SessionId;
-use ego_core::permit::{CanonPath, Confinement, ExecCaps, ProcessError, RunConfinement};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use ego_core::permit::ProcessError;
+use ego_core::permit::{CanonPath, Confinement, ExecCaps, RunConfinement};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ego_core::store::blob::BlobStore;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ego_core::store::evidence::EvidenceRef;
 use ego_core::turn::CancelToken;
-use ego_tools::exec::{
-    ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts, SessionEvidenceStore,
-};
+use ego_tools::exec::{ExecLimits, RunEffectPorts};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use ego_tools::exec::{ExecRunConfig, HttpCallTimeout, SessionEvidenceStore};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ego_tools::http::SystemResolver;
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -32,6 +40,7 @@ fn policy(level: Confinement, offline: bool, workspace: &Path) -> RunConfinement
         .expect("the diagnostic policy uses an absolute workspace")
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn recorded_config(
     policy: RunConfinement,
     evidence: SessionEvidenceStore,
@@ -57,10 +66,12 @@ fn diagnostic_capabilities(policy: &RunConfinement) -> ExecCaps {
     .unwrap_or_else(|error| panic!("boot capability diagnostic failed unexpectedly: {error}"))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn read_transcript(store: &SessionEvidenceStore, reference: &EvidenceRef) -> Vec<u8> {
     BlobStore::read(store, &reference.blob_ref()).expect("recorded probe transcript")
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn assert_transcript_for_workspace(bytes: &[u8], workspace: &Path) {
     let text = std::str::from_utf8(bytes).expect("probe transcript is UTF-8 JSON Lines");
     assert!(!text.is_empty(), "the recorded probe transcript is empty");

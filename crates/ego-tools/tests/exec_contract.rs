@@ -122,6 +122,7 @@ impl Attempt {
 
 struct ConfigFixture {
     evidence_root: tempfile::TempDir,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     session: SessionId,
     evidence: SessionEvidenceStore,
     cancel: CancelToken,
@@ -154,6 +155,7 @@ fn config_fixture(
     );
     ConfigFixture {
         evidence_root,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         session,
         evidence,
         cancel,

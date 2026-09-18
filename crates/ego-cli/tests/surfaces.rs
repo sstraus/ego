@@ -125,6 +125,7 @@ fn invalid_hook_candidate_is_rejected_and_inspection_is_read_only() {
 }
 
 #[test]
+#[cfg(unix)]
 fn executable_ego_shebang_uses_real_run_pipeline_and_relative_schema() {
     let fixture = Fixture::new();
     fixture.ego().home_file("config.toml", "thinking = 'off'\n");

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! contract for the protocol-neutral secret-child adapter.
 //!
 //! Credential commands remain owned by `ego-cli`, while process-group

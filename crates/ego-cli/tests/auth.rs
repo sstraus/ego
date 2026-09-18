@@ -6,8 +6,10 @@ use std::fs;
 use ego_ai::provider::ProviderRow;
 use ego_cli::auth::{
     AuthConfig, AuthEntry, AuthError, AuthStore, CredentialSource, StoreCredentials,
-    discover_plugin, overlay_headers, run_program, select_source,
+    overlay_headers, select_source,
 };
+#[cfg(unix)]
+use ego_cli::auth::{discover_plugin, run_program};
 use ego_cli::cli::{self, AuthAction, Invocation};
 use tempfile::tempdir;
 

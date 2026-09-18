@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use agent_client_protocol::{
-    Agent, ByteStreams, Channel, Client, ConnectTo, Error, TransportFrame,
-};
+#[cfg(unix)]
+use agent_client_protocol::ByteStreams;
+use agent_client_protocol::{Agent, Channel, Client, ConnectTo, Error, TransportFrame};
 use agent_client_protocol_schema::{ProtocolVersion, v1};
 use async_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 use ego_acp::auth::Credential;
@@ -21,6 +21,7 @@ use tokio::net::TcpStream;
 use tokio::net::UnixStream;
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinSet;
+#[cfg(unix)]
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
 mod support;

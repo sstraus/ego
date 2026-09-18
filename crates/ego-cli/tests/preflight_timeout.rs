@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! contract for supervised credential preflight.
 //!
 //! These tests deliberately run the real `ego` process. A configured

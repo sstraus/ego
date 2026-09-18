@@ -9,21 +9,23 @@
 mod support;
 
 use std::net::{SocketAddr, TcpListener};
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::{
-    Agent, ByteStreams, Channel, Client, ConnectTo, Error, TransportFrame,
-};
+#[cfg(unix)]
+use agent_client_protocol::ByteStreams;
+use agent_client_protocol::{Agent, Channel, Client, ConnectTo, Error, TransportFrame};
 use agent_client_protocol_schema::{ProtocolVersion, v1};
 use async_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 use futures::StreamExt;
 use support::{Ego, Running};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
+#[cfg(unix)]
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
 const ACP_TOKEN: &str = "regression case-token";
@@ -92,6 +94,7 @@ fn acp_refusal<const N: usize>(args: [&str; N]) -> support::Finished {
     ))
 }
 
+#[cfg(unix)]
 fn wait_for_path(child: &mut ChildGuard, path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -227,10 +230,12 @@ async fn a_local_endpoint_starts_and_answers_acp_without_reading_a_bearer_token(
     let _ = client.await;
 }
 
+#[cfg(unix)]
 struct InitializingClient {
     ready: Arc<Notify>,
 }
 
+#[cfg(unix)]
 impl ConnectTo<Agent> for InitializingClient {
     async fn connect_to(self, agent: impl ConnectTo<Client>) -> Result<(), Error> {
         Client
