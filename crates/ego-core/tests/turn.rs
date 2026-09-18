@@ -5880,6 +5880,14 @@ mod turn {
         use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty};
         use ego_core::generator::capabilities::CapabilityGap;
 
+        fn native_workspace() -> CanonPath {
+            if cfg!(windows) {
+                CanonPath::new(r"C:\ws")
+            } else {
+                CanonPath::new("/ws")
+            }
+        }
+
         enum ResolutionStep {
             Ready(Box<Result<GenerationProfile, GenerationModelError>>),
             Pending,
@@ -6082,12 +6090,8 @@ mod turn {
 
         fn judge_context() -> JudgeContext {
             JudgeContext {
-                confinement: RunConfinement::new(
-                    Confinement::Workspace,
-                    false,
-                    CanonPath::new("/ws"),
-                )
-                .unwrap(),
+                confinement: RunConfinement::new(Confinement::Workspace, false, native_workspace())
+                    .unwrap(),
                 exec_caps: ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
             }
         }
@@ -6763,7 +6767,7 @@ mod turn {
                 .with_trace(trace.clone()),
             );
             let confinement =
-                RunConfinement::new(Confinement::Workspace, false, CanonPath::new("/ws")).unwrap();
+                RunConfinement::new(Confinement::Workspace, false, native_workspace()).unwrap();
             let context = JudgeContext {
                 confinement,
                 exec_caps: ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),

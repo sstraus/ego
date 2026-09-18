@@ -9,9 +9,9 @@ use ego_core::event::id::ItemId;
 use ego_core::permit::fake::FakeFs;
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    Authority, CanonPath, Change, Classification, DuplexHandle, DuplexSpawner, Escalation,
-    HttpRequest, HumanApprover, OneHop, OneHopResponse, Op, PermissionRequest, PolicyEngine,
-    PreparedCall, ProcessError, ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec, ToolResult,
+    Authority, CanonPath, Change, Classification, DuplexHandle, DuplexSpawner, HttpRequest,
+    HumanApprover, OneHop, OneHopResponse, Op, PermissionRequest, PolicyEngine, PreparedCall,
+    ProcessError, ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec, ToolResult,
     TransportError,
 };
 use ego_core::store::evidence::{
@@ -97,11 +97,47 @@ impl DuplexSpawner for NoDuplex {
     }
 }
 
+#[cfg(not(windows))]
 const WORKSPACE: &str = "/sentinel/generation-policy-workspace";
+#[cfg(windows)]
+const WORKSPACE: &str = "C:/sentinel/generation-policy-workspace";
+#[cfg(not(windows))]
+const SOURCE_FILE: &str = "/sentinel/generation-policy-workspace/src/main.rs";
+#[cfg(windows)]
+const SOURCE_FILE: &str = "C:/sentinel/generation-policy-workspace/src/main.rs";
+#[cfg(not(windows))]
+const OUTPUT_FILE: &str = "/sentinel/generation-policy-workspace/out/result.txt";
+#[cfg(windows)]
+const OUTPUT_FILE: &str = "C:/sentinel/generation-policy-workspace/out/result.txt";
+#[cfg(not(windows))]
+const SECRET_FILE: &str = "/sentinel/generation-policy-workspace/secrets/token";
+#[cfg(windows)]
+const SECRET_FILE: &str = "C:/sentinel/generation-policy-workspace/secrets/token";
+#[cfg(not(windows))]
+const TEMP_FILE: &str = "/sentinel/generation-policy-workspace/tmp/value";
+#[cfg(windows)]
+const TEMP_FILE: &str = "C:/sentinel/generation-policy-workspace/tmp/value";
+#[cfg(not(windows))]
+const OUTSIDE_FILE: &str = "/outside/captured-workspace";
+#[cfg(windows)]
+const OUTSIDE_FILE: &str = "C:/outside/captured-workspace";
+#[cfg(not(windows))]
 const RULE_A: &str = "read(/sentinel/generation-policy-workspace/src/**)";
+#[cfg(windows)]
+const RULE_A: &str = "read(src/**)";
+#[cfg(not(windows))]
 const RULE_B: &str = "write(/sentinel/generation-policy-workspace/out/**)";
+#[cfg(windows)]
+const RULE_B: &str = "write(out/**)";
 const RULE_C: &str = "exec(sentinel-tool *)";
+#[cfg(not(windows))]
 const RULE_D: &str = "read(/sentinel/generation-policy-workspace/secrets/**)";
+#[cfg(windows)]
+const RULE_D: &str = "read(secrets/**)";
+#[cfg(not(windows))]
+const CHANGED_RULE: &str = "read(/sentinel/generation-policy-workspace/src/main.rs)";
+#[cfg(windows)]
+const CHANGED_RULE: &str = "read(src/main.rs)";
 const CONTINUATION_ID: &str = "mcp-sentinel-generation-policy-continuation";
 const RAW_BYTES: &str = "sentinel-raw-generation-policy-bytes";
 const CODEC_LIMIT: usize = 1024 * 1024;
@@ -278,7 +314,7 @@ fn confidential_roundtrip_preserves_order_origins_digest_and_encoding() {
     let Classification::Settled(Ok(allowed)) = policy.classify(PreparedCall::new(
         "read",
         Op::Read {
-            path: CanonPath::new("/sentinel/generation-policy-workspace/src/main.rs"),
+            path: CanonPath::new(SOURCE_FILE),
         },
     )) else {
         panic!("first ordered allow rule was not restored");
@@ -288,7 +324,7 @@ fn confidential_roundtrip_preserves_order_origins_digest_and_encoding() {
     let Classification::Settled(Err(first_deny)) = policy.classify(PreparedCall::new(
         "edit",
         Op::Write {
-            path: CanonPath::new("/sentinel/generation-policy-workspace/out/result.txt"),
+            path: CanonPath::new(OUTPUT_FILE),
             change: Change::Whole(Vec::new()),
         },
     )) else {
@@ -303,7 +339,7 @@ fn confidential_roundtrip_preserves_order_origins_digest_and_encoding() {
     let Classification::Settled(Err(second_deny)) = policy.classify(PreparedCall::new(
         "read",
         Op::Read {
-            path: CanonPath::new("/sentinel/generation-policy-workspace/secrets/token"),
+            path: CanonPath::new(SECRET_FILE),
         },
     )) else {
         panic!("second ordered deny rule was not restored");
@@ -317,29 +353,23 @@ fn confidential_roundtrip_preserves_order_origins_digest_and_encoding() {
     let Classification::Ask(pending) = policy.classify(PreparedCall::new(
         "edit",
         Op::Write {
-            path: CanonPath::new("/sentinel/generation-policy-workspace/tmp/value"),
+            path: CanonPath::new(TEMP_FILE),
             change: Change::Whole(Vec::new()),
         },
     )) else {
         panic!("uncovered write should reach the captured mode");
     };
-    let ego_core::permit::Resolution::Ask(pending) =
+    let ego_core::permit::Resolution::Settled(Ok(authorized)) =
         futures::executor::block_on(policy.settle(pending))
     else {
-        panic!("auto mode should preserve the unresolved mutating call");
+        panic!("auto mode should preserve its bounded-write decision");
     };
-    assert!(matches!(
-        pending.request().why(),
-        Escalation::ModeAsks {
-            mode: Mode::Auto,
-            ..
-        }
-    ));
+    assert_eq!(authorized.by(), &Authority::Mode { mode: Mode::Auto });
 
     let Classification::Settled(Err(outside)) = policy.classify(PreparedCall::new(
         "read",
         Op::Read {
-            path: CanonPath::new("/outside/captured-workspace"),
+            path: CanonPath::new(OUTSIDE_FILE),
         },
     )) else {
         panic!("restored workspace boundary must remain closed");
@@ -364,10 +394,7 @@ fn digest_is_domain_separated_stable_and_changes_for_every_semantic_dimension() 
     reordered.allow.swap(0, 1);
     assert_ne!(base, capture(Mode::Auto, reordered).snapshot().digest());
     let mut changed_text = rules();
-    changed_text.allow[0] = SourcedRule::new(
-        Rule::load("read(/sentinel/generation-policy-workspace/src/main.rs)").unwrap(),
-        Source::System,
-    );
+    changed_text.allow[0] = SourcedRule::new(Rule::load(CHANGED_RULE).unwrap(), Source::System);
     assert_ne!(base, capture(Mode::Auto, changed_text).snapshot().digest());
     let mut changed_polarity = rules();
     changed_polarity.allow.clear();
@@ -549,7 +576,7 @@ fn new_and_restore_couple_policy_semantics_and_live_human_port() {
     let call = PreparedCall::new(
         "edit",
         Op::Write {
-            path: CanonPath::new("/sentinel/generation-policy-workspace/src/main.rs"),
+            path: CanonPath::new(SOURCE_FILE),
             change: Change::Whole(b"updated".to_vec()),
         },
     );
@@ -584,7 +611,7 @@ fn new_and_restore_couple_policy_semantics_and_live_human_port() {
     let call = PreparedCall::new(
         "edit",
         Op::Write {
-            path: CanonPath::new("/sentinel/generation-policy-workspace/src/main.rs"),
+            path: CanonPath::new(SOURCE_FILE),
             change: Change::Whole(b"updated".to_vec()),
         },
     );

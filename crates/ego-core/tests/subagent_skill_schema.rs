@@ -319,6 +319,14 @@ mod regression_case {
 
     type Controller = RunController<OriginStore, OriginExecutor, FixedClock, FixedIds>;
 
+    fn workspace_root() -> &'static str {
+        if cfg!(windows) {
+            r"C:\workspace"
+        } else {
+            "/workspace"
+        }
+    }
+
     fn controller(store: Arc<OriginStore>, executor: Arc<OriginExecutor>) -> Controller {
         RunController::new(
             store,
@@ -334,7 +342,7 @@ mod regression_case {
             RequestId::session_id(RequestId::from_uuid(
                 uuid::Uuid::parse_str(INVOCATION).unwrap(),
             )),
-            RunRoot::new("/workspace").unwrap(),
+            RunRoot::new(workspace_root()).unwrap(),
             RequestId::from_uuid(uuid::Uuid::parse_str(INVOCATION).unwrap()),
             RequestDigest::parse(digest).unwrap(),
             ego_core::run::RunSelections::empty(),

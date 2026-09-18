@@ -14,8 +14,28 @@ use ego_core::health::{
     VisibleRoots,
 };
 
+#[cfg(not(windows))]
+const VISIBLE_HOME: &str = "/home/op/.ego";
+#[cfg(windows)]
+const VISIBLE_HOME: &str = r"C:\Users\op\.ego";
+#[cfg(not(windows))]
+const VISIBLE_WORKSPACE: &str = "/work/repo";
+#[cfg(windows)]
+const VISIBLE_WORKSPACE: &str = r"C:\work\repo";
+#[cfg(not(windows))]
+const PRIVATE_MACHINE_PATH: &str = "/Users/someone/.ssh/id_rsa";
+#[cfg(windows)]
+const PRIVATE_MACHINE_PATH: &str = r"C:\Users\someone\.ssh\id_rsa";
+#[cfg(not(windows))]
+const PRIVATE_SYSTEM_PATH: &str = "/etc/shadow";
+#[cfg(windows)]
+const PRIVATE_SYSTEM_PATH: &str = r"C:\Windows\System32\config\SAM";
+
 fn roots() -> VisibleRoots {
-    VisibleRoots::new([PathBuf::from("/home/op/.ego"), PathBuf::from("/work/repo")])
+    VisibleRoots::new([
+        PathBuf::from(VISIBLE_HOME),
+        PathBuf::from(VISIBLE_WORKSPACE),
+    ])
 }
 
 fn item(probe: &'static str, status: HealthStatus) -> HealthItem {
@@ -140,7 +160,7 @@ fn a_detail_naming_a_path_outside_the_operator_visible_roots_is_refused() {
     // detail does not notice, and a caller holding an `Err` has to decide.
     let refusal = HealthDetail::sanitized(
         "credentials.store",
-        "could not read /Users/someone/.ssh/id_rsa",
+        format!("could not read {PRIVATE_MACHINE_PATH}"),
         &roots(),
     )
     .expect_err("a path outside every visible root is not printable");
@@ -156,14 +176,14 @@ fn a_path_inside_a_visible_root_is_exactly_what_doctor_is_for() {
     // thing an operator needs — which file to go and look at.
     let detail = HealthDetail::sanitized(
         "config.load",
-        "/home/op/.ego/config.toml is not valid TOML",
+        format!("{VISIBLE_HOME}/config.toml is not valid TOML"),
         &roots(),
     )
     .expect("a path under EGO_HOME is what the operator is meant to see");
 
     assert_eq!(
         detail.as_str(),
-        "/home/op/.ego/config.toml is not valid TOML"
+        format!("{VISIBLE_HOME}/config.toml is not valid TOML")
     );
 }
 
@@ -172,15 +192,19 @@ fn a_refused_detail_becomes_a_loud_item_that_does_not_carry_it() {
     // "Refuses output rather than printing the unsafe detail" — and says so.
     // A silent drop would leave the operator with a diagnosis that is missing
     // a line and no way to know it.
-    let refusal = HealthDetail::sanitized("mcp.admission", "/etc/shadow is unreadable", &roots())
-        .expect_err("outside the roots");
+    let refusal = HealthDetail::sanitized(
+        "mcp.admission",
+        format!("{PRIVATE_SYSTEM_PATH} is unreadable"),
+        &roots(),
+    )
+    .expect_err("outside the roots");
     let item = HealthItem::refused(HealthSection::Mcp, &refusal);
 
     assert_eq!(item.status, HealthStatus::Error);
     assert_eq!(item.id.probe, "doctor.redaction_refused");
     assert_eq!(item.id.subject.as_deref(), Some("mcp.admission"));
     assert!(
-        !item.detail.as_str().contains("/etc/shadow"),
+        !item.detail.as_str().contains(PRIVATE_SYSTEM_PATH),
         "the refused path must not reach the output the refusal kept it out of",
     );
     assert!(item.detail.as_str().contains("mcp.admission"));

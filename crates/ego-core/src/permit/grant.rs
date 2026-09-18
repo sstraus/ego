@@ -2326,9 +2326,14 @@ mod tests {
 
     #[test]
     fn permit_scope_covers_paths_endpoints_and_exact_spawn_spec() {
+        let spawn_cwd = if cfg!(windows) {
+            CanonPath::new(r"C:\ws")
+        } else {
+            CanonPath::new("/ws")
+        };
         let allowed_spawn = SpawnSpec::new(
             vec![OsString::from("git"), OsString::from("status")],
-            Some(CanonPath::new("/ws")),
+            Some(spawn_cwd.clone()),
             Some(Duration::from_secs(30)),
             EnvPolicy::Inherited,
         )
@@ -2382,7 +2387,7 @@ mod tests {
                 OsString::from("status"),
                 OsString::from("--short"),
             ],
-            Some(CanonPath::new("/ws")),
+            Some(spawn_cwd),
             Some(Duration::from_secs(30)),
             EnvPolicy::Inherited,
         )
