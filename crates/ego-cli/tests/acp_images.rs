@@ -132,7 +132,10 @@ impl Host {
     fn start(stub: &Stub, image_input: &str) -> (Self, Ego) {
         let ego = Ego::against(stub);
         ego.home_file("models.toml", &facts(image_input));
-        ego.home_file("config.toml", "model = \"anthropic/fixture-vision\"\n");
+        ego.home_file(
+            "config.toml",
+            "model = \"anthropic/fixture-vision\"\nsandbox = \"off\"\n",
+        );
         let workspace = ego.workspace_path().to_owned();
         let running = Ego::at(ego.home_path(), &workspace, Some(stub))
             .subcommand("acp")

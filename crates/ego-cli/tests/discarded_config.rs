@@ -21,7 +21,15 @@ fn headless_json_keeps_diagnostics_on_stderr_and_names_discarded_settings() {
     let ego = Ego::against(&stub);
     ignored_config(&ego);
     let finished = ego
-        .args(["-m", "ollama/qwen3", "--output", "json", "hello"])
+        .args([
+            "-m",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--output",
+            "json",
+            "hello",
+        ])
         .run();
     assert_eq!(finished.code, Some(0), "{}", finished.stderr);
     assert!(
