@@ -19,7 +19,7 @@ use ego_core::permit::Confinement;
 
 mod support;
 
-const ROOT: &str = "/tmp/regression case";
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
 const UNSELECTED: &str = "__ego_unselected__";
 
 /// A seat that answers for one session and remembers what was staged.

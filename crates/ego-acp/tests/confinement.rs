@@ -15,7 +15,7 @@ use ego_core::permit::Confinement;
 
 mod support;
 
-const ROOT: &str = "/tmp/regression case";
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
 
 #[derive(Debug, Default)]
 struct Seat {

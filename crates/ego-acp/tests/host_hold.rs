@@ -14,7 +14,10 @@ use ego_core::run::RunStatus;
 
 mod support;
 
-const ROOT: &str = "/tmp/regression case-workspace";
+const ROOT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/regression case-workspace"
+);
 const REQUEST: &str = "00000000-0000-0000-0000-000000000091";
 const SECOND_REQUEST: &str = "00000000-0000-0000-0000-000000000092";
 const THIRD_REQUEST: &str = "00000000-0000-0000-0000-000000000093";

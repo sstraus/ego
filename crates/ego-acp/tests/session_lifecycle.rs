@@ -15,7 +15,9 @@ use futures::{SinkExt, StreamExt};
 
 mod support;
 
-const ROOT: &str = "/tmp/regression case";
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
+const OTHER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
+const WRONG_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
 const regression_case_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
 
 async fn regression_case_phase<T>(name: &str, operation: impl Future<Output = T>) -> T {
@@ -684,7 +686,7 @@ async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt()
 async fn list_uses_restart_safe_cursor_pagination_and_root_filtering() {
     let fixture = support::DurableAcpFixture::new();
     fixture.seed_sessions(ROOT, support::SESSION_PAGE_SIZE + 1);
-    fixture.seed_sessions("/tmp/another-workspace", 1);
+    fixture.seed_sessions(OTHER_ROOT, 1);
     let mut connection = Connected::new(fixture.router());
     connection.initialize().await;
 
@@ -723,7 +725,7 @@ async fn list_uses_restart_safe_cursor_pagination_and_root_filtering() {
         .request(
             "session/list",
             serde_json::json!({
-                "cwd": "/tmp/another-workspace",
+                "cwd": OTHER_ROOT,
                 "cursor": cursor,
             }),
         )
@@ -1365,7 +1367,7 @@ async fn malformed_unknown_and_wrong_root_requests_return_explicit_errors() {
             "session/load",
             serde_json::json!({
                 "sessionId": target.session_id,
-                "cwd": "/tmp/wrong-root",
+                "cwd": WRONG_ROOT,
                 "mcpServers": [],
             }),
         ),

@@ -66,6 +66,20 @@ use tokio::sync::Notify;
 
 mod support;
 
+const WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-workspace");
+const SOME_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-some-workspace");
+const FIRST_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-first");
+const SECOND_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-second");
+const OTHER_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-other");
+
+fn workspace_file_uri(name: &str) -> String {
+    format!(
+        "file:///{}/{}",
+        WORKSPACE.trim_start_matches('/').replace('\\', "/"),
+        name
+    )
+}
+
 /// The model a turn in this file resolved to.
 ///
 /// A stated context window, because the one thing an `UsageUpdate` needs that
@@ -897,7 +911,7 @@ fn expected_updates(session: &str) -> Vec<serde_json::Value> {
 async fn a_prompt_produces_the_same_updates_the_cli_would_and_then_its_stop_reason() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/some-workspace").await;
+    let session = connection.open(SOME_WORKSPACE).await;
 
     let (response, notifications) = connection
         .request(
@@ -919,10 +933,7 @@ async fn a_prompt_produces_the_same_updates_the_cli_would_and_then_its_stop_reas
             .into_iter()
             .map(|(prompt, root)| (prompt.text().to_owned(), root))
             .collect::<Vec<_>>(),
-        vec![(
-            "list the files".to_string(),
-            PathBuf::from("/tmp/some-workspace")
-        )],
+        vec![("list the files".to_string(), PathBuf::from(SOME_WORKSPACE))],
         "the host was handed a different prompt, or a different workspace, \
          than the client sent"
     );
@@ -950,8 +961,8 @@ async fn a_prompt_produces_the_same_updates_the_cli_would_and_then_its_stop_reas
 #[tokio::test]
 async fn each_session_receives_only_its_own_updates() {
     let mut connection = Connected::to(PromptExecutor::publishing());
-    let first = connection.open("/tmp/first").await;
-    let second = connection.open("/tmp/second").await;
+    let first = connection.open(FIRST_WORKSPACE).await;
+    let second = connection.open(SECOND_WORKSPACE).await;
     assert_ne!(first, second, "session/new handed out the same id twice");
 
     let (_, notifications) = connection
@@ -988,7 +999,8 @@ async fn each_session_receives_only_its_own_updates() {
 async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
+    let resource_uri = workspace_file_uri("notes.md");
 
     connection
         .request(
@@ -997,7 +1009,7 @@ async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
                 "sessionId": session,
                 "prompt": [
                     { "type": "text", "text": "summarise" },
-                    { "type": "resource_link", "uri": "file:///tmp/ws/notes.md", "name": "notes" },
+                    { "type": "resource_link", "uri": resource_uri.clone(), "name": "notes" },
                 ],
             }),
         )
@@ -1005,7 +1017,7 @@ async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
 
     assert_eq!(
         turns.turns()[0].0.text(),
-        "summarise\nfile:///tmp/ws/notes.md",
+        format!("summarise\n{resource_uri}"),
         "a resource link did not reach the turn as its URI"
     );
 
@@ -1021,7 +1033,7 @@ async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
 async fn audio_is_refused_by_name_and_no_turn_is_started() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     let (response, notifications) = connection
         .request(
@@ -1091,7 +1103,7 @@ const PNG_1X1: &[u8] = &[
 async fn an_image_reaches_the_turn_decoded_and_measured() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     connection
         .request(
@@ -1132,7 +1144,7 @@ async fn an_image_reaches_the_turn_decoded_and_measured() {
 async fn an_image_whose_bytes_contradict_its_declared_type_is_refused() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     let (response, notifications) = connection
         .request(
@@ -1177,7 +1189,7 @@ async fn an_image_whose_bytes_contradict_its_declared_type_is_refused() {
 async fn an_image_encoding_this_build_cannot_read_is_refused_by_name() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     let (response, _) = connection
         .request(
@@ -1217,7 +1229,7 @@ async fn an_image_encoding_this_build_cannot_read_is_refused_by_name() {
 async fn image_data_that_is_not_base64_is_refused() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     let (response, _) = connection
         .request(
@@ -1269,7 +1281,7 @@ async fn a_prompt_is_admitted_under_a_derived_digest_and_not_its_own_body() {
 
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     connection
         .request(
@@ -1316,7 +1328,7 @@ async fn a_prompt_is_admitted_under_a_derived_digest_and_not_its_own_body() {
 async fn a_prompt_for_an_unopened_session_is_refused() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    connection.open("/tmp/ws").await;
+    connection.open(WORKSPACE).await;
 
     let (response, _) = connection
         .request(
@@ -1355,7 +1367,7 @@ async fn a_prompt_for_an_unopened_session_is_refused() {
 async fn a_second_prompt_while_a_turn_is_running_is_refused_and_starts_nothing() {
     let host = PromptExecutor::blocking();
     let mut connection = Connected::to(host.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     let first = connection
         .send(
@@ -1429,7 +1441,7 @@ async fn a_second_prompt_while_a_turn_is_running_is_refused_and_starts_nothing()
 async fn an_integrity_failure_answers_an_error_and_not_a_cancelled_stop() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
     turns.misattach_next();
 
     let (answer, _) = connection
@@ -1478,7 +1490,7 @@ async fn an_integrity_failure_answers_an_error_and_not_a_cancelled_stop() {
 async fn a_retried_failed_prompt_answers_the_diagnostic_the_first_delivery_gave() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     connection
         .request(
@@ -1543,7 +1555,7 @@ async fn a_retried_failed_prompt_answers_the_diagnostic_the_first_delivery_gave(
 async fn a_prompt_redelivered_after_a_later_turn_replays_instead_of_running_again() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     let body = serde_json::json!({
         "sessionId": session,
@@ -1592,7 +1604,7 @@ async fn a_prompt_redelivered_after_a_later_turn_replays_instead_of_running_agai
 async fn cancel_reaches_the_turn_that_is_running() {
     let host = PromptExecutor::blocking();
     let mut connection = Connected::to(host.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     let running = connection
         .send(
@@ -1620,7 +1632,7 @@ async fn cancel_reaches_the_turn_that_is_running() {
         "the dispatch loop was blocked, so the cancel never reached the registry",
         connection.request(
             "session/new",
-            serde_json::json!({ "cwd": "/tmp/other", "mcpServers": [] }),
+            serde_json::json!({ "cwd": OTHER_WORKSPACE, "mcpServers": [] }),
         ),
     )
     .await;
@@ -1653,7 +1665,7 @@ async fn cancel_reaches_the_turn_that_is_running() {
 async fn a_session_accepts_another_prompt_once_its_turn_has_ended() {
     let host = PromptExecutor::blocking();
     let mut connection = Connected::to(host.clone());
-    let session = connection.open("/tmp/ws").await;
+    let session = connection.open(WORKSPACE).await;
 
     for text in ["first", "second"] {
         let sent = connection
@@ -1714,7 +1726,7 @@ async fn session_new_accepts_mcp_servers_without_advertising_unsupported_capabil
         .request(
             "session/new",
             serde_json::json!({
-                "cwd": "/tmp/ws",
+                "cwd": WORKSPACE,
                 "mcpServers": [{
                     "name": "files",
                     "command": "/bin/true",
@@ -1771,7 +1783,7 @@ async fn session_new_retains_stdio_and_http_transport_material_losslessly() {
         .request(
             "session/new",
             serde_json::json!({
-                "cwd": "/tmp/ws",
+                "cwd": WORKSPACE,
                 "mcpServers": [
                     {
                         "name": "files",
@@ -1847,7 +1859,7 @@ async fn invalid_supplied_mcp_servers_are_rejected_atomically_before_session_ins
         let (response, _) = connection
             .request(
                 "session/new",
-                serde_json::json!({ "cwd": "/tmp/ws", "mcpServers": [server] }),
+                serde_json::json!({ "cwd": WORKSPACE, "mcpServers": [server] }),
             )
             .await;
         assert!(
@@ -1882,7 +1894,7 @@ async fn supplied_mcp_authority_survives_prompt_continuations() {
         .request(
             "session/new",
             serde_json::json!({
-                "cwd": "/tmp/ws",
+                "cwd": WORKSPACE,
                 "mcpServers": [
                     {
                         "name": "files",
@@ -1972,7 +1984,7 @@ async fn mcp_admission_failure_leaves_session_unknown_and_uninserted() {
         .request(
             "session/new",
             serde_json::json!({
-                "cwd": "/tmp/ws",
+                "cwd": WORKSPACE,
                 "mcpServers": [{
                     "name": "files",
                     "command": "/bin/true",
