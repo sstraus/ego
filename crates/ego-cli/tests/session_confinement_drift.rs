@@ -27,7 +27,7 @@ use ego_core::turn::CancelToken;
 use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts};
 use ego_tools::http::SystemResolver;
 use ego_tools::store::{JsonlStore, OsIo, SessionEvidenceStore};
-use support::{Plan, Reply, Stub, text};
+use support::{Plan, Reply, Stub, fixture_path, text, windows_system_environment};
 
 struct CollectingSinkFactory(Arc<CollectingSink>);
 
@@ -195,9 +195,10 @@ fn cli_refuses_changed_admitted_observation_before_provider_or_tool_effects() {
     });
     let home = tempfile::tempdir().expect("isolated child home");
     let sessions = tempfile::tempdir().expect("isolated child sessions");
-    let child = Command::new(std::env::current_exe().expect("test executable"))
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", fixture_path())
         .env("HOME", home.path())
         .env("EGO_HOME", home.path())
         .env("EGO_DRIFT_CHILD", "1")
@@ -210,9 +211,11 @@ fn cli_refuses_changed_admitted_observation_before_provider_or_tool_effects() {
             "--exact",
             "cli_refuses_changed_admitted_observation_before_provider_or_tool_effects",
             "--nocapture",
-        ])
-        .output()
-        .expect("isolated CLI drift child");
+        ]);
+    for (key, value) in windows_system_environment() {
+        command.env(key, value);
+    }
+    let child = command.output().expect("isolated CLI drift child");
     assert!(
         child.status.success(),
         "isolated CLI drift child failed:\n{}\n{}",

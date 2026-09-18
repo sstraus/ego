@@ -34,22 +34,22 @@ use std::time::{Duration, Instant};
 use portable_pty::{NativePtySystem, PtySize, PtySystem};
 
 #[cfg(not(windows))]
-fn fixture_path() -> OsString {
+pub fn fixture_path() -> OsString {
     OsString::from("/usr/bin:/bin")
 }
 
 #[cfg(windows)]
-fn fixture_path() -> OsString {
+pub fn fixture_path() -> OsString {
     std::env::var_os("PATH").unwrap_or_default()
 }
 
 #[cfg(not(windows))]
-fn windows_system_environment() -> Vec<(&'static str, OsString)> {
+pub fn windows_system_environment() -> Vec<(&'static str, OsString)> {
     Vec::new()
 }
 
 #[cfg(windows)]
-fn windows_system_environment() -> Vec<(&'static str, OsString)> {
+pub fn windows_system_environment() -> Vec<(&'static str, OsString)> {
     ["SystemRoot", "WINDIR"]
         .into_iter()
         .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
