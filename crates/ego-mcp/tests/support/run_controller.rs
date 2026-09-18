@@ -27,9 +27,6 @@ use ego_core::run::{
 };
 use ego_core::session::TargetPublication;
 
-pub fn root() -> RunRoot {
-    RunRoot::new("/workspace/project").expect("fixture root")
-}
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_mcp::{
@@ -37,7 +34,13 @@ use ego_mcp::{
     McpRunResourceRequest, McpRunRootResolver, McpRunServerPorts, McpServerToolCall,
     SanitizedMcpRunResource,
 };
-use serde_json::Map;
+use serde_json::{Map, json};
+
+pub const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/mcp-run-controller");
+
+pub fn root() -> RunRoot {
+    RunRoot::new(ROOT).expect("fixture root")
+}
 
 fn invalid_error() -> McpError {
     match McpServerToolCall::new(String::new(), Map::new(), None) {
@@ -483,9 +486,16 @@ impl McpRunResourceReader for ResourceReader {
             match request {
                 McpRunResourceRequest::Summary { run_id } => Ok(SanitizedMcpRunResource::Text {
                     mime_type: Arc::from("application/json"),
-                    text: Arc::from(format!(
-                        "{{\"run_id\":\"{run_id}\",\"revision\":1,\"root\":\"/workspace/project\",\"status\":\"settled\",\"settlement\":null}}"
-                    )),
+                    text: Arc::from(
+                        json!({
+                            "run_id": run_id.to_string(),
+                            "revision": 1,
+                            "root": ROOT,
+                            "status": "settled",
+                            "settlement": null,
+                        })
+                        .to_string(),
+                    ),
                 }),
                 McpRunResourceRequest::Artifact { artifact_id, .. } => {
                     Ok(SanitizedMcpRunResource::Blob {

@@ -40,6 +40,8 @@ use ego_core::skill::{
     ActiveSkillScope, SkillCatalogue, SkillInvocation, SkillInvocationOutcome, SkillInvocationPort,
     SkillOperation, SkillSpec,
 };
+
+const TEST_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/skill-service");
 use ego_core::state::SessionState;
 use ego_core::store::blob::{
     BlobError, BlobId, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter,
@@ -1263,7 +1265,7 @@ fn real_child_service() -> RealChildFixture {
         child: ChildRunService::new(
             controller,
             gate,
-            RunRoot::new("/workspace").expect("root"),
+            RunRoot::new(TEST_ROOT).expect("root"),
             bindings,
             ports,
         ),

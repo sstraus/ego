@@ -19,6 +19,8 @@ use ego_core::permit::{
     RunConfinement, SpawnSpec,
 };
 
+const TEST_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/judge-contract");
+
 fn config() -> JudgeConfig {
     JudgeConfig {
         identity: ModelRef("ollama/qwen3".to_string()),
@@ -33,7 +35,7 @@ fn spawn_call() -> PreparedCall {
             OsString::from("/usr/bin/printf"),
             OsString::from("argv-native"),
         ],
-        Some(CanonPath::new("/workspace")),
+        Some(CanonPath::new(TEST_ROOT)),
         Some(Duration::from_secs(5)),
         EnvPolicy::allow_only(["PATH", "EGO_CONTRACT_SECRET"]).unwrap(),
     )
@@ -45,12 +47,12 @@ fn escalation() -> Escalation {
     Escalation::ModeAsks {
         mode: Mode::Auto,
         op: OpName::Spawn,
-        path: CanonPath::new("/workspace"),
+        path: CanonPath::new(TEST_ROOT),
     }
 }
 
 fn confinement(level: Confinement, offline: bool) -> RunConfinement {
-    RunConfinement::new(level, offline, CanonPath::new("/workspace")).unwrap()
+    RunConfinement::new(level, offline, CanonPath::new(TEST_ROOT)).unwrap()
 }
 
 fn canonical_json(request: &GenRequest) -> serde_json::Value {
@@ -174,7 +176,7 @@ fn judge_request_is_toolless_and_contains_only_canonical_authority_facts() {
         serde_json::json!({
             "level": "workspace",
             "offline": true,
-            "workspace": "/workspace",
+            "workspace": TEST_ROOT,
         }),
         "judge confinement must be exactly the canonical three-field object"
     );

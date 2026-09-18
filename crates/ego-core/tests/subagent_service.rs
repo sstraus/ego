@@ -47,6 +47,8 @@ use ego_core::run::{
     RunOrigin, RunPreparation, RunPrepared, RunPrompt, RunRetention, RunRoot, RunSelections,
     RunSettlement, RunTransaction,
 };
+
+const TEST_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/subagent-service");
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobId, BlobRef};
@@ -152,7 +154,7 @@ impl ExistingAuthorityAdmission {
             None,
         )
         .expect("system config resolves");
-        let workspace = CanonPath::new("/workspace");
+        let workspace = CanonPath::new(TEST_ROOT);
         Self {
             parent,
             system,
@@ -1402,7 +1404,7 @@ impl Harness {
             inner: ChildRunService::new(
                 Arc::clone(&self.controller),
                 gate.clone(),
-                RunRoot::new("/workspace").expect("absolute root"),
+                RunRoot::new(TEST_ROOT).expect("absolute root"),
                 RunExecutionBindings::new(Arc::new(Sinks), None).with_budget_gate(gate),
                 ports,
             ),

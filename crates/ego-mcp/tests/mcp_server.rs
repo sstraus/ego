@@ -163,11 +163,11 @@ fn schemas_reject_unknown_fields_and_non_subtractive_authority() {
     for (name, body) in [
         (
             "run",
-            json!({"request_id":"00000000-0000-0000-0000-000000000058","root":"/workspace/project","prompt":"x","credentials":"secret"}),
+            json!({"request_id":"00000000-0000-0000-0000-000000000058","root":run_fixture::ROOT,"prompt":"x","credentials":"secret"}),
         ),
         (
             "run",
-            json!({"request_id":"00000000-0000-0000-0000-000000000059","root":"/workspace/project","prompt":"x","permission_rules":[]}),
+            json!({"request_id":"00000000-0000-0000-0000-000000000059","root":run_fixture::ROOT,"prompt":"x","permission_rules":[]}),
         ),
         (
             "continue",
@@ -190,9 +190,9 @@ fn run_enforces_root_model_budget_mode_and_concurrency_ceilings_before_controlle
     let server = server(controller.clone());
     for body in [
         json!({"request_id":"00000000-0000-0000-0000-000000000062","root":"/tmp","prompt":"x"}),
-        json!({"request_id":"00000000-0000-0000-0000-000000000063","root":"/workspace/project","prompt":"x","model":"model/other"}),
-        json!({"request_id":"00000000-0000-0000-0000-000000000064","root":"/workspace/project","prompt":"x","budget":"101k"}),
-        json!({"request_id":"00000000-0000-0000-0000-000000000065","root":"/workspace/project","prompt":"x","mode":"yolo"}),
+        json!({"request_id":"00000000-0000-0000-0000-000000000063","root":run_fixture::ROOT,"prompt":"x","model":"model/other"}),
+        json!({"request_id":"00000000-0000-0000-0000-000000000064","root":run_fixture::ROOT,"prompt":"x","budget":"101k"}),
+        json!({"request_id":"00000000-0000-0000-0000-000000000065","root":run_fixture::ROOT,"prompt":"x","mode":"yolo"}),
     ] {
         let error = futures::executor::block_on(server.call_tool(call("run", body)))
             .expect_err("policy ceiling must refuse");
@@ -225,7 +225,7 @@ fn run_budget_axes_are_independent_and_currency_is_not_convertible() {
         let server = server_with_ceilings(controller, ceilings);
         let error = futures::executor::block_on(server.call_tool(call(
             "run",
-            json!({"request_id":"00000000-0000-0000-0000-000000000058","root":"/workspace/project","prompt":"x","budget":requested}),
+            json!({"request_id":"00000000-0000-0000-0000-000000000058","root":run_fixture::ROOT,"prompt":"x","budget":requested}),
         )))
         .expect_err("a missing, wrong-currency, or excessive axis must refuse");
         assert!(error.to_string().contains("ceiling") || error.to_string().contains("not allowed"));
@@ -247,7 +247,7 @@ fn run_continue_cancel_status_are_adapted_to_one_injected_controller() {
         &server,
         "run",
         json!({
-            "request_id":"00000000-0000-0000-0000-000000000066", "root":"/workspace/project", "prompt":"hello"
+            "request_id":"00000000-0000-0000-0000-000000000066", "root":run_fixture::ROOT, "prompt":"hello"
         }),
     ));
     let run_id = run["run_id"].as_str().expect("run id");
@@ -301,7 +301,7 @@ fn admitted_execution_is_driven_separately_and_propagates_all_selections() {
         "run",
         json!({
             "request_id":"00000000-0000-0000-0000-000000000079",
-            "root":"/workspace/project", "model":"model/allowed",
+            "root":run_fixture::ROOT, "model":"model/allowed",
             "thinking":"high", "mode":"default", "budget":"40k",
             "profile":"ci", "prompt":"select"
         }),
@@ -339,7 +339,7 @@ fn fresh_controller_replay_attaches_shared_durable_run_and_recovers() {
     let executor = Arc::new(run_fixture::ExecutorFixture::default());
     let controller1 = run_fixture::controller_from(store.clone(), executor.clone());
     let (factory1, spawner1) = factory_with_spawner(controller1);
-    let request = json!({"request_id":"00000000-0000-0000-0000-000000000080","root":"/workspace/project","prompt":"recover"});
+    let request = json!({"request_id":"00000000-0000-0000-0000-000000000080","root":run_fixture::ROOT,"prompt":"recover"});
     let first =
         futures::executor::block_on(invoke(&factory1.new_connection(), "run", request.clone()));
     assert_eq!(first["status"], "running");
@@ -365,11 +365,11 @@ fn executor_capacity_refuses_third_admission_without_server_queue() {
         let result = futures::executor::block_on(invoke(
             &server,
             "run",
-            json!({"request_id":format!("00000000-0000-0000-0000-0000000000{value}"),"root":"/workspace/project","prompt":"held"}),
+            json!({"request_id":format!("00000000-0000-0000-0000-0000000000{value}"),"root":run_fixture::ROOT,"prompt":"held"}),
         ));
         assert_eq!(result["status"], "running");
     }
-    let third = futures::executor::block_on(server.call_tool(call("run", json!({"request_id":"00000000-0000-0000-0000-000000000083","root":"/workspace/project","prompt":"refused"}))));
+    let third = futures::executor::block_on(server.call_tool(call("run", json!({"request_id":"00000000-0000-0000-0000-000000000083","root":run_fixture::ROOT,"prompt":"refused"}))));
     assert!(third.is_err());
 }
 
@@ -379,7 +379,7 @@ fn failed_execution_spawn_does_not_grant_connection_visibility() {
     let (factory, spawner) = factory_with_spawner(controller);
     spawner.set_fail(true);
     let server = factory.new_connection();
-    let error = futures::executor::block_on(server.call_tool(call("run", json!({"request_id":"00000000-0000-0000-0000-000000000084","root":"/workspace/project","prompt":"spawn fail"}))));
+    let error = futures::executor::block_on(server.call_tool(call("run", json!({"request_id":"00000000-0000-0000-0000-000000000084","root":run_fixture::ROOT,"prompt":"spawn fail"}))));
     assert!(error.is_err());
     assert!(futures::executor::block_on(server.read_resource("ego://runs/00000000-0000-0000-0000-000000000000.00000000-0000-0000-0000-000000000000/summary")).is_err());
 }
@@ -388,7 +388,7 @@ fn failed_execution_spawn_does_not_grant_connection_visibility() {
 fn duplicate_mutations_replay_and_digest_mismatch_does_not_repeat_effects() {
     let (controller, executor) = run_fixture::mcp_controller_fixture();
     let server = server(controller.clone());
-    let request = json!({"request_id":"00000000-0000-0000-0000-000000000069", "root":"/workspace/project", "prompt":"once"});
+    let request = json!({"request_id":"00000000-0000-0000-0000-000000000069", "root":run_fixture::ROOT, "prompt":"once"});
     let first = futures::executor::block_on(invoke(&server, "run", request.clone()));
     let replay = futures::executor::block_on(invoke(&server, "run", request));
     assert_eq!(first, replay);
@@ -403,7 +403,7 @@ fn duplicate_mutations_replay_and_digest_mismatch_does_not_repeat_effects() {
     let mismatch = futures::executor::block_on(server.call_tool(call(
         "run",
         json!({
-            "request_id":"00000000-0000-0000-0000-000000000069", "root":"/workspace/project", "prompt":"twice"
+            "request_id":"00000000-0000-0000-0000-000000000069", "root":run_fixture::ROOT, "prompt":"twice"
         }),
     )))
     .expect_err("same id with another digest must refuse");
@@ -426,7 +426,7 @@ fn lease_conflict_stale_revision_and_concurrency_are_truthful() {
         &server,
         "run",
         json!({
-            "request_id":"00000000-0000-0000-0000-000000000070", "root":"/workspace/project", "prompt":"x"
+            "request_id":"00000000-0000-0000-0000-000000000070", "root":run_fixture::ROOT, "prompt":"x"
         }),
     ));
     let run_id = run["run_id"].as_str().expect("run id");
@@ -472,7 +472,7 @@ fn resources_are_connection_scoped_authorized_redacted_bounded_and_absent_when_u
         &server,
         "run",
         json!({
-            "request_id":"00000000-0000-0000-0000-000000000073", "root":"/workspace/project", "prompt":"x"
+            "request_id":"00000000-0000-0000-0000-000000000073", "root":run_fixture::ROOT, "prompt":"x"
         }),
     ));
     let run_id = run["run_id"].as_str().expect("run id");
@@ -533,7 +533,7 @@ fn disconnect_only_detaches_and_never_cancels_the_run() {
         &persistent,
         "run",
         json!({
-            "request_id":"00000000-0000-0000-0000-000000000074", "root":"/workspace/project", "prompt":"x"
+            "request_id":"00000000-0000-0000-0000-000000000074", "root":run_fixture::ROOT, "prompt":"x"
         }),
     ));
     drop(persistent);
@@ -556,7 +556,7 @@ fn cancellation_before_and_during_work_and_unresolved_approval_are_explicit() {
         &server,
         "run",
         json!({
-            "request_id":"00000000-0000-0000-0000-000000000075", "root":"/workspace/project", "prompt":"x"
+            "request_id":"00000000-0000-0000-0000-000000000075", "root":run_fixture::ROOT, "prompt":"x"
         }),
     ));
     assert_eq!(before["status"], "running");
@@ -577,7 +577,7 @@ fn cancellation_before_and_during_work_and_unresolved_approval_are_explicit() {
         &server,
         "run",
         json!({
-            "request_id":"00000000-0000-0000-0000-000000000077", "root":"/workspace/project", "prompt":"write file"
+            "request_id":"00000000-0000-0000-0000-000000000077", "root":run_fixture::ROOT, "prompt":"write file"
         }),
     ));
     assert_eq!(approval["status"], "running");
@@ -601,7 +601,7 @@ fn restart_reconstructs_interrupted_or_uncertain_without_claiming_running_and_re
     let first_connection = server(controller.clone());
     let request = json!({
         "request_id":"00000000-0000-0000-0000-000000000078",
-        "root":"/workspace/project",
+        "root":run_fixture::ROOT,
         "prompt":"x"
     });
     let run = futures::executor::block_on(invoke(&first_connection, "run", request.clone()));

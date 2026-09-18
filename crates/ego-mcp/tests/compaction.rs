@@ -252,7 +252,7 @@ fn status_projects_context_overflow_after_the_real_settlement() {
         "run",
         json!({
             "request_id": "00000000-0000-0000-0000-000000000068",
-            "root": "/workspace/project",
+            "root": run_fixture::ROOT,
             "prompt": "context overflow fixture"
         }),
     )))
