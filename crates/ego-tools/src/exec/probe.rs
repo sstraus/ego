@@ -491,6 +491,18 @@ async fn paired_udp(
         return false;
     };
     let sentinel = sentinel(endpoint);
+    let receiver_failure = |reason: String| {
+        evidence.log.record(ProbeRecord {
+            suite: format!("{control}.receiver"),
+            root: suite.root.to_path_buf(),
+            argv: network_probe_argv("udp", endpoint, &sentinel)
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect(),
+            outcome: reason,
+        });
+        false
+    };
     if !probe(
         baseline,
         evidence.clone(),
@@ -508,13 +520,14 @@ async fn paired_udp(
         .set_read_timeout(Some(Duration::from_millis(250)))
         .is_err()
     {
-        return false;
+        return receiver_failure("receiver socket configuration failed".into());
     }
-    let Ok((received_len, _)) = socket.recv_from(&mut received) else {
-        return false;
+    let (received_len, _) = match socket.recv_from(&mut received) {
+        Ok(received) => received,
+        Err(error) => return receiver_failure(format!("sentinel receive failed: {error}")),
     };
     if received[..received_len] != sentinel.as_bytes()[..] {
-        return false;
+        return receiver_failure("sentinel mismatch".into());
     }
     if probe(
         backend,
@@ -627,7 +640,17 @@ where
                     "[::]:0"
                 };
                 UdpSocket::bind(bind)
-                    .and_then(|socket| socket.send_to(&sentinel, endpoint))
+                    .and_then(|socket| {
+                        let written = socket.send_to(&sentinel, endpoint)?;
+                        if written == sentinel.len() {
+                            // On macOS a process that closes its last UDP
+                            // socket immediately after `send_to` can exit
+                            // before a non-loopback local delivery becomes
+                            // observable by the paired receiver.
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        Ok(written)
+                    })
                     .ok()
                     .filter(|written| *written == sentinel.len())
                     .map(|_| ())

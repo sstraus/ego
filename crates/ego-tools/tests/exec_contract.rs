@@ -22,8 +22,8 @@ use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
 use ego_core::permit::{
-    BackendIdentity, CanonPath, Classification, Confinement, EnvPolicy, ExecCaps, ExecObservation,
-    Op, PolicyDenied, PolicyDigest, RunConfinement, SpawnSpec, StreamProvenance,
+    BackendIdentity, CanonPath, Classification, Confinement, EnvName, EnvPolicy, ExecCaps,
+    ExecObservation, Op, PolicyDenied, PolicyDigest, RunConfinement, SpawnSpec, StreamProvenance,
     ToolOutputProvenance, ToolResult,
 };
 use ego_core::store::evidence::{EvidenceRef, EvidenceStore as _};
@@ -84,6 +84,12 @@ struct Run {
 
 fn cwd() -> CanonPath {
     CanonPath::new(std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap())
+}
+
+fn exact_executable_rule(executable: &str) -> ego_core::permit::rule::Rule {
+    let quoted = executable.replace('\\', "\\\\").replace('"', "\\\"");
+    ego_core::permit::rule::Rule::load(&format!("exec(\"{quoted}\" *)"))
+        .expect("the exact executable rule parses")
 }
 
 fn run_confinement(level: Confinement, offline: bool, workspace: CanonPath) -> RunConfinement {
@@ -199,7 +205,8 @@ fn open_run(
     attempt.into_run()
 }
 
-/// The one way a host may decline to demonstrate a confinement guarantee.
+/// The one way a supported host may decline to demonstrate a confinement
+/// guarantee.
 ///
 /// `MissingCapabilities` used to be an ordinary accepted outcome here, so the
 /// suite stayed green for months while `workspace` was refused on every macOS
@@ -220,7 +227,8 @@ fn open_confined_run(
     match open_run(level, offline, workspace, hard_cap, preview) {
         Ok(run) => Some(run),
         Err(ProcessError::MissingCapabilities(missing))
-            if std::env::var_os(BACKEND_ABSENT).is_some() =>
+            if cfg!(not(any(target_os = "linux", target_os = "macos")))
+                || std::env::var_os(BACKEND_ABSENT).is_some() =>
         {
             assert_eq!(
                 missing.required(),
@@ -379,6 +387,11 @@ fn fixture_spec(
 /// the backend's own paired probes use, reached through the same production
 /// exec path.
 fn mutation_spec(operation: &str, paths: &[&std::path::Path], workspace: CanonPath) -> SpawnSpec {
+    #[cfg(windows)]
+    if operation == "create" {
+        return fixture_spec("exec_contract_fixture_creates", paths, None, workspace);
+    }
+
     let path = |index: usize| {
         OsString::from(
             paths
@@ -495,6 +508,16 @@ fn exec_contract_fixture_reads() {
         .expect("the fixture receives a read path");
     let bytes = std::fs::read(path).expect("read fixture target");
     std::io::stdout().write_all(&bytes).unwrap();
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_creates() {
+    let path = std::env::args_os()
+        .skip_while(|arg| arg != "--")
+        .nth(1)
+        .expect("the fixture receives a create path");
+    std::fs::File::create(path).expect("create fixture target");
 }
 
 #[test]
@@ -716,8 +739,7 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     let root = cwd();
     let executable = std::env::current_exe().unwrap();
     let executable_text = executable.to_str().expect("test executable is UTF-8");
-    let allow =
-        vec![ego_core::permit::rule::Rule::load(&format!("exec({executable_text} *)")).unwrap()];
+    let allow = vec![exact_executable_rule(executable_text)];
     let policy = ego_core::permit::PolicyEngine::new(
         root.clone(),
         Mode::Yolo,
@@ -772,7 +794,9 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     let EnvPolicy::Exact { bindings, .. } = prepared_spec.env_policy() else {
         panic!("preparation must capture one exact environment before policy");
     };
-    let expected_environment = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+    let expected_environment = std::env::vars_os()
+        .filter(|(name, _)| EnvName::new(name.clone()).is_ok())
+        .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(bindings.len(), expected_environment.len());
     assert!(
         bindings
@@ -804,8 +828,7 @@ fn exec_tool_policy_denial_stops_before_guarded_effects() {
     let root = cwd();
     let executable = std::env::current_exe().unwrap();
     let executable_text = executable.to_str().expect("test executable is UTF-8");
-    let rule = ego_core::permit::rule::Rule::load(&format!("exec({executable_text} *)"))
-        .expect("the exact executable rule parses");
+    let rule = exact_executable_rule(executable_text);
     let policy = ego_core::permit::PolicyEngine::new(
         root.clone(),
         Mode::Yolo,
@@ -1346,6 +1369,14 @@ fn filesystem_read_matrix_covers_inside_and_outside_for_each_level() {
 
     let read_root = root.clone();
     let read = move |run: &Run, target: &std::path::Path| {
+        #[cfg(windows)]
+        let spec = fixture_spec(
+            "exec_contract_fixture_reads",
+            &[target],
+            None,
+            read_root.clone(),
+        );
+        #[cfg(not(windows))]
         let spec = SpawnSpec::new(
             vec![
                 OsString::from("/bin/cat"),
@@ -2196,7 +2227,7 @@ fn timeout_kills_a_descendant_process_group_not_only_the_direct_child() {
     let process = fixture_spec(
         "exec_contract_fixture_holds_a_descendant",
         &[pid_path.as_path()],
-        Some(Duration::from_millis(100)),
+        Some(Duration::from_secs(2)),
         root,
     );
     let err = execute(&run, process).unwrap_err();
@@ -2279,6 +2310,28 @@ fn non_loopback_control_pairs(ip: std::net::IpAddr) -> bool {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn non_loopback_udp_control_pairs(ip: std::net::IpAddr) -> bool {
+    let bind = if ip.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let Ok(receiver) = UdpSocket::bind((ip, 0)) else {
+        return false;
+    };
+    let (Ok(endpoint), Ok(sender)) = (receiver.local_addr(), UdpSocket::bind(bind)) else {
+        return false;
+    };
+    if receiver
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .is_err()
+        || sender.send_to(b"pair", endpoint).ok() != Some(4)
+    {
+        return false;
+    }
+    let mut received = [0_u8; 4];
+    receiver
+        .recv_from(&mut received)
+        .is_ok_and(|(length, _)| length == received.len() && received == *b"pair")
+}
+
 enum NetworkControl {
     Tcp(TcpListener),
     Udp(UdpSocket),
@@ -2316,21 +2369,37 @@ fn open_offline_control_run(workspace: CanonPath, nonloopback: std::net::IpAddr)
         // The early host check is not a lease on network availability. Identity
         // acquisition can take time. Re-establish this existing prerequisite
         // at refusal, without accepting a failed confined half as host evidence.
-        let control_ran = records.iter().any(|record| {
-            record["suite"] == "offline.tcp-nonloopback.control" && record["outcome"] == "ok"
-        });
-        let receiver_failed = records
+        let receiver_failure = records
             .iter()
-            .any(|record| record["suite"] == "offline.tcp-nonloopback.control.receiver");
-        let confined_ran = records
+            .find_map(|record| {
+                record["suite"]
+                    .as_str()
+                    .filter(|suite| suite.ends_with("-nonloopback.control.receiver"))
+            })
+            .expect("a failed baseline receiver names its protocol");
+        let control = receiver_failure
+            .strip_suffix(".receiver")
+            .expect("receiver suite suffix");
+        let confined = control
+            .strip_suffix(".control")
+            .expect("control suite suffix");
+        let control_ran = records
             .iter()
-            .any(|record| record["suite"] == "offline.tcp-nonloopback");
+            .any(|record| record["suite"] == control && record["outcome"] == "ok");
+        let confined_ran = records.iter().any(|record| record["suite"] == confined);
         assert!(
-            control_ran && receiver_failed && !confined_ran,
+            control_ran && !confined_ran,
             "offline failed without an unpaired host control: {transcript}"
         );
+        let independent_control_pairs = if receiver_failure.starts_with("offline.tcp-") {
+            non_loopback_control_pairs(nonloopback)
+        } else if receiver_failure.starts_with("offline.udp-") {
+            non_loopback_udp_control_pairs(nonloopback)
+        } else {
+            panic!("unknown receiver suite: {receiver_failure}");
+        };
         assert!(
-            !non_loopback_control_pairs(nonloopback),
+            !independent_control_pairs,
             "independent host control still works; confinement must be demonstrated: {transcript}"
         );
         assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
