@@ -132,6 +132,8 @@ fn direct_ci_model_answer_refuses_before_question_or_tool_mutation_when_provider
         .current_dir(workspace.path())
         .args([
             "resume",
+            "--sandbox",
+            "off",
             session.to_string().as_str(),
             "resume",
             "--profile",
