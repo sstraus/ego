@@ -217,14 +217,17 @@ impl ProbeLog {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn record(&self, record: ProbeRecord) {
         self.entries().push(record);
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn snapshot(&self) -> Arc<[ProbeRecord]> {
         self.entries().as_slice().into()
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn extend(&self, records: &[ProbeRecord]) {
         self.entries().extend_from_slice(records);
     }
@@ -463,6 +466,7 @@ impl RunEffectPorts {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn for_probe(config: ExecRunConfig, backend: Arc<dyn Backend>) -> Self {
         let capabilities = backend.maximum_demonstrable_caps();
         Self::build(config, backend, capabilities)

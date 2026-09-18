@@ -13,10 +13,7 @@ use std::time::{Duration, Instant};
 use ego_core::credentials::SecretMaterial;
 use ego_core::event::domain::CancelCause;
 use ego_core::hook::EffectScope;
-use ego_core::permit::{
-    CanonPath, Confinement, DuplexEnd, DuplexSpawner, EnvPolicy, ProcessExecutor, RunConfinement,
-    SpawnSpec,
-};
+use ego_core::permit::{CanonPath, Confinement, DuplexEnd, EnvPolicy, RunConfinement, SpawnSpec};
 use ego_core::turn::CancelToken;
 use ego_tools::exec::{
     ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts, SecretChildError,
@@ -26,7 +23,7 @@ use ego_tools::http::SystemResolver;
 use futures::io::AsyncReadExt as _;
 
 const DESCENDANT_LIFETIME: Duration = Duration::from_millis(250);
-const LATE_DESCENDANT_LIFETIME: Duration = Duration::from_secs(1);
+const LATE_DESCENDANT_LIFETIME: Duration = Duration::from_secs(4);
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 const MARKER_WAIT: Duration = Duration::from_secs(3);
 
