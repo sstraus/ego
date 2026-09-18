@@ -672,10 +672,20 @@ fn digest(value: &str) -> RequestDigest {
     RequestDigest::parse(value).expect("request digest")
 }
 
+fn fixture_root(name: &str) -> RunRoot {
+    let name = name.strip_prefix('/').unwrap_or(name);
+    RunRoot::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/run-controller")
+            .join(name),
+    )
+    .expect("fixture run root is absolute")
+}
+
 fn start(root: &str, value: u128, body: &str) -> StartRequest {
     StartRequest::new(
         RequestId::session_id(request(value)),
-        RunRoot::new(root).expect("absolute run root"),
+        fixture_root(root),
         request(value),
         digest(body),
         selections(),
@@ -700,7 +710,7 @@ fn selections_are_persisted_folded_and_pin_the_continuation_model() {
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
     let request = StartRequest::new(
         RequestId::session_id(request_id(58)),
-        RunRoot::new("/selected").expect("root"),
+        fixture_root("selected"),
         request_id(58),
         digest("selected"),
         selections_with_model(),
@@ -748,7 +758,7 @@ fn explicit_durable_session_target_is_independent_of_request_identity() {
     assert_ne!(target, RequestId::session_id(command));
     let request = StartRequest::new(
         target,
-        RunRoot::new("/explicit").expect("root"),
+        fixture_root("explicit"),
         command,
         digest("explicit target"),
         selections(),
@@ -1197,7 +1207,7 @@ fn terminal_continuation_on_a_fresh_controller_attaches_once_and_preserves_ident
     let final_status = futures::executor::block_on(subscription);
     assert_eq!(final_status.status(), RunStatus::Settled);
     assert_eq!(final_status.run_id(), run);
-    assert_eq!(final_status.root(), RunRoot::new("/terminal").unwrap());
+    assert_eq!(final_status.root(), fixture_root("terminal"));
     assert_eq!(executor.attached_origins().len(), 2);
     assert_eq!(
         executor.attached_origins()[0],
