@@ -14,6 +14,15 @@ use support::{Ego, Plan, Reply, Stub, text, tool_call};
 const MODEL: &str = "ollama/qwen3";
 const HOSTED_MODEL: &str = "anthropic/claude-test-5";
 const XAI_JUDGE_MODEL: &str = "xai-oauth/grok-code-fast-1";
+#[cfg(not(windows))]
+const ECHO_ARGV: &[&str] = &["/bin/echo", "judge exact argv"];
+#[cfg(windows)]
+const ECHO_ARGV: &[&str] = &[
+    r"C:\Windows\System32\cmd.exe",
+    "/C",
+    "echo",
+    "judge exact argv",
+];
 
 const ANTHROPIC_FACTS: &str = r#"
 [model."anthropic/claude-test-5".capabilities]
@@ -63,11 +72,12 @@ fn judge_response(verdict: &str, reason: &str) -> Reply {
 }
 
 fn exec_request() -> Reply {
-    Reply::Sse(tool_call(
-        "judge-exec",
-        "exec",
-        r#"{"argv":["/bin/echo","judge exact argv"],"cwd":null,"timeout_ms":1000}"#,
-    ))
+    let arguments = serde_json::json!({
+        "argv": ECHO_ARGV,
+        "cwd": null,
+        "timeout_ms": 1000,
+    });
+    Reply::Sse(tool_call("judge-exec", "exec", &arguments.to_string()))
 }
 
 fn marker_exec_request(marker: &Path) -> Reply {

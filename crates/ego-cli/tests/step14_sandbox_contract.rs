@@ -6,13 +6,29 @@
 
 mod support;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(windows))]
+use std::path::PathBuf;
 
 use support::{Ego, Plan, Reply, Stub, text, tool_call};
 
 use ego_cli::cli::{self, Invocation};
 use ego_core::config::{ConfigLayer, Source, Sourced, Trust, resolve};
 use ego_core::permit::Confinement;
+
+#[cfg(not(windows))]
+const ECHO_ARGV: &[&str] = &["/bin/echo", "cli exact argv"];
+#[cfg(windows)]
+const ECHO_ARGV: &[&str] = &[
+    r"C:\Windows\System32\cmd.exe",
+    "/C",
+    "echo",
+    "cli exact argv",
+];
+#[cfg(not(windows))]
+const ECHO_RULE: &str = "exec(/bin/echo *)";
+#[cfg(windows)]
+const ECHO_RULE: &str = r"exec('C:\Windows\System32\cmd.exe' *)";
 
 fn argv<const N: usize>(args: [&str; N]) -> Vec<String> {
     std::iter::once("ego".to_string())
@@ -32,19 +48,21 @@ fn layer(source: Source, text: &str) -> Sourced<ConfigLayer> {
 }
 
 fn exec_plan() -> Plan {
+    let arguments = serde_json::json!({
+        "argv": ECHO_ARGV,
+        "cwd": null,
+        "timeout_ms": 1000,
+    });
     Plan {
         completions: vec![
-            Reply::Sse(tool_call(
-                "exec-contract",
-                "exec",
-                r#"{"argv":["/bin/echo","cli exact argv"],"cwd":null,"timeout_ms":1000}"#,
-            )),
+            Reply::Sse(tool_call("exec-contract", "exec", &arguments.to_string())),
             Reply::Sse(text("the model saw the process result")),
         ],
         ..Plan::default()
     }
 }
 
+#[cfg(not(windows))]
 fn shell_write_plan(target: &Path) -> Plan {
     let params = serde_json::json!({
         "argv": [
@@ -77,6 +95,7 @@ fn maybe_completed_tool_event(finished: &support::Finished) -> Option<serde_json
         .find(|event| event["type"] == "item_completed" && event["kind"] == "tool")
 }
 
+#[cfg(not(windows))]
 fn shell_write_case(
     user_sandbox: Option<&str>,
     cli_sandbox: Option<&str>,
@@ -104,6 +123,7 @@ fn shell_write_case(
     (finished, outside, target, stub)
 }
 
+#[cfg(not(windows))]
 fn assert_sandbox_denied(finished: &support::Finished, target: &Path, stub: &Stub, label: &str) {
     assert!(!target.exists(), "{label} wrote outside its confinement");
     match maybe_completed_tool_event(finished) {
@@ -295,7 +315,7 @@ fn cli_off_keeps_permission_and_exec_lifecycle_enforced() {
             "--sandbox",
             "off",
             "--allow",
-            "exec(/bin/echo *)",
+            ECHO_RULE,
             "Ask",
         ])
         .run();
@@ -327,7 +347,7 @@ fn cli_confinement_uses_the_configured_level_without_degrading_to_off() {
                 "--sandbox",
                 level,
                 "--allow",
-                "exec(/bin/echo *)",
+                ECHO_RULE,
                 "Ask",
             ])
             .run();
@@ -359,9 +379,17 @@ fn cli_confinement_uses_the_configured_level_without_degrading_to_off() {
                     "startup refusal must be usage exit 2"
                 );
                 let all_output = format!("{}\n{}", finished.stdout, finished.stderr);
+                #[cfg(not(windows))]
                 assert!(
                     all_output.contains("missing"),
                     "startup refusal was not surfaced: {all_output}"
+                );
+                #[cfg(windows)]
+                assert!(
+                    all_output.contains("Windows")
+                        && all_output.contains("unconfined")
+                        && all_output.contains("--sandbox off"),
+                    "Windows startup refusal lacked its explicit remedy: {all_output}"
                 );
                 assert!(
                     stub.generations().is_empty(),
@@ -373,6 +401,7 @@ fn cli_confinement_uses_the_configured_level_without_degrading_to_off() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn cli_real_enforcement_matrix_covers_omission_override_and_final_workspace_default() {
     // A lower user layer remains effective when the CLI omits --sandbox.  Off
     // is deliberately chosen so this case is runnable even where a stronger
@@ -449,7 +478,7 @@ fn linux_landlock_hidden_current_exe_helper_runs_before_clap_and_provider() {
             "--sandbox",
             "workspace",
             "--allow",
-            "exec(/bin/echo *)",
+            ECHO_RULE,
             "Ask",
         ])
         .run();
@@ -515,7 +544,7 @@ fn cli_offline_refuses_even_when_filesystem_sandbox_is_off() {
             "off",
             "--offline",
             "--allow",
-            "exec(/bin/echo *)",
+            ECHO_RULE,
             "Ask",
         ])
         .run();
@@ -610,7 +639,7 @@ fn actual_once_executor_appends_exactly_one_execution_observed_fact() {
             "--sandbox",
             "off",
             "--allow",
-            "exec(/bin/echo *)",
+            ECHO_RULE,
             "Ask",
         ])
         .run();
@@ -663,7 +692,7 @@ fn durable_actual_executor_creates_a_manifest_and_one_observation() {
             "--sandbox",
             "off",
             "--allow",
-            "exec(/bin/echo *)",
+            ECHO_RULE,
             "Ask",
         ])
         .run();
