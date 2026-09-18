@@ -49,6 +49,7 @@ mod lease {
         let lock: &'static mut fd_lock::RwLock<std::fs::File> =
             Box::leak(Box::new(fd_lock::RwLock::new(file)));
         let mut guard = lock.try_write().unwrap();
+        guard.write_all(b" ").unwrap();
         guard.write_all(contents).unwrap();
         guard
     }

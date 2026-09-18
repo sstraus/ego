@@ -79,7 +79,7 @@
 //! story.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -90,7 +90,10 @@ use serde::{Deserialize, Serialize};
 /// The lock file's on-disk contents: the writer's PID and the wall-clock
 /// time it last confirmed its own liveness. JSON, exactly two fields —
 /// `{"pid": <u32>, "heartbeat": <millis>}` — matching `Timestamp`'s own
-/// bare-integer serde form (`ego_core::event::time::Timestamp`).
+/// bare-integer serde form (`ego_core::event::time::Timestamp`). Byte zero
+/// is one JSON whitespace byte reserved for the advisory lock; the object
+/// begins at byte one so Windows can read it while `LockFileEx` holds byte
+/// zero exclusively.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct LockContents {
     pid: u32,
@@ -332,6 +335,7 @@ fn write_lock_contents(file: &mut File, pid: u32, heartbeat: Timestamp) -> io::R
     // today, but the seek costs nothing) may have left it at.
     file.seek(SeekFrom::Start(0))?;
     file.set_len(0)?;
+    file.write_all(b" ")?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     Ok(())
@@ -341,11 +345,18 @@ fn write_lock_contents(file: &mut File, pid: u32, heartbeat: Timestamp) -> io::R
 /// `Ok(None)` covers both "no file" and "empty file" — both are treated as
 /// "no readable liveness record", not as evidence of anything.
 fn read_lock_file(path: &Path) -> Result<Option<LockContents>, LeaseError> {
-    match fs::read(path) {
-        Ok(bytes) if bytes.is_empty() => Ok(None),
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| LeaseError::Corrupt(path.to_path_buf())),
+    match File::open(path) {
+        Ok(mut file) => {
+            file.seek(SeekFrom::Start(1))?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|_| LeaseError::Corrupt(path.to_path_buf()))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(LeaseError::Io(e)),
     }
