@@ -10,6 +10,8 @@
 //! fixture-facing API accepted by the story ADR. They remain compile-until
 //! the CLI composition wires the real `SessionConfinementAdmission` port.
 
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+
 mod support;
 
 use std::path::Path;
@@ -77,11 +79,15 @@ async fn measured_rows(
 async fn cli_adapter_measures_the_offer_and_preserves_typed_unsupported_rows() {
     let sessions = tempfile::tempdir().expect("session root");
     let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
     let session = SessionId::new();
-    let root = RunRoot::new(workspace.path()).expect("absolute workspace");
+    let root = RunRoot::new(&workspace_root).expect("absolute workspace");
     let store = Arc::new(JsonlStore::new(
         sessions.path(),
-        workspace.path(),
+        &workspace_root,
         Box::new(OsIo),
     ));
     let controls = Arc::new(seat(Confinement::Workspace));
@@ -137,11 +143,15 @@ async fn cli_adapter_measures_the_offer_and_preserves_typed_unsupported_rows() {
 async fn cli_adapter_commits_measurement_evidence_before_publishing_the_offer() {
     let sessions = tempfile::tempdir().expect("session root");
     let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
     let session = SessionId::new();
-    let root = RunRoot::new(workspace.path()).expect("absolute workspace");
+    let root = RunRoot::new(&workspace_root).expect("absolute workspace");
     let store = Arc::new(JsonlStore::new(
         sessions.path(),
-        workspace.path(),
+        &workspace_root,
         Box::new(OsIo),
     ));
     let controls = Arc::new(seat(Confinement::Workspace));
