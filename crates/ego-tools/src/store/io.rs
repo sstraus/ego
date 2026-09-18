@@ -622,7 +622,11 @@ impl StoreIo for OsIo {
         // Reopen without truncation after the append handle has flushed.
         // Unix can sync a read handle; Windows FlushFileBuffers requires
         // write access even though this operation does not modify bytes.
-        open_for_sync(path)?.sync_all()
+        if path.is_dir() {
+            open_directory(path)?.sync_all()
+        } else {
+            open_for_sync(path)?.sync_all()
+        }
     }
 
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
