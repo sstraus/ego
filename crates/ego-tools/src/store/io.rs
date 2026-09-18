@@ -97,6 +97,36 @@ fn read_last_line(path: &Path) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(line))
 }
 
+fn open_directory(path: &Path) -> io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        // Win32 requires FILE_FLAG_BACKUP_SEMANTICS when CreateFile opens a
+        // directory handle. The standard File::open path omits it and returns
+        // ERROR_ACCESS_DENIED before the durability barrier can run.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        return fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path);
+    }
+
+    #[cfg(not(windows))]
+    fs::File::open(path)
+}
+
+fn open_for_sync(path: &Path) -> io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        return fs::OpenOptions::new().read(true).write(true).open(path);
+    }
+
+    #[cfg(not(windows))]
+    fs::File::open(path)
+}
+
 /// The scratch path [`StoreIo::replace_atomic`] writes before renaming it
 /// onto `path`.
 ///
@@ -402,7 +432,7 @@ fn replace_atomic_publication_with_privacy(
     // storage, but the directory entry pointing at them is a separate
     // write that a crash can still lose.
     if let Some(parent) = path.parent() {
-        let directory = match fs::File::open(parent) {
+        let directory = match open_directory(parent) {
             Ok(directory) => directory,
             Err(error) => return Ok(ReplacePublication::PublishedDurabilityUncertain(error)),
         };
@@ -481,9 +511,13 @@ fn publish_new_with(staging: &Path, target: &Path, barrier: Barrier) -> io::Resu
     match fs::hard_link(staging, target) {
         Ok(()) => {
             let durable: io::Result<()> = (|| {
-                barrier.apply(&fs::File::open(target)?)?;
+                barrier
+                    .apply(&open_for_sync(target)?)
+                    .map_err(|error| phase_error("sync published blob", target, error))?;
                 if let Some(parent) = target.parent() {
-                    barrier.apply(&fs::File::open(parent)?)?;
+                    barrier
+                        .apply(&open_directory(parent)?)
+                        .map_err(|error| phase_error("sync blob directory", parent, error))?;
                 }
                 Ok(())
             })();
@@ -491,12 +525,15 @@ fn publish_new_with(staging: &Path, target: &Path, barrier: Barrier) -> io::Resu
                 let _ = fs::remove_file(target);
                 return Err(error);
             }
-            fs::remove_file(staging)?;
+            fs::remove_file(staging)
+                .map_err(|error| phase_error("remove blob staging file", staging, error))?;
             if let Some(parent) = staging.parent()
-                && let Err(error) = barrier.apply(&fs::File::open(parent)?)
+                && let Err(error) = barrier
+                    .apply(&open_directory(parent)?)
+                    .map_err(|error| phase_error("sync staging directory", parent, error))
             {
                 let _ = fs::remove_file(target);
-                if let Ok(directory) = fs::File::open(parent) {
+                if let Ok(directory) = open_directory(parent) {
                     let _ = barrier.apply(&directory);
                 }
                 return Err(error);
@@ -504,8 +541,15 @@ fn publish_new_with(staging: &Path, target: &Path, barrier: Barrier) -> io::Resu
             Ok(true)
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-        Err(error) => Err(error),
+        Err(error) => Err(phase_error("publish blob hard link", target, error)),
     }
+}
+
+fn phase_error(action: &str, path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{action} at {}: {error}", path.display()),
+    )
 }
 
 fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -575,10 +619,10 @@ impl StoreIo for OsIo {
     }
 
     fn fsync(&self, path: &Path) -> io::Result<()> {
-        // Opened for read: syncing an already-flushed append handle needs
-        // no write access, and this avoids truncating or otherwise
-        // disturbing the file just to sync it.
-        fs::File::open(path)?.sync_all()
+        // Reopen without truncation after the append handle has flushed.
+        // Unix can sync a read handle; Windows FlushFileBuffers requires
+        // write access even though this operation does not modify bytes.
+        open_for_sync(path)?.sync_all()
     }
 
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
