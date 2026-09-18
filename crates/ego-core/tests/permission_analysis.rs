@@ -5,13 +5,23 @@ use ego_core::permit::{
     CanonPath, Change, EnvName, EnvPolicy, ExplicitEnvBinding, Op, PreparedCall, SpawnSpec,
 };
 
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/permission-analysis");
+const OTHER_ROOT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/permission-analysis-other"
+);
+
+fn rooted(relative: &str) -> CanonPath {
+    CanonPath::new(std::path::Path::new(ROOT).join(relative))
+}
+
 fn spawn(args: &[&str], value: &str) -> PreparedCall {
     PreparedCall::new(
         "exec",
         Op::Spawn {
             spec: SpawnSpec::new(
                 args.iter().map(OsString::from).collect(),
-                Some(CanonPath::new("/ws")),
+                Some(CanonPath::new(ROOT)),
                 None,
                 EnvPolicy::exact(vec![
                     ExplicitEnvBinding::from_native(EnvName::new("TOKEN").unwrap(), value.into())
@@ -57,7 +67,7 @@ fn authority_fingerprint_preserves_empty_ordered_and_native_arguments() {
             Op::Spawn {
                 spec: SpawnSpec::new(
                     vec!["tool".into(), OsString::from_vec(vec![255])],
-                    Some(CanonPath::new("/ws")),
+                    Some(CanonPath::new(ROOT)),
                     None,
                     EnvPolicy::Inherited,
                 )
@@ -76,13 +86,13 @@ fn risk_classes_and_reasons_do_not_trust_process_names() {
     let read = PreparedCall::new(
         "read",
         Op::Read {
-            path: CanonPath::new("/ws/file"),
+            path: rooted("file"),
         },
     );
     assert_eq!(assess(&read).class, RiskClass::Low);
     assert_eq!(assess(&read).reasons, vec![RiskReason::ReadOnly]);
     let write = read.with_op(Op::Write {
-        path: CanonPath::new("/ws/file"),
+        path: rooted("file"),
         change: Change::Whole(b"text".to_vec()),
     });
     assert_eq!(assess(&write).class, RiskClass::Bounded);
@@ -120,7 +130,7 @@ fn each_policy_backend_trust_and_judge_dimension_invalidates_analysis() {
     use ego_core::permit::{BackendIdentity, ExecCaps, ExecObservation};
     use ego_core::turn::GenerationPolicyCapture;
     let policy =
-        GenerationPolicyCapture::new(CanonPath::new("/ws"), Mode::Auto, Ruleset::default(), None)
+        GenerationPolicyCapture::new(CanonPath::new(ROOT), Mode::Auto, Ruleset::default(), None)
             .unwrap()
             .snapshot()
             .digest();
@@ -144,7 +154,7 @@ fn each_policy_backend_trust_and_judge_dimension_invalidates_analysis() {
         Op::Spawn {
             spec: SpawnSpec::new(
                 spec.argv().to_vec(),
-                Some(CanonPath::new("/ws/other")),
+                Some(rooted("other")),
                 spec.timeout(),
                 spec.env_policy().clone(),
             )
@@ -214,7 +224,7 @@ fn each_policy_backend_trust_and_judge_dimension_invalidates_analysis() {
             cache_key(&call, &policy, &observation, Trust::Trusted, &changed)
         );
     }
-    for (workspace, mode) in [("/other", Mode::Auto), ("/ws", Mode::Plan)] {
+    for (workspace, mode) in [(OTHER_ROOT, Mode::Auto), (ROOT, Mode::Plan)] {
         let changed =
             GenerationPolicyCapture::new(CanonPath::new(workspace), mode, Ruleset::default(), None)
                 .unwrap()
@@ -276,7 +286,7 @@ fn inline_source_and_environment_values_never_enter_the_judge_projection() {
         max_output_tokens: Some(100),
     };
     let confinement =
-        RunConfinement::new(Confinement::Workspace, true, CanonPath::new("/ws")).unwrap();
+        RunConfinement::new(Confinement::Workspace, true, CanonPath::new(ROOT)).unwrap();
     let request = JudgeInput::new(
         &call,
         &confinement,
@@ -284,7 +294,7 @@ fn inline_source_and_environment_values_never_enter_the_judge_projection() {
         &Escalation::ModeAsks {
             mode: Mode::Auto,
             op: OpName::Spawn,
-            path: CanonPath::new("/ws"),
+            path: CanonPath::new(ROOT),
         },
     )
     .request(&config);
