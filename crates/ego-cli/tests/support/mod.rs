@@ -1191,6 +1191,7 @@ impl Ego {
         let deadline = Instant::now() + Self::QUIET_DEADLINE;
         let mut timed_out = false;
         let mut status = None;
+        let mut kill_error = None;
         loop {
             if let Ok(child_status) = status_receiver.try_recv() {
                 status = Some(child_status);
@@ -1198,7 +1199,7 @@ impl Ego {
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                killer.kill().expect("stop stalled PTY child");
+                kill_error = killer.kill().err();
                 timed_out = true;
                 break;
             }
@@ -1222,7 +1223,7 @@ impl Ego {
                             .windows(needle.len())
                             .any(|window| window == needle.as_bytes())
                     }) {
-                        killer.kill().expect("stop observed PTY child");
+                        kill_error = killer.kill().err();
                         break;
                     }
                 }
@@ -1233,7 +1234,15 @@ impl Ego {
         drop(writer);
         drop(pair);
         let status = status
-            .unwrap_or_else(|| status_receiver.recv().expect("child status"))
+            .unwrap_or_else(|| {
+                status_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap_or_else(|receive_error| {
+                        panic!(
+                            "PTY child did not exit after kill ({kill_error:?}): {receive_error}"
+                        )
+                    })
+            })
             .expect("child ran");
         waiter.join().expect("child waiter thread panicked");
         output = reader.join().expect("pty reader thread");
