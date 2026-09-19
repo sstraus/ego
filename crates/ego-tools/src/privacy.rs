@@ -22,7 +22,7 @@ pub fn harden_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<()>
             PrivatePathKind::File => 0o600,
             PrivatePathKind::Directory => 0o700,
         };
-        return std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
     }
 
     #[cfg(windows)]
@@ -102,7 +102,7 @@ pub fn validate_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<(
         if metadata.permissions().mode() & 0o777 == expected {
             return Ok(());
         }
-        return Err(private_error("the private path mode is not owner-only"));
+        Err(private_error("the private path mode is not owner-only"))
     }
 
     #[cfg(windows)]
