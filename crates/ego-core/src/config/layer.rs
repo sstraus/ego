@@ -368,6 +368,12 @@ impl McpHttpUrl {
     pub fn as_url(&self) -> &Url {
         &self.parsed
     }
+
+    /// Whether this URL is eligible for explicitly allowed plaintext
+    /// loopback transport.
+    pub fn is_exact_plaintext_loopback(&self) -> bool {
+        self.parsed.scheme() == "http" && is_exact_loopback(self)
+    }
 }
 
 impl From<Url> for McpHttpUrl {

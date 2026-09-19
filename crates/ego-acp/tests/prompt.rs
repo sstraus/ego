@@ -1815,6 +1815,84 @@ async fn session_new_retains_stdio_and_http_transport_material_losslessly() {
 }
 
 #[tokio::test]
+async fn session_new_accepts_exact_loopback_http_and_refuses_other_plaintext_hosts() {
+    for url in [
+        "http://localhost:8787/mcp",
+        "http://127.0.0.1:8787/mcp",
+        "http://[::1]:8787/mcp",
+    ] {
+        let mut connection = Connected::to_with_admitter(
+            PromptExecutor::publishing(),
+            Arc::new(RecordingMcpAdmitter::default()) as Arc<dyn McpSessionAdmitter>,
+        );
+        let (initialized, _) = connection
+            .request(
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": ProtocolVersion::V1.as_u16(),
+                    "clientCapabilities": {},
+                }),
+            )
+            .await;
+        assert!(initialized.get("result").is_some());
+
+        let (response, _) = connection
+            .request(
+                "session/new",
+                serde_json::json!({
+                    "cwd": WORKSPACE,
+                    "mcpServers": [{
+                        "type": "http",
+                        "name": "local",
+                        "url": url,
+                        "headers": []
+                    }],
+                }),
+            )
+            .await;
+        assert!(
+            response.get("result").is_some(),
+            "exact loopback MCP server {url} was refused: {response}"
+        );
+        connection.finish().await;
+    }
+
+    let mut connection = Connected::to_with_admitter(
+        PromptExecutor::publishing(),
+        Arc::new(RecordingMcpAdmitter::default()) as Arc<dyn McpSessionAdmitter>,
+    );
+    let (initialized, _) = connection
+        .request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": ProtocolVersion::V1.as_u16(),
+                "clientCapabilities": {},
+            }),
+        )
+        .await;
+    assert!(initialized.get("result").is_some());
+    let (response, _) = connection
+        .request(
+            "session/new",
+            serde_json::json!({
+                "cwd": WORKSPACE,
+                "mcpServers": [{
+                    "type": "http",
+                    "name": "remote",
+                    "url": "http://192.0.2.1:8787/mcp",
+                    "headers": []
+                }],
+            }),
+        )
+        .await;
+    assert_eq!(
+        response["error"]["data"],
+        "plaintext HTTP requires allow_insecure_loopback = true"
+    );
+    connection.finish().await;
+}
+
+#[tokio::test]
 async fn invalid_supplied_mcp_servers_are_rejected_atomically_before_session_insert() {
     let invalid_servers = [
         serde_json::json!({

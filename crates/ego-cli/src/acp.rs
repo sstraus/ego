@@ -210,9 +210,13 @@ fn map_mcp_servers(
                     let url = server.url.parse::<ego_core::config::McpHttpUrl>().map_err(
                         |error: ego_core::config::McpValueError| safe_mcp_error(error.to_string()),
                     )?;
-                    let config =
-                        McpServerConfig::http(url.as_url().clone(), McpHttpAuth::None, false)
-                            .map_err(|error| safe_mcp_error(error.to_string()))?;
+                    let allow_insecure_loopback = url.is_exact_plaintext_loopback();
+                    let config = McpServerConfig::http(
+                        url.as_url().clone(),
+                        McpHttpAuth::None,
+                        allow_insecure_loopback,
+                    )
+                    .map_err(|error| safe_mcp_error(error.to_string()))?;
                     let headers = server
                         .headers
                         .into_iter()
@@ -502,7 +506,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
 
 #[cfg(test)]
 mod confinement_ceiling_tests {
-    use super::confinement_ceiling;
+    use super::{confinement_ceiling, map_mcp_servers};
     use crate::cli::{self, AcpArgs, Invocation};
     use ego_core::endpoint::Admitted;
     use ego_core::permit::Confinement;
@@ -560,6 +564,39 @@ mod confinement_ceiling_tests {
             confinement_ceiling(&args(None), Some(Confinement::Off), Some(&loopback)),
             Confinement::Off,
             "a loopback endpoint adds no confinement cap"
+        );
+    }
+
+    #[test]
+    fn maps_only_exact_loopback_plaintext_http_servers() {
+        let server = |url: &str| {
+            serde_json::from_value(serde_json::json!({
+                "type": "http",
+                "name": "local",
+                "url": url,
+                "headers": []
+            }))
+            .expect("the ACP HTTP server fixture parses")
+        };
+
+        for url in [
+            "http://localhost:8787/mcp",
+            "http://127.0.0.1:8787/mcp",
+            "http://[::1]:8787/mcp",
+            "https://mcp.example.test/mcp",
+        ] {
+            assert!(
+                map_mcp_servers(vec![server(url)]).is_ok(),
+                "valid ACP MCP server {url} was refused"
+            );
+        }
+        let error = match map_mcp_servers(vec![server("http://192.0.2.1:8787/mcp")]) {
+            Ok(_) => panic!("non-loopback plaintext HTTP was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "plaintext HTTP requires allow_insecure_loopback = true"
         );
     }
 }

@@ -877,10 +877,11 @@ fn validate_mcp_servers(servers: &[v1::McpServer]) -> Result<(), McpSessionAdmis
                     .url
                     .parse::<ego_core::config::McpHttpUrl>()
                     .map_err(|error| McpSessionAdmissionError::new(error.to_string()))?;
+                let allow_insecure_loopback = url.is_exact_plaintext_loopback();
                 ego_core::config::McpServerConfig::http(
                     url.as_url().clone(),
                     ego_core::config::McpHttpAuth::None,
-                    false,
+                    allow_insecure_loopback,
                 )
                 .map_err(|error| McpSessionAdmissionError::new(error.to_string()))?;
                 let mut names = BTreeSet::new();

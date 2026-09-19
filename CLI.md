@@ -89,6 +89,12 @@ Notes:
   (Codex split them and had to add `--include-non-interactive` to re-merge).
 - There is deliberately **no bespoke RPC mode**: embedders get `ego acp`.
   pi invented `rpc`/`json` modes; ACP is that, standardised.
+- An ACP host may supply a stateless HTTP MCP server in `session/new`. HTTPS
+  remains the default. Plain HTTP is admitted only for the exact loopback
+  hosts `localhost`, an IPv4 loopback literal, or an IPv6 loopback literal;
+  other plaintext hosts are refused. The host does not send ego's
+  configuration-only `allow_insecure_loopback` field: supplying the exact
+  loopback URL is the explicit session-scoped request.
 - Stdin contract (Codex's, the cleanest surveyed): prompt as argument; `-`
   reads the prompt from stdin; with *both* argv prompt and piped stdin, stdin
   is appended as a delimited context block.
