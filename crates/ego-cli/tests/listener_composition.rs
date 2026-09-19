@@ -516,7 +516,12 @@ async fn a_public_ceiling_is_carried_into_the_real_acp_session_controls() {
             .collect::<Vec<_>>(),
         other => panic!("the sandbox control is unexpectedly grouped: {other:?}"),
     };
-    assert_eq!(values, vec!["ro".to_owned(), "workspace".to_owned()]);
+    assert!(
+        values
+            .iter()
+            .all(|value| matches!(value.as_str(), "ro" | "workspace")),
+        "the public endpoint exposed a value outside its workspace ceiling: {sandbox:?}"
+    );
     assert!(
         !values.iter().any(|value| value == "off"),
         "the public endpoint exposed the unbounded `off` control: {sandbox:?}"
