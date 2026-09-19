@@ -287,6 +287,16 @@ fn permission_modal_decisions_are_immediate_and_only_explicit_keys_can_approve()
         ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}allow"))
     );
     assert_eq!(
+        mode.parse_event(
+            ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+                KeyCode::Char('Y'),
+                KeyModifiers::SHIFT,
+            )))
+            .expect("shifted key event")
+        ),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}allow"))
+    );
+    assert_eq!(
         mode.parse_event(key(KeyCode::Char('n'))),
         ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}deny"))
     );

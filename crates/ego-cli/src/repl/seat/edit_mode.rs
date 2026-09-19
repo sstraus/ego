@@ -81,15 +81,19 @@ impl EditMode for SurfaceEditMode {
 
         if picker_open {
             return match &raw {
-                Event::Key(key) if key.modifiers.is_empty() => match key.code {
-                    KeyCode::Up => picker_command("up"),
-                    KeyCode::Down => picker_command("down"),
-                    KeyCode::Enter => picker_command("enter"),
-                    KeyCode::Esc => picker_command("escape"),
-                    KeyCode::Char('s') => picker_command("session"),
-                    KeyCode::Char(digit @ '1'..='9') => picker_command(&format!("number:{digit}")),
-                    _ => ReedlineEvent::None,
-                },
+                Event::Key(key) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                    match key.code {
+                        KeyCode::Up => picker_command("up"),
+                        KeyCode::Down => picker_command("down"),
+                        KeyCode::Enter => picker_command("enter"),
+                        KeyCode::Esc => picker_command("escape"),
+                        KeyCode::Char('s') => picker_command("session"),
+                        KeyCode::Char(digit @ '1'..='9') => {
+                            picker_command(&format!("number:{digit}"))
+                        }
+                        _ => ReedlineEvent::None,
+                    }
+                }
                 Event::Key(key)
                     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL =>
                 {
@@ -102,17 +106,19 @@ impl EditMode for SurfaceEditMode {
 
         if question_selector_open {
             return match &raw {
-                Event::Key(key) if key.modifiers.is_empty() => match key.code {
-                    KeyCode::Up => question_selector_command("up"),
-                    KeyCode::Down => question_selector_command("down"),
-                    KeyCode::Enter => question_selector_command("enter"),
-                    KeyCode::Esc => question_selector_command("escape"),
-                    KeyCode::Char(' ') => question_selector_command("space"),
-                    KeyCode::Char(digit @ '1'..='9') => {
-                        question_selector_command(&format!("number:{digit}"))
+                Event::Key(key) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                    match key.code {
+                        KeyCode::Up => question_selector_command("up"),
+                        KeyCode::Down => question_selector_command("down"),
+                        KeyCode::Enter => question_selector_command("enter"),
+                        KeyCode::Esc => question_selector_command("escape"),
+                        KeyCode::Char(' ') => question_selector_command("space"),
+                        KeyCode::Char(digit @ '1'..='9') => {
+                            question_selector_command(&format!("number:{digit}"))
+                        }
+                        _ => ReedlineEvent::None,
                     }
-                    _ => ReedlineEvent::None,
-                },
+                }
                 Event::Key(key)
                     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL =>
                 {
@@ -125,17 +131,19 @@ impl EditMode for SurfaceEditMode {
 
         if permission_modal {
             return match &raw {
-                Event::Key(key) if key.modifiers.is_empty() => match key.code {
-                    KeyCode::Char('y' | 'Y') => permission_decision_command("allow"),
-                    KeyCode::Char('n' | 'N') => permission_decision_command("deny"),
-                    KeyCode::Char('e' | 'E') => permission_decision_command("amend"),
-                    KeyCode::Char('r' | 'R') => permission_decision_command("remember"),
-                    KeyCode::Enter => ReedlineEvent::None,
-                    KeyCode::Esc => {
-                        ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.to_string())
+                Event::Key(key) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                    match key.code {
+                        KeyCode::Char('y' | 'Y') => permission_decision_command("allow"),
+                        KeyCode::Char('n' | 'N') => permission_decision_command("deny"),
+                        KeyCode::Char('e' | 'E') => permission_decision_command("amend"),
+                        KeyCode::Char('r' | 'R') => permission_decision_command("remember"),
+                        KeyCode::Enter => ReedlineEvent::None,
+                        KeyCode::Esc => {
+                            ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.to_string())
+                        }
+                        _ => ReedlineEvent::None,
                     }
-                    _ => ReedlineEvent::None,
-                },
+                }
                 Event::Key(key)
                     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL =>
                 {

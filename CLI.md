@@ -541,6 +541,10 @@ pause has neither.
 130 SIGINT    143 SIGTERM
 ```
 
+Windows ConPTY reports a double idle `Ctrl+C` exit with the native
+`STATUS_CONTROL_C_EXIT` (`0xC000013A`) status rather than the POSIX-derived
+`130`; both identify an operator interrupt.
+
 Only Gemini ever documented an exit-code table; Codex and Claude collapse
 almost everything into 0/1. Scripting needs the distinctions (retry on 4,
 escalate on 3, alert on 5, resume on 6). The shutdown contract is explicit (Claude's, which

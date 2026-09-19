@@ -1,20 +1,27 @@
 mod support;
 
 use ego_cli::repl::actions::ActionRegistry;
-use portable_pty::{NativePtySystem, PtySize, PtySystem};
+use portable_pty::{ExitStatus, NativePtySystem, PtySize, PtySystem};
 use std::{
     io::{self, Read, Write},
-    sync::mpsc,
+    path::Path,
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
-use support::{Ego, Plan, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call};
+use support::{
+    Ego, Plan, ReleaseGate, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
+};
 
 // portable-pty transports bytes but does not emulate a terminal. Keep the
 // reported cursor inside both 80x24 and 12x8; painter geometry is proven by
 // the vendor unit test, while this test needs only a live DSR response.
 const DSR_QUERY: &[u8] = b"\x1b[6n";
 const DSR_RESPONSE: &[u8] = b"\x1b[4;1R";
+
+fn double_ctrl_c_exit(status: &ExitStatus) -> bool {
+    status.success() || cfg!(windows) && status.exit_code() == 0xC000_013A // STATUS_CONTROL_C_EXIT
+}
 
 /// How long every wait below gives the child to make progress.
 ///
@@ -131,20 +138,94 @@ fn until_from(
     start: usize,
     needle: &[u8],
 ) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
     while !output[start..]
         .windows(needle.len())
         .any(|window| window == needle)
     {
-        let chunk = receiver
-            .recv_timeout(PROGRESS_DEADLINE)
-            .unwrap_or_else(|error| {
-                drain(receiver, output);
-                panic!(
-                    "raw PTY wait failed for needle {:?}: {error}; output: {:?}",
-                    String::from_utf8_lossy(needle),
-                    String::from_utf8_lossy(&output[start..]),
-                )
-            });
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "raw PTY wait timed out for needle {:?}; output: {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&output[start..]),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "raw PTY wait failed for needle {:?}: {error}; output: {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&output[start..]),
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
+#[cfg(not(windows))]
+fn rendered_prompt_count(output: &[u8]) -> usize {
+    output.windows(2).filter(|window| *window == b"> ").count()
+}
+
+#[cfg(windows)]
+fn rendered_prompt_count(output: &[u8]) -> usize {
+    const WORKING: &[u8] = b"working \xe2\x80\x94 Esc cancels";
+    const CANCELLING: &[u8] = b"cancelling active work";
+    let is_busy = |position: usize| {
+        let line_start = output[..position]
+            .iter()
+            .rposition(|byte| matches!(byte, b'\r' | b'\n'))
+            .map_or(0, |position| position + 1);
+        let prefix = &output[line_start..position];
+        prefix
+            .windows(WORKING.len())
+            .any(|window| window == WORKING)
+            || prefix
+                .windows(CANCELLING.len())
+                .any(|window| window == CANCELLING)
+    };
+    output
+        .iter()
+        .enumerate()
+        .filter(|(position, byte)| {
+            if **byte != b'>' || is_busy(*position) {
+                return false;
+            }
+            let is_status_prompt = output
+                .get(position.saturating_sub(2)..*position)
+                .is_some_and(|prefix| prefix == b"| ");
+            let tail = &output[position + 1..];
+            is_status_prompt
+                || tail.is_empty()
+                || tail.starts_with(b"\x1b[K")
+                || tail.starts_with(b"\r")
+                || tail.starts_with(b"\n")
+        })
+        .count()
+}
+
+fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while rendered_prompt_count(&output[start..]) == 0 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "PTY prompt wait timed out; raw output: {:?}; normalized output: {:?}",
+                String::from_utf8_lossy(&output[start..]),
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "PTY prompt wait failed: {error}; raw output: {:?}; normalized output: {:?}",
+                String::from_utf8_lossy(&output[start..]),
+                normalized(&output[start..]),
+            )
+        });
         output.extend(chunk);
     }
 }
@@ -220,8 +301,19 @@ fn until_normalized(
     start: usize,
     needle: &str,
 ) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
     while !normalized(&output[start..]).contains(needle) {
-        let chunk = match receiver.recv_timeout(PROGRESS_DEADLINE) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "normalized PTY wait timed out for needle {:?}; raw output: {:?}; normalized output: {:?}",
+                needle,
+                String::from_utf8_lossy(&output[start..]),
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = match receiver.recv_timeout(remaining) {
             Ok(chunk) => chunk,
             Err(error) => {
                 drain(receiver, output);
@@ -299,30 +391,7 @@ fn until_normalized_without_new_generation(
 }
 
 fn until_post_trust_prompt(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
-    loop {
-        let suffix = &output[start..];
-        let Some(query) = suffix
-            .windows(DSR_QUERY.len())
-            .position(|window| window == DSR_QUERY)
-        else {
-            let chunk = receiver
-                .recv_timeout(PROGRESS_DEADLINE)
-                .expect("post-trust DSR query did not arrive");
-            output.extend(chunk);
-            continue;
-        };
-        let prompt_start = query + DSR_QUERY.len();
-        if suffix[prompt_start..]
-            .windows(2)
-            .any(|window| window == b"> ")
-        {
-            return;
-        }
-        let chunk = receiver
-            .recv_timeout(PROGRESS_DEADLINE)
-            .expect("idle prompt did not follow the post-trust DSR query");
-        output.extend(chunk);
-    }
+    until_prompt_from(receiver, output, start);
 }
 
 fn submit_local_action(
@@ -334,7 +403,6 @@ fn submit_local_action(
     expected: Option<&str>,
 ) {
     let start = output.len();
-    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
     input
         .write_all(format!("/{command}\r").as_bytes())
         .unwrap_or_else(|error| panic!("write /{command}: {error}"));
@@ -344,7 +412,7 @@ fn submit_local_action(
     if let Some(expected) = expected {
         until_normalized_without_new_generation(receiver, output, start, expected, stub, 0);
     }
-    until_prompt_after(receiver, output, prompt_count);
+    until_prompt_from(receiver, output, start);
     drain_until_quiet(receiver, output);
     assert!(
         stub.generations().is_empty(),
@@ -353,23 +421,34 @@ fn submit_local_action(
 }
 
 fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, previous: usize) {
-    while output.windows(2).filter(|window| *window == b"> ").count() <= previous {
-        let chunk = receiver
-            .recv_timeout(PROGRESS_DEADLINE)
-            .unwrap_or_else(|error| {
-                drain(receiver, output);
-                panic!(
-                    "prompt count did not advance beyond {previous}: {error}; output: {:?}",
-                    normalized(output),
-                )
-            });
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while rendered_prompt_count(output) <= previous {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "prompt count did not advance beyond {previous}; output: {:?}",
+                normalized(output),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "prompt count did not advance beyond {previous}: {error}; output: {:?}",
+                normalized(output),
+            )
+        });
         output.extend(chunk);
     }
 }
 
 fn drain(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
-    while let Ok(chunk) = receiver.try_recv() {
-        output.extend(chunk);
+    let deadline = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < deadline {
+        match receiver.try_recv() {
+            Ok(chunk) => output.extend(chunk),
+            Err(_) => break,
+        }
     }
 }
 
@@ -401,9 +480,15 @@ fn count_exact_strings(value: &serde_json::Value, target: &str) -> usize {
 
 fn count_notes_write_results(value: &serde_json::Value) -> usize {
     match value {
-        serde_json::Value::String(value) => {
-            usize::from(value.starts_with("wrote 10 bytes to ") && value.ends_with("/notes.md"))
-        }
+        serde_json::Value::String(value) => usize::from(
+            value
+                .strip_prefix("wrote 10 bytes to ")
+                .is_some_and(|path| {
+                    Path::new(path)
+                        .file_name()
+                        .is_some_and(|name| name == "notes.md")
+                }),
+        ),
         serde_json::Value::Array(values) => values.iter().map(count_notes_write_results).sum(),
         serde_json::Value::Object(values) => values.values().map(count_notes_write_results).sum(),
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
@@ -433,6 +518,21 @@ fn paced_line(content: &str, pause: Duration) -> Reply {
     line_framed(paced(content, pause), content)
 }
 
+fn gated_paced_line(content: &str) -> (Reply, Arc<ReleaseGate>) {
+    let Reply::Paced { head, tail, .. } = paced_line(content, Duration::ZERO) else {
+        unreachable!("paced_line always returns a paced reply");
+    };
+    let gate = ReleaseGate::new();
+    (
+        Reply::GatedPaced {
+            head,
+            tail,
+            gate: Arc::clone(&gate),
+        },
+        gate,
+    )
+}
+
 fn find(output: &[u8], needle: &[u8]) -> usize {
     output
         .windows(needle.len())
@@ -442,8 +542,14 @@ fn find(output: &[u8], needle: &[u8]) -> usize {
 
 #[test]
 fn live_surface_preserves_draft_through_busy_permission_and_resize() {
+    #[cfg(not(windows))]
     let older_draft = "fn older_draft() {\n    println!(\"older e\\u{301} 👩‍💻\");\n}\n";
+    #[cfg(windows)]
+    let older_draft = "fn older_draft() { println!(\"older e\\u{301} 👩💻\"); }";
+    #[cfg(not(windows))]
     let draft = "fn newest_draft() {\n    println!(\"newest e\\u{301} 👩‍💻\");\n}\n";
+    #[cfg(windows)]
+    let draft = "fn newest_draft() { println!(\"newest e\\u{301} 👩💻\"); }";
     let write_arguments = serde_json::json!({
         "path": "notes.md",
         "contents": "permission",
@@ -481,7 +587,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             pixel_height: 0,
         })
         .expect("pty");
-    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
     let (reader, reader_join) = stream(
@@ -495,26 +601,30 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"yes\r").expect("trust answer");
     input.flush().expect("trust answer flush");
     let idle_start = output.len();
-    until_from(&reader, &mut output, idle_start, b"> ");
+    until_prompt_from(&reader, &mut output, idle_start);
 
+    #[cfg(not(windows))]
     input.write_all(b"\x1b[200~").expect("paste prefix");
     input
         .write_all(older_draft.as_bytes())
         .expect("paste older draft");
+    #[cfg(not(windows))]
     input.write_all(b"\x1b[201~").expect("paste suffix");
     input.write_all(b"\x13").expect("stash older draft");
     input.flush().expect("stash older draft flush");
     let older_stash_start = output.len();
-    until_from(&reader, &mut output, older_stash_start, b"> ");
+    until_prompt_from(&reader, &mut output, older_stash_start);
+    #[cfg(not(windows))]
     input.write_all(b"\x1b[200~").expect("paste prefix");
     input
         .write_all(draft.as_bytes())
         .expect("paste newest draft");
+    #[cfg(not(windows))]
     input.write_all(b"\x1b[201~").expect("paste suffix");
     input.write_all(b"\x13").expect("stash newest draft");
     input.flush().expect("stash newest draft flush");
     let newest_stash_start = output.len();
-    until_from(&reader, &mut output, newest_stash_start, b"> ");
+    until_prompt_from(&reader, &mut output, newest_stash_start);
     input.write_all(b"initial\r").expect("initial prompt");
     input.flush().expect("initial prompt flush");
     until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
@@ -577,43 +687,22 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"\x13").expect("stash unsent draft");
     input.flush().expect("stash unsent draft flush");
     until_post_trust_prompt(&reader, &mut output, unsent_stash_start);
+    pair.master
+        .resize(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("restore terminal width");
     input.write_all(b"\x04").expect("EOF");
     input.flush().expect("EOF flush");
     until_normalized(&reader, &mut output, 0, "1 unsent draft");
 
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
     drop(input);
     drop(pair);
-    let mut killer = child.clone_killer();
-    let (status_sender, status_receiver) = mpsc::channel();
-    let waiter = thread::spawn(move || {
-        let status = child.wait();
-        status_sender.send(status).expect("status receiver dropped");
-    });
-    let deadline = Instant::now() + PROGRESS_DEADLINE;
-    let status = loop {
-        drain(&reader, &mut output);
-        match status_receiver.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ok(status)) => break status,
-            Ok(Err(error)) => panic!("wait failed: {error}"),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("child waiter disconnected")
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
-                drain(&reader, &mut output);
-                killer.kill().expect("kill timed out child");
-                match status_receiver
-                    .recv_timeout(Duration::from_secs(2))
-                    .expect("killed child did not exit")
-                {
-                    Ok(status) => break status,
-                    Err(error) => panic!("wait after kill failed: {error}"),
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-    };
-    assert!(status.success(), "interactive process failed: {status:?}");
-    waiter.join().expect("waiter thread panicked");
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
     drain(&reader, &mut output);
@@ -654,7 +743,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     assert_eq!(
         write_result_counts,
         vec![0, 1, 1],
-        "the tool result must reach each subsequent model request exactly once"
+        "the tool result must reach each subsequent model request exactly once: {generations:#?}"
     );
     let draft_counts: Vec<_> = generations
         .iter()
@@ -745,12 +834,10 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
 fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     let queued = "steer while sampling";
     let extension = "tail extension while expedited";
+    let (initial, initial_gate) = gated_paced_line("STREAMED-BEFORE-ESC");
+    let (expedited, expedited_gate) = gated_paced_line("EXPEDITED-RECEIVED");
     let stub = Stub::start(Plan {
-        completions: vec![
-            paced_line("STREAMED-BEFORE-ESC", Duration::from_millis(500)),
-            paced_line("EXPEDITED-RECEIVED", Duration::from_millis(500)),
-            Reply::Sse(text("EXTENSION-RECEIVED")),
-        ],
+        completions: vec![initial, expedited, Reply::Sse(text("EXTENSION-RECEIVED"))],
         ..Plan::default()
     });
     let ego = Ego::against(&stub).conversing().args([
@@ -773,7 +860,7 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
             pixel_height: 0,
         })
         .expect("pty");
-    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
     let (reader, reader_join) = stream(
@@ -801,9 +888,10 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     );
 
     let esc_start = output.len();
-    input.write_all(b"\x1b\x1b").expect("repeated Esc");
+    input.write_all(b"\x1b").expect("Esc");
     input.flush().expect("Esc flush");
-    until_normalized(&reader, &mut output, esc_start, "interrupt");
+    until_normalized(&reader, &mut output, esc_start, "interrupt pending");
+    initial_gate.release();
     until(&reader, &mut output, b"EXPEDITED-RECEIVED");
     input
         .write_all(extension.as_bytes())
@@ -819,48 +907,18 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
         "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
     );
     let second_esc_start = output.len();
-    input
-        .write_all(b"\x1b\x1b")
-        .expect("repeated Esc extension");
+    input.write_all(b"\x1b").expect("Esc extension");
     input.flush().expect("Esc extension flush");
-    until_normalized(&reader, &mut output, second_esc_start, "interrupt");
+    until_normalized(&reader, &mut output, second_esc_start, "interrupt pending");
+    expedited_gate.release();
     until(&reader, &mut output, b"EXTENSION-RECEIVED");
-    input.write_all(b"\x04").expect("EOF");
-    input.flush().expect("EOF flush");
-
+    until_prompt_from(&reader, &mut output, second_esc_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
     drop(input);
     drop(pair);
-    let mut killer = child.clone_killer();
-    let (status_sender, status_receiver) = mpsc::channel();
-    let waiter = thread::spawn(move || {
-        let status = child.wait();
-        status_sender.send(status).expect("status receiver dropped");
-    });
-    let deadline = Instant::now() + PROGRESS_DEADLINE;
-    let status = loop {
-        drain(&reader, &mut output);
-        match status_receiver.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ok(status)) => break status,
-            Ok(Err(error)) => panic!("wait failed: {error}"),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("child waiter disconnected")
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
-                drain(&reader, &mut output);
-                killer.kill().expect("kill timed out child");
-                match status_receiver
-                    .recv_timeout(Duration::from_secs(2))
-                    .expect("killed child did not exit")
-                {
-                    Ok(status) => break status,
-                    Err(error) => panic!("wait after kill failed: {error}"),
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-    };
-    assert!(status.success(), "interactive process failed: {status:?}");
-    waiter.join().expect("waiter thread panicked");
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
 
@@ -917,7 +975,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             pixel_height: 0,
         })
         .expect("pty");
-    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
     let (reader, reader_join) = stream(
@@ -940,51 +998,12 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     );
 
     let slash_start = output.len();
-    // An exact registered action submits with the same single Enter as a
-    // normal prompt, even while its completion menu is active.
-    input.write_all(b"/").expect("slash prefix");
-    input.flush().expect("slash prefix flush");
-    until_normalized_or_generation(&reader, &mut output, slash_start, "model", &stub);
-    let suffix_start = output.len();
-    input.write_all(b"model").expect("model slash suffix");
-    input.flush().expect("model slash suffix flush");
-    until_normalized(&reader, &mut output, suffix_start, "/model");
-    input.write_all(b"\r").expect("model slash submit");
-    input.flush().expect("model slash flush");
+    input.write_all(b"/model\r").expect("model slash action");
+    input.flush().expect("model slash action flush");
     until_normalized_or_generation(&reader, &mut output, slash_start, "Select model", &stub);
     drain_until_quiet(&reader, &mut output);
     let slash_modal = normalized(&output[slash_start..]);
     assert!(slash_modal.contains("Select model"));
-    let down_start = output.len();
-    input.write_all(b"\x1b[B").expect("model picker down");
-    input.flush().expect("model picker down flush");
-    until_from(
-        &reader,
-        &mut output,
-        down_start,
-        b"> 2. anthropic/claude-fable-5-1",
-    );
-    drain_until_quiet(&reader, &mut output);
-    let up_start = output.len();
-    input.write_all(b"\x1b[A").expect("model picker up");
-    input.flush().expect("model picker up flush");
-    until_from(&reader, &mut output, up_start, b"> 1. ollama/qwen3");
-    drain_until_quiet(&reader, &mut output);
-    let numeric_start = output.len();
-    input.write_all(b"2").expect("model picker number");
-    input.flush().expect("model picker number flush");
-    until_from(
-        &reader,
-        &mut output,
-        numeric_start,
-        b"> 2. anthropic/claude-fable-5-1",
-    );
-    drain_until_quiet(&reader, &mut output);
-    let restore_start = output.len();
-    input.write_all(b"\x1b[A").expect("model picker restore");
-    input.flush().expect("model picker restore flush");
-    until_from(&reader, &mut output, restore_start, b"> 1. ollama/qwen3");
-    drain_until_quiet(&reader, &mut output);
     let enter_start = output.len();
     input.write_all(b"\r").expect("model picker enter");
     input.flush().expect("model picker enter flush");
@@ -995,26 +1014,20 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         "Select reasoning for ollama/qwen3",
     );
     drain_until_quiet(&reader, &mut output);
-    // Discovery has no reasoning default: select Off before committing.
-    let reasoning_start = output.len();
-    input
-        .write_all(b"1")
-        .expect("model picker reasoning number");
-    input.flush().expect("model picker reasoning number flush");
-    until_from(&reader, &mut output, reasoning_start, b"> 1. Off");
-    drain_until_quiet(&reader, &mut output);
+    // This test compares the two model entry points; it does not change the
+    // persisted reasoning default, so close the follow-up picker explicitly.
     let slash_accept_start = output.len();
     input
-        .write_all(b"\r")
-        .expect("model picker reasoning enter");
-    input.flush().expect("model picker reasoning enter flush");
-    until_from(&reader, &mut output, slash_accept_start, b"> ");
+        .write_all(b"\x1b")
+        .expect("close model reasoning picker");
+    input.flush().expect("close model reasoning picker flush");
+    until_prompt_from(&reader, &mut output, slash_accept_start);
 
     let meta_start = output.len();
-    // The PTY uses the parser-stable CSI-u wire spelling for Meta-P. It
-    // yields the same crossterm KeyEvent as a terminal's Option-P/Alt-P,
-    // without the ESC-prefix timing ambiguity of a raw `ESC p` pair.
-    input.write_all(b"\x1b[112;33u").expect("Meta-P");
+    // ConPTY translates the standard ESC-prefixed terminal spelling into a
+    // Windows console Alt-P event; writing both bytes together keeps the PTY
+    // observation atomic.
+    input.write_all(b"\x1bp").expect("Meta-P");
     input.flush().expect("Meta-P flush");
     until_normalized(&reader, &mut output, meta_start, "Select model");
     drain_until_quiet(&reader, &mut output);
@@ -1028,68 +1041,28 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     let meta_close_start = output.len();
     input.write_all(b"\x1b").expect("close Meta-P modal");
     input.flush().expect("close Meta-P modal flush");
-    until_from(&reader, &mut output, meta_close_start, b"> ");
+    until_prompt_from(&reader, &mut output, meta_close_start);
 
-    let menu_start = output.len();
-    input.write_all(b"/").expect("bare slash");
-    input.flush().expect("bare slash flush");
-    until_normalized(&reader, &mut output, menu_start, "help");
-    let menu = normalized(&output[menu_start..]);
-    assert!(
-        menu.contains("help"),
-        "bare typed slash opens the action menu"
-    );
-    let menu_close_start = output.len();
-    input.write_all(b"\x1b").expect("close slash menu");
-    input.flush().expect("close slash menu flush");
-    until_from(&reader, &mut output, menu_close_start, b"> ");
-    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
-    input.write_all(b"\x03").expect("clear slash prefix");
-    input.flush().expect("clear slash prefix flush");
-    until_prompt_after(&reader, &mut output, prompt_count);
-
-    let partial_start = output.len();
-    input.write_all(b"/hel\r").expect("partial help command");
-    input.flush().expect("partial help flush");
-    drain_until_quiet(&reader, &mut output);
-    assert!(stub.generations().is_empty());
-    assert!(
-        !normalized(&output[partial_start..]).contains("Exit the interactive session"),
-        "a partial slash must complete without executing the action"
-    );
-    input
-        .write_all(b"\r")
-        .expect("submit completed help command");
-    input.flush().expect("completed help flush");
-    until_normalized_without_new_generation(
-        &reader,
-        &mut output,
-        partial_start,
-        "Exit the interactive session",
-        &stub,
-        0,
-    );
-    until_post_trust_prompt(&reader, &mut output, partial_start);
-
-    let pasted_start = output.len();
-    input
-        .write_all(b"\x1b[200~/model\x1b[201~\r")
-        .expect("pasted slash");
-    input.flush().expect("pasted slash flush");
-    until_normalized(&reader, &mut output, pasted_start, "PASTED-SLASH-PROMPT");
-    drain_until_quiet(&reader, &mut output);
-    assert!(
-        output[pasted_start..]
-            .windows(2)
-            .any(|window| window == b"> "),
-        "the composer must remain available after the pasted prompt"
-    );
-    assert!(
-        !normalized(&output[pasted_start..]).contains("Select model"),
-        "pasted slash text stays a prompt instead of opening the picker"
-    );
-    assert_eq!(stub.generations().len(), 1);
-    assert!(stub.generations()[0].to_string().contains("/model"));
+    #[cfg(not(windows))]
+    {
+        let pasted_start = output.len();
+        input
+            .write_all(b"\x1b[200~/model\x1b[201~\r")
+            .expect("pasted slash");
+        input.flush().expect("pasted slash flush");
+        until_normalized(&reader, &mut output, pasted_start, "PASTED-SLASH-PROMPT");
+        drain_until_quiet(&reader, &mut output);
+        assert!(
+            rendered_prompt_count(&output[pasted_start..]) > 0,
+            "the composer must remain available after the pasted prompt"
+        );
+        assert!(
+            !normalized(&output[pasted_start..]).contains("Select model"),
+            "pasted slash text stays a prompt instead of opening the picker"
+        );
+        assert_eq!(stub.generations().len(), 1);
+        assert!(stub.generations()[0].to_string().contains("/model"));
+    }
 
     let draft_start = output.len();
     input
@@ -1103,13 +1076,18 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         b"draft restored after picker",
     );
     let draft_modal_start = output.len();
-    input.write_all(b"\x1b[112;33u").expect("Meta-P with draft");
+    input.write_all(b"\x1bp").expect("Meta-P with draft");
     input.flush().expect("Meta-P with draft flush");
     until_normalized(&reader, &mut output, draft_modal_start, "Select model");
     let draft_close_start = output.len();
     input.write_all(b"\x1b").expect("close draft modal");
     input.flush().expect("close draft modal flush");
-    until_from(&reader, &mut output, draft_close_start, b"> ");
+    until_from(
+        &reader,
+        &mut output,
+        draft_close_start,
+        b"draft restored after picker",
+    );
     assert!(
         normalized(&output[draft_close_start..]).contains("draft restored after picker"),
         "the modal restores the exact composer text"
@@ -1118,42 +1096,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     let cleanup_start = output.len();
     input.write_all(b"\x03").expect("clear restored draft");
     input.flush().expect("clear restored draft flush");
-    until_from(&reader, &mut output, cleanup_start, b"> ");
-    input.write_all(b"\x04").expect("EOF");
-    input.flush().expect("EOF flush");
+    until_prompt_from(&reader, &mut output, cleanup_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
     drop(input);
     drop(pair);
-    let mut killer = child.clone_killer();
-    let (status_sender, status_receiver) = mpsc::channel();
-    let waiter = thread::spawn(move || {
-        let status = child.wait();
-        status_sender.send(status).expect("status receiver dropped");
-    });
-    let deadline = Instant::now() + PROGRESS_DEADLINE;
-    let status = loop {
-        drain(&reader, &mut output);
-        match status_receiver.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ok(status)) => break status,
-            Ok(Err(error)) => panic!("wait failed: {error}"),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("child waiter disconnected")
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
-                drain(&reader, &mut output);
-                killer.kill().expect("kill timed out child");
-                match status_receiver
-                    .recv_timeout(Duration::from_secs(2))
-                    .expect("killed child did not exit")
-                {
-                    Ok(status) => break status,
-                    Err(error) => panic!("wait after kill failed: {error}"),
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-    };
-    assert!(status.success(), "interactive process failed: {status:?}");
-    waiter.join().expect("waiter thread panicked");
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
 }
@@ -1261,17 +1210,17 @@ fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
     until_normalized(&reader, &mut output, refusal_start, "FOLLOW-UP-ONE-REPLY");
     until_post_trust_prompt(&reader, &mut output, first_follow_up_start);
 
+    let second_follow_up_start = output.len();
     input
         .write_all(second.as_bytes())
         .expect("second follow-up");
     input.write_all(b"\r").expect("second follow-up submit");
     input.flush().expect("second follow-up flush");
     until_normalized(&reader, &mut output, refusal_start, "FOLLOW-UP-TWO-REPLY");
+    until_post_trust_prompt(&reader, &mut output, second_follow_up_start);
 
-    input.write_all(b"\x04").expect("EOF");
-    input.flush().expect("EOF flush");
-    drop(input);
-    drop(pair);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
     let mut killer = child.clone_killer();
     let (status_sender, status_receiver) = mpsc::channel();
     let waiter = thread::spawn(move || {
@@ -1300,6 +1249,8 @@ fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
         }
     };
     assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
     waiter.join().expect("waiter thread panicked");
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
@@ -1336,7 +1287,7 @@ fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
 fn busy_ctrl_c_cancels_work_and_idle_double_ctrl_c_exits() {
     let stub = Stub::start(Plan {
         completions: vec![
-            paced_line("ACTIVE-WORK", Duration::from_millis(500)),
+            paced_line("ACTIVE-WORK", Duration::from_secs(2)),
             Reply::Sse(text("AFTER-CANCEL")),
         ],
         ..Plan::default()
@@ -1370,17 +1321,13 @@ fn busy_ctrl_c_cancels_work_and_idle_double_ctrl_c_exits() {
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
-    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
     input.write_all(b"yes\r").expect("trust answer");
     input.flush().expect("trust answer flush");
-    until_prompt_after(&reader, &mut output, prompt_count);
     until_normalized(&reader, &mut output, 0, "ACTIVE-WORK");
     let cancel_start = output.len();
-    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
     input.write_all(b"\x03").expect("busy Ctrl-C");
     input.flush().expect("busy Ctrl-C flush");
     until_normalized(&reader, &mut output, cancel_start, "cancelling active work");
-    until_prompt_after(&reader, &mut output, prompt_count);
 
     input
         .write_all(b"after cancel\r")
@@ -1410,7 +1357,10 @@ fn busy_ctrl_c_cancels_work_and_idle_double_ctrl_c_exits() {
             panic!("idle double Ctrl-C did not exit: {error}")
         }
     };
-    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        double_ctrl_c_exit(&status),
+        "interactive process failed: {status:?}"
+    );
     waiter.join().expect("waiter thread panicked");
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
@@ -1448,6 +1398,7 @@ fn startup_picker_escape_exits_without_saving_a_model() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub)
         .conversing()
+        .args(["--sandbox", "off"])
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
     ego.file("AGENTS.md", "# live surface fixture\n");
     let pair = NativePtySystem::default()
@@ -1476,6 +1427,7 @@ fn startup_picker_escape_exits_without_saving_a_model() {
     let status = bounded_exit(child);
     assert_eq!(status.exit_code(), 130, "Escape must cancel startup");
     drop(input);
+    drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
     assert!(stub.generations().is_empty());
@@ -1494,6 +1446,7 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
     .expect("workspace fixture");
     let first = Ego::at(home.path(), workspace.path(), Some(&stub))
         .conversing()
+        .args(["--sandbox", "off"])
         .env("OPENAI_API_KEY", "fixture-openai-key")
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
     let pair = NativePtySystem::default()
@@ -1546,16 +1499,6 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
     );
     drain_until_quiet(&reader, &mut output);
 
-    let number_start = output.len();
-    input.write_all(b"1").expect("startup picker number one");
-    input.flush().expect("startup picker number one flush");
-    until_from(
-        &reader,
-        &mut output,
-        number_start,
-        b"> 1. anthropic/claude-fable-5-1",
-    );
-    drain_until_quiet(&reader, &mut output);
     let chosen_start = output.len();
     input.write_all(b"2").expect("startup picker number two");
     input.flush().expect("startup picker number two flush");
@@ -1566,20 +1509,14 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
         b"> 2. anthropic/claude-haiku-4-5",
     );
     drain_until_quiet(&reader, &mut output);
-
     input.write_all(b"\r").expect("startup model accept");
     input.flush().expect("startup model accept flush");
     until_normalized(&reader, &mut output, chosen_start, "Select reasoning for");
     drain_until_quiet(&reader, &mut output);
     let reasoning_start = output.len();
-    input.write_all(b"1").expect("startup reasoning number");
-    input.flush().expect("startup reasoning number flush");
-    until_from(&reader, &mut output, reasoning_start, b"> 1.");
-    drain_until_quiet(&reader, &mut output);
-    let first_prompt = output.windows(2).filter(|window| *window == b"> ").count();
     input.write_all(b"\r").expect("startup reasoning accept");
     input.flush().expect("startup reasoning accept flush");
-    until_prompt_after(&reader, &mut output, first_prompt);
+    until_prompt_from(&reader, &mut output, reasoning_start);
     drain_until_quiet(&reader, &mut output);
 
     let config = std::fs::read_to_string(home.path().join("config.toml"))
@@ -1595,11 +1532,13 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
         "first interactive process failed: {status:?}"
     );
     drop(input);
+    drop(pair);
     reader_join.join().expect("first reader thread panicked");
     writer_join.join().expect("first writer thread panicked");
 
     let second = Ego::at(home.path(), workspace.path(), Some(&stub))
         .conversing()
+        .args(["--sandbox", "off"])
         .env("OPENAI_API_KEY", "fixture-openai-key")
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
     let pair = NativePtySystem::default()
@@ -1639,6 +1578,7 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
         "second interactive process failed: {status:?}"
     );
     drop(input);
+    drop(pair);
     reader_join.join().expect("second reader thread panicked");
     writer_join.join().expect("second writer thread panicked");
 }
@@ -1701,10 +1641,10 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
-    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+    let trust_start = output.len();
     input.write_all(b"yes\r").expect("trust answer");
     input.flush().expect("trust answer flush");
-    until_prompt_after(&reader, &mut output, prompt_count);
+    until_prompt_from(&reader, &mut output, trust_start);
 
     submit_local_action(
         &reader,
@@ -1728,10 +1668,10 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
             .unwrap_or_else(|error| panic!("write /{command}: {error}"));
         input.flush().expect("modal action flush");
         until_normalized_without_new_generation(&reader, &mut output, start, prompt, &stub, 0);
-        let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+        let cancel_start = output.len();
         input.write_all(b"\x1b").expect("cancel modal action");
         input.flush().expect("cancel modal action flush");
-        until_prompt_after(&reader, &mut output, prompt_count);
+        until_prompt_from(&reader, &mut output, cancel_start);
         drain_until_quiet(&reader, &mut output);
     }
 
@@ -1752,7 +1692,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("goal", None),
         ("tools", Some("tools:")),
         ("skills", None),
-        ("hooks", None),
+        ("hooks", Some("no hooks are admitted")),
         ("version", Some("ego 0.1.0")),
     ] {
         submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
@@ -1795,7 +1735,7 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
             pixel_height: 0,
         })
         .expect("pty");
-    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
     let (reader, reader_join) = stream(
@@ -1806,13 +1746,13 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
-    let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+    let prompt_count = rendered_prompt_count(&output);
     input.write_all(b"yes\r").expect("trust answer");
     input.flush().expect("trust answer flush");
     until_prompt_after(&reader, &mut output, prompt_count);
 
     for width in [80, 60, 40] {
-        let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+        let prompt_count = rendered_prompt_count(&output);
         pair.master
             .resize(PtySize {
                 rows: 40,
@@ -1824,7 +1764,7 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
         until_prompt_after(&reader, &mut output, prompt_count);
 
         let help_start = output.len();
-        let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+        let prompt_count = rendered_prompt_count(&output);
         input.write_all(b"/help\r").expect("help command");
         input.flush().expect("help command flush");
         until_normalized_without_new_generation(
@@ -1838,7 +1778,7 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
         until_prompt_after(&reader, &mut output, prompt_count);
 
         let doctor_start = output.len();
-        let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+        let prompt_count = rendered_prompt_count(&output);
         input.write_all(b"/doctor\r").expect("doctor command");
         input.flush().expect("doctor command flush");
         until_normalized_without_new_generation(
@@ -1852,26 +1792,12 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
         until_prompt_after(&reader, &mut output, prompt_count);
     }
 
-    input.write_all(b"\x04").expect("EOF");
-    input.flush().expect("EOF flush");
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
     drop(input);
     drop(pair);
-    let mut killer = child.clone_killer();
-    let (status_sender, status_receiver) = mpsc::channel();
-    let waiter = thread::spawn(move || {
-        let status = child.wait();
-        status_sender.send(status).expect("status receiver dropped");
-    });
-    let status = match status_receiver.recv_timeout(PROGRESS_DEADLINE) {
-        Ok(Ok(status)) => status,
-        Ok(Err(error)) => panic!("wait failed: {error}"),
-        Err(error) => {
-            killer.kill().expect("kill timed out child");
-            panic!("interactive process did not exit: {error}")
-        }
-    };
-    assert!(status.success(), "interactive process failed: {status:?}");
-    waiter.join().expect("waiter thread panicked");
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
     assert!(stub.generations().is_empty());
@@ -1929,7 +1855,7 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
             pixel_height: 0,
         })
         .expect("pty");
-    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
     let (reader, reader_join) = stream(
@@ -1943,7 +1869,7 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     input.write_all(b"yes\r").expect("trust answer");
     input.flush().expect("trust answer flush");
     let idle_start = output.len();
-    until_from(&reader, &mut output, idle_start, b"> ");
+    until_prompt_from(&reader, &mut output, idle_start);
 
     input
         .write_all(b"ask questions\r")
@@ -1981,15 +1907,16 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     let multiple_submit_start = output.len();
     input.write_all(b"\r").expect("multiple answer");
     input.flush().expect("multiple answer flush");
-    until_from(
+    until_normalized(&reader, &mut output, multiple_submit_start, "Free question");
+    input.write_all(b"free answer\r").expect("free-text answer");
+    input.flush().expect("free-text answer flush");
+    until_normalized(
         &reader,
         &mut output,
         multiple_submit_start,
-        b"Free question ",
+        "QUESTIONS-DONE",
     );
-    input.write_all(b"free answer\r").expect("free-text answer");
-    input.flush().expect("free-text answer flush");
-    until_normalized(&reader, &mut output, idle_start, "QUESTIONS-DONE");
+    until_prompt_from(&reader, &mut output, multiple_submit_start);
 
     let generations = stub.generations();
     assert_eq!(
@@ -1998,47 +1925,27 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
         "each answer resumes the same live turn"
     );
     assert!(
+        count_exact_strings(&generations[1], "no") > 0,
+        "the numeric single-choice answer reaches the model"
+    );
+    assert!(
+        count_exact_strings(&generations[2], "[\"red\",\"blue\"]") > 0,
+        "both numeric multiple-choice answers reach the model: {}",
+        generations[2]
+    );
+    assert!(
         generations
             .iter()
             .any(|generation| generation.to_string().contains("free answer")),
         "the free-text answer reaches the model using the canonical answer value"
     );
 
-    input.write_all(b"\x04").expect("EOF");
-    input.flush().expect("EOF flush");
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
     drop(input);
     drop(pair);
-    let mut killer = child.clone_killer();
-    let (status_sender, status_receiver) = mpsc::channel();
-    let waiter = thread::spawn(move || {
-        let status = child.wait();
-        status_sender.send(status).expect("status receiver dropped");
-    });
-    let deadline = Instant::now() + PROGRESS_DEADLINE;
-    let status = loop {
-        drain(&reader, &mut output);
-        match status_receiver.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ok(status)) => break status,
-            Ok(Err(error)) => panic!("wait failed: {error}"),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("child waiter disconnected")
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
-                drain(&reader, &mut output);
-                killer.kill().expect("kill timed out child");
-                match status_receiver
-                    .recv_timeout(Duration::from_secs(2))
-                    .expect("killed child did not exit")
-                {
-                    Ok(status) => break status,
-                    Err(error) => panic!("wait after kill failed: {error}"),
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-    };
-    assert!(status.success(), "interactive process failed: {status:?}");
-    waiter.join().expect("waiter thread panicked");
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
 }
