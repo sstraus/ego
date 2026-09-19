@@ -18,6 +18,7 @@ pub mod mcp_registry;
 pub mod model_catalogue_cache;
 pub mod permission_analysis_cache;
 pub mod pricing;
+pub mod privacy;
 mod stdio;
 pub mod store;
 pub mod tools;

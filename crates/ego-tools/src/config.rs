@@ -16,6 +16,7 @@ use fd_lock::RwLock;
 use sha2::{Digest as _, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
 
+use crate::privacy::{PrivatePathKind, harden_private_path};
 use crate::store::{AtomicReplacePublication, StoreIo};
 
 /// The real filesystem adapter for one user `config.toml` authority.
@@ -1047,14 +1048,10 @@ fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
         options.mode(0o600);
     }
     let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
-            drop(file);
-            let _ = fs::remove_file(path);
-            return Err(error);
-        }
+    if let Err(error) = harden_private_path(path, PrivatePathKind::File) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(error);
     }
     Ok(file)
 }

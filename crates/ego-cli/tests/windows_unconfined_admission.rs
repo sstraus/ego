@@ -11,6 +11,7 @@ mod support;
 use std::fs;
 
 use ego_cli::trust::inventory_digest;
+use ego_tools::privacy::{PrivatePathKind, validate_private_path};
 use support::{Ego, FIXTURE_SESSION_ID, Finished, MODEL, Places, Stub};
 
 /// Stable words in the human acknowledgement surface.  The complete prompt
@@ -305,7 +306,10 @@ fn implicit_default_prompts_once_per_canonical_workspace_and_records_yes() {
         config
     );
     assert!(!places.home_path().join("trust.json").exists());
-    assert!(places.home_path().join("unconfined.json").exists());
+    let ledger = places.home_path().join("unconfined.json");
+    assert!(ledger.exists());
+    validate_private_path(places.home_path(), PrivatePathKind::Directory).unwrap();
+    validate_private_path(&ledger, PrivatePathKind::File).unwrap();
 }
 
 #[test]

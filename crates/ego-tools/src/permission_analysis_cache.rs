@@ -11,6 +11,7 @@ use futures::future::BoxFuture;
 use futures::lock::{Mutex as AsyncMutex, OwnedMutexGuard};
 use serde::{Deserialize, Serialize};
 
+use crate::privacy::{PrivatePathKind, harden_private_path, validate_private_path};
 use crate::store::{Lease, OsIo, StoreIo};
 
 const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -101,6 +102,8 @@ impl FilePermissionAnalysisCache {
             builder
                 .create(&self.directory)
                 .map_err(|_| "permission analysis directory creation failed".to_owned())?;
+            harden_private_path(&self.directory, PrivatePathKind::Directory)
+                .map_err(|_| "permission analysis directory hardening failed".to_owned())?;
         }
         private(&self.directory, true)?;
         // Kernel lease exists only during reload, merge and atomic publication.
@@ -148,15 +151,13 @@ fn private(path: &Path, directory: bool) -> Result<(), String> {
     {
         return Err("permission analysis path has an unexpected file type".into());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let expected = if directory { 0o700 } else { 0o600 };
-        if metadata.permissions().mode() & 0o777 != expected {
-            return Err("permission analysis path permissions are not private".into());
-        }
-    }
-    Ok(())
+    let kind = if directory {
+        PrivatePathKind::Directory
+    } else {
+        PrivatePathKind::File
+    };
+    validate_private_path(path, kind)
+        .map_err(|_| "permission analysis path permissions are not private".into())
 }
 
 type LocalLocks = HashMap<(PathBuf, [u8; 32]), Weak<AsyncMutex<()>>>;

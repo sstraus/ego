@@ -17,6 +17,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::privacy::{PrivatePathKind, harden_private_path};
+
 /// Read the first newline-terminated line without visiting the rest of the file.
 fn read_first_line(path: &Path) -> io::Result<Option<Vec<u8>>> {
     use io::BufRead as _;
@@ -411,6 +413,9 @@ fn replace_atomic_publication_with_privacy(
         } else {
             fs::File::create(&tmp_path)?
         };
+        if private {
+            harden_private_path(&tmp_path, PrivatePathKind::File)?;
+        }
         if let Err(error) = file.write_all(bytes).and_then(|()| barrier.apply(&file)) {
             drop(file);
             if private {

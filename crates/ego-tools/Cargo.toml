@@ -53,6 +53,7 @@ process-wrap = { path = "../../vendor/process-wrap", default-features = false, f
     "kill-on-drop",
 ] }
 windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
+windows-permissions = "0.2.4"
 
 [features]
 # `NonDurableOsIo`: `OsIo` with the fsync barriers elided, for tests that

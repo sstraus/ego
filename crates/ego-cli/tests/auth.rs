@@ -11,6 +11,7 @@ use ego_cli::auth::{
 #[cfg(unix)]
 use ego_cli::auth::{discover_plugin, run_program};
 use ego_cli::cli::{self, AuthAction, Invocation};
+use ego_tools::privacy::{PrivatePathKind, validate_private_path};
 use tempfile::tempdir;
 
 #[cfg(unix)]
@@ -37,16 +38,21 @@ fn the_store_is_one_map_and_secrets_never_format() {
     assert!(!printed.contains("refresh-secret"), "{printed}");
 }
 
-#[cfg(unix)]
 #[test]
-fn the_store_directory_and_file_have_private_modes() {
+fn the_store_directory_and_file_are_private_to_the_current_user() {
     let root = tempdir().unwrap();
     let home = root.path().join("ego");
     let store = AuthStore::new(&home);
     store.put("openai-codex", oauth("secret")).unwrap();
 
-    assert_eq!(fs::metadata(&home).unwrap().mode() & 0o777, 0o700);
-    assert_eq!(fs::metadata(store.path()).unwrap().mode() & 0o777, 0o600);
+    validate_private_path(&home, PrivatePathKind::Directory).unwrap();
+    validate_private_path(&store.path(), PrivatePathKind::File).unwrap();
+
+    #[cfg(unix)]
+    {
+        assert_eq!(fs::metadata(&home).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(store.path()).unwrap().mode() & 0o777, 0o600);
+    }
 }
 
 #[test]

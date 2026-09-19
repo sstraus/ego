@@ -26,6 +26,7 @@ use ego_core::credentials::SecretMaterial;
 use ego_core::event::domain::CancelCause;
 use ego_core::turn::CancelToken;
 use ego_tools::exec::{SecretChildError, SecretChildRequest, run_secret_child};
+use ego_tools::privacy::{PrivatePathKind, harden_private_path};
 
 const PROGRAM_TIMEOUT: Duration = Duration::from_secs(120);
 const PROGRAM_TERMINATION_GRACE: Duration = Duration::from_millis(500);
@@ -365,16 +366,12 @@ impl AuthStore {
             path: self.home.clone(),
             source,
         })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.home, fs::Permissions::from_mode(0o700)).map_err(
-                |source| AuthError::Io {
-                    path: self.home.clone(),
-                    source,
-                },
-            )?;
-        }
+        harden_private_path(&self.home, PrivatePathKind::Directory).map_err(|source| {
+            AuthError::Io {
+                path: self.home.clone(),
+                source,
+            }
+        })?;
         Ok(())
     }
 
@@ -527,6 +524,10 @@ impl AuthStore {
             path: tmp.clone(),
             source,
         })?;
+        harden_private_path(&tmp, PrivatePathKind::File).map_err(|source| AuthError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
         file.write_all(bytes.expose_secret_bytes())
             .and_then(|()| file.sync_all())
             .map_err(|source| AuthError::Io {
@@ -537,12 +538,8 @@ impl AuthStore {
             path: path.clone(),
             source,
         })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .map_err(|source| AuthError::Io { path, source })?;
-        }
+        harden_private_path(&path, PrivatePathKind::File)
+            .map_err(|source| AuthError::Io { path, source })?;
         Ok(())
     }
 }

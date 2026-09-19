@@ -17,6 +17,7 @@ use ego_core::config::{
 };
 #[cfg(windows)]
 use ego_core::config::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger};
+use ego_tools::privacy::{PrivatePathKind, harden_private_path};
 use fd_lock::RwLock;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -347,12 +348,8 @@ where
     fn open_lock(&self) -> Result<RwLock<File>, String> {
         fs::create_dir_all(&self.home)
             .map_err(|error| format!("{}: {error}", self.home.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.home, fs::Permissions::from_mode(0o700))
-                .map_err(|error| format!("{}: {error}", self.home.display()))?;
-        }
+        harden_private_path(&self.home, PrivatePathKind::Directory)
+            .map_err(|error| format!("{}: {error}", self.home.display()))?;
         let path = self.lock_path();
         let file = OpenOptions::new()
             .create(true)
@@ -379,10 +376,14 @@ where
         let mut file = options
             .open(&temporary)
             .map_err(|error| format!("{}: {error}", temporary.display()))?;
+        harden_private_path(&temporary, PrivatePathKind::File)
+            .map_err(|error| format!("{}: {error}", temporary.display()))?;
         file.write_all(&bytes)
             .and_then(|()| file.sync_all())
             .map_err(|error| format!("{}: {error}", temporary.display()))?;
-        fs::rename(&temporary, &path).map_err(|error| format!("{}: {error}", path.display()))
+        fs::rename(&temporary, &path).map_err(|error| format!("{}: {error}", path.display()))?;
+        harden_private_path(&path, PrivatePathKind::File)
+            .map_err(|error| format!("{}: {error}", path.display()))
     }
 }
 

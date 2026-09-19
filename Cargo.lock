@@ -1319,6 +1319,7 @@ dependencies = [
  "url",
  "uuid",
  "windows",
+ "windows-permissions",
  "zeroize",
 ]
 
