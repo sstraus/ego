@@ -716,7 +716,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
 
     let rendered = normalized(&output);
     for fact in [
-        "Call: \"write\"",
+        "εgo: write",
         "Reason:",
         "Operations:",
         "Risk: Bounded",
