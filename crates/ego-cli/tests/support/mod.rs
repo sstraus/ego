@@ -1098,6 +1098,11 @@ impl Ego {
             }
             let prompt_count = ready_prompt_count(&output);
             if !submitted && prompt_count > 0 {
+                // ConPTY publishes the completed redraw before its input side
+                // finishes consuming the DSR response. Keep the scripted
+                // line out of that control-sequence read.
+                #[cfg(windows)]
+                std::thread::sleep(Duration::from_millis(25));
                 if input.is_none() {
                     let mut writer = writer.lock().expect("pty writer lock");
                     writer.write_all(b"\x04").expect("interactive EOF");

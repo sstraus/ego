@@ -395,7 +395,12 @@ async fn cli_background_launch_crosses_execution_barrier_without_collection_futu
     let service = ChildRunService::new(
         controller,
         gate,
-        RunRoot::new("/workspace").expect("launch barrier root"),
+        RunRoot::new(
+            std::env::current_dir()
+                .expect("launch barrier current directory")
+                .join("workspace"),
+        )
+        .expect("launch barrier root"),
         bindings,
         ports,
     );

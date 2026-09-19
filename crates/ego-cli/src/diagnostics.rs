@@ -211,6 +211,9 @@ mod tests {
     /// whole security argument, so it is asserted rather than assumed.
     #[test]
     fn an_unset_or_emptied_variable_installs_nothing() {
+        let log_file = std::env::current_dir()
+            .expect("current directory")
+            .join("ego.log");
         for (log, what) in [(None, "unset"), (Some(""), "empty"), (Some("  "), "blank")] {
             assert_eq!(
                 plan(log, None, false),
@@ -220,23 +223,26 @@ mod tests {
         }
         // Naming a file without naming a level is still off: the destination is
         // not the switch.
-        assert_eq!(plan(None, Some("/tmp/ego.log"), false), Ok(Plan::Off));
+        assert_eq!(plan(None, log_file.to_str(), false), Ok(Plan::Off));
     }
 
     /// A session that paints its own prompt is told to name a file, not left to
     /// discover a corrupted display.
     #[test]
     fn an_interactive_session_refuses_stderr_and_says_what_to_do_instead() {
+        let log_file = std::env::current_dir()
+            .expect("current directory")
+            .join("ego.log");
         let refusal = plan(Some("info"), None, true).expect_err("interactive stderr is refused");
         assert!(
             refusal.contains(LOG_FILE),
             "the refusal must name the variable that fixes it: {refusal}"
         );
         assert_eq!(
-            plan(Some("info"), Some("/tmp/ego.log"), true),
+            plan(Some("info"), log_file.to_str(), true),
             Ok(Plan::File {
                 filter: "info".to_owned(),
-                path: PathBuf::from("/tmp/ego.log"),
+                path: log_file,
             }),
             "naming a file is what makes an interactive session collectable"
         );

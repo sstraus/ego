@@ -38,6 +38,16 @@ use ego_core::run::{
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
+fn fixture_cwd(path: &str) -> PathBuf {
+    if cfg!(windows) {
+        std::env::current_dir()
+            .expect("ACP fixture current directory")
+            .join(path.trim_start_matches('/'))
+    } else {
+        PathBuf::from(path)
+    }
+}
+
 struct NoMcpAdmitter;
 
 impl McpSessionAdmitter for NoMcpAdmitter {
@@ -231,7 +241,7 @@ impl SessionStore for AcpStore {
             .keys()
             .map(|id| SessionMeta {
                 id: *id,
-                workspace_root: PathBuf::from("/workspace"),
+                workspace_root: fixture_cwd("/workspace"),
                 model: None,
                 created: Timestamp::EPOCH,
                 updated: Timestamp::EPOCH,
@@ -824,6 +834,7 @@ impl Connected {
         cwd: &str,
         client_capabilities: serde_json::Value,
     ) -> String {
+        let cwd = fixture_cwd(cwd);
         let (initialize, _) = self
             .request(
                 "initialize",
@@ -896,7 +907,7 @@ async fn session_new_prompt_and_baseline_cancel_notification_drive_the_shared_co
         Arc::clone(&sink_factory),
     );
     let session = connection.open("/workspace/project").await;
-    assert_eq!(roots.calls(), vec![PathBuf::from("/workspace/project")]);
+    assert_eq!(roots.calls(), vec![fixture_cwd("/workspace/project")]);
     assert!(store.entries.lock().expect("session entries").is_empty());
     let prompt_id = connection
         .send(
@@ -938,7 +949,10 @@ async fn session_new_prompt_and_baseline_cancel_notification_drive_the_shared_co
     assert_eq!(run.status(), ego_core::run::RunStatus::Cancelled);
     assert_eq!(
         executor.started_roots(),
-        vec![(run_id, RunRoot::new("/workspace/project").expect("root"))]
+        vec![(
+            run_id,
+            RunRoot::new(fixture_cwd("/workspace/project")).expect("root")
+        )]
     );
     assert_eq!(
         executor.started_models(),
@@ -953,7 +967,7 @@ async fn session_new_prompt_and_baseline_cancel_notification_drive_the_shared_co
     ));
     assert_eq!(
         transactions[0].root(),
-        &RunRoot::new("/workspace/project").expect("root")
+        &RunRoot::new(fixture_cwd("/workspace/project")).expect("root")
     );
     assert!(matches!(
         transactions[1].command(),

@@ -641,8 +641,12 @@ transport = "sse"
             refusal.contains(BUILTIN_CATALOGUE_REVISION),
             "the refusal must name the catalogue that knows it: {refusal}"
         );
+        let system_override = PathBuf::from(SYSTEM_DIR)
+            .join(MODELS_FILE)
+            .display()
+            .to_string();
         assert!(
-            refusal.contains("/etc/ego/models.toml"),
+            refusal.contains(&system_override),
             "the refusal must name where to override it: {refusal}"
         );
         assert!(

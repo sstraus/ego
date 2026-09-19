@@ -67,9 +67,27 @@ impl LocalPeer {
             stream.read_exact(&mut byte).expect("read peer request");
             request.push(byte[0]);
             if request.ends_with(b"\r\n\r\n") {
-                return request;
+                break;
             }
         }
+        let content_length = String::from_utf8_lossy(&request)
+            .split("\r\n")
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length").then(|| {
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .expect("request content length")
+                })
+            })
+            .unwrap_or(0);
+        let header_length = request.len();
+        request.resize(header_length + content_length, 0);
+        stream
+            .read_exact(&mut request[header_length..])
+            .expect("read peer request body");
+        request
     }
 
     fn serve_before_headers(self: Arc<Self>) {
@@ -223,11 +241,18 @@ impl PeerBroker {
         let request: &HttpRequest = call.request();
         let mut bytes =
             format!("{} {} HTTP/1.1\r\n", request.method(), request.path()).into_bytes();
+        let mut has_content_length = false;
         for header in request.headers() {
+            has_content_length |= header.name().eq_ignore_ascii_case("content-length");
             bytes.extend_from_slice(header.name().as_bytes());
             bytes.extend_from_slice(b": ");
             bytes.extend_from_slice(header.value());
             bytes.extend_from_slice(b"\r\n");
+        }
+        if !has_content_length {
+            bytes.extend_from_slice(
+                format!("Content-Length: {}\r\n", request.body().len()).as_bytes(),
+            );
         }
         bytes.extend_from_slice(b"\r\n");
         bytes.extend_from_slice(request.body());
@@ -573,7 +598,16 @@ fn real_peer_cancel_after_one_sse_event_closes_body_and_preserves_possible_deliv
             .expect("runtime")
             .block_on(client.discover())
     });
+    let first_poll_deadline = Instant::now() + Duration::from_secs(5);
     while !peer.first_body_poll.load(Ordering::Acquire) {
+        if task.is_finished() {
+            let result = task.join().expect("discover thread");
+            panic!("discover completed before polling the response body: {result:?}");
+        }
+        assert!(
+            Instant::now() < first_poll_deadline,
+            "discover did not poll the response body within five seconds"
+        );
         thread::yield_now();
     }
     cancellation.cancel();
