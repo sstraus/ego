@@ -200,6 +200,7 @@ fn rendered_prompt_count(output: &[u8]) -> usize {
             is_status_prompt
                 || tail.is_empty()
                 || tail.starts_with(b"\x1b[K")
+                || tail.starts_with(b"\x1b[1C")
                 || tail.starts_with(b"\r")
                 || tail.starts_with(b"\n")
         })
