@@ -73,7 +73,7 @@ smoke providers="ollama":
 
 # Compile the workspace with the MSRV the manifest promises.
 msrv:
-    cargo +`just _msrv` check --workspace --all-targets
+    rustup run `just _msrv` cargo check --workspace --all-targets
 
 # The single source of the MSRV, read by `msrv` and by the CI job so a version
 # pinned in two files cannot disagree with itself.

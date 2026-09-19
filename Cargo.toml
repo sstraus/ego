@@ -35,7 +35,7 @@ edition = "2024"
 # 1.95 for Reedline 0.51.0, whose host-break and repaint handles are the final
 # live-surface control boundary. The repository-local copy preserves that
 # authoritative floor; see the 2026-08-25 live-surface dependency ADR.
-rust-version = "1.95"
+rust-version = "1.95.0"
 license = "MIT"
 publish = false
 
