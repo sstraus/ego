@@ -1385,7 +1385,8 @@ fn no_message_shown_to_a_person_is_a_debug_rendering() {
 
     let mut offences = Vec::new();
     for file in rust_sources(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))) {
-        let source = std::fs::read_to_string(&file).expect("a source file reads");
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("source file {} reads: {error}", file.display()));
         for constructor in CONSTRUCTORS {
             let mut from = 0;
             while let Some(found) = source[from..].find(constructor) {
@@ -1464,7 +1465,11 @@ fn collect_rust(directory: &Path, found: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_rust(&path, found);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+        } else if path.extension().is_some_and(|extension| extension == "rs")
+            && !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("._"))
+        {
             found.push(path);
         }
     }
