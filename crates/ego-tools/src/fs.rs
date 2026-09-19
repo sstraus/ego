@@ -14,6 +14,24 @@ use std::path::{Path, PathBuf};
 use ego_core::permit::{CanonPath, Entry, EntryKind, Fs, FsError, PathResolver, Scan, ScanRequest};
 use tempfile::NamedTempFile;
 
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        return fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?
+            .sync_all();
+    }
+
+    #[cfg(not(windows))]
+    fs::File::open(path)?.sync_all()
+}
+
 /// `std::fs`, behind the port.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OsFs;
@@ -134,7 +152,7 @@ impl PreparedReplacement {
 
         // The file data is already stable. This barrier makes the directory
         // entry that names it stable before success is reported.
-        fs::File::open(parent)?.sync_all()
+        sync_directory(&parent)
     }
 }
 
@@ -335,5 +353,18 @@ mod tests {
             scratch.as_ref().is_some_and(|path| !path.exists()),
             "returning the error drops the preparation and cleans its scratch"
         );
+    }
+
+    #[test]
+    fn a_committed_replacement_publishes_complete_bytes() {
+        let dir = TempDir::new().expect("a temp directory");
+        let target = dir.path().join("target.txt");
+
+        PreparedReplacement::new(&target, b"complete")
+            .expect("the replacement is prepared")
+            .commit()
+            .expect("the replacement is durably committed");
+
+        assert_eq!(fs::read(target).unwrap(), b"complete");
     }
 }
