@@ -11,6 +11,7 @@ use ego_core::config::{
 use ego_core::config::{McpHttpAuth, McpServerConfig, McpServerName};
 use ego_core::mcp::ToolExecution;
 use ego_core::permit::{CanonPath, Op, PreparedCall, ToolError};
+use ego_core::suspension::McpCapturePin;
 use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 use ego_mcp::{
     McpAdmittedCandidate, McpCandidateAdmission, McpCandidateError, McpCandidateInventory,
@@ -100,6 +101,7 @@ enum Outcome {
 struct CandidateFixture {
     name: String,
     tools: Vec<Arc<CountingTool>>,
+    instructions: Option<String>,
 }
 #[derive(Default)]
 struct AdmissionState {
@@ -158,7 +160,11 @@ impl McpCandidateAdmission for FakeAdmission {
             match outcome {
                 (Outcome::Candidate(fixture), admission) => {
                     assert_eq!(fixture.name, admission.name().as_str());
-                    Ok(admitted_candidate(admission, fixture.tools))
+                    Ok(admitted_candidate_saying(
+                        admission,
+                        fixture.tools,
+                        fixture.instructions.as_deref(),
+                    ))
                 }
                 (Outcome::Invalid(cause), _) => Err(McpCandidateError::Invalid { cause }),
                 (
@@ -401,11 +407,31 @@ fn candidate(name: &str, tools: Vec<Arc<CountingTool>>) -> CandidateFixture {
     CandidateFixture {
         name: name.to_owned(),
         tools,
+        instructions: None,
+    }
+}
+/// A candidate whose server describes itself at `initialize`.
+fn candidate_saying(
+    name: &str,
+    tools: Vec<Arc<CountingTool>>,
+    instructions: &str,
+) -> CandidateFixture {
+    CandidateFixture {
+        name: name.to_owned(),
+        tools,
+        instructions: Some(instructions.to_owned()),
     }
 }
 fn admitted_candidate(
     admission: Arc<McpServerAdmission>,
     tools: Vec<Arc<CountingTool>>,
+) -> McpAdmittedCandidate {
+    admitted_candidate_saying(admission, tools, None)
+}
+fn admitted_candidate_saying(
+    admission: Arc<McpServerAdmission>,
+    tools: Vec<Arc<CountingTool>>,
+    instructions: Option<&str>,
 ) -> McpAdmittedCandidate {
     let descriptors = tools
         .iter()
@@ -417,6 +443,7 @@ fn admitted_candidate(
         ego_mcp::McpCandidateIdentity::validated(admission.name().as_str()),
         McpCandidateInventory::new(
             ego_mcp::McpCapabilities::tools(),
+            instructions.map(str::to_owned),
             descriptors,
             Vec::new(),
             Vec::new(),
@@ -1364,4 +1391,87 @@ async fn fresh_controller_reconstructs_matching_capture_but_not_drift_or_removal
 
     let (removed, _) = one_publication(empty_config(), Vec::new()).await;
     assert!(removed.resolve_capture(&stable).is_err());
+}
+
+fn config_three() -> ego_core::config::ResolvedMcpConfig {
+    let layer = ConfigLayer::parse(
+        Source::User,
+        "[mcp.servers.zulu]\ntransport = 'stdio'\ncommand = 'mcp-zulu'\n\n         [mcp.servers.alpha]\ntransport = 'stdio'\ncommand = 'mcp-alpha'\n\n         [mcp.servers.mike]\ntransport = 'stdio'\ncommand = 'mcp-mike'\n",
+    )
+    .expect("valid MCP layer");
+    resolve(&[layer], Trust::Trusted, None)
+        .expect("resolved MCP config")
+        .mcp
+}
+
+/// A server's `instructions` reach the capture, trimmed and bounded, in
+/// ascending server-name order — and a server that said nothing adds no entry.
+///
+/// The capture keeps its servers in a `BTreeMap`, so today the order happens
+/// incidentally. A documented composition order that nothing checks is one
+/// that stops being true the first time the container changes, which is why
+/// this asserts the whole ordered list rather than membership.
+#[tokio::test(flavor = "current_thread")]
+async fn server_instructions_reach_the_capture_in_server_name_order() {
+    let admission = Arc::new(FakeAdmission {
+        state: Arc::new(Mutex::new(AdmissionState::default())),
+        gate: Arc::new(Mutex::new(None)),
+    });
+    admission.push(Outcome::Candidate(candidate_saying(
+        "alpha",
+        vec![CountingTool::new(
+            "alpha_tool",
+            Arc::new(AtomicUsize::new(0)),
+        )],
+        "  Prefer alpha_tool for live lookups.  ",
+    )));
+    admission.push(Outcome::Candidate(candidate(
+        "mike",
+        vec![CountingTool::new(
+            "mike_tool",
+            Arc::new(AtomicUsize::new(0)),
+        )],
+    )));
+    admission.push(Outcome::Candidate(candidate_saying(
+        "zulu",
+        vec![CountingTool::new(
+            "zulu_tool",
+            Arc::new(AtomicUsize::new(0)),
+        )],
+        "Prefer zulu_tool for archival lookups.",
+    )));
+    let (registry, _) = controller(Arc::clone(&admission));
+    let publication = registry
+        .reconcile(
+            McpRegistryRefresh::new(
+                admissions(config_three()),
+                RegistryTrigger::Add,
+                RegistryScope::All,
+            )
+            .expect("registry refresh"),
+        )
+        .await
+        .expect("publication");
+    assert_eq!(
+        publication.admitted_servers(),
+        ["alpha".to_owned(), "mike".to_owned(), "zulu".to_owned()]
+    );
+
+    let instructions = publication.capture().instructions();
+    let seen: Vec<_> = instructions
+        .iter()
+        .map(|entry| (entry.server(), entry.text()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("alpha", "Prefer alpha_tool for live lookups."),
+            ("zulu", "Prefer zulu_tool for archival lookups."),
+        ],
+        "instructions must be name-ordered, trimmed, and absent for a silent server"
+    );
+    assert!(
+        instructions.iter().all(|entry| !entry.truncated()),
+        "nothing this short was cut"
+    );
 }

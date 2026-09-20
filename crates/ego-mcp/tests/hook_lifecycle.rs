@@ -2940,6 +2940,7 @@ fn registry_capture_with_history_and_schema(
     let admission = server_admission();
     let inventory = McpCandidateInventory::new(
         McpCapabilities::tools(),
+        None,
         vec![
             ego_core::generator::types::ToolDescriptor {
                 name: "lookup".into(),

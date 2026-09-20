@@ -61,6 +61,12 @@ impl GenerationToolCatalogue {
     pub(crate) fn authority(&self) -> ToolCaptureAuthority {
         self.authority.clone()
     }
+
+    /// What the MCP servers in this generation's catalogue say about
+    /// themselves, in ascending server-name order.
+    pub(crate) fn instructions(&self) -> &[crate::mcp::McpServerInstructions] {
+        self.authority.instructions()
+    }
 }
 
 /// A model call after the mixed registry has selected its typed boundary.

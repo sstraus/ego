@@ -3009,6 +3009,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 return self.refuse(turn, error.to_string(), ExitReason::Internal);
             }
         };
+        // Here and not in `with_system`: a server's instructions explain the
+        // tools *this* catalogue admitted, and the catalogue is captured after
+        // the session's own system prompt has been spliced. Splicing them
+        // earlier would let a server describe a surface the generation does
+        // not have.
+        let conversation = Self::with_mcp_instructions(conversation, catalogue.instructions());
 
         let source = Arc::clone(&self.source);
         let first = AttemptRef::first(GenerationId::new());
@@ -3472,6 +3478,56 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             system_messages.push(Message::text(Role::System, rendered));
         }
         messages.splice(0..0, system_messages);
+        Conversation::new(messages)
+            .expect("a text message adds no call and answers none, so a valid history stays valid")
+    }
+
+    /// One `Role::System` block per admitted MCP server that described itself.
+    ///
+    /// **Composition order is ascending server name**, fixed by the capture
+    /// rather than by arrival. Two servers admitted in a different order on
+    /// two runs would otherwise reach the model in a different order, and the
+    /// answer would stop being reproducible for a reason nothing recorded.
+    ///
+    /// They are placed *after* the leading run of system messages, which is
+    /// exactly the session's own prompt and its active skill instructions
+    /// ([`Self::with_system`]): what the workspace says about itself outranks
+    /// what a foreign server says about itself, and a block spliced at the
+    /// front would silently invert that.
+    ///
+    /// A truncated instruction is marked in the text it is part of, because
+    /// the model is the reader that needs to know its guidance was cut.
+    fn with_mcp_instructions(
+        history: Conversation,
+        instructions: &[crate::mcp::McpServerInstructions],
+    ) -> Conversation {
+        let blocks: Vec<Message> = instructions
+            .iter()
+            .filter(|server| !server.text().is_empty())
+            .map(|server| {
+                let mut rendered = format!(
+                    "Instructions from MCP server \"{}\":\n{}",
+                    server.server(),
+                    server.text()
+                );
+                if server.truncated() {
+                    rendered.push_str(&format!(
+                        "\n…[truncated at {} bytes]",
+                        crate::mcp::FOREIGN_VISIBLE_BYTES
+                    ));
+                }
+                Message::text(Role::System, rendered)
+            })
+            .collect();
+        if blocks.is_empty() {
+            return history;
+        }
+        let mut messages: Vec<Message> = history.into();
+        let after_system = messages
+            .iter()
+            .take_while(|message| message.role == Role::System)
+            .count();
+        messages.splice(after_system..after_system, blocks);
         Conversation::new(messages)
             .expect("a text message adds no call and answers none, so a valid history stays valid")
     }

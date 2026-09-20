@@ -300,6 +300,7 @@ fn dynamic_candidate(
         McpCandidateIdentity::validated("dynamic"),
         McpCandidateInventory::new(
             McpCapabilities::tools(),
+            None,
             collapsed_management(),
             Vec::new(),
             Vec::new(),

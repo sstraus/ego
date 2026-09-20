@@ -20,7 +20,8 @@ use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator, RequestExpressibilityError};
 use ego_core::generator::types::GenRequest;
-use ego_core::generator::types::StopReason;
+use ego_core::generator::types::{ContentBlock, Role, StopReason};
+use ego_core::mcp::McpServerInstructions;
 use ego_core::permit::{
     CanonPath, DuplexSpawner, OneHop, OneHopResponse, ProcessError, ProcessExecutor, Resolver,
     Tool, ToolError, ToolResult, Typed, TypedTool,
@@ -31,6 +32,7 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use ego_core::suspension::McpCapturePin;
 use ego_core::turn::{
     AdmittedToolSource, CapturedToolCatalogue, GenerationRuntime, RegisteredTool, Session,
     ToolCatalogueError, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
@@ -332,6 +334,7 @@ fn loop_with_policy(
     static_tools: &[RegisteredTool],
     source: Arc<dyn AdmittedToolSource>,
     policy_source: Arc<dyn ego_core::turn::GenerationPolicySource>,
+    system: Option<SystemPrompt>,
 ) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
     let store: &'static MemoryStore = Box::leak(Box::new(MemoryStore::default()));
     let clock = Box::leak(Box::new(FixedClock));
@@ -356,7 +359,7 @@ fn loop_with_policy(
         source: Arc::new(TestGenerationSource { generator }),
         gate,
         config: TurnConfig {
-            system: None::<SystemPrompt>,
+            system,
             token_ceiling: None,
             retry: 0,
             fallbacks: Vec::new(),
@@ -389,6 +392,24 @@ fn loop_with(
         static_tools,
         source,
         common::default_policy_source(),
+        None,
+    )
+}
+
+/// `loop_with`, plus the session's own system prompt, so a test can assert on
+/// what a foreign block is composed *around*.
+fn loop_with_system(
+    generator: Arc<dyn ego_core::generator::port::Generator>,
+    static_tools: &[RegisteredTool],
+    source: Arc<dyn AdmittedToolSource>,
+    system: SystemPrompt,
+) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
+    loop_with_policy(
+        generator,
+        static_tools,
+        source,
+        common::default_policy_source(),
+        Some(system),
     )
 }
 
@@ -402,6 +423,7 @@ fn loop_with_yolo(
         static_tools,
         source,
         common::policy_source_with_root("/workspace", Mode::Yolo, Ruleset::default()),
+        None,
     )
 }
 
@@ -673,4 +695,139 @@ fn sibling_calls_keep_old_arcs_after_refresh_and_removal_then_next_generation_se
     assert!(completed.iter().any(|text| text == "old-a"));
     assert!(completed.iter().any(|text| text == "old-b"));
     assert!(completed.iter().any(|text| text == "new-a"));
+}
+
+/// A capture pin that says only what its servers said, for tests that care
+/// about the instructions and not about which registry produced them.
+struct InstructingPin {
+    instructions: Vec<McpServerInstructions>,
+}
+
+impl McpCapturePin for InstructingPin {
+    fn stable_fingerprint(&self) -> &str {
+        "instructing-pin"
+    }
+
+    fn instructions(&self) -> &[McpServerInstructions] {
+        &self.instructions
+    }
+}
+
+#[test]
+fn server_instructions_reach_the_model_after_the_sessions_own_prompt() {
+    // Built in the order a registry would *not* have produced, so passing the
+    // order assertion means the capture ordered them rather than the fixture.
+    let pin = InstructingPin {
+        instructions: vec![
+            McpServerInstructions::new("alpha", "Prefer alpha_tool for live lookups."),
+            McpServerInstructions::new("zulu", "Prefer zulu_tool for archival lookups."),
+        ],
+    };
+    let state = Arc::new(Mutex::new(SourceState {
+        captures: 0,
+        order: None,
+        trace: None,
+        catalogues: VecDeque::from([CapturedToolCatalogue::new_mcp(
+            "g1",
+            vec![RegisteredTool::from(TaggedTool::new("dynamic-a"))],
+            pin,
+        )
+        .expect("distinct dynamic tools")]),
+    }));
+    let source: Arc<dyn AdmittedToolSource> = Arc::new(SequencedSource {
+        state: Arc::clone(&state),
+    });
+    let generator = Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+    let (mut turn, _store) = loop_with_system(
+        generator.clone(),
+        &[],
+        source,
+        SystemPrompt::verbatim("the workspace speaks first"),
+    )
+    .expect("valid catalogue");
+    futures::executor::block_on(turn.run("first")).expect("first turn");
+    let requests = generator.calls();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        system_texts(&requests[0]),
+        [
+            "the workspace speaks first".to_owned(),
+            "Instructions from MCP server \"alpha\":\nPrefer alpha_tool for live lookups."
+                .to_owned(),
+            "Instructions from MCP server \"zulu\":\nPrefer zulu_tool for archival lookups."
+                .to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_silent_server_adds_no_block_and_a_cut_one_says_it_was_cut() {
+    let long = "x".repeat(ego_core::mcp::FOREIGN_VISIBLE_BYTES + 1_024);
+    let pin = InstructingPin {
+        instructions: vec![
+            McpServerInstructions::new("quiet", ""),
+            McpServerInstructions::new("verbose", &long),
+        ],
+    };
+    assert!(
+        pin.instructions()[1].truncated(),
+        "the fixture must exceed the bound or it proves nothing"
+    );
+    let state = Arc::new(Mutex::new(SourceState {
+        captures: 0,
+        order: None,
+        trace: None,
+        catalogues: VecDeque::from([CapturedToolCatalogue::new_mcp(
+            "g1",
+            vec![RegisteredTool::from(TaggedTool::new("dynamic-a"))],
+            pin,
+        )
+        .expect("distinct dynamic tools")]),
+    }));
+    let source: Arc<dyn AdmittedToolSource> = Arc::new(SequencedSource {
+        state: Arc::clone(&state),
+    });
+    let generator = Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+    let (mut turn, _store) = loop_with_system(
+        generator.clone(),
+        &[],
+        source,
+        SystemPrompt::verbatim("the workspace speaks first"),
+    )
+    .expect("valid catalogue");
+    futures::executor::block_on(turn.run("first")).expect("first turn");
+    let systems = system_texts(&generator.calls()[0]);
+    assert_eq!(
+        systems.len(),
+        2,
+        "the silent server must contribute no block at all: {systems:?}"
+    );
+    assert!(!systems[1].contains("quiet"));
+    assert!(systems[1].starts_with("Instructions from MCP server \"verbose\":\n"));
+    assert!(
+        systems[1].ends_with(&format!(
+            "\n…[truncated at {} bytes]",
+            ego_core::mcp::FOREIGN_VISIBLE_BYTES
+        )),
+        "a cut instruction must say so in the text the model reads"
+    );
+    assert!(
+        systems[1].len() <= ego_core::mcp::FOREIGN_VISIBLE_BYTES + 128,
+        "the bound must be applied, not merely reported"
+    );
+}
+
+/// Every `Role::System` block of one request, in order, as plain text.
+fn system_texts(request: &GenRequest) -> Vec<String> {
+    request
+        .messages
+        .messages()
+        .iter()
+        .filter(|message| message.role == Role::System)
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
 }

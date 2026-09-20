@@ -16,9 +16,61 @@ use crate::permit::{InvocationDigest, ToolResult};
 use crate::store::evidence::EvidenceRef;
 
 /// Maximum UTF-8 bytes exposed to a model from one foreign result.
+///
+/// Also the bound on one server's `instructions` ([`McpServerInstructions`]).
+/// The same number rather than a fourth one: every instruction-shaped text
+/// this build admits is already bounded at 64 KiB — an instruction file
+/// (`config::discovery`), a skill body (`skill::MAX_ADMISSION_BYTES`), and a
+/// foreign result. A different limit for this one would need a reason, and
+/// there is not one.
 pub const FOREIGN_VISIBLE_BYTES: usize = 64 * 1024;
 /// Maximum bytes retained inline for one unsupported content block.
 pub const FOREIGN_UNSUPPORTED_BYTES: usize = 32 * 1024;
+
+/// What one admitted MCP server says about itself.
+///
+/// The `instructions` an MCP server may return from `initialize`: what it is
+/// for, and how its tools should be preferred. ego has one immutable mixed
+/// catalogue per generation and rules that allow or deny but never prefer, so
+/// without this a server cannot explain itself at all — the only thing the
+/// model learns about a foreign tool surface is the tool descriptions.
+///
+/// Bounded on the way in, and the bound is *recorded* rather than applied
+/// silently: a shortened instruction reads exactly like a complete one, so a
+/// server whose guidance was cut must be able to say so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerInstructions {
+    server: String,
+    text: String,
+    truncated: bool,
+}
+
+impl McpServerInstructions {
+    /// Admit one server's instructions, bounded at [`FOREIGN_VISIBLE_BYTES`].
+    pub fn new(server: impl Into<String>, text: &str) -> Self {
+        let mut bounded = String::new();
+        let mut truncated = false;
+        append_bounded_text(&mut bounded, text, &mut truncated);
+        Self {
+            server: server.into(),
+            text: bounded,
+            truncated,
+        }
+    }
+
+    pub fn server(&self) -> &str {
+        &self.server
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Whether the bound cut this server's instructions.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

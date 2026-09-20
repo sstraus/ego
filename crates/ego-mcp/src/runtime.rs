@@ -152,6 +152,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 McpCandidateIdentity::validated(request.name().as_str()),
                 McpCandidateInventory::new(
                     capabilities,
+                    inventory.instructions,
                     inventory.tools,
                     inventory.resources,
                     inventory.prompts,

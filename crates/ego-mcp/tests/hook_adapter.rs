@@ -293,6 +293,7 @@ fn capture_registry(result: serde_json::Value) -> McpRegistryCapture {
     });
     let inventory = McpCandidateInventory::new(
         McpCapabilities::tools(),
+        None,
         vec![ego_core::generator::types::ToolDescriptor {
             name: "lookup".to_owned(),
             description: "hook fixture".to_owned(),

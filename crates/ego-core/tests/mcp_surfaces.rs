@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ego_core::credentials::SecretMaterial;
-use ego_core::mcp::McpRuntimeBinding;
+use ego_core::mcp::{McpRuntimeBinding, McpServerInstructions};
 use ego_core::permit::{EnvName, EnvPolicy, HttpHeader, HttpRequest, HttpRequestDigest};
 use ego_core::run::{EventSinkFactory, RunExecutionBindings};
 use ego_core::sink::{EventSink, NullSink};
@@ -164,4 +164,31 @@ fn existing_run_selection_model_has_no_live_mcp_attachment_shape() {
     let selections = ego_core::run::RunSelections::empty();
     let encoded = serde_json::to_string(&selections).expect("run selections serialize");
     assert!(!encoded.contains("mcp"));
+}
+
+#[test]
+fn server_instructions_are_bounded_on_a_character_boundary_and_say_they_were_cut() {
+    // A multi-byte character straddling the bound: cutting at the byte would
+    // split it, and `text()` could not be a `&str` at all.
+    let over = "€".repeat(ego_core::mcp::FOREIGN_VISIBLE_BYTES);
+    let cut = McpServerInstructions::new("verbose", &over);
+    assert!(cut.truncated());
+    assert!(cut.text().len() <= ego_core::mcp::FOREIGN_VISIBLE_BYTES);
+    assert!(
+        cut.text().len() > ego_core::mcp::FOREIGN_VISIBLE_BYTES - 3,
+        "the bound must cut as close as a character boundary allows"
+    );
+    assert!(cut.text().chars().all(|character| character == '€'));
+
+    // Exactly at the bound is not truncation: a server whose instructions fit
+    // must not be told they were cut.
+    let exact = "x".repeat(ego_core::mcp::FOREIGN_VISIBLE_BYTES);
+    let whole = McpServerInstructions::new("exact", &exact);
+    assert!(!whole.truncated());
+    assert_eq!(whole.text(), exact);
+    assert_eq!(whole.server(), "exact");
+
+    let silent = McpServerInstructions::new("quiet", "");
+    assert!(!silent.truncated());
+    assert!(silent.text().is_empty());
 }

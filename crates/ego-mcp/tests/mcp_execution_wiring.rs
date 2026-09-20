@@ -246,6 +246,7 @@ fn static_candidate(
         McpCandidateIdentity::validated("alpha"),
         McpCandidateInventory::new(
             McpCapabilities::tools(),
+            None,
             vec![descriptor(
                 "weather",
                 json!({"type":"object","additionalProperties":false}),
@@ -274,6 +275,7 @@ fn dynamic_candidate(
         McpCandidateIdentity::validated("alpha"),
         McpCandidateInventory::new(
             McpCapabilities::tools(),
+            None,
             vec![
                 descriptor(
                     "search_tools",

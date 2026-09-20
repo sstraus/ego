@@ -11,7 +11,8 @@ use ego_core::event::time::Clock;
 use ego_core::generator::types::ToolDescriptor as GeneratorToolDescriptor;
 use ego_core::mcp::{
     CacheScope, ContextEntry, ContextError, ContextSensitivity, ContextSnapshot, ContextSource,
-    ForeignQuestionPort, McpAdmissionFingerprint, McpOperationKind, McpRuntimeBinding, McpSubject,
+    ForeignQuestionPort, McpAdmissionFingerprint, McpOperationKind, McpRuntimeBinding,
+    McpServerInstructions, McpSubject,
 };
 use ego_core::permit::{PreparedCall, Tool, ToolError};
 use ego_core::suspension::{
@@ -365,6 +366,7 @@ impl McpCacheMetadata {
 #[derive(Clone)]
 pub struct McpCandidateInventory {
     capabilities: McpCapabilities,
+    instructions: Option<String>,
     tools: Vec<GeneratorToolDescriptor>,
     resources: Vec<Resource>,
     prompts: Vec<Prompt>,
@@ -373,8 +375,11 @@ pub struct McpCandidateInventory {
 }
 
 impl McpCandidateInventory {
+    /// `instructions` is what the server said about itself at `initialize`;
+    /// `None` is a server that said nothing, which behaves exactly as before.
     pub fn new(
         capabilities: McpCapabilities,
+        instructions: Option<String>,
         tools: Vec<GeneratorToolDescriptor>,
         resources: Vec<Resource>,
         prompts: Vec<Prompt>,
@@ -383,6 +388,7 @@ impl McpCandidateInventory {
     ) -> Self {
         Self {
             capabilities,
+            instructions,
             tools,
             resources,
             prompts,
@@ -397,6 +403,7 @@ pub struct McpAdmittedCandidate {
     admission: Arc<McpServerAdmission>,
     identity: McpCandidateIdentity,
     capabilities: McpCapabilities,
+    instructions: Option<String>,
     descriptors: Arc<[GeneratorToolDescriptor]>,
     tools: Arc<[McpToolDefinition]>,
     resources: Arc<[Resource]>,
@@ -424,6 +431,7 @@ impl McpAdmittedCandidate {
             .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
         let McpCandidateInventory {
             capabilities,
+            instructions,
             tools,
             resources,
             prompts,
@@ -462,6 +470,7 @@ impl McpAdmittedCandidate {
             admission,
             identity,
             capabilities,
+            instructions,
             descriptors,
             tools: definitions.into(),
             resources: resources.into(),
@@ -532,6 +541,7 @@ struct AdmittedServerSlice {
     identity: McpCandidateIdentity,
     provenance: McpConfigProvenance,
     capabilities: McpCapabilities,
+    instructions: Option<String>,
     descriptors: Arc<[GeneratorToolDescriptor]>,
     tools: Arc<[McpToolDefinition]>,
     resources: Arc<[Resource]>,
@@ -546,6 +556,7 @@ impl AdmittedServerSlice {
         Self {
             admission: candidate.admission,
             identity: candidate.identity,
+            instructions: candidate.instructions,
             provenance,
             capabilities: candidate.capabilities,
             descriptors: candidate.descriptors,
@@ -577,6 +588,7 @@ impl AdmittedServerSlice {
             identity: self.identity.clone(),
             provenance: self.provenance.clone(),
             capabilities: self.capabilities.clone(),
+            instructions: self.instructions.clone(),
             descriptors: Arc::clone(&self.descriptors),
             tools: tools.into(),
             resources: Arc::clone(&self.resources),
@@ -594,6 +606,7 @@ pub struct McpCapturedServer {
     identity: McpCandidateIdentity,
     provenance: McpConfigProvenance,
     capabilities: McpCapabilities,
+    instructions: Option<String>,
     cache: McpCacheMetadata,
     collapsed_bootstrap: Option<McpCollapsedBootstrap>,
     factory: Arc<dyn McpOperationFactory>,
@@ -824,6 +837,9 @@ struct McpRegistryCaptureInner {
     captured_tools: Arc<[Arc<McpCapturedTool>]>,
     contexts: Arc<McpCapturedContextSource>,
     servers: Arc<[McpCapturedServer]>,
+    /// One entry per captured server that described itself, bounded, in the
+    /// ascending server-name order `servers` is already canonicalised into.
+    instructions: Arc<[McpServerInstructions]>,
 }
 
 impl McpRegistryCapture {
@@ -968,6 +984,29 @@ impl McpCapturePin for McpRegistryCapture {
     fn stable_fingerprint(&self) -> &str {
         McpRegistryCapture::stable_fingerprint(self)
     }
+
+    fn instructions(&self) -> &[McpServerInstructions] {
+        &self.inner.instructions
+    }
+}
+
+/// Bound and order what the captured servers said about themselves.
+///
+/// The order is the servers' own names ascending, which is what
+/// `captured_servers` already carries because it is built from a `BTreeMap`
+/// keyed by name. Restated here rather than assumed, because the composition
+/// order is a documented contract and an incidental one is not a contract.
+fn captured_instructions(servers: &[McpCapturedServer]) -> Vec<McpServerInstructions> {
+    let mut instructions: Vec<_> = servers
+        .iter()
+        .filter_map(|server| {
+            let text = server.instructions.as_deref()?;
+            let text = text.trim();
+            (!text.is_empty()).then(|| McpServerInstructions::new(server.identity.as_str(), text))
+        })
+        .collect();
+    instructions.sort_by(|left, right| left.server().cmp(right.server()));
+    instructions
 }
 
 struct AdmittedRegistrySnapshot {
@@ -1002,6 +1041,7 @@ impl AdmittedRegistrySnapshot {
                     captured_tools: Arc::from(Vec::<Arc<McpCapturedTool>>::new()),
                     contexts,
                     servers: Arc::from(Vec::<McpCapturedServer>::new()),
+                    instructions: Arc::from(Vec::<McpServerInstructions>::new()),
                 }),
             },
         }
@@ -1927,11 +1967,13 @@ impl McpRegistryController {
                 identity: server.identity.clone(),
                 provenance: server.provenance.clone(),
                 capabilities: server.capabilities.clone(),
+                instructions: server.instructions.clone(),
                 cache: server.cache.clone(),
                 collapsed_bootstrap: server.collapsed_bootstrap,
                 factory: Arc::clone(&server.factory),
             })
             .collect::<Vec<_>>();
+        let instructions = captured_instructions(&captured_servers);
         let capture = McpRegistryCapture {
             inner: Arc::new(McpRegistryCaptureInner {
                 generation: Arc::clone(&generation),
@@ -1940,6 +1982,7 @@ impl McpRegistryController {
                 captured_tools: captured_tools.into(),
                 contexts,
                 servers: captured_servers.into(),
+                instructions: instructions.into(),
             }),
         };
         let snapshot = Arc::new(AdmittedRegistrySnapshot {
@@ -2600,6 +2643,7 @@ mod collapsed_mcp_red {
             McpCandidateIdentity::validated(server_admission.name().as_str()),
             McpCandidateInventory::new(
                 McpCapabilities::tools(),
+                None,
                 management(),
                 Vec::new(),
                 Vec::<Prompt>::new(),

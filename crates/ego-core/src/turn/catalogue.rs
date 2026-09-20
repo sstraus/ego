@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::hook::{HookCausality, SessionHookRuntime};
+use crate::mcp::McpServerInstructions;
 use crate::suspension::{McpCaptureAuthority, McpCapturePin, McpResumeContext};
 
 use super::{GenerationPolicySnapshot, RegisteredTool};
@@ -17,6 +18,17 @@ pub(crate) enum ToolCaptureAuthority {
 }
 
 impl ToolCaptureAuthority {
+    /// What the servers behind this authority say about themselves.
+    ///
+    /// Empty for a static capture, which is not a fallback: a static registry
+    /// has no server that could have described itself.
+    pub(crate) fn instructions(&self) -> &[McpServerInstructions] {
+        match self {
+            Self::Static => &[],
+            Self::Mcp(authority) => authority.instructions(),
+        }
+    }
+
     pub(crate) fn resume_context<'s>(
         &self,
         runtime: Option<&SessionHookRuntime<'s>>,
@@ -109,6 +121,11 @@ impl CapturedToolCatalogue {
 
     pub(crate) fn authority(&self) -> ToolCaptureAuthority {
         self.authority.clone()
+    }
+
+    /// What the MCP servers behind this capture say about themselves.
+    pub fn instructions(&self) -> &[McpServerInstructions] {
+        self.authority.instructions()
     }
 }
 

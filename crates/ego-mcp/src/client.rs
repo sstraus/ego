@@ -629,6 +629,8 @@ pub struct McpClient {
 
 pub(crate) struct McpClientInventory {
     pub(crate) capabilities: ServerCapabilities,
+    /// What the server said about itself at `initialize`, verbatim.
+    pub(crate) instructions: Option<String>,
     pub(crate) tools: Vec<ToolDescriptor>,
     pub(crate) resources: Vec<Resource>,
     pub(crate) prompts: Vec<Prompt>,
@@ -805,15 +807,18 @@ impl McpClient {
         let options = self.options;
         let control = Arc::clone(&self.control);
         let service = self.running_service_mut()?;
-        let capabilities = service
-            .peer_info()
-            .map(|peer| peer.capabilities.clone())
-            .ok_or_else(|| {
-                McpError::new(
-                    McpFailure::Protocol,
-                    "MCP discovery returned no server capabilities",
-                )
-            })?;
+        let peer = service.peer_info().ok_or_else(|| {
+            McpError::new(
+                McpFailure::Protocol,
+                "MCP discovery returned no server capabilities",
+            )
+        })?;
+        let capabilities = peer.capabilities.clone();
+        // A server that describes what it is for and how its tools should be
+        // preferred says so here and nowhere else. Dropping it left the tool
+        // descriptions as the only thing a model ever learned about a foreign
+        // surface.
+        let instructions = peer.instructions.clone();
         let tools = if capabilities.tools.is_some() {
             Self::list_current_tools(service, options, Arc::clone(&control)).await?
         } else {
@@ -847,6 +852,7 @@ impl McpClient {
             .transpose()?;
         Ok(McpClientInventory {
             capabilities,
+            instructions,
             tools: project_tools(tools.items),
             resources: resources.items,
             prompts: prompts.items,

@@ -12,6 +12,7 @@ use sha2::{Digest as _, Sha256};
 use crate::config::Mode;
 use crate::event::time::{Clock, Timestamp};
 use crate::hook::{HookCausality, SessionHookRuntime};
+use crate::mcp::McpServerInstructions;
 use crate::permit::{Authority, Authorized, PreparedCall};
 use crate::turn::{GenerationPolicyDigest, GenerationPolicySnapshot};
 
@@ -91,6 +92,15 @@ pub trait ResumeKeySource: Send + Sync {
 /// An immutable exact MCP registry capture retained across deferred execution.
 pub trait McpCapturePin: Send + Sync {
     fn stable_fingerprint(&self) -> &str;
+
+    /// What the servers in this capture say about themselves, in ascending
+    /// server-name order.
+    ///
+    /// On the pin rather than beside it, because a server's instructions
+    /// describe the exact tools this capture admitted. Carried anywhere else
+    /// they could outlive or precede the catalogue they explain, which is the
+    /// one thing a generation-scoped catalogue exists to prevent.
+    fn instructions(&self) -> &[McpServerInstructions];
 }
 
 /// A type-erased strong pin for one exact immutable MCP registry capture.
@@ -109,6 +119,10 @@ impl McpCaptureAuthority {
 
     pub fn capture(&self) -> &str {
         self.pin.stable_fingerprint()
+    }
+
+    pub fn instructions(&self) -> &[McpServerInstructions] {
+        self.pin.instructions()
     }
 }
 
