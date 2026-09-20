@@ -653,6 +653,12 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             .collect();
         format!("stub request paths: {paths:?}")
     });
+    // The banner this wait is about to look for again is on screen already,
+    // so a render the reader thread is still holding would satisfy the
+    // post-resize wait with a pre-resize frame and prove nothing. The queue is
+    // emptied before the marker is taken, for the reason `drain_until_quiet`
+    // exists.
+    drain_until_quiet(&reader, &mut output);
     let resize_start = output.len();
     pair.master
         .resize(PtySize {
@@ -684,6 +690,13 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"unsent draft").expect("type unsent draft");
     input.flush().expect("unsent draft flush");
     until_from(&reader, &mut output, unsent_draft_start, b"unsent draft");
+    // `rendered_prompt_count` counts every `"> "`, and the frame echoing the
+    // draft carries one. A re-render the reader thread was still holding would
+    // therefore answer the wait below without the stash having happened, and
+    // the EOF two lines down would then arrive at a line that still held text
+    // — where Ctrl-D is not EOF at all, and the farewell it is waited on never
+    // comes. The queue is emptied before the marker is taken.
+    drain_until_quiet(&reader, &mut output);
     let unsent_stash_start = output.len();
     input.write_all(b"\x13").expect("stash unsent draft");
     input.flush().expect("stash unsent draft flush");
@@ -894,6 +907,16 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     until_normalized(&reader, &mut output, esc_start, "interrupt pending");
     initial_gate.release();
     until(&reader, &mut output, b"EXPEDITED-RECEIVED");
+    // The queue banner this second steer will raise was already rendered once,
+    // by the first steer, and that earlier render sits after `esc_start`.
+    // Searching from there would match it and let the gate below open while
+    // the extension was still being typed — a pass that depends on how much
+    // output the reader thread happened to be holding, which is exactly how
+    // this case failed under a loaded suite and passed alone. The marker is
+    // taken once the queue is quiet, so nothing before the extension can
+    // satisfy the wait for it.
+    drain_until_quiet(&reader, &mut output);
+    let extension_start = output.len();
     input
         .write_all(extension.as_bytes())
         .expect("extend expedited tail");
@@ -904,7 +927,7 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     until_normalized(
         &reader,
         &mut output,
-        esc_start,
+        extension_start,
         "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
     );
     let second_esc_start = output.len();
@@ -1908,7 +1931,22 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     let multiple_submit_start = output.len();
     input.write_all(b"\r").expect("multiple answer");
     input.flush().expect("multiple answer flush");
-    until_normalized(&reader, &mut output, multiple_submit_start, "Free question");
+    // The trailing space is the whole point. A tool call is announced by
+    // printing its arguments, so `{"prompt":"Free question"}` renders the
+    // question's own text one frame before the widget that asks it — and there
+    // the text is followed by a quote, never by a space. Waiting on the bare
+    // text matched that announcement, and under load the two frames were far
+    // enough apart that the answer below was typed at the REPL instead, where
+    // it became a steer message while the widget waited for an answer nobody
+    // could still give. The single and multiple cases above survive the same
+    // ambiguity only because each is followed by a wait on an option row,
+    // which no announcement can contain; free text has no option row.
+    until_normalized(
+        &reader,
+        &mut output,
+        multiple_submit_start,
+        "Free question ",
+    );
     input.write_all(b"free answer\r").expect("free-text answer");
     input.flush().expect("free-text answer flush");
     until_normalized(
