@@ -139,6 +139,38 @@ pub fn inventory_digest(root: &Path) -> Option<String> {
     (!inventory.is_empty()).then(|| inventory.digest())
 }
 
+/// How many inventory entries a trust question names before it summarises.
+///
+/// A seat that lists two hundred skill files is a seat nobody reads, and an
+/// unread trust question is the failure this whole module exists to avoid. The
+/// digest still covers every entry; only the rendering is bounded.
+const LISTED_CONTENT: usize = 12;
+
+/// What this workspace offers to be trusted with, rendered for a human.
+///
+/// `None` is the same empty inventory [`inventory_digest`] reports: nothing
+/// here that a trust answer would change, so no seat should be asked.
+///
+/// Here and not in the seat that asks, because the paths probed are this
+/// module's to know — `ego-cli` owns which files an answer is about, and a
+/// second lister would be a second answer to that question.
+pub(crate) fn trustable_content(root: &Path) -> Option<String> {
+    let inventory = inventory(root);
+    if inventory.is_empty() {
+        return None;
+    }
+    let entries = inventory.entries();
+    let mut rendered: String = entries
+        .iter()
+        .take(LISTED_CONTENT)
+        .map(|entry| format!("- {}\n", entry.path()))
+        .collect();
+    if let Some(remaining) = entries.len().checked_sub(LISTED_CONTENT).filter(|n| *n > 0) {
+        rendered.push_str(&format!("- …and {remaining} more\n"));
+    }
+    Some(rendered)
+}
+
 /// Everything under `root` whose admission the trust answer governs.
 fn inventory(root: &Path) -> TrustInventory {
     let mut paths: Vec<PathBuf> = PROJECT_CONFIGS

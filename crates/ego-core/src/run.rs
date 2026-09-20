@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 use crate::budget::SharedBudgetGate;
 use crate::ceiling::Budget;
-use crate::config::{Mode, ModelRef};
+use crate::config::{Mode, ModelRef, Trust};
 use crate::cost::Money;
 pub use crate::event::id::SubagentInvocationId;
 use crate::event::id::{ItemId, SessionId, TurnId};
@@ -565,6 +565,19 @@ pub struct RunSelections {
     /// admission truth. Non-ACP runs have no session observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sandbox_observation: Option<ExecObservation>,
+    /// The workspace posture a seat answered for, if a seat answered.
+    ///
+    /// Here for the same reason [`Self::sandbox`] is: trust is resolved once,
+    /// at preparation, and the config layers, the instruction file, the
+    /// project MCP servers, the skills and the hooks are all derived from it.
+    /// A posture selected later would answer a question whose consequences
+    /// have already been decided.
+    ///
+    /// `None` is not `Untrusted` with a different name: it means no seat was
+    /// asked, which is every headless caller. Preparation resolves both to a
+    /// bare posture, but only one of them is a person's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trust: Option<Trust>,
 }
 
 impl RunSelections {
@@ -583,6 +596,7 @@ impl RunSelections {
             profile,
             sandbox: None,
             sandbox_observation: None,
+            trust: None,
         }
     }
 
@@ -618,6 +632,7 @@ impl RunSelections {
             profile: None,
             sandbox: None,
             sandbox_observation: None,
+            trust: None,
         }
     }
 
@@ -628,6 +643,21 @@ impl RunSelections {
     /// The immutable process observation admitted with [`Self::sandbox`].
     pub const fn sandbox_observation(&self) -> Option<&ExecObservation> {
         self.sandbox_observation.as_ref()
+    }
+
+    /// Pin the posture a seat answered for this session.
+    ///
+    /// A builder rather than another positional argument, for the reason
+    /// [`Self::with_sandbox`] gives: every existing caller answers nothing.
+    #[must_use]
+    pub const fn with_trust(mut self, trust: Trust) -> Self {
+        self.trust = Some(trust);
+        self
+    }
+
+    /// The posture a seat answered, or `None` when no seat was asked.
+    pub const fn trust(&self) -> Option<Trust> {
+        self.trust
     }
 
     pub fn model(&self) -> Option<&ModelRef> {

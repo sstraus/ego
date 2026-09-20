@@ -9,7 +9,7 @@ use agent_client_protocol_schema::v1;
 use ego_acp::auth::Credential;
 use ego_acp::serve::{
     AcpRunBindingsBuilder, McpSessionAdmissionError, McpSessionAdmitter,
-    SessionConfinementAdmission, SessionMcpAdmission,
+    SessionConfinementAdmission, SessionMcpAdmission, SessionTrustAdmission,
 };
 use ego_core::config::{
     McpConfigProvenance, McpEnvironmentName, McpHttpAuth, McpServerConfig, McpServerName, Source,
@@ -42,6 +42,7 @@ use futures::future::BoxFuture;
 
 use crate::acp_confinement::CliSessionConfinementAdmission;
 use crate::acp_controls::AcpSessionControls;
+use crate::acp_trust::CliSessionTrustAdmission;
 use crate::cli::AcpArgs;
 use crate::confinement_diagnostics::Reporter;
 use crate::host_ports::{CanonicalRoots, TokioExecutionSpawner, UuidIds};
@@ -464,6 +465,11 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             Arc::clone(&reporter),
         ));
 
+    // One lister for the whole connection: it holds no session state, and
+    // the answer it helps ask is carried by the run selection rather than by
+    // anything this adapter remembers.
+    let trust_port: Arc<dyn SessionTrustAdmission> = Arc::new(CliSessionTrustAdmission);
+
     let roots = Arc::new(CanonicalRoots { base: root });
     let spawner = Arc::new(TokioExecutionSpawner);
     let factory = move || {
@@ -480,6 +486,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             Arc::clone(&compaction),
             Some(Arc::clone(&control_port)),
             Some(Arc::clone(&confinement_port)),
+            Some(Arc::clone(&trust_port)),
         )
     };
     let outcome = match listener {

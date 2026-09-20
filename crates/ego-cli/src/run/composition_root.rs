@@ -137,9 +137,18 @@ impl CliPrepared {
             });
         }
         let root = request.root.as_path().to_path_buf();
+        // The closure never asks: it reports what a seat already answered, or
+        // `Untrusted` when nothing was asked. This path has no terminal and no
+        // stdin, and the substitution keeps it that way — a protocol seat does
+        // its asking before preparation, where it can await the host, and
+        // arrives here with a decision rather than with a question.
+        //
+        // A frozen config is a child of a run whose posture was decided when
+        // the parent was prepared; it re-reads no layers and takes no answer.
+        let trust = request.selections.trust().unwrap_or(Trust::Untrusted);
         let settings = match frozen {
             Some(frozen) => frozen_rooted_settings(&args, root, frozen, &Stderr),
-            None => rooted_settings(&args, root, |_| Trust::Untrusted, &Stderr),
+            None => rooted_settings(&args, root, |_| trust, &Stderr),
         }
         .map_err(usage)?;
         if let Some(authority) = child_authority.as_deref() {

@@ -27,14 +27,19 @@ use axum::response::{IntoResponse, Response as AxumResponse};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ego_core::compact::{CompactionCommand, CompactionReceipt, CompactionTransitionRequest};
+use ego_core::config::Trust;
 use ego_core::control::{ControlError, SessionControlChange, SessionControlState, SessionControls};
 use ego_core::endpoint::{Admitted, Authentication};
+use ego_core::event::id::ItemId;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::types::{Image, ImageMediaType};
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::{Confinement, ExecObservation};
+use ego_core::question::{
+    Elicitor, QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
+};
 use ego_core::run::{
     CancelKey, ContinueRequest, EventSinkFactory, IdSource, RequestDigest, RequestId,
     RunCommandOutcome, RunController, RunError, RunExecution, RunExecutionBindings, RunExecutor,
@@ -50,6 +55,7 @@ use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use ego_core::turn::AdmittedToolSource;
 use ego_listen::{Bound, ConnectionGate, GuardedAccepted, Peer, serve_connections};
 use futures::channel::oneshot;
+use futures::future::Either;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
@@ -324,6 +330,25 @@ pub trait SessionConfinementAdmission: Send + Sync {
     ) -> Result<ExecObservation, ControlError>;
 }
 
+/// Consumer-owned boundary naming what one workspace holds that only trust
+/// admits.
+///
+/// The adapter asks the question and the host answers it, but *which* files
+/// the answer is about is not ACP's to know: the trust ADR gives `ego-cli`
+/// "which paths are probed, the reads that build the inventory". This port is
+/// that division, and nothing more — it reads, it never remembers, and it is
+/// never consulted for an answer.
+pub trait SessionTrustAdmission: Send + Sync {
+    /// The workspace content a trust answer would change, rendered for a
+    /// human, or `None` when there is none.
+    ///
+    /// `None` means trusted and untrusted would open the same session, and
+    /// the session is opened untrusted with no question asked. A question
+    /// whose answers do not differ teaches the reader that trust questions do
+    /// not matter, which is the one habit a trust dialog must not build.
+    fn trustable(&self, root: &RunRoot) -> Option<String>;
+}
+
 /// Builds live execution bindings from the connection that accepted a prompt.
 pub trait RunBindingsBuilder: Send + Sync {
     fn build(
@@ -592,8 +617,36 @@ struct Registered {
     answered: VecDeque<AnsweredCommand>,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
     busy: bool,
+    withdrawal: Option<Withdrawal>,
     active_cancel: Option<CancelKey>,
     mcp: Option<Arc<dyn SessionMcpAdmission>>,
+}
+
+/// A `session/cancel` that arrives while a prompt is accepted but the run it
+/// names has not been admitted yet.
+///
+/// There is no [`CancelKey`] in that window and there cannot be one: the key is
+/// minted by admission. The flag is the whole point — a cancellation must be
+/// remembered even when nobody is waiting on it yet, because the task that
+/// will admit the run may not have reached the question, or may be inside
+/// `start` and past the point where it could have declined to begin. The
+/// channel only *wakes* a waiter; it is the flag, read under the registration
+/// lock, that decides.
+struct Withdrawal {
+    raised: bool,
+    wake: Option<oneshot::Sender<()>>,
+}
+
+/// What one `session/cancel` found in flight under a session id.
+enum Cancellation {
+    /// A run is admitted, so the controller owns the cancellation and the key
+    /// names it.
+    Admitted(CancelKey),
+    /// A prompt is accepted and not yet admitted: the withdrawal is recorded
+    /// against the registration and the prompt task answers it.
+    Withdrawn,
+    /// Nothing is in flight under this id.
+    Nothing,
 }
 
 /// A prompt one session accepted, and the command that prompt named.
@@ -613,6 +666,10 @@ struct PromptCorrelation {
     root: RunRoot,
     request_id: RequestId,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
+    /// Resolves when this prompt is withdrawn before its run is admitted, and
+    /// also when the registration holding the other half is dropped: a session
+    /// that closed mid-question is not one to start a run for either.
+    withdrawn: oneshot::Receiver<()>,
     mcp: Option<Arc<dyn SessionMcpAdmission>>,
 }
 
@@ -683,6 +740,7 @@ impl Sessions {
                 answered: VecDeque::new(),
                 run,
                 busy: false,
+                withdrawal: None,
                 active_cancel: None,
                 mcp,
             },
@@ -738,6 +796,14 @@ impl Sessions {
             .expect("the checked ACP session remains registered");
         session.generation = generation;
         session.busy = true;
+        // Minted here, under the lock that publishes `busy`, so there is no
+        // instant in which this session is accepting a prompt and a
+        // `session/cancel` has nowhere to land.
+        let (wake, withdrawn) = oneshot::channel();
+        session.withdrawal = Some(Withdrawal {
+            raised: false,
+            wake: Some(wake),
+        });
         let replayed = session
             .answered
             .iter()
@@ -769,10 +835,20 @@ impl Sessions {
             root: session.root.clone(),
             request_id,
             run: session.run,
+            withdrawn,
             mcp: session.mcp.as_ref().map(Arc::clone),
         })
     }
 
+    /// Install the admitted run's cancel key, and say whether this prompt was
+    /// already withdrawn.
+    ///
+    /// Both halves happen under one lock, and that is the contract: a
+    /// `session/cancel` that arrives while `start` is writing its transaction
+    /// finds no key to name, so it leaves the flag instead, and this is the
+    /// only place that can read the flag and publish the key in the same
+    /// instant. Split in two, the window between them would swallow exactly
+    /// that cancellation.
     fn install_admission(
         &self,
         id: &v1::SessionId,
@@ -780,17 +856,47 @@ impl Sessions {
         run_id: ego_core::run::RunId,
         revision: ego_core::run::RunRevision,
         key: CancelKey,
-    ) {
-        if let Some(session) = self
-            .lock()
+    ) -> bool {
+        let mut sessions = self.lock();
+        let Some(session) = sessions
             .sessions
             .get_mut(id)
             .filter(|session| session.generation == generation)
-        {
-            session.run = Some((run_id, revision));
-            session.active_cancel = Some(key);
-            session.busy = true;
+        else {
+            return false;
+        };
+        session.run = Some((run_id, revision));
+        session.active_cancel = Some(key);
+        session.busy = true;
+        let withdrawn = session
+            .withdrawal
+            .as_ref()
+            .is_some_and(|withdrawal| withdrawal.raised);
+        // The key answers every later cancellation, so the flag has served its
+        // purpose and staying set would make a second prompt read this one's.
+        session.withdrawal = None;
+        withdrawn
+    }
+
+    /// Record a cancellation against whatever this session has in flight.
+    fn cancel(&self, id: &v1::SessionId) -> Cancellation {
+        let mut sessions = self.lock();
+        let Some(session) = sessions.sessions.get_mut(id) else {
+            return Cancellation::Nothing;
+        };
+        if let Some(key) = session.active_cancel.clone() {
+            return Cancellation::Admitted(key);
         }
+        let Some(withdrawal) = session.withdrawal.as_mut() else {
+            return Cancellation::Nothing;
+        };
+        withdrawal.raised = true;
+        if let Some(wake) = withdrawal.wake.take() {
+            // A closed receiver means the prompt task is past the point where
+            // it waits; the flag above is what it reads then.
+            let _ = wake.send(());
+        }
+        Cancellation::Withdrawn
     }
 
     fn finish(
@@ -806,6 +912,7 @@ impl Sessions {
             .filter(|session| session.generation == generation)
         {
             session.run = Some((snapshot.run_id(), snapshot.revision()));
+            session.withdrawal = None;
             session.active_cancel = None;
             session.busy = false;
         }
@@ -818,16 +925,10 @@ impl Sessions {
             .get_mut(id)
             .filter(|session| session.generation == generation)
         {
+            session.withdrawal = None;
             session.active_cancel = None;
             session.busy = false;
         }
-    }
-
-    fn cancel_key(&self, id: &v1::SessionId) -> Option<CancelKey> {
-        self.lock()
-            .sessions
-            .get(id)
-            .and_then(|session| session.active_cancel.clone())
     }
 
     fn is_busy(&self, id: &v1::SessionId) -> bool {
@@ -1415,6 +1516,138 @@ fn selected_confinement(
     Ok(selections.with_sandbox_observation(sandbox, observation))
 }
 
+/// The option ids the trust form offers. They are ego's, not the host's: the
+/// host renders labels and returns one of these two strings, so a host that
+/// invents a third answer is refused rather than guessed at.
+const TRUST_GRANT: &str = "trusted";
+const TRUST_REFUSE: &str = "untrusted";
+
+/// Ask this session's host what posture the workspace should run at.
+///
+/// Asked here, on the prompt that *starts* the run, for the reason
+/// [`selected_confinement`] gives one function up: trust is admitted once, and
+/// the config layers, the instruction file, the project MCP servers, the
+/// skills and the hooks are all derived from it during preparation. Asked at
+/// `session/new` it would be a form raised before the person had asked for
+/// anything; asked after preparation it would answer a settled question.
+///
+/// The answer governs this session and is neither read from nor written to
+/// the per-root ledger the terminal seat keeps. That is the stricter half of
+/// the choice on purpose: a `y` typed once in a terminal must not become a
+/// posture some other program's session inherits without anyone being asked.
+///
+/// Every way of not answering — a decline, a cancel, a host with no form, a
+/// transport failure — leaves the session exactly as untrusted as it was
+/// before this function existed. Only an explicit `trusted` grants anything.
+/// The trust question this prompt raises, or `None` when it raises none.
+///
+/// Every condition here is synchronous, and that is the point: the caller uses
+/// a `Some` to mean "this prompt is about to wait on a person". A prompt that
+/// waits on nobody must keep behaving exactly as it did before trust existed,
+/// down to where a `session/cancel` lands on it, so the three ways there is no
+/// question are answered before anything is awaited.
+///
+/// The capability is re-read here rather than left to the adapter because the
+/// two readings answer different questions. The adapter's decides whether it
+/// can render a form; this one decides whether this prompt has a host to wait
+/// for. The adapter remains the authority on the first.
+fn trust_question(
+    admission: Option<&Arc<dyn SessionTrustAdmission>>,
+    capabilities: CapabilityCapture,
+    root: &RunRoot,
+) -> Option<QuestionRequest> {
+    let admission = admission?;
+    // Nothing only trust admits: both answers open the same session, and a
+    // question whose answers do not differ teaches a host that trust questions
+    // do not matter.
+    let trustable = admission.trustable(root)?;
+    if !capabilities.form_available() {
+        return None;
+    }
+    Some(QuestionRequest::new(
+        format!(
+            "Trust the workspace at {}?\n\nTrusting it lets this session read its project \
+             configuration, its AGENTS.md, its project MCP servers, its skills and its hooks, \
+             and run the programs those name. It holds:\n{trustable}",
+            root.as_path().display()
+        ),
+        QuestionMode::Single,
+        vec![
+            QuestionOption::new(TRUST_GRANT, "Trust this workspace for this session"),
+            QuestionOption::new(TRUST_REFUSE, "Keep this session bare"),
+        ],
+        false,
+    ))
+}
+
+/// Put one trust question to the host and read the posture out of the answer.
+async fn selected_trust(
+    request: QuestionRequest,
+    connection: &ConnectionTo<Client>,
+    session: &v1::SessionId,
+    capabilities: CapabilityCapture,
+    selections: RunSelections,
+) -> RunSelections {
+    let elicitor = AcpQuestionAdapter::live(session.clone(), capabilities, connection.clone());
+    let question = ItemId::new();
+    let outcome = match elicitor.elicit(question, request).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::warn!(%error, outcome = "failed", "the workspace trust question was not answered");
+            return selections;
+        }
+    };
+    // Four outcomes, four branches, and no default that swallows one: a
+    // refusal is a person's decision and a cancel is a question nobody
+    // answered, and collapsing them would make the two indistinguishable to
+    // the host that produced them.
+    match outcome {
+        QuestionOutcome::Answered(QuestionAnswer::Single(answer)) if answer == TRUST_GRANT => {
+            tracing::info!(
+                outcome = "trusted",
+                "the host trusted this workspace for this session"
+            );
+            selections.with_trust(Trust::Trusted)
+        }
+        QuestionOutcome::Answered(QuestionAnswer::Single(_)) => {
+            tracing::info!(outcome = "untrusted", "the host kept this session bare");
+            selections.with_trust(Trust::Untrusted)
+        }
+        // `validate_for` already refused every answer outside the grammar, so
+        // reaching here would mean the adapter admitted a shape it offered no
+        // option for. Untrusted, and said out loud.
+        QuestionOutcome::Answered(other) => {
+            tracing::warn!(
+                ?other,
+                outcome = "malformed",
+                "the workspace trust answer was not one of the offered options"
+            );
+            selections
+        }
+        QuestionOutcome::Declined => {
+            tracing::info!(
+                outcome = "declined",
+                "the host refused the workspace trust question"
+            );
+            selections.with_trust(Trust::Untrusted)
+        }
+        QuestionOutcome::Cancelled => {
+            tracing::info!(
+                outcome = "cancelled",
+                "the workspace trust question was withdrawn unanswered"
+            );
+            selections
+        }
+        QuestionOutcome::Unavailable => {
+            tracing::info!(
+                outcome = "unavailable",
+                "this host cannot render the workspace trust form"
+            );
+            selections
+        }
+    }
+}
+
 fn control_error(error: &ControlError) -> Error {
     match error {
         // Both name a value the caller sent, so both are the caller's
@@ -1562,6 +1795,7 @@ where
         None,
         None,
         None,
+        None,
     ))
 }
 
@@ -1592,6 +1826,7 @@ where
         Some(lifecycle),
         None,
         None,
+        None,
     ))
 }
 
@@ -1607,6 +1842,7 @@ pub fn agent_with_compaction<S, E, C, I>(
     compaction: Arc<dyn CompactionCommand>,
     controls: Option<Arc<dyn SessionControls>>,
     confinement: Option<Arc<dyn SessionConfinementAdmission>>,
+    trust: Option<Arc<dyn SessionTrustAdmission>>,
 ) -> AgentProtocolRouter
 where
     S: SessionStore + 'static,
@@ -1625,6 +1861,7 @@ where
         None,
         controls,
         confinement,
+        trust,
     ))
 }
 
@@ -1641,6 +1878,7 @@ pub fn durable_agent_with_compaction<S, E, C, I>(
     compaction: Arc<dyn CompactionCommand>,
     controls: Option<Arc<dyn SessionControls>>,
     confinement: Option<Arc<dyn SessionConfinementAdmission>>,
+    trust: Option<Arc<dyn SessionTrustAdmission>>,
 ) -> AgentProtocolRouter
 where
     S: SessionLifecycleStore + 'static,
@@ -1659,6 +1897,7 @@ where
         Some(lifecycle),
         controls,
         confinement,
+        trust,
     ))
 }
 
@@ -1674,6 +1913,7 @@ fn v1_agent<S, E, C, I>(
     lifecycle: Option<Arc<dyn LifecycleOperations>>,
     controls: Option<Arc<dyn SessionControls>>,
     confinement: Option<Arc<dyn SessionConfinementAdmission>>,
+    trust: Option<Arc<dyn SessionTrustAdmission>>,
 ) -> impl agent_client_protocol::ConnectTo<Client>
 where
     S: SessionStore + 'static,
@@ -2158,10 +2398,19 @@ where
                 let sessions = sessions.clone();
                 let controller = Arc::clone(&controller);
                 async move |notification: v1::CancelNotification, _cx| {
-                    if let Some(key) = sessions.cancel_key(&notification.session_id)
-                        && let Err(error) = controller.cancel_admitted(&key).await
-                    {
-                        tracing::warn!(%error, "ACP cancellation could not be applied");
+                    match sessions.cancel(&notification.session_id) {
+                        Cancellation::Admitted(key) => {
+                            if let Err(error) = controller.cancel_admitted(&key).await {
+                                tracing::warn!(%error, "ACP cancellation could not be applied");
+                            }
+                        }
+                        // Recorded, not applied: there is no run to cancel
+                        // yet. The prompt task that is about to admit one
+                        // reads it and answers `cancelled` instead.
+                        Cancellation::Withdrawn => tracing::info!(
+                            "an ACP cancellation arrived before the run it names was admitted"
+                        ),
+                        Cancellation::Nothing => {}
                     }
                     Ok(())
                 }
@@ -2178,6 +2427,7 @@ where
                 let client_capabilities = Arc::clone(&client_capabilities);
                 let controls = controls.clone();
                 let confinement = confinement.clone();
+                let trust = trust.clone();
                 async move |request: v1::PromptRequest, responder, cx: ConnectionTo<Client>| {
                     let id = request.session_id.clone();
                     let durable_session = match parse_session(&id) {
@@ -2241,88 +2491,197 @@ where
                         ),
                         None => bindings,
                     };
-                    let outcome = match correlation.run {
-                        None => {
-                            let selections = match selected_confinement(
-                                controls.as_ref(),
-                                confinement.as_ref(),
-                                durable_session,
-                            ) {
-                                Ok(selections) => selections,
-                                Err(error) => {
-                                    sessions.refuse(&id, correlation.generation);
-                                    return responder.respond_with_error(error);
-                                }
-                            };
-                            controller
-                                .start(
-                                    StartRequest::new(
-                                        durable_session,
-                                        correlation.root,
-                                        correlation.request_id,
-                                        digest,
-                                        selections,
-                                        prompt,
-                                    ),
-                                    bindings,
-                                )
-                                .await
-                        }
-                        Some((run_id, revision)) => {
-                            controller
-                                .continue_run(
-                                    ContinueRequest::new(
-                                        run_id,
-                                        correlation.request_id,
-                                        digest,
-                                        revision,
-                                        prompt,
-                                    ),
-                                    bindings,
-                                )
-                                .await
-                        }
-                    };
-                    let (subscription, execution) = match outcome {
-                        Ok(RunCommandOutcome::Admitted(admission)) => {
-                            let subscription = admission.subscription();
-                            sessions.install_admission(
-                                &id,
-                                correlation.generation,
-                                admission.run_id(),
-                                admission.revision(),
-                                admission.cancel_key().clone(),
-                            );
-                            (subscription, Some(admission.into_execution()))
-                        }
-                        Ok(RunCommandOutcome::Replayed(observation)) => {
-                            (observation.subscription(), None)
-                        }
-                        Err(error) => {
-                            sessions.refuse(&id, correlation.generation);
-                            return responder.respond_with_error(
-                                Error::internal_error().data(error.to_string()),
-                            );
-                        }
-                    };
-                    // The execution settles the admitted revision before it
-                    // returns, so the awaited subscription can only report
-                    // *that* the turn failed. The diagnostic that names *why*
-                    // travels beside it and is answered to the same request.
-                    let (diagnostic_tx, diagnostic_rx) = oneshot::channel();
-                    if let Some(execution) = execution {
-                        let controller = Arc::clone(&controller);
-                        spawner.spawn(Box::pin(async move {
-                            let outcome = controller.execute(execution).await;
-                            if let Err(error) = &outcome {
-                                tracing::warn!(%error, "admitted ACP execution failed");
+                    // Synchronous, and deliberately still on the event loop:
+                    // the registration lock serializes this pick against
+                    // `session/set_session_config_option`, and a refusal here
+                    // answers the prompt before any run exists to refuse.
+                    let selections = match correlation.run {
+                        None => match selected_confinement(
+                            controls.as_ref(),
+                            confinement.as_ref(),
+                            durable_session,
+                        ) {
+                            Ok(selections) => Some(selections),
+                            Err(error) => {
+                                sessions.refuse(&id, correlation.generation);
+                                return responder.respond_with_error(error);
                             }
-                            let _ = diagnostic_tx.send(outcome.err().map(|error| error.to_string()));
-                        }));
-                    }
+                        },
+                        Some(_) => None,
+                    };
+                    // Everything below runs off the event loop. `selected_trust`
+                    // awaits the host, and an ACP handler that awaits a client
+                    // round-trip stops the connection from processing messages
+                    // -- including the very answer it is waiting for. `spawn`
+                    // is the SDK's documented way out, and the permission seat
+                    // already reaches the host through it.
+                    let controller = Arc::clone(&controller);
+                    let spawner = Arc::clone(&spawner);
                     let sessions = sessions.clone();
+                    let trust = trust.clone();
+                    let connection = cx.clone();
                     let generation = correlation.generation;
                     cx.spawn(async move {
+                        let PromptCorrelation {
+                            root,
+                            request_id,
+                            run,
+                            withdrawn,
+                            ..
+                        } = correlation;
+                        let outcome = match run {
+                            None => {
+                                let selections = selections
+                                    .expect("a first prompt carries its confinement pick");
+                                // Between the confinement pick and the start:
+                                // preparation derives the config layers, the
+                                // instruction file, the project MCP servers,
+                                // the skills and the hooks from this answer,
+                                // and none of them can be re-decided once a
+                                // run exists.
+                                //
+                                // Raced against a withdrawal, and the
+                                // withdrawal is polled first: a host that took
+                                // its prompt back while the question was open
+                                // gets no run at all. That is not the same act
+                                // as refusing the question, which answers it
+                                // and runs bare.
+                                let selections = match trust_question(
+                                    trust.as_ref(),
+                                    capabilities,
+                                    &root,
+                                ) {
+                                    // Nothing is asked, so nothing is waited
+                                    // on, and this prompt reaches admission
+                                    // exactly as a prompt on a router without
+                                    // a trust port does -- including where a
+                                    // `session/cancel` lands on it.
+                                    None => selections,
+                                    Some(request) => {
+                                        let answered = {
+                                            let question = std::pin::pin!(selected_trust(
+                                                request,
+                                                &connection,
+                                                &id,
+                                                capabilities,
+                                                selections,
+                                            ));
+                                            match futures::future::select(withdrawn, question)
+                                                .await
+                                            {
+                                                Either::Left(_) => None,
+                                                Either::Right((selections, _)) => Some(selections),
+                                            }
+                                        };
+                                        let Some(selections) = answered else {
+                                            sessions.refuse(&id, generation);
+                                            return responder.respond(v1::PromptResponse::new(
+                                                v1::StopReason::Cancelled,
+                                            ));
+                                        };
+                                        selections
+                                    }
+                                };
+                                controller
+                                    .start(
+                                        StartRequest::new(
+                                            durable_session,
+                                            root,
+                                            request_id,
+                                            digest,
+                                            selections,
+                                            prompt,
+                                        ),
+                                        bindings,
+                                    )
+                                    .await
+                            }
+                            Some((run_id, revision)) => {
+                                controller
+                                    .continue_run(
+                                        ContinueRequest::new(
+                                            run_id,
+                                            request_id,
+                                            digest,
+                                            revision,
+                                            prompt,
+                                        ),
+                                        bindings,
+                                    )
+                                    .await
+                            }
+                        };
+                        let (subscription, execution, withdrawn) = match outcome {
+                            Ok(RunCommandOutcome::Admitted(admission)) => {
+                                let subscription = admission.subscription();
+                                let key = admission.cancel_key().clone();
+                                // A cancellation that arrived while this
+                                // admission was being written had no key to
+                                // name, so it left a flag instead, and this is
+                                // the one read that cannot miss it. The
+                                // admission itself is never raced --
+                                // abandoning a half-written transaction would
+                                // leave a run nobody manages.
+                                let withdrawn = sessions
+                                    .install_admission(
+                                        &id,
+                                        generation,
+                                        admission.run_id(),
+                                        admission.revision(),
+                                        key.clone(),
+                                    )
+                                    .then_some(key);
+                                (subscription, Some(admission.into_execution()), withdrawn)
+                            }
+                            Ok(RunCommandOutcome::Replayed(observation)) => {
+                                (observation.subscription(), None, None)
+                            }
+                            Err(error) => {
+                                sessions.refuse(&id, generation);
+                                return responder.respond_with_error(
+                                    Error::internal_error().data(error.to_string()),
+                                );
+                            }
+                        };
+                        // The execution settles the admitted revision before
+                        // it returns, so the awaited subscription can only
+                        // report *that* the turn failed. The diagnostic that
+                        // names *why* travels beside it and is answered to the
+                        // same request.
+                        let (diagnostic_tx, diagnostic_rx) = oneshot::channel();
+                        match execution {
+                            Some(execution) => {
+                                let controller = Arc::clone(&controller);
+                                spawner.spawn(Box::pin(async move {
+                                    let outcome = controller.execute(execution).await;
+                                    if let Err(error) = &outcome {
+                                        tracing::warn!(%error, "admitted ACP execution failed");
+                                    }
+                                    let _ = diagnostic_tx
+                                        .send(outcome.err().map(|error| error.to_string()));
+                                }));
+                            }
+                            // A replay explains nothing new, so the sender is
+                            // dropped rather than held: a receiver still
+                            // waiting on a message nobody will send would
+                            // never answer the request at all.
+                            None => drop(diagnostic_tx),
+                        }
+                        // After the execution is under way, and deliberately:
+                        // the run was admitted, so it cancels the way every
+                        // other admitted run does -- asked to stop at its next
+                        // boundary. Applying it ahead of the execution would
+                        // instead leave an admitted run that never started,
+                        // which is a third state neither the controller nor a
+                        // host has a word for.
+                        if let Some(key) = withdrawn
+                            && let Err(error) = controller.cancel_admitted(&key).await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "an ACP cancellation received during admission could not be applied"
+                            );
+                        }
                         let snapshot = subscription.await;
                         sessions.finish(&id, generation, &snapshot);
                         match prompt_result(&snapshot) {

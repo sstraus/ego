@@ -149,6 +149,15 @@ impl DurableAcpFixture {
         controls: Option<Arc<dyn ego_core::control::SessionControls>>,
         confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
     ) -> agent_client_protocol::AgentProtocolRouter {
+        self.router_with_trust(controls, confinement, None)
+    }
+
+    pub fn router_with_trust(
+        &self,
+        controls: Option<Arc<dyn ego_core::control::SessionControls>>,
+        confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+        trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
+    ) -> agent_client_protocol::AgentProtocolRouter {
         let clock = Arc::new(TestClock);
         let controller = Arc::new(RunController::new(
             Arc::clone(&self.store),
@@ -172,6 +181,7 @@ impl DurableAcpFixture {
             Arc::new(CompactionCommandFixture),
             controls,
             confinement,
+            trust,
         )
     }
 
@@ -1211,6 +1221,35 @@ where
     C: Clock + 'static,
     I: IdSource + 'static,
 {
+    agent_with_compaction_confinement_and_trust(
+        store,
+        executor,
+        clock,
+        ids,
+        compaction,
+        controls,
+        confinement,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn agent_with_compaction_confinement_and_trust<S, E, C, I>(
+    store: Arc<S>,
+    executor: Arc<E>,
+    clock: Arc<C>,
+    ids: Arc<I>,
+    compaction: Arc<dyn CompactionCommand>,
+    controls: Option<Arc<dyn ego_core::control::SessionControls>>,
+    confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+    trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
+) -> agent_client_protocol::AgentProtocolRouter
+where
+    S: SessionStore + 'static,
+    E: RunExecutor + 'static,
+    C: Clock + 'static,
+    I: IdSource + 'static,
+{
     let controller = Arc::new(RunController::new(
         store,
         executor,
@@ -1228,6 +1267,7 @@ where
         compaction,
         controls,
         confinement,
+        trust,
     )
 }
 
@@ -1343,6 +1383,21 @@ impl Connected {
         id
     }
 
+    /// Send one notification, which by definition is never answered.
+    pub async fn notify(&mut self, method: &str, params: serde_json::Value) {
+        self.to_agent
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params,
+                })
+                .to_string(),
+            )
+            .await
+            .expect("the ACP agent is listening");
+    }
+
     pub async fn response(&mut self, id: u64) -> (serde_json::Value, Vec<serde_json::Value>) {
         let mut notifications = Vec::new();
         loop {
@@ -1368,15 +1423,59 @@ impl Connected {
     }
 
     pub async fn initialize(&mut self) -> serde_json::Value {
+        self.initialize_with_capabilities(serde_json::json!({}))
+            .await
+    }
+
+    pub async fn initialize_with_capabilities(
+        &mut self,
+        capabilities: serde_json::Value,
+    ) -> serde_json::Value {
         self.request(
             "initialize",
             serde_json::json!({
                 "protocolVersion": ProtocolVersion::V1.as_u16(),
-                "clientCapabilities": {},
+                "clientCapabilities": capabilities,
             }),
         )
         .await
         .0
+    }
+
+    /// The next message the agent sends that is a *request* rather than a
+    /// response or a notification, dropping everything before it.
+    ///
+    /// A request carries both an id and a method; that pair is what tells it
+    /// apart from a response to one of ours, whose id comes from a counter
+    /// this side owns and may coincidentally match.
+    pub async fn agent_request(&mut self) -> serde_json::Value {
+        loop {
+            let line = self
+                .from_agent
+                .next()
+                .await
+                .expect("the agent is still connected");
+            let message: serde_json::Value =
+                serde_json::from_str(&line).expect("the agent writes JSON-RPC");
+            if message.get("id").is_some() && message.get("method").is_some() {
+                return message;
+            }
+        }
+    }
+
+    /// Answer one agent-originated request.
+    pub async fn answer(&mut self, request: &serde_json::Value, result: serde_json::Value) {
+        self.to_agent
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": result,
+                })
+                .to_string(),
+            )
+            .await
+            .expect("the ACP agent is listening");
     }
 
     pub async fn new_session(&mut self, root: &str) -> serde_json::Value {
