@@ -124,7 +124,7 @@ use turns::{
 pub use turns::{InteractiveSeat, Reads, stop_signal};
 
 use crate::budget;
-use crate::cli::{Args, ModelsArgs, Output, ResumeAnswer, SessionChoice, UsageError};
+use crate::cli::{Args, ModelsArgs, Output, ResumeAnswer, SessionChoice, SessionShape, UsageError};
 use crate::hook::{CliHookInvocationBinding, RunToollessGenerationService};
 use crate::model_picker::{ModelPicker, ModelSwitchRequest};
 use crate::models;

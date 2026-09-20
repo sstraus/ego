@@ -972,6 +972,86 @@ fn acp_honours_the_two_flags_it_shares() {
     );
 }
 
+/// Every general session flag `ego run` takes, `ego acp` takes too, from the
+/// same declaration.
+///
+/// A host launching `ego acp` could not shape the session it got: no tool
+/// selection, no policy on the launch line, and nothing to tell the model
+/// about the environment it is working in. None of these is a new concept —
+/// they are the flags `ego run` has always had, reaching the one surface that
+/// could not reach them.
+#[test]
+fn acp_takes_every_general_session_flag_run_takes() {
+    let args = served([
+        "acp",
+        "--tools",
+        "read,write",
+        "--allow",
+        "read(src/**)",
+        "--deny",
+        "write(**)",
+        "--profile",
+        "ci",
+        "--append-system",
+        "this session is driven by a host",
+        "--instructions",
+        "/tmp/AGENTS.md",
+    ]);
+    assert_eq!(
+        args.shape.tools,
+        Some(vec!["read".to_owned(), "write".to_owned()])
+    );
+    assert_eq!(args.shape.allow, vec!["read(src/**)".to_owned()]);
+    assert_eq!(args.shape.deny, vec!["write(**)".to_owned()]);
+    assert_eq!(args.shape.profile.as_deref(), Some("ci"));
+    assert_eq!(
+        args.shape.profile_source,
+        Some(ego_core::config::Source::Flags),
+        "a named profile without its source is a panic waiting in config::profile"
+    );
+    assert_eq!(
+        args.shape.append_system.as_deref(),
+        Some("this session is driven by a host")
+    );
+    assert_eq!(
+        args.shape.instructions.as_deref(),
+        Some(Path::new("/tmp/AGENTS.md"))
+    );
+}
+
+/// `--no-tools` over ACP is the empty tool list, exactly as it is for `ego
+/// run` — and a tool-less session is the one that can never ask a host for a
+/// permission seat, because a permission request only ever originates from a
+/// tool call.
+#[test]
+fn acp_no_tools_is_the_empty_tool_list_so_nothing_can_ask_for_a_seat() {
+    let args = served(["acp", "--no-tools"]);
+    assert_eq!(args.shape.tools, Some(Vec::new()));
+}
+
+/// The same conflict `ego run` enforces: "no tools" and "these tools" are one
+/// question, so answering it twice is refused rather than silently preferred.
+#[test]
+fn acp_refuses_no_tools_beside_a_tool_list() {
+    let refusal = refused(["acp", "--no-tools", "--tools", "read"]);
+    assert!(
+        refusal.contains("--tools") || refusal.contains("--no-tools"),
+        "the conflict must be refused by name: {refusal}"
+    );
+}
+
+/// A host that names no session flag gets exactly the session it got before
+/// these flags existed. This is the whole backward-compatibility claim, and it
+/// is one equality rather than seven.
+#[test]
+fn acp_without_session_flags_shapes_nothing() {
+    assert_eq!(
+        served(["acp"]).shape,
+        ego_cli::cli::SessionShape::default(),
+        "`ego acp` with no flags must not shape the session at all"
+    );
+}
+
 /// **`--output` is the flag `ego acp` must not have**, and this is the test
 /// that says so.
 ///

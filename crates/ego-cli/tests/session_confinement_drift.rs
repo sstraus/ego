@@ -134,7 +134,12 @@ async fn run_drift_case() {
     let root = RunRoot::new(&workspace).expect("absolute workspace");
     let store = Arc::new(JsonlStore::new(sessions, &workspace, Box::new(OsIo)));
     let admission = Arc::new(EvidenceAdmissionService::new());
-    let executor = CliRunExecutor::for_acp(None, Arc::clone(&store), admission);
+    let executor = CliRunExecutor::for_acp(
+        None,
+        ego_cli::cli::SessionShape::default(),
+        Arc::clone(&store),
+        admission,
+    );
 
     let (control, control_events) = submit_case(
         &executor,

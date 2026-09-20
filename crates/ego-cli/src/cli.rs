@@ -528,11 +528,54 @@ pub struct AcpArgs {
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
     pub sandbox: Option<Confinement>,
+    pub shape: SessionShape,
     pub listen: Option<String>,
     pub allow_public_bind: bool,
     pub max_connections: u32,
     pub connection_lifetime: Duration,
     pub max_ingress_bytes: u64,
+}
+
+/// The general shape of a session, resolved from the launch line.
+///
+/// The one place `ego run` and a served protocol agree on what `--tools`,
+/// `--allow`, `--deny`, `--profile`, `--append-system` and `--instructions`
+/// mean. [`Default`] is "the operator named nothing", which is exactly the
+/// session a host got before a served protocol could be shaped at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionShape {
+    pub append_system: Option<String>,
+    pub instructions: Option<PathBuf>,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    /// `None` is every builtin; `Some(vec![])` is the tool-less session.
+    pub tools: Option<Vec<String>>,
+    pub profile: Option<String>,
+    pub profile_source: Option<ego_core::config::Source>,
+}
+
+impl From<Shape> for SessionShape {
+    fn from(shape: Shape) -> Self {
+        Self {
+            append_system: shape.append_system,
+            instructions: shape.instructions,
+            allow: shape.allow,
+            deny: shape.deny,
+            // `--no-tools` is the empty list rather than a second field: "no
+            // tools" and "these tools" are the same question answered, and two
+            // fields would let them disagree.
+            tools: if shape.no_tools {
+                Some(Vec::new())
+            } else {
+                shape.tools
+            },
+            profile_source: shape
+                .profile
+                .as_ref()
+                .map(|_| ego_core::config::Source::Flags),
+            profile: shape.profile,
+        }
+    }
 }
 
 /// Where `ego a2a` serves, whether the operator asked for it to be reachable
@@ -1182,6 +1225,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                     session_dir: parsed.places.session_dir,
                     directory: parsed.places.directory,
                     sandbox: parsed.ceiling.sandbox,
+                    shape: parsed.shape.into(),
                     listen: parsed.listen,
                     allow_public_bind: parsed.allow_public_bind,
                     max_connections: parsed
@@ -1617,7 +1661,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
     // belonged here rather than in the loader: from a resolved posture alone,
     // "the user demanded bare" and "the workspace is untrusted" are the same
     // value and want opposite answers.
-    if flags.bare && flags.instructions.is_some() {
+    if flags.bare && flags.shape.instructions.is_some() {
         return Err(UsageError(
             "--bare and --instructions contradict each other: --bare turns \
              ambient discovery off, and --instructions names a file to use \
@@ -1650,6 +1694,10 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         SessionChoice::New
     };
 
+    // One conversion, so `ego run` and a served protocol cannot start
+    // disagreeing about what these seven flags mean.
+    let shape = SessionShape::from(flags.shape);
+
     Ok(Args {
         prompt,
         agent_file,
@@ -1660,12 +1708,12 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         sandbox: flags.sandbox,
         thinking: flags.thinking,
         system: flags.system,
-        append_system: flags.append_system,
-        instructions: flags.instructions,
+        append_system: shape.append_system,
+        instructions: shape.instructions,
         bare: flags.bare,
         mode,
-        allow: flags.allow,
-        deny: flags.deny,
+        allow: shape.allow,
+        deny: shape.deny,
         answers: Vec::new(),
         session,
         session_dir: flags.common.places.session_dir,
@@ -1678,22 +1726,12 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         budget: flags.budget,
         max_turns: flags.max_turns,
         timeout: flags.timeout,
-        // `--no-tools` is the empty list rather than a second field: "no
-        // tools" and "these tools" are the same question answered, and two
-        // fields would let them disagree.
-        tools: if flags.no_tools {
-            Some(Vec::new())
-        } else {
-            flags.tools
-        },
+        tools: shape.tools,
         mcp: flags.mcp,
         directory: flags.common.places.directory,
         set: flags.set,
-        profile_source: flags
-            .profile
-            .as_ref()
-            .map(|_| ego_core::config::Source::Flags),
-        profile: flags.profile,
+        profile_source: shape.profile_source,
+        profile: shape.profile,
         quiet: flags.quiet,
         no_color: flags.no_color,
     })

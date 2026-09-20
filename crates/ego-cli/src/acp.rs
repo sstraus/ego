@@ -338,6 +338,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     let store = Arc::new(session::jsonl(store_root, root.clone()));
     let executor = Arc::new(run::CliRunExecutor::for_acp(
         args.session_dir.clone(),
+        args.shape.clone(),
         Arc::clone(&store),
         Arc::clone(&evidence),
     ));
@@ -393,7 +394,8 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     // acp` invocation is online by construction, so this adds no reach it did
     // not already have.
     let (controls, ceiling) =
-        match run::protocol_effective(root.as_path(), args.session_dir.clone()) {
+        match run::protocol_effective(root.as_path(), args.session_dir.clone(), args.shape.clone())
+        {
             Ok(effective) => {
                 crate::config::report_discarded(root.as_path(), &effective, &crate::output::Stderr);
                 let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(mcp_effects.ports())))

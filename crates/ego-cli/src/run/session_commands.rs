@@ -28,7 +28,9 @@ use ego_tools::store::{AtomicReplacePublication, JsonlStore, OsIo, StoreIo};
 use serde_json::Value;
 
 use super::{CliCompactionCommand, Ended, protocol_args, report, rooted_path, workspace};
-use crate::cli::{CompactArgs, ExportArgs, ExportFormat, ForkArgs, Output, UsageError};
+use crate::cli::{
+    CompactArgs, ExportArgs, ExportFormat, ForkArgs, Output, SessionShape, UsageError,
+};
 use crate::output::{Diagnostics, Stderr, Stdout, note};
 use crate::session::{self, Opened};
 
@@ -327,7 +329,7 @@ pub async fn compact(
         let root = workspace(args.directory.as_ref())?;
         let store_root = rooted_path(&root, session::store_root(args.session_dir.as_ref())?);
         let store = Arc::new(session::jsonl(store_root, root.clone()));
-        let mut runtime_args = protocol_args(args.session_dir.clone());
+        let mut runtime_args = protocol_args(args.session_dir.clone(), SessionShape::default());
         runtime_args.directory = Some(root);
         runtime_args.output = args.output;
         let command = CliCompactionCommand::new(runtime_args, store, admission);

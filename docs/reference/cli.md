@@ -178,15 +178,22 @@ Report a read-only redacted health snapshot of this installation.
 
 Serve the Agent Client Protocol on stdio or an endpoint.
 
+- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable
 - `--allow-public-bind` — Serve on an address reachable from outside this machine
+- `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--connection-lifetime <CONNECTION_LIFETIME>` — Maximum lifetime of one listener connection: 90s, 10m or 2h
+- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help
+- `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
 - `--listen <LISTEN>` — Serve on a socket path or address instead of stdio
 - `--max-connections <MAX_CONNECTIONS>` — Maximum simultaneous listener connections
 - `--max-ingress-bytes <MAX_INGRESS_BYTES>` — Maximum cumulative bytes read from one listener connection
+- `--no-tools` — Offer no tools at all
+- `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|off
 - `--session-dir <SESSION_DIR>` — Override the store location
+- `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
 
 ## `ego a2a`
 

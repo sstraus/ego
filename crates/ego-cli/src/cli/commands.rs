@@ -234,6 +234,9 @@ pub(super) struct AcpCommand {
     #[command(flatten)]
     pub(super) ceiling: Ceiling,
 
+    #[command(flatten)]
+    pub(super) shape: Shape,
+
     /// Serve on a socket path or address instead of stdio.
     #[arg(long)]
     pub(super) listen: Option<String>,
@@ -253,6 +256,45 @@ pub(super) struct AcpCommand {
     /// Maximum cumulative bytes read from one listener connection.
     #[arg(long, requires = "listen")]
     pub(super) max_ingress_bytes: Option<NonZeroU64>,
+}
+
+/// The general shape of a session: what the model may use, what it is allowed
+/// to do, and what it is told about where it is working.
+///
+/// Its own struct rather than seven fields on `Flags`, because these questions
+/// are not about `ego run`. They are about a *session*, and every surface that
+/// opens one — a terminal run, a resumed run, a served protocol — answers them
+/// the same way or answers them wrongly. Declaring them once is what stops
+/// `ego acp` from growing a `--tools` that means something else.
+#[derive(Debug, ClapArgs)]
+pub(super) struct Shape {
+    /// Append to the system prompt. `@file` reads it from a file.
+    #[arg(long)]
+    pub(super) append_system: Option<String>,
+
+    /// Use this instruction file instead of discovering one.
+    #[arg(long)]
+    pub(super) instructions: Option<PathBuf>,
+
+    /// Restrict the builtin tools to this comma-separated list.
+    #[arg(long, value_delimiter = ',')]
+    pub(super) tools: Option<Vec<String>>,
+
+    /// Offer no tools at all.
+    #[arg(long, conflicts_with = "tools")]
+    pub(super) no_tools: bool,
+
+    /// Allow rule, e.g. 'read(src/**)'. Repeatable.
+    #[arg(long, value_name = "RULE", action = ArgAction::Append)]
+    pub(super) allow: Vec<String>,
+
+    /// Deny rule, e.g. 'write(**)'. Repeatable.
+    #[arg(long, value_name = "RULE", action = ArgAction::Append)]
+    pub(super) deny: Vec<String>,
+
+    /// Layer [profile.NAME] from config.
+    #[arg(long)]
+    pub(super) profile: Option<String>,
 }
 
 /// The weakest confinement a served protocol's sessions may run at.
@@ -625,13 +667,8 @@ pub(super) struct Flags {
     #[arg(long)]
     pub(super) system: Option<String>,
 
-    /// Append to the system prompt. `@file` reads it from a file.
-    #[arg(long)]
-    pub(super) append_system: Option<String>,
-
-    /// Use this instruction file instead of discovering one.
-    #[arg(long)]
-    pub(super) instructions: Option<PathBuf>,
+    #[command(flatten)]
+    pub(super) shape: Shape,
 
     /// No ambient discovery, even in a trusted workspace.
     #[arg(long)]
@@ -689,14 +726,6 @@ pub(super) struct Flags {
     #[arg(long)]
     pub(super) timeout: Option<String>,
 
-    /// Restrict the builtin tools to this comma-separated list.
-    #[arg(long, value_delimiter = ',')]
-    pub(super) tools: Option<Vec<String>>,
-
-    /// Offer no tools at all.
-    #[arg(long, conflicts_with = "tools")]
-    pub(super) no_tools: bool,
-
     /// Attach a named effective or strict invocation-scoped JSON MCP server.
     #[arg(
         long,
@@ -718,21 +747,9 @@ pub(super) struct Flags {
     #[arg(long, group = "mode-choice")]
     pub(super) yolo: bool,
 
-    /// Allow rule, e.g. 'read(src/**)'. Repeatable.
-    #[arg(long, value_name = "RULE", action = ArgAction::Append)]
-    pub(super) allow: Vec<String>,
-
-    /// Deny rule, e.g. 'write(**)'. Repeatable.
-    #[arg(long, value_name = "RULE", action = ArgAction::Append)]
-    pub(super) deny: Vec<String>,
-
     /// Dotted-path config override, value parsed as TOML.
     #[arg(short = 'c', long = "set", value_name = "K=V", action = ArgAction::Append)]
     pub(super) set: Vec<String>,
-
-    /// Layer [profile.NAME] from config.
-    #[arg(long)]
-    pub(super) profile: Option<String>,
 
     /// Suppress progress and diagnostics on stderr; stdout is unaffected.
     #[arg(short = 'q', long)]

@@ -246,8 +246,12 @@ async fn compose_and_serve(
         .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
     let store = Arc::new(session::jsonl(store_root, root.clone()));
     let artifact_publisher: Arc<dyn RunArtifactStore> = store.clone();
-    let effective = run::protocol_effective(root.as_path(), args.session_dir.clone())
-        .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+    let effective = run::protocol_effective(
+        root.as_path(),
+        args.session_dir.clone(),
+        crate::cli::SessionShape::default(),
+    )
+    .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
     let catalogue = if effective.thinking.is_none() {
         let scope = crate::provider_http::CommandHttpScope::online(CancelToken::new())
             .await

@@ -58,12 +58,18 @@ ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               stable IDs; `explain <tool> <args>` shows the
                               canonical intent + matching rule, dry)
 ego usage  [--period P] [--all-roles] [--json] cost and token report
-ego acp [--listen ENDPOINT [--allow-public-bind]
+ego acp [--tools LIST | --no-tools] [--allow RULE] [--deny RULE]
+        [--profile NAME] [--append-system TEXT|@file]
+        [--instructions FILE]
+        [--listen ENDPOINT [--allow-public-bind]
          [--max-connections N] [--connection-lifetime DURATION]
          [--max-ingress-bytes N]]
                               serve ACP on stdio by default, or on an explicit
-                              endpoint. Listener controls default to 32
-                              connections, 24h, and 134217728 cumulative
+                              endpoint. The seven session flags are §3's
+                              general session shape and mean here exactly what
+                              they mean for `ego run`; naming none of them is
+                              the unshaped session. Listener controls default
+                              to 32 connections, 24h, and 134217728 cumulative
                               ingress bytes per connection. TCP endpoints need
                               EGO_ACP_TOKEN; local endpoints use operating-
                               system peer identity and never read that token.
@@ -394,6 +400,36 @@ ceilings come only from an administrator's `/etc/ego`.
                           JSON MCP server for this invocation (repeatable)
 ```
 
+**The general session shape**
+
+Seven of the flags above are not about *running a prompt*: they are about the
+*session* a prompt runs in — what the model may use, what it is allowed to do,
+and what it is told about where it is working.
+
+```
+    --tools LIST / --no-tools    what the model may call
+    --allow RULE / --deny RULE   what it is allowed to do
+    --profile NAME               which stored configuration layer applies
+    --append-system TEXT|@file   what it is told, appended to the prompt
+    --instructions FILE          which instruction file, named not discovered
+```
+
+Every surface that opens a session takes them, from one declaration: `ego run`,
+`ego resume`, and `ego acp`. They are declared once (`Shape` in
+`crates/ego-cli/src/cli/commands.rs`) and converted once
+(`SessionShape`), so the served surface cannot drift into a `--tools` that
+means something else.
+
+On `ego acp` this is how a caller shapes the sessions the served process will
+open, before any client connects. Naming none of them is the unshaped session
+and is byte-for-byte the behaviour of an `ego acp` that had no such flags.
+`--no-tools` there is worth stating on its own: a session with no tool can
+never ask for a permission seat, because a permission request originates from
+a tool call and nowhere else. `--instructions` still names a file rather than
+discovering one — a served session is untrusted (§4.4), and an untrusted
+posture does no ambient discovery, so an explicit file is the only way to tell
+a served session anything about its workspace.
+
 Final retry semantics are owned above provider mappings. `--retry N` permits
 at most N additional attempts on the same resolved model and only after a
 `DefinitelyUnsent` settlement. Each repeatable `--fallback P/M` is an ordered
@@ -436,8 +472,8 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `-m, --model` | **yes** | |
 | `--offline` | **yes** | |
 | `--thinking` | **yes** | §3 above spelled the second value `min` until 2026-08-21; the parser has only ever accepted `minimal`, so `--thinking min` was a documented value that errored. Corrected above |
-| `--system`, `--append-system` | **yes** | |
-| `--instructions` | **yes** | ships, and is **missing from §3's grammar** — documented only in §4.5's prose |
+| `--system`, `--append-system` | **yes** | `--append-system` is part of §3's general session shape, so `ego acp` takes it too; `--system`, which replaces the prompt outright, is not |
+| `--instructions` | **yes** | part of §3's general session shape, so `ego acp` takes it too. It was **missing from §3's grammar** until 2026-09-20 and documented only in §4.5's prose |
 | `--bare` | **yes** | |
 | `--session`, `--session-id` | **yes** | durable session choices; the parser places them in the §4.5 mutually exclusive session group |
 | `--ephemeral` | no | recognized only to refuse by name with usage error exit 2 before opening or creating a session or causing an effect; use the durable default, `--session`, or `--session-id` |
@@ -450,10 +486,10 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
 | `--budget` | **yes** | binds only on a currency-metered row — the run says so on `metering.selected` |
 | `--max-turns`, `--timeout` | **yes** | |
-| `--tools`, `--no-tools` | **yes** | |
-| `-C`, `-c/--set`, `--profile` | **yes** | |
+| `--tools`, `--no-tools` | **yes** | part of §3's general session shape, so `ego acp` takes them too. `--no-tools` there is the session that can never ask for a permission seat |
+| `-C`, `-c/--set`, `--profile` | **yes** | `--profile` is part of §3's general session shape, so `ego acp` takes it too. `-C` it already shared; `-c/--set` it does not take |
 | `-q`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §1 |
-| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. All seven rule heads enforce: `read`, `write`, `list`, `search`, `exec`, `net`, and `tool` — `net` matches `Op::Connect`/`Op::ProtocolConnect` and `tool` matches `Op::Opaque`, both of which this build now produces. This sentence is derived from `parse.rs`'s `OPERATIONS` table by `the_documents_name_the_rule_heads_the_parser_actually_enforces`, not maintained beside it. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
+| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--allow`/`--deny` are part of §3's general session shape, so `ego acp` takes them too; `--mode` and its two spellings are not part of it. `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. All seven rule heads enforce: `read`, `write`, `list`, `search`, `exec`, `net`, and `tool` — `net` matches `Op::Connect`/`Op::ProtocolConnect` and `tool` matches `Op::Opaque`, both of which this build now produces. This sentence is derived from `parse.rs`'s `OPERATIONS` table by `the_documents_name_the_rule_heads_the_parser_actually_enforces`, not maintained beside it. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
 | `--sandbox` | **yes** | `ro\|workspace\|off`, default `workspace`, enforced by the measured platform backend before a prepared process can launch; an unavailable required capability fails closed |
 | `-f`, `--file`, `--var` | **yes** | strict version-1 agent files load through the existing bounded YAML implementation, apply their configuration layer below flags, and substitute declared body variables. M4 extracts the shared envelope for skills and still owns the direct executable shebang end-to-end proof, not these flags' availability |
 | `--attach` | **yes** | repeatable local-path or HTTPS image input; bytes enter the durable session-blob/content path before model-specific projection and unsupported model/profile combinations refuse before acquisition |

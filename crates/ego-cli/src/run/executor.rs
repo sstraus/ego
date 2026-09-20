@@ -279,13 +279,19 @@ pub(crate) struct CliMcpRunPolicy {
 pub(crate) fn protocol_effective(
     root: &Path,
     session_dir: Option<PathBuf>,
+    shape: SessionShape,
 ) -> Result<ego_core::config::Effective, UsageError> {
-    let args = protocol_args(session_dir);
+    let args = protocol_args(session_dir, shape);
     let frozen = config::FrozenRunConfig::capture(root, &args, Trust::Untrusted)?;
     frozen.resolve(&args)
 }
 
-pub(super) fn protocol_args(session_dir: Option<PathBuf>) -> Args {
+/// The headless `Args` every served protocol runs under.
+///
+/// Everything a protocol cannot have is fixed here; `shape` is the part the
+/// launch line owns, so a host that named nothing gets exactly the session it
+/// got before these flags existed ([`SessionShape::default`]).
+pub(super) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -> Args {
     Args {
         prompt: None,
         agent_file: None,
@@ -296,12 +302,12 @@ pub(super) fn protocol_args(session_dir: Option<PathBuf>) -> Args {
         sandbox: None,
         thinking: None,
         system: None,
-        append_system: None,
-        instructions: None,
+        append_system: shape.append_system,
+        instructions: shape.instructions,
         bare: false,
         mode: None,
-        allow: Vec::new(),
-        deny: Vec::new(),
+        allow: shape.allow,
+        deny: shape.deny,
         answers: Vec::new(),
         session: SessionChoice::New,
         session_dir,
@@ -314,12 +320,12 @@ pub(super) fn protocol_args(session_dir: Option<PathBuf>) -> Args {
         budget: None,
         max_turns: None,
         timeout: None,
-        tools: None,
+        tools: shape.tools,
         mcp: Vec::new(),
         directory: None,
         set: Vec::new(),
-        profile: None,
-        profile_source: None,
+        profile: shape.profile,
+        profile_source: shape.profile_source,
         quiet: false,
         no_color: false,
     }
@@ -443,7 +449,7 @@ impl CliCompactionCommand {
         store: Arc<JsonlStore>,
         admission: Arc<EvidenceAdmissionService>,
     ) -> Self {
-        let mut args = protocol_args(session_dir);
+        let mut args = protocol_args(session_dir, SessionShape::default());
         args.directory = Some(root);
         Self::new(args, store, admission)
     }
@@ -693,11 +699,12 @@ impl CliRunExecutor {
     /// Build the fixed headless inputs for the ACP host once, before admission.
     pub fn for_acp(
         session_dir: Option<PathBuf>,
+        shape: SessionShape,
         store: Arc<JsonlStore>,
         admission: Arc<EvidenceAdmissionService>,
     ) -> Self {
         Self {
-            args: protocol_args(session_dir),
+            args: protocol_args(session_dir, shape),
             store,
             concurrency: None,
             frozen: None,
@@ -723,7 +730,7 @@ impl CliRunExecutor {
         admission: Arc<EvidenceAdmissionService>,
         catalogue: Option<&ego_ai::catalogue::ModelCatalogueSnapshot>,
     ) -> Result<(Self, CliMcpRunPolicy), UsageError> {
-        let args = protocol_args(session_dir);
+        let args = protocol_args(session_dir, SessionShape::default());
         let frozen = Arc::new(config::FrozenRunConfig::capture(
             root.as_path(),
             &args,

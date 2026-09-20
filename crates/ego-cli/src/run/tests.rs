@@ -576,10 +576,16 @@ async fn protocol_ci_profile_is_refused_before_session_or_provider_effects() {
 
     let admission = Arc::new(EvidenceAdmissionService::new());
     let child_executor = Arc::new(
-        CliRunExecutor::for_acp(None, Arc::clone(&store), Arc::clone(&admission)).for_children(),
+        CliRunExecutor::for_acp(
+            None,
+            SessionShape::default(),
+            Arc::clone(&store),
+            Arc::clone(&admission),
+        )
+        .for_children(),
     );
     let result = CliPrepared::prepare(
-        protocol_args(None),
+        protocol_args(None, SessionShape::default()),
         store,
         None,
         &request,
@@ -1699,5 +1705,39 @@ fn an_unchosen_control_leaves_what_configuration_resolved_alone() {
     assert_eq!(
         effective.model,
         Some(ego_core::config::ModelRef("configured".to_owned()))
+    );
+}
+
+/// A tool-less served session offers no tool, so nothing in it can ever ask a
+/// host for a permission seat.
+///
+/// `ego acp --no-tools` is worth having only if that chain holds end to end: a
+/// permission request originates from a tool call and nowhere else
+/// (`crates/ego-acp/src/permission.rs`), so an empty catalogue is the same
+/// guarantee stated one link earlier. The second half of the test is what
+/// stops it passing for the wrong reason — a protocol that had quietly lost
+/// its tools would satisfy the first assertion just as well.
+#[test]
+fn a_tool_less_protocol_session_offers_no_tool_to_ask_a_seat_for() {
+    let tool_less = protocol_args(
+        None,
+        crate::cli::SessionShape {
+            tools: Some(Vec::new()),
+            ..crate::cli::SessionShape::default()
+        },
+    );
+    let offered = composition::tools(tool_less.tools.as_ref(), None).expect("an empty selection");
+    assert!(
+        offered.is_empty(),
+        "a tool-less session offered {} tools",
+        offered.len()
+    );
+
+    let ordinary = protocol_args(None, crate::cli::SessionShape::default());
+    assert!(
+        !composition::tools(ordinary.tools.as_ref(), None)
+            .expect("no selection at all")
+            .is_empty(),
+        "an unshaped session must still offer the builtins"
     );
 }
