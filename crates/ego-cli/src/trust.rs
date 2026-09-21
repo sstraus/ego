@@ -139,11 +139,15 @@ pub fn inventory_digest(root: &Path) -> Option<String> {
     (!inventory.is_empty()).then(|| inventory.digest())
 }
 
-/// How many inventory entries a trust question names before it summarises.
+/// How many *declared* inventory entries a trust question names before it
+/// summarises.
 ///
 /// A seat that lists two hundred skill files is a seat nobody reads, and an
 /// unread trust question is the failure this whole module exists to avoid. The
 /// digest still covers every entry; only the rendering is bounded.
+///
+/// The bound applies to declarations only. The programs a trusted config would
+/// run are listed in full, however many there are — see [`trustable_content`].
 const LISTED_CONTENT: usize = 12;
 
 /// What this workspace offers to be trusted with, rendered for a human.
@@ -154,19 +158,45 @@ const LISTED_CONTENT: usize = 12;
 /// Here and not in the seat that asks, because the paths probed are this
 /// module's to know — `ego-cli` owns which files an answer is about, and a
 /// second lister would be a second answer to that question.
+///
+/// Rendered in two parts, and that split is the whole point. The inventory is
+/// one list sorted by path, so a repository that wants its hook handler unseen
+/// only has to name it so it sorts past [`LISTED_CONTENT`] and pad the front
+/// with skill files. Truncation would then hide the one entry the question is
+/// really about. What a trusted config would *run* is therefore listed in
+/// full, separately from what it merely *declares*, and only the declarations
+/// are bounded.
 pub(crate) fn trustable_content(root: &Path) -> Option<String> {
     let inventory = inventory(root);
     if inventory.is_empty() {
         return None;
     }
-    let entries = inventory.entries();
-    let mut rendered: String = entries
+    let programs: Vec<String> = referenced_commands(root)
+        .iter()
+        .filter_map(|path| path.strip_prefix(root).ok())
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .collect();
+    let (runs, declares): (Vec<&TrustedContent>, Vec<&TrustedContent>) = inventory
+        .entries()
+        .iter()
+        .partition(|entry| programs.iter().any(|program| program == entry.path()));
+    let mut rendered: String = declares
         .iter()
         .take(LISTED_CONTENT)
         .map(|entry| format!("- {}\n", entry.path()))
         .collect();
-    if let Some(remaining) = entries.len().checked_sub(LISTED_CONTENT).filter(|n| *n > 0) {
+    if let Some(remaining) = declares
+        .len()
+        .checked_sub(LISTED_CONTENT)
+        .filter(|n| *n > 0)
+    {
         rendered.push_str(&format!("- …and {remaining} more\n"));
+    }
+    if !runs.is_empty() {
+        rendered.push_str("\nand runs:\n");
+        for entry in runs {
+            rendered.push_str(&format!("- {}\n", entry.path()));
+        }
     }
     Some(rendered)
 }
@@ -482,6 +512,43 @@ mod tests {
         assert_eq!(
             inside(root, "scripts/../hook.sh"),
             Some(PathBuf::from("/workspace/hook.sh"))
+        );
+    }
+
+    /// The rendering is the whole consent screen an ACP host sees, and the
+    /// inventory it reads from is sorted by path — a path the repository
+    /// chooses. Truncating one list would therefore let a repository push the
+    /// program its hook runs off the end behind a wall of skill files, and a
+    /// host would grant execution to something it was never shown.
+    #[test]
+    fn a_program_a_trusted_config_runs_is_listed_even_past_the_summary_bound() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        fs::create_dir_all(root.path().join(".ego")).expect("the config directory");
+        // Sorts after every skill file and after `AGENTS.md`, so a single
+        // truncated list would cut it.
+        fs::write(root.path().join("zzz-run.sh"), "#!/bin/sh\n").expect("the script");
+        fs::write(
+            root.path().join(".ego/config.toml"),
+            "[[hooks]]\nevent = \"pre_tool_use\"\n[hooks.handler]\ntype = \"command\"\n\
+             command = \"./zzz-run.sh\"\n",
+        )
+        .expect("the project config");
+        fs::write(root.path().join(INSTRUCTIONS_FILE), "read me\n").expect("the instructions");
+        for index in 0..LISTED_CONTENT {
+            let skill = root.path().join(format!(".ego/skills/a{index:02}"));
+            fs::create_dir_all(&skill).expect("the skill directory");
+            fs::write(skill.join(SKILL_FILE), "a skill\n").expect("the skill");
+        }
+
+        let rendered = trustable_content(root.path()).expect("a non-empty inventory");
+
+        assert!(
+            rendered.contains("zzz-run.sh"),
+            "the program a trusted config runs was not named: {rendered}"
+        );
+        assert!(
+            rendered.contains("…and"),
+            "the declarations were not summarised, so this proves nothing: {rendered}"
         );
     }
 

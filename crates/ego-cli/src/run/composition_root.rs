@@ -31,6 +31,14 @@ pub struct CliPrepared {
     pub(super) root: PathBuf,
     pub(super) cwd: PathBuf,
     pub(super) confinement: RunConfinement,
+    /// The posture the config layers below were resolved at, kept so the hook
+    /// catalogue is admitted at the same one.
+    ///
+    /// Resolved in `prepare` and read in `submit` because those are two calls:
+    /// dropping it in between is what let a session a host had answered
+    /// `trusted` for admit its hooks under `Untrusted` anyway.
+    pub(super) trust: Trust,
+    pub(super) profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
     /// The exact ACP session fact to compare during effect construction.
     pub(super) admitted_sandbox_observation: Option<ExecObservation>,
     pub(super) effective: Effective,
@@ -171,8 +179,9 @@ impl CliPrepared {
             root,
             cwd,
             confinement,
+            trust,
+            profile_layers,
             effective,
-            ..
         } = settings;
         let schema_retries = args.schema_retries;
         let retry = args.retry;
@@ -209,6 +218,8 @@ impl CliPrepared {
                 root,
                 cwd,
                 confinement,
+                trust,
+                profile_layers,
                 admitted_sandbox_observation: request.selections.sandbox_observation().cloned(),
                 effective,
                 system,
@@ -389,8 +400,8 @@ impl CliPrepared {
                 invocation,
                 config,
                 gate,
-                hook_layers: None,
-                hook_trust: Trust::Untrusted,
+                hook_layers: self.profile_layers.as_deref(),
+                hook_trust: self.trust,
                 policy_source,
                 judge_available,
             },

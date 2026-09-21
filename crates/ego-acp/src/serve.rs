@@ -1522,23 +1522,6 @@ fn selected_confinement(
 const TRUST_GRANT: &str = "trusted";
 const TRUST_REFUSE: &str = "untrusted";
 
-/// Ask this session's host what posture the workspace should run at.
-///
-/// Asked here, on the prompt that *starts* the run, for the reason
-/// [`selected_confinement`] gives one function up: trust is admitted once, and
-/// the config layers, the instruction file, the project MCP servers, the
-/// skills and the hooks are all derived from it during preparation. Asked at
-/// `session/new` it would be a form raised before the person had asked for
-/// anything; asked after preparation it would answer a settled question.
-///
-/// The answer governs this session and is neither read from nor written to
-/// the per-root ledger the terminal seat keeps. That is the stricter half of
-/// the choice on purpose: a `y` typed once in a terminal must not become a
-/// posture some other program's session inherits without anyone being asked.
-///
-/// Every way of not answering — a decline, a cancel, a host with no form, a
-/// transport failure — leaves the session exactly as untrusted as it was
-/// before this function existed. Only an explicit `trusted` grants anything.
 /// The trust question this prompt raises, or `None` when it raises none.
 ///
 /// Every condition here is synchronous, and that is the point: the caller uses
@@ -1557,13 +1540,15 @@ fn trust_question(
     root: &RunRoot,
 ) -> Option<QuestionRequest> {
     let admission = admission?;
+    // Asked before the workspace is read, because reading it is the expensive
+    // half and a host that cannot render a form will never see the answer.
+    if !capabilities.form_available() {
+        return None;
+    }
     // Nothing only trust admits: both answers open the same session, and a
     // question whose answers do not differ teaches a host that trust questions
     // do not matter.
     let trustable = admission.trustable(root)?;
-    if !capabilities.form_available() {
-        return None;
-    }
     Some(QuestionRequest::new(
         format!(
             "Trust the workspace at {}?\n\nTrusting it lets this session read its project \
@@ -1581,6 +1566,22 @@ fn trust_question(
 }
 
 /// Put one trust question to the host and read the posture out of the answer.
+///
+/// Asked here, on the prompt that *starts* the run, for the reason
+/// [`selected_confinement`] gives one function up: trust is admitted once, and
+/// the config layers, the instruction file, the project MCP servers, the
+/// skills and the hooks are all derived from it during preparation. Asked at
+/// `session/new` it would be a form raised before the person had asked for
+/// anything; asked after preparation it would answer a settled question.
+///
+/// The answer governs this session and is neither read from nor written to
+/// the per-root ledger the terminal seat keeps. That is the stricter half of
+/// the choice on purpose: a `y` typed once in a terminal must not become a
+/// posture some other program's session inherits without anyone being asked.
+///
+/// Every way of not answering — a decline, a cancel, a host with no form, a
+/// transport failure — leaves the session exactly as untrusted as it was
+/// before this function existed. Only an explicit `trusted` grants anything.
 async fn selected_trust(
     request: QuestionRequest,
     connection: &ConnectionTo<Client>,
