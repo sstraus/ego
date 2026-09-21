@@ -1741,3 +1741,46 @@ fn a_tool_less_protocol_session_offers_no_tool_to_ask_a_seat_for() {
         "an unshaped session must still offer the builtins"
     );
 }
+
+/// A subagent of a trusted terminal run prepares its parent's configuration.
+///
+/// A child does not re-ask anything: it resolves the layers its parent's
+/// answer already admitted, frozen at capture. Its own posture is still
+/// `Untrusted`, because a child is not a seat that was asked — and that pair,
+/// trusted layers under an untrusted run, is the one the shared tail of
+/// `finish_rooted_settings` used to assert could not exist. It can, and in a
+/// debug build the assertion fired: every subagent of a trusted terminal
+/// session panicked before it ran.
+#[test]
+fn a_frozen_child_of_a_trusted_parent_prepares_the_layers_its_parent_admitted() {
+    let owner = tempdir().expect("workspace owner");
+    let root = std::fs::canonicalize(owner.path()).expect("canonical workspace");
+    std::fs::create_dir_all(root.join(".ego")).expect("project directory");
+    std::fs::write(
+        root.join(".ego/config.toml"),
+        "model = \"a-project-model\"\n",
+    )
+    .expect("project config");
+    let args = interactive_args(&[]);
+    let frozen = crate::config::FrozenRunConfig::capture(&root, &args, Trust::Trusted)
+        .expect("a parent that was trusted captures its layers");
+
+    let settings = super::composition::frozen_rooted_settings(
+        &args,
+        root.clone(),
+        &frozen,
+        &crate::output::Stderr,
+    )
+    .expect("a child of a trusted parent prepares");
+
+    assert_eq!(
+        settings.effective.posture,
+        ego_core::config::Posture::Ambient,
+        "the child dropped the project layers its parent's answer admitted"
+    );
+    assert_eq!(
+        settings.trust,
+        Trust::Untrusted,
+        "a child is not a seat and must not report itself as one"
+    );
+}

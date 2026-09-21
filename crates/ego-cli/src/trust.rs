@@ -312,13 +312,38 @@ fn inside(root: &Path, command: &str) -> Option<PathBuf> {
     resolved.starts_with(root).then_some(resolved)
 }
 
+/// An I/O result, with everything that is not "it is not there" said out loud.
+///
+/// Absence is the ordinary answer: most workspaces hold none of these paths,
+/// and a missing file is exactly the "nothing to trust" this inventory is
+/// reporting. Every other failure is a read the inventory drops, and dropping
+/// it silently makes an unreadable workspace indistinguishable from an empty
+/// one — a permission bit dropped on `.ego/` would leave the seat asked
+/// nothing at all about a repository full of content. The answer stays the
+/// same, because failing closed is right; it just stops being silent.
+fn readable<T>(path: &Path, result: std::io::Result<T>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "a workspace trust inventory entry could not be read and is not covered by the answer"
+            );
+            None
+        }
+    }
+}
+
 /// `<root>/.ego/skills/*/SKILL.md`, exactly as the skill loader finds them.
 fn skill_files(root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(root.join(PROJECT_SKILLS)) else {
+    let skills = root.join(PROJECT_SKILLS);
+    let Some(entries) = readable(&skills, fs::read_dir(&skills)) else {
         return Vec::new();
     };
     entries
-        .filter_map(Result::ok)
+        .filter_map(|entry| readable(&skills, entry))
         .map(|entry| entry.path().join(SKILL_FILE))
         .collect()
 }
@@ -330,17 +355,18 @@ fn content(root: &Path, path: &Path) -> Option<TrustedContent> {
     // instruction loader's reason, applied one step earlier. A workspace
     // whose only content is a symlink is therefore never asked about, and so
     // is never read.
-    let metadata = fs::symlink_metadata(path).ok()?;
+    let metadata = readable(path, fs::symlink_metadata(path))?;
     if !metadata.is_file() {
         return None;
     }
     let relative = path.strip_prefix(root).ok()?;
     let mut prefix = Vec::new();
-    File::open(path)
-        .ok()?
-        .take(TRUST_DIGEST_MAX_BYTES as u64)
-        .read_to_end(&mut prefix)
-        .ok()?;
+    readable(
+        path,
+        readable(path, File::open(path))?
+            .take(TRUST_DIGEST_MAX_BYTES as u64)
+            .read_to_end(&mut prefix),
+    )?;
     Some(TrustedContent::regular(
         relative.to_string_lossy(),
         metadata.len(),

@@ -475,6 +475,126 @@ async fn a_trusted_session_is_not_asked_again_on_the_next_prompt() {
     connection.abort().await;
 }
 
+/// Closing the session while its question is open starts nothing either.
+///
+/// The other half of what [`PromptCorrelation::withdrawn`] promises: the
+/// receiver resolves when the registration holding its sender is dropped, and
+/// `session/close` drops it without ever calling `cancel`. A session that is
+/// gone is not one to open a run for, and the difference from a withdrawal is
+/// only how the sender died.
+///
+/// The durable fixture, because `session/close` needs a lifecycle behind it;
+/// the trust port is wired the same way in both.
+#[tokio::test]
+async fn a_session_closed_while_the_form_is_open_prepares_nothing() {
+    let fixture = support::DurableAcpFixture::new();
+    let lister = Lister::holding("- AGENTS.md\n");
+    let mut connection = support::Connected::new(fixture.router_with_trust(
+        None,
+        None,
+        Some(Arc::clone(&lister) as Arc<dyn SessionTrustAdmission>),
+    ));
+    let session = opened(&mut connection, true).await;
+    let (prompt, _form) = asked(&mut connection, &session).await;
+    let close = connection
+        .send_request("session/close", serde_json::json!({ "sessionId": session }))
+        .await;
+    let (answer, meanwhile) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        connection.response(prompt),
+    )
+    .await
+    .expect("a prompt whose session closed is answered without its question");
+    assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
+    let closed = match meanwhile
+        .iter()
+        .find(|message| message["id"].as_u64() == Some(close))
+    {
+        Some(found) => found.clone(),
+        None => {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                connection.response(close),
+            )
+            .await
+            .expect("session/close response")
+            .0
+        }
+    };
+    assert!(closed.get("result").is_some(), "close failed: {closed}");
+    assert!(
+        fixture.prepared_selections().is_none(),
+        "a closed session must not prepare a run"
+    );
+    connection.abort().await;
+}
+
+/// A host that fails the request rather than answering it stays untrusted.
+///
+/// The transport-failure branch: the elicitation never produces an outcome at
+/// all, which is not a decline and not a cancel. The turn still runs, because
+/// nothing about it depended on the answer being a grant — it just runs bare,
+/// and with `None` rather than `Some(Untrusted)`, because nobody decided.
+#[tokio::test]
+async fn a_host_that_fails_the_trust_request_runs_the_turn_untrusted() {
+    let executor = Arc::new(support::Executor::default());
+    let mut connection = support::Connected::new(router(
+        Some(Lister::holding("- AGENTS.md\n") as Arc<dyn SessionTrustAdmission>),
+        Arc::clone(&executor),
+    ));
+    let session = opened(&mut connection, true).await;
+    let (prompt, form) = asked(&mut connection, &session).await;
+    connection
+        .refuse_request(&form, "this host cannot render that form")
+        .await;
+    let (answer, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        connection.response(prompt),
+    )
+    .await
+    .expect("a failed question still answers the prompt");
+    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+    assert_eq!(
+        executor.prepared_selections().expect("preparation").trust(),
+        None,
+        "an unanswered question is not an answer"
+    );
+    connection.abort().await;
+}
+
+/// A `session/cancel` naming nothing in flight cancels nothing.
+///
+/// The third arm of the cancellation match, and the one with no test: no run
+/// is admitted and no prompt is accepted, so there is neither a key to name
+/// nor a withdrawal to record. What must not happen is that it is remembered —
+/// a cancellation left behind here would be read by the next prompt as its
+/// own, and that prompt is the one that raises the trust question.
+#[tokio::test]
+async fn a_cancel_with_nothing_in_flight_leaves_the_next_prompt_askable() {
+    let executor = Arc::new(support::Executor::default());
+    let lister = Lister::holding("- AGENTS.md\n");
+    let mut connection = support::Connected::new(router(
+        Some(Arc::clone(&lister) as Arc<dyn SessionTrustAdmission>),
+        Arc::clone(&executor),
+    ));
+    let session = opened(&mut connection, true).await;
+    withdraw(&mut connection, &session).await;
+    fence(&mut connection).await;
+    let answer = prompt_answering(
+        &mut connection,
+        &session,
+        serde_json::json!({ "action": "accept", "content": { "answer": "trusted" } }),
+    )
+    .await;
+    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+    assert_eq!(
+        executor.prepared_selections().expect("preparation").trust(),
+        Some(Trust::Trusted)
+    );
+    assert_eq!(lister.asked().len(), 1, "the question is still asked");
+    connection.abort().await;
+}
+
 /// No lister at all is the shape every non-ego host of this router has.
 #[tokio::test]
 async fn a_router_without_a_trust_port_prepares_exactly_as_before() {

@@ -668,6 +668,14 @@ pub(super) fn rooted_settings(
             .map(config::SelectedProfile::as_resolver_input),
     )
     .map_err(|err| UsageError(err.to_string()))?;
+    // Checked here, where the posture and the trust it was resolved from are
+    // the same pair. A frozen run resolves its posture from the trust its
+    // capture pinned and then reports `Untrusted` — it is a child, not a seat
+    // — so the same check there compares two different answers and fails on a
+    // correct run.
+    if trust == Trust::Untrusted || args.bare {
+        debug_assert_eq!(effective.posture, Posture::Bare);
+    }
     finish_rooted_settings(args, cwd, effective, trust, Some(layers), diagnostics)
 }
 
@@ -703,9 +711,6 @@ pub(super) fn finish_rooted_settings(
         })
         .transpose()?;
     let root = cwd.clone();
-    if trust == Trust::Untrusted || args.bare {
-        debug_assert_eq!(effective.posture, Posture::Bare);
-    }
 
     // §4 requires the clamp be stated, not silent: a `--budget 20$` reduced to
     // an administrator's $5 must not read as binding at $20. The money half

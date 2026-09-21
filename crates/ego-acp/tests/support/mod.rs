@@ -1478,6 +1478,23 @@ impl Connected {
             .expect("the ACP agent is listening");
     }
 
+    /// Fail one agent-originated request the way a host that cannot serve it
+    /// does: an error response, not an answer and not silence.
+    #[allow(dead_code)]
+    pub async fn refuse_request(&mut self, request: &serde_json::Value, message: &str) {
+        self.to_agent
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": { "code": -32603, "message": message },
+                })
+                .to_string(),
+            )
+            .await
+            .expect("the ACP agent is listening");
+    }
+
     pub async fn new_session(&mut self, root: &str) -> serde_json::Value {
         self.request(
             "session/new",
