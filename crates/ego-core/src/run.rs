@@ -565,7 +565,14 @@ pub struct RunSelections {
     /// admission truth. Non-ACP runs have no session observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sandbox_observation: Option<ExecObservation>,
-    /// The workspace posture a seat answered for, if a seat answered.
+    /// The workspace posture this run is being started at, if anyone decided.
+    ///
+    /// Two callers fill it and they are answering the same question. A seat
+    /// reports what a person answered for this workspace. A parent spawning a
+    /// subagent reports the posture that child runs at — its own by default,
+    /// `Untrusted` when the role or the call spent it bare — because a child
+    /// is subject to the rules its parent is subject to unless the parent
+    /// says otherwise. Neither can exceed what the parent already holds.
     ///
     /// Here for the same reason [`Self::sandbox`] is: trust is resolved once,
     /// at preparation, and the config layers, the instruction file, the
@@ -573,9 +580,10 @@ pub struct RunSelections {
     /// A posture selected later would answer a question whose consequences
     /// have already been decided.
     ///
-    /// `None` is not `Untrusted` with a different name: it means no seat was
-    /// asked, which is every headless caller. Preparation resolves both to a
-    /// bare posture, but only one of them is a person's answer.
+    /// `None` is not `Untrusted` with a different name: it means nobody was
+    /// in a position to decide — no seat asked and no parent spawning. It is
+    /// every plain headless caller. Preparation resolves it to a bare posture
+    /// all the same, but only a value here is somebody's answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     trust: Option<Trust>,
 }

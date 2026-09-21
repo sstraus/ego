@@ -515,6 +515,55 @@ mod regression_case {
         );
     }
 
+    /// `bare` is a declaration about a child run, so it needs a child run.
+    ///
+    /// An inline skill body is the parent's own turn — there is no separate
+    /// posture to lower — so accepting `bare` there would silently mean
+    /// nothing. Refusing it says so at the file.
+    #[test]
+    fn bare_is_declared_only_on_a_skill_that_forks_a_child_to_hold_it() {
+        let roots = Roots::new();
+        roots.write(
+            &roots.user,
+            "sealed",
+            &valid_for("sealed", "context: fork\nbare: true"),
+            "body",
+        );
+        roots.write(
+            &roots.user,
+            "inherits",
+            &valid_for("inherits", "context: fork"),
+            "body",
+        );
+        roots.write(
+            &roots.user,
+            "bare-inline",
+            &valid_for("bare-inline", "bare: true"),
+            "body",
+        );
+        let captured = capture(&roots.catalogue(false));
+        assert!(
+            captured
+                .descriptor("sealed")
+                .expect("a forked skill may declare itself bare")
+                .bare()
+        );
+        assert!(
+            !captured
+                .descriptor("inherits")
+                .expect("a forked skill is admitted without the field")
+                .bare(),
+            "a subagent inherits its parent's posture unless the role refuses it"
+        );
+        let diagnostic = captured
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.name() == "bare-inline")
+            .expect("an inline skill declaring itself bare is refused");
+        assert!(diagnostic.message().contains("bare"));
+        assert!(captured.descriptor("bare-inline").is_none());
+    }
+
     #[test]
     fn agent_must_resolve_through_the_existing_trusted_profile_owner() {
         let roots = Roots::new();

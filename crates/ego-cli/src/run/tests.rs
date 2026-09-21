@@ -448,7 +448,7 @@ async fn cli_background_launch_crosses_execution_barrier_without_collection_futu
         )
         .await
         .expect("background child admission");
-    let owner = CliSkillInvocationOwner::new(service, hooks, CancelToken::new());
+    let owner = CliSkillInvocationOwner::new(service, hooks, CancelToken::new(), Trust::Untrusted);
     let execution = owner
         .launch(invocation)
         .expect("launch does not fail")
@@ -1742,15 +1742,95 @@ fn a_tool_less_protocol_session_offers_no_tool_to_ask_a_seat_for() {
     );
 }
 
-/// A subagent of a trusted terminal run prepares its parent's configuration.
+/// The parent's posture is the ceiling, and `bare` is the only lever on it.
 ///
-/// A child does not re-ask anything: it resolves the layers its parent's
-/// answer already admitted, frozen at capture. Its own posture is still
-/// `Untrusted`, because a child is not a seat that was asked — and that pair,
-/// trusted layers under an untrusted run, is the one the shared tail of
-/// `finish_rooted_settings` used to assert could not exist. It can, and in a
-/// debug build the assertion fired: every subagent of a trusted terminal
-/// session panicked before it ran.
+/// Two claims in one table. A child is subject to the rules its parent is
+/// subject to, so a trusted parent spawns trusted children. And nothing a
+/// repository declares can promote the run that reads it: there is no pair
+/// here where an untrusted parent produces a trusted child.
+#[test]
+fn a_child_runs_at_its_parents_posture_and_bare_can_only_lower_it() {
+    use super::port_adapters::child_posture;
+
+    assert_eq!(child_posture(Trust::Trusted, false), Trust::Trusted);
+    assert_eq!(
+        child_posture(Trust::Trusted, true),
+        Trust::Untrusted,
+        "a role declared bare must be spent without its parent's posture"
+    );
+    assert_eq!(child_posture(Trust::Untrusted, false), Trust::Untrusted);
+    assert_eq!(
+        child_posture(Trust::Untrusted, true),
+        Trust::Untrusted,
+        "no declaration may promote a child above the parent that read it"
+    );
+}
+
+/// Only the child that refused the posture refuses the capture of it.
+#[test]
+fn only_a_bare_child_of_a_trusted_parent_resolves_without_its_parents_capture() {
+    use super::composition_root::spent_bare;
+
+    assert!(spent_bare(Trust::Trusted, Trust::Untrusted));
+    assert!(!spent_bare(Trust::Trusted, Trust::Trusted));
+    assert!(
+        !spent_bare(Trust::Untrusted, Trust::Untrusted),
+        "an untrusted capture resolves the same layers either way, and keeping \
+         it keeps the profile pinned with it"
+    );
+}
+
+/// What a child's posture decides, on a workspace that has something to hide.
+///
+/// This is the shape a child with no capture resolves through — every ACP
+/// subagent, because `for_acp` pins no configuration. The trusted case is the
+/// defect this story exists for: the child of a session a person trusted was
+/// reading none of the project its parent was reading.
+#[test]
+fn a_childs_posture_decides_whether_it_sees_the_project_at_all() {
+    let owner = tempdir().expect("workspace owner");
+    let root = std::fs::canonicalize(owner.path()).expect("canonical workspace");
+    std::fs::create_dir_all(root.join(".ego")).expect("project directory");
+    std::fs::write(
+        root.join(".ego/config.toml"),
+        "model = \"a-project-model\"\n",
+    )
+    .expect("project config");
+    let args = interactive_args(&[]);
+
+    for (posture, project, expected) in [
+        (Trust::Trusted, true, ego_core::config::Posture::Ambient),
+        (Trust::Untrusted, false, ego_core::config::Posture::Bare),
+    ] {
+        let settings = super::composition::rooted_settings(
+            &args,
+            root.clone(),
+            |_| posture,
+            &crate::output::Stderr,
+        )
+        .expect("a child with no capture resolves for itself");
+        assert_eq!(settings.effective.posture, expected, "{posture:?}");
+        assert_eq!(
+            settings
+                .profile_layers
+                .as_ref()
+                .expect("a resolving child carries its layers")
+                .iter()
+                .any(|layer| layer.source == ego_core::config::Source::Project),
+            project,
+            "a {posture:?} child saw the wrong side of the project configuration"
+        );
+    }
+}
+
+/// A subagent of a trusted terminal run prepares at its parent's posture.
+///
+/// A child does not re-ask anything: it runs at the posture its parent's
+/// answer already settled, frozen at capture. Reporting `Untrusted` here
+/// while resolving trusted layers was not a conservative choice, it was two
+/// answers to one question — and the half that read the posture rather than
+/// the layers, the hook catalogue, admitted nothing. Every rule the parent
+/// runs under, the child runs under.
 #[test]
 fn a_frozen_child_of_a_trusted_parent_prepares_the_layers_its_parent_admitted() {
     let owner = tempdir().expect("workspace owner");
@@ -1780,7 +1860,17 @@ fn a_frozen_child_of_a_trusted_parent_prepares_the_layers_its_parent_admitted() 
     );
     assert_eq!(
         settings.trust,
-        Trust::Untrusted,
-        "a child is not a seat and must not report itself as one"
+        Trust::Trusted,
+        "the child reported a posture its own layers contradict"
+    );
+    let layers = settings
+        .profile_layers
+        .as_ref()
+        .expect("a frozen child carries the layers it resolved");
+    assert!(
+        layers
+            .iter()
+            .any(|layer| layer.source == ego_core::config::Source::Project),
+        "the hook catalogue is admitted from these layers, and the project layer is missing"
     );
 }

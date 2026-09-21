@@ -685,8 +685,21 @@ pub(super) fn frozen_rooted_settings(
     frozen: &config::FrozenRunConfig,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Settings, UsageError> {
-    let effective = frozen.resolve(args)?;
-    finish_rooted_settings(args, cwd, effective, Trust::Untrusted, None, diagnostics)
+    // The capture's own posture, not `Untrusted`. A child runs at the posture
+    // its parent's answer settled: reporting anything else here is a second
+    // answer to a question already answered, and the consumers that read the
+    // posture rather than the resolved layers — the hook catalogue is the one
+    // that matters — acted on it.
+    let layers = frozen.layers(args)?;
+    let effective = frozen.resolve_layers(&layers, args)?;
+    finish_rooted_settings(
+        args,
+        cwd,
+        effective,
+        frozen.trust(),
+        Some(layers),
+        diagnostics,
+    )
 }
 
 pub(super) fn finish_rooted_settings(

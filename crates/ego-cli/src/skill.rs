@@ -645,6 +645,7 @@ fn load_skill(
         validate_profile_name(agent).map_err(|message| format!("field `agent` {message}"))?;
     }
     let background = take_optional_bool(&mut entries, "background")?.unwrap_or(false);
+    let bare = take_optional_bool(&mut entries, "bare")?.unwrap_or(false);
     let hooks = match entries.remove("hooks") {
         None => Vec::new(),
         Some(Node::Sequence(hooks)) => hooks
@@ -693,7 +694,13 @@ fn load_skill(
         });
     } else if background {
         return Err("field `background` requires `context: fork`".to_owned());
+    } else if bare {
+        // Only a fork opens a run of its own to hold a posture. Read on a
+        // skill that runs inside its parent's turn, `bare` would be a word
+        // that changes nothing, which is worse than a refusal.
+        return Err("field `bare` requires `context: fork`".to_owned());
     }
+    spec = spec.with_bare(bare);
     if let Some(agent) = agent {
         spec = spec.with_profile(agent);
     }
@@ -727,6 +734,7 @@ fn validate_field_names(entries: &BTreeMap<String, Node>) -> Result<(), String> 
                 | "context"
                 | "agent"
                 | "background"
+                | "bare"
                 | "hooks"
                 | "shell"
         ) {

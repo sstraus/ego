@@ -97,6 +97,18 @@ pub(super) fn apply_seat(
     // started.
 }
 
+/// Whether this run refused the posture the capture it was handed pins.
+///
+/// A subagent runs at its parent's posture, and a capture *is* that posture,
+/// already resolved. The one run that must not use it is the child a parent
+/// deliberately spent bare, because the capture is exactly what it is
+/// refusing. Only a trusted capture has anything to refuse: a bare child of an
+/// untrusted parent resolves the same layers either way, and keeping the
+/// capture keeps the profile pinned with it.
+pub(super) const fn spent_bare(captured: Trust, requested: Trust) -> bool {
+    matches!((captured, requested), (Trust::Trusted, Trust::Untrusted))
+}
+
 impl CliPrepared {
     pub(super) async fn prepare(
         mut args: Args,
@@ -155,8 +167,10 @@ impl CliPrepared {
         // the parent was prepared; it re-reads no layers and takes no answer.
         let trust = request.selections.trust().unwrap_or(Trust::Untrusted);
         let settings = match frozen {
-            Some(frozen) => frozen_rooted_settings(&args, root, frozen, &Stderr),
-            None => rooted_settings(&args, root, |_| trust, &Stderr),
+            Some(frozen) if !spent_bare(frozen.trust(), trust) => {
+                frozen_rooted_settings(&args, root, frozen, &Stderr)
+            }
+            _ => rooted_settings(&args, root, |_| trust, &Stderr),
         }
         .map_err(usage)?;
         if let Some(authority) = child_authority.as_deref() {

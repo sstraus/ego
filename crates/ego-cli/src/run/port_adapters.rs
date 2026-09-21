@@ -654,10 +654,32 @@ pub(super) struct BackgroundSkill {
     pub(super) execution: Option<ChildExecutionTask>,
 }
 
+/// The posture a child is spawned at.
+///
+/// A subagent is subject to the rules its parent is subject to, so the default
+/// is the parent's own posture: the same config layers, the same project MCP
+/// servers, the same skills, the same hooks. A role declared `bare` is spent
+/// without them.
+///
+/// The parent's posture is the ceiling and this function is why: `bare` can
+/// only take it away, and there is no argument that returns `Trusted` for an
+/// untrusted parent. A declaration in a repository cannot promote the run that
+/// reads it.
+pub(super) const fn child_posture(parent: Trust, bare: bool) -> Trust {
+    match (parent, bare) {
+        (Trust::Trusted, false) => Trust::Trusted,
+        _ => Trust::Untrusted,
+    }
+}
+
 pub(super) struct CliSkillInvocationOwner<'a> {
     pub(super) service: ChildRunService,
     pub(super) hooks: SessionHookRuntime<'a>,
     pub(super) parent_cancel: CancelToken,
+    /// The posture this run was admitted at, and so the posture its children
+    /// are spawned at. A child is subject to the rules its parent is subject
+    /// to; the only thing an invocation can do with this value is lower it.
+    pub(super) trust: Trust,
     pub(super) background: Arc<Mutex<BTreeMap<SubagentInvocationId, BackgroundSkill>>>,
 }
 
@@ -666,11 +688,13 @@ impl<'a> CliSkillInvocationOwner<'a> {
         service: ChildRunService,
         hooks: SessionHookRuntime<'a>,
         parent_cancel: CancelToken,
+        trust: Trust,
     ) -> Self {
         Self {
             service,
             hooks,
             parent_cancel,
+            trust,
             background: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -791,13 +815,15 @@ impl SkillInvocationPort for CliSkillInvocationOwner<'_> {
                     })
                 })
                 .transpose()?;
+            let posture = child_posture(self.trust, invocation.bare());
             let selections = RunSelections::new(
                 invocation.model().map(|model| ModelRef(model.to_owned())),
                 thinking,
                 None,
                 None,
                 invocation.profile().map(str::to_owned),
-            );
+            )
+            .with_trust(posture);
             let id = invocation.subagent_invocation();
             if self
                 .service

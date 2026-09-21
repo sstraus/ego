@@ -426,6 +426,7 @@ fn skill_operation_wire_is_closed_and_has_only_invoke_or_read_resource() {
     let invoke = SkillOperation::Invoke {
         name: "explain".to_owned(),
         arguments: "sh -c 'touch /tmp/nope'".to_owned(),
+        bare: false,
     };
     let read = SkillOperation::ReadResource {
         invocation: SkillInvocationId::new(),
@@ -460,6 +461,7 @@ fn renderer_is_one_inert_pass_and_preserves_the_exact_raw_argument_tail() {
     let operation = SkillOperation::Invoke {
         name: "explain".to_owned(),
         arguments: "$(touch /tmp/nope)".to_owned(),
+        bare: false,
     };
     let rendered = skill.render(&operation).expect("inert skill rendering");
     assert_eq!(rendered, "Explain $(touch /tmp/nope) and keep $1 inert.");
@@ -538,6 +540,7 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
         SkillOperation::Invoke {
             name: "explain".to_owned(),
             arguments: "captured".to_owned(),
+            bare: false,
         },
         &blobs,
         &journal,
@@ -629,6 +632,7 @@ fn admitted_skill_snapshot_persists_versioned_executable_hooks_and_descriptor_ev
         SkillOperation::Invoke {
             name: "snapshot".to_owned(),
             arguments: "captured".to_owned(),
+            bare: false,
         },
         &blobs,
         &journal,
@@ -655,6 +659,113 @@ fn admitted_skill_snapshot_persists_versioned_executable_hooks_and_descriptor_ev
     assert!(serde_json::to_vec(&value).expect("admission bytes").len() <= 64 * 1024);
 }
 
+/// A role that refuses its parent's posture is admitted at that refusal once.
+///
+/// The catalogue the resume below reads no longer declares `bare`. If the flag
+/// were recomputed from current skill source instead of read back from the
+/// snapshot, an invocation resumed after an edit would come back holding a
+/// posture nobody admitted it at — which is the same class of defect the
+/// digest-pinned hook snapshot already exists to prevent.
+#[test]
+fn a_bare_role_is_admitted_into_the_snapshot_and_outlives_the_declaration() {
+    let blobs = RecordingBlobStore::default();
+    let store = RecordingSessionStore::default();
+    let clock = FixedClock;
+    let sink = NullSink;
+    let session = SessionId::new();
+    let journal = SharedJournal::new(Journal::new(
+        session,
+        &store,
+        &clock,
+        &sink,
+        Producer::Main,
+        Default::default(),
+    ));
+    let catalogue = SkillCatalogue::new(vec![spec("sealed", DIGEST_A, true, true).with_bare(true)])
+        .expect("a bare role is a complete catalogue entry");
+    let invocation = SkillInvocation::admit(
+        &catalogue,
+        SkillOperation::Invoke {
+            name: "sealed".to_owned(),
+            arguments: "captured".to_owned(),
+            bare: false,
+        },
+        &blobs,
+        &journal,
+    )
+    .expect("skill admission");
+    assert!(invocation.bare());
+
+    let value =
+        serde_json::to_value(invocation.admission_blob(&blobs).unwrap()).expect("admission JSON");
+    assert_eq!(
+        value["bare"], true,
+        "the snapshot must carry the posture the role was admitted at"
+    );
+
+    let inheriting = SkillCatalogue::new(vec![spec("sealed", DIGEST_A, true, true)])
+        .expect("the same role, no longer declaring itself bare");
+    let resumed = SkillInvocation::resume(invocation.id(), &inheriting, &blobs, &journal)
+        .expect("resume from the admitted snapshot");
+    assert!(
+        resumed.bare(),
+        "resume must reconstruct the admitted posture, never the current declaration"
+    );
+}
+
+/// The caller can spend one child bare on a role that never declared itself so.
+///
+/// This is the orchestration half: the role says what it always is, the parent
+/// says what it is doing right now. The parent knows which repository it is
+/// about to point a subagent at, so it is the one that can answer for a case
+/// the skill file could not anticipate. Omitting the field inherits, which is
+/// why it must be absent from the wire without being a decision.
+#[test]
+fn a_caller_can_spend_one_child_bare_without_the_role_declaring_it() {
+    let inherits = serde_json::from_value::<SkillOperation>(json!({
+        "kind": "invoke",
+        "name": "sealed",
+        "arguments": "captured",
+    }))
+    .expect("an invocation that says nothing inherits");
+    assert!(!inherits.bare());
+    let spent = serde_json::from_value::<SkillOperation>(json!({
+        "kind": "invoke",
+        "name": "sealed",
+        "arguments": "captured",
+        "bare": true,
+    }))
+    .expect("a caller may spend this one child bare");
+    assert!(spent.bare());
+
+    let blobs = RecordingBlobStore::default();
+    let store = RecordingSessionStore::default();
+    let clock = FixedClock;
+    let sink = NullSink;
+    let session = SessionId::new();
+    let journal = SharedJournal::new(Journal::new(
+        session,
+        &store,
+        &clock,
+        &sink,
+        Producer::Main,
+        Default::default(),
+    ));
+    let catalogue = catalogue("sealed", DIGEST_A);
+    assert!(
+        !SkillInvocation::admit(&catalogue, inherits, &blobs, &journal)
+            .expect("skill admission")
+            .bare(),
+        "a role that declares nothing inherits its parent's posture"
+    );
+    assert!(
+        SkillInvocation::admit(&catalogue, spent, &blobs, &journal)
+            .expect("skill admission")
+            .bare(),
+        "the caller's answer must reach the admitted snapshot"
+    );
+}
+
 #[test]
 fn admitted_skill_snapshot_rejects_lifecycle_only_unknown_missing_mismatched_and_oversized_shapes()
 {
@@ -677,6 +788,7 @@ fn admitted_skill_snapshot_rejects_lifecycle_only_unknown_missing_mismatched_and
         SkillOperation::Invoke {
             name: "snapshot".to_owned(),
             arguments: "captured".to_owned(),
+            bare: false,
         },
         &blobs,
         &journal,
@@ -844,6 +956,7 @@ fn skill_invocation_port_bridges_real_child_service_for_both_fork_modes() {
         SkillOperation::Invoke {
             name: "explain".to_owned(),
             arguments: "foreground".to_owned(),
+            bare: false,
         },
     )
     .expect("typed service invocation");
@@ -853,6 +966,7 @@ fn skill_invocation_port_bridges_real_child_service_for_both_fork_modes() {
         SkillOperation::Invoke {
             name: "explain".to_owned(),
             arguments: "background".to_owned(),
+            bare: false,
         },
     )
     .expect("typed background service invocation");

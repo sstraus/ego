@@ -199,6 +199,7 @@ pub(super) async fn drive_headless_turn(
         child_service,
         hooks.runtime.clone(),
         cancel.clone(),
+        hook_trust,
     ));
     let tools = match admitted_tools {
         Some(source) => {

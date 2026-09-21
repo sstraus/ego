@@ -465,6 +465,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                         child_service,
                         session_hooks.runtime.clone(),
                         cancel.clone(),
+                        skill_trust,
                     ));
                     let model_switch_owner;
                     install_model_switch_owner!(session_hooks, model_switch_owner, status);

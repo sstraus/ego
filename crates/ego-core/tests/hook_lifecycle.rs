@@ -1580,6 +1580,7 @@ fn admitted_skill_instruction_crosses_real_hook_boundary_once_before_child_start
         SkillOperation::Invoke {
             name: "explain".to_owned(),
             arguments: "question".to_owned(),
+            bare: false,
         },
     )
     .expect("durable skill invocation");

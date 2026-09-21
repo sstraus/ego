@@ -765,16 +765,43 @@ impl FrozenRunConfig {
         })
     }
 
-    pub(crate) fn resolve(&self, args: &Args) -> Result<Effective, UsageError> {
+    /// The posture this capture pinned.
+    ///
+    /// A child runs at its parent's posture, so this is the answer for every
+    /// consumer that asks one — including the ones that read the posture
+    /// rather than the layers, which is how a child came to resolve project
+    /// configuration and admit no hooks from it.
+    pub(crate) const fn trust(&self) -> Trust {
+        self.trust
+    }
+
+    /// The layers this capture resolves against, composed exactly as [`layers`]
+    /// composes a fresh run's: the pinned base, then this request's agent file
+    /// and its flags.
+    pub(crate) fn layers(&self, args: &Args) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
         let mut layers = self.layers.clone();
         if let Some(agent_file) = &args.agent_file {
             layers.push(agent_file.layer()?);
         }
         layers.push(args_layer(args)?);
+        Ok(layers)
+    }
+
+    pub(crate) fn resolve(&self, args: &Args) -> Result<Effective, UsageError> {
+        self.resolve_layers(&self.layers(args)?, args)
+    }
+
+    /// Resolve layers this capture already composed, so a caller that needs
+    /// both does not compose them twice.
+    pub(crate) fn resolve_layers(
+        &self,
+        layers: &[Sourced<ConfigLayer>],
+        args: &Args,
+    ) -> Result<Effective, UsageError> {
         let request_profile = profile(args);
         let selected_profile = request_profile.as_ref().or(self.profile.as_ref());
         resolve_selected(
-            &layers,
+            layers,
             self.trust,
             selected_profile.map(SelectedProfile::as_resolver_input),
         )

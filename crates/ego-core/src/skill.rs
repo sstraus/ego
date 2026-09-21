@@ -36,6 +36,17 @@ pub enum SkillOperation {
     Invoke {
         name: String,
         arguments: String,
+        /// The caller spending this child without its own posture.
+        ///
+        /// The role's own `bare` declaration answers "this role is never
+        /// trusted with a workspace"; this answers "not this time". An
+        /// orchestrator that knows what it is about to hand a subagent is the
+        /// one deciding its level of engagement, and a repository it has not
+        /// vetted is exactly the case the declaration cannot anticipate.
+        /// Absent means inherit, and neither source can raise a child above
+        /// the parent that read it.
+        #[serde(default)]
+        bare: bool,
     },
     ReadResource {
         invocation: SkillInvocationId,
@@ -57,6 +68,11 @@ impl SkillOperation {
             Self::ReadResource { .. } => "",
         }
     }
+
+    /// Whether the caller asked for this one child to be spent bare.
+    pub const fn bare(&self) -> bool {
+        matches!(self, Self::Invoke { bare: true, .. })
+    }
 }
 
 /// User-surface invocation bound to the descriptor selected from one action
@@ -73,6 +89,7 @@ impl AdmittedSkillOperation {
             operation: SkillOperation::Invoke {
                 name: descriptor.name.clone(),
                 arguments: arguments.into(),
+                bare: false,
             },
             descriptor: descriptor.id,
         }
@@ -150,6 +167,15 @@ pub struct SkillSpec {
     disallowed_tools: BTreeSet<String>,
     fork: Option<ChildWait>,
     profile: Option<String>,
+    /// Whether this role is spawned without its parent's workspace posture.
+    ///
+    /// A forked skill runs at the posture its parent was admitted at: it is
+    /// subject to the same project rules, hooks included. `bare` is how a
+    /// role says otherwise — a reviewer that should read a repository without
+    /// running anything the repository declares. It can only take authority
+    /// away: a bare child of a trusted parent is untrusted, and no value here
+    /// makes a child of an untrusted parent trusted.
+    bare: bool,
     hooks: Vec<HookConfigEntry>,
     resource_paths: Vec<String>,
     arguments: Vec<String>,
@@ -186,6 +212,7 @@ impl SkillSpec {
             disallowed_tools: BTreeSet::new(),
             fork: None,
             profile: None,
+            bare: false,
             hooks: Vec::new(),
             resource_paths: Vec::new(),
             arguments: Vec::new(),
@@ -249,6 +276,12 @@ impl SkillSpec {
         self
     }
 
+    #[must_use]
+    pub const fn with_bare(mut self, bare: bool) -> Self {
+        self.bare = bare;
+        self
+    }
+
     pub fn with_hook_entries(mut self, hooks: Vec<HookConfigEntry>) -> Self {
         self.hooks = hooks;
         self
@@ -305,6 +338,10 @@ impl SkillSpec {
         self.profile.as_deref()
     }
 
+    pub const fn bare(&self) -> bool {
+        self.bare
+    }
+
     pub fn hooks(&self) -> &[HookConfigEntry] {
         &self.hooks
     }
@@ -319,7 +356,9 @@ impl SkillSpec {
 
     pub fn render(&self, operation: &SkillOperation) -> Result<String, SkillError> {
         let (name, arguments) = match operation {
-            SkillOperation::Invoke { name, arguments } => (name, arguments),
+            SkillOperation::Invoke {
+                name, arguments, ..
+            } => (name, arguments),
             SkillOperation::ReadResource { .. } => {
                 return Err(SkillError::new(
                     "a resource read cannot render instructions",
@@ -546,6 +585,10 @@ pub struct SkillInvocationAdmission {
     effort: Option<String>,
     fork: Option<String>,
     profile: Option<String>,
+    /// The declared refusal of the parent's posture, carried in the evidence
+    /// because the run it spawns is admitted from this blob and nothing else.
+    #[serde(default)]
+    bare: bool,
     hooks: Vec<AdmittedSkillHook>,
     resource_paths: Vec<String>,
 }
@@ -563,6 +606,8 @@ struct DecodedSkillInvocationAdmission {
     effort: Option<String>,
     fork: Option<String>,
     profile: Option<String>,
+    #[serde(default)]
+    bare: bool,
     hooks: Vec<AdmittedSkillHook>,
     resource_paths: Vec<String>,
 }
@@ -584,6 +629,7 @@ impl<'de> Deserialize<'de> for SkillInvocationAdmission {
             effort: decoded.effort,
             fork: decoded.fork,
             profile: decoded.profile,
+            bare: decoded.bare,
             hooks: decoded.hooks,
             resource_paths: decoded.resource_paths,
         };
@@ -838,7 +884,7 @@ impl SkillInvocation {
     ) -> Result<(Self, EventId), SkillError> {
         let rendered = spec.render(&operation)?;
         let id = SkillInvocationId::new();
-        let admission = invocation_admission(id, catalogue_generation, &spec)?;
+        let admission = invocation_admission(id, catalogue_generation, &spec, operation.bare())?;
         let admission_bytes = encode_admission(&admission)?;
         let admission_ref = commit_blob(blobs, &admission_bytes)?;
         let rendered_ref = commit_blob(blobs, rendered.as_bytes())?;
@@ -882,7 +928,7 @@ impl SkillInvocation {
             .map_err(|error| SkillError::new(error.to_string()))?;
         let generation = SkillCatalogueGeneration::derive(&evidence);
         let id = SkillInvocationId::new();
-        let admission = invocation_admission(id, generation, &spec)?;
+        let admission = invocation_admission(id, generation, &spec, operation.bare())?;
         let admission_bytes = encode_admission(&admission)?;
         let admission_ref = synthetic_blob(&admission_bytes)?;
         // `admit_for_service` receives no blob owner; its child-service seam
@@ -1010,6 +1056,10 @@ impl SkillInvocation {
     }
     pub fn profile(&self) -> Option<&str> {
         self.admission.profile.as_deref()
+    }
+    /// Whether this invocation refuses its parent's workspace posture.
+    pub const fn bare(&self) -> bool {
+        self.admission.bare
     }
     pub fn subagent_invocation(&self) -> SubagentInvocationId {
         SubagentInvocationId::from_uuid(self.id.uuid())
@@ -1186,6 +1236,7 @@ fn invocation_admission(
     invocation: SkillInvocationId,
     catalogue_generation: SkillCatalogueGeneration,
     spec: &SkillSpec,
+    requested_bare: bool,
 ) -> Result<SkillInvocationAdmission, SkillError> {
     let hook_source = HookSource::skill_entries_with_authority(
         spec.descriptor.location.as_str(),
@@ -1224,6 +1275,9 @@ fn invocation_admission(
             ChildWait::Background => "background".to_owned(),
         }),
         profile: spec.profile.clone(),
+        // Either source is enough and neither is a veto: both can only take
+        // the parent's posture away.
+        bare: spec.bare || requested_bare,
         hooks,
         resource_paths: spec.resource_paths.clone(),
     })

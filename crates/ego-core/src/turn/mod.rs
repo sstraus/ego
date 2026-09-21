@@ -139,7 +139,11 @@ impl RegisteredTool {
                             "properties": {
                                 "kind": { "const": "invoke" },
                                 "name": { "type": "string" },
-                                "arguments": { "type": "string" }
+                                "arguments": { "type": "string" },
+                                "bare": {
+                                    "type": "boolean",
+                                    "description": "Run this invocation without the workspace posture of this session: no project configuration, no project hooks. Omit to let the subagent inherit what you are subject to."
+                                }
                             }
                         },
                         {
