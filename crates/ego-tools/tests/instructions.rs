@@ -95,6 +95,18 @@ fn nested_agents_files_load_root_first_so_the_nearest_one_comes_last() {
 }
 
 #[test]
+fn relative_claude_alias_to_agents_does_not_duplicate_instruction_text() {
+    let tree = Tree::new();
+    tree.write("AGENTS.md", "canonical rules");
+    symlink("AGENTS.md", tree.root.join("CLAUDE.md")).unwrap();
+
+    let set = tree.set(&tree.root, Limits::default());
+
+    assert_eq!(texts(&set), ["canonical rules"]);
+    assert_eq!(set.loaded[0].path, tree.root.join("AGENTS.md"));
+}
+
+#[test]
 fn an_agents_file_carries_its_real_byte_count_and_a_stable_digest() {
     let tree = Tree::new();
     tree.write("AGENTS.md", "abc");
@@ -126,6 +138,21 @@ fn a_symlinked_agents_file_is_refused_and_its_target_is_never_read() {
     assert_eq!(set.skipped.len(), 1);
     assert_eq!(set.skipped[0].reason, Refusal::Symlink);
     assert_eq!(set.skipped[0].path, tree.root.join("AGENTS.md"));
+}
+
+#[test]
+fn an_import_through_a_symlinked_directory_never_reads_its_target() {
+    let tree = Tree::new();
+    tree.write("AGENTS.md", "project rules\n@linked/secret.md\n");
+    let secret = tree.write("private/secret.md", "private fixture bytes");
+    symlink(secret.parent().unwrap(), tree.root.join("linked")).unwrap();
+
+    let set = tree.set(&tree.root, Limits::default());
+
+    assert_eq!(texts(&set), ["project rules\n@linked/secret.md\n"]);
+    assert_eq!(set.skipped.len(), 1);
+    assert_eq!(set.skipped[0].path, tree.root.join("linked/secret.md"));
+    assert_eq!(set.skipped[0].reason, Refusal::Symlink);
 }
 
 /// Refused even when the target is perfectly ordinary and inside the

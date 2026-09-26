@@ -662,11 +662,26 @@ failures, and one conversion sent help to stderr at exit 2, which §4.3
 defines as a usage error. Asking what a command does is not misusing it, and
 a script that pipes `--help` must not get an empty stdout and a failure.
 
+**Ambient discovery is trust-gated.** Project-local config, `AGENTS.md`,
+hooks, skills and MCP servers load only after the interactive seat explicitly
+trusts the canonical workspace. Declining, Ctrl-C or EOF
+continues bare. Headless always runs untrusted and bare automatically (no
+dialog, no ambient code execution). `--bare` forces this and skips the trust
+question. The question is asked only where there is something to answer about:
+a workspace holding no project config, skill, or discoverable instruction file
+starts untrusted in silence, and the `trust` status segment says so. For a
+workspace under `~/Gits`, instruction discovery starts at `~/Gits/AGENTS.md`
+and descends through every ancestor to the working directory; outside that
+tree it starts at the workspace root. Scratch work under `~/Gits/.tmp` does not
+inherit shared instructions. `AGENTS.md` is canonical; a relative `CLAUDE.md`
+symlink to it adds no duplicate prompt text.
+
 
 
 `--instructions FILE` is the headless opt-in and is **not** ambient: it names
 a file rather than discovering one, so it survives `Posture::Bare` and
-*replaces* the discovered set rather than adding to it. `--bare` together with
+*replaces* the discovered set rather than adding to it. Its bounded imports
+are relative to `FILE` and cannot leave that file's directory. `--bare` together with
 `--instructions` is a conflict for the applicability matrix above, not for the
 loader — from a resolved posture alone, "the user demanded bare" and "the
 workspace is untrusted" are the same value and want opposite answers. See

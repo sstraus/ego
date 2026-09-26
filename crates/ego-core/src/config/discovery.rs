@@ -1,15 +1,17 @@
 //! Discovering the instructions a workspace hands a model.
 //!
-//! `AGENTS.md`, from the workspace root down to the current directory, only in
-//! a workspace the trust gate let through. See
+//! `AGENTS.md`, from the supplied discovery root down to the current directory,
+//! including bounded relative imports, only in a workspace the trust gate let
+//! through. The CLI chooses `~/Gits` as the discovery root where applicable. See
 //! `docs/decisions/2026-08-21-instructions-a-workspace-may-hand-a-model.md`
+//! and `docs/decisions/2026-09-26-shared-instruction-parity.md`
 //! and `docs/08-codex-critique.md` I2.
 //!
 //! Split the way everything in this crate is split: the *decision* is a pure
 //! function here, and the reading happens behind [`InstructionIo`], whose
 //! only real implementation lives in `ego-tools`. Root→cwd needs no directory
-//! walk — the filename is known, so the path list is arithmetic over the
-//! caller's already-canonical inputs.
+//! walk — the filename is known, so the candidate path list is arithmetic
+//! over the caller's already-canonical inputs.
 //!
 //! ## What this does not do
 //!
@@ -19,12 +21,13 @@
 //! them. Instructions are **declarative** — they may shape what a model is
 //! told, and they can never grant a permission or run a hook.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 
 use super::resolve::Posture;
 use crate::public::{InstructionDescriptor, InstructionSource};
 
-/// The default file every ancestor directory is checked for.
+/// The canonical file every ancestor directory is checked for.
 pub const INSTRUCTIONS_FILE: &str = "AGENTS.md";
 
 /// How a run's instructions were chosen.
@@ -39,7 +42,7 @@ pub const INSTRUCTIONS_FILE: &str = "AGENTS.md";
 pub enum Selection {
     /// Nothing is loaded, and [`load`] touches no file at all.
     Disabled,
-    /// [`INSTRUCTIONS_FILE`], workspace root down to cwd.
+    /// [`INSTRUCTIONS_FILE`], discovery root down to cwd.
     Ambient,
     /// One named file, whatever it is called.
     Explicit(PathBuf),
@@ -120,8 +123,16 @@ pub enum Refusal {
     Unreadable { message: String },
     /// [`Limits::max_total_bytes`] would have been exceeded by this file.
     TotalTooLarge { limit: u64 },
-    /// [`Limits::max_files`] files had already been loaded.
+    /// [`Limits::max_files`] loaded files or distinct import attempts reached.
     TooManyFiles { limit: usize },
+    /// An imported file is absent; ambient top-level candidates may be absent.
+    MissingImport,
+    /// An import leaves the allowed instruction tree or names an absolute path.
+    ImportOutsideScope,
+    /// A file imports one of its active ancestors.
+    ImportCycle,
+    /// A standalone `@` lacks a single usable relative path.
+    InvalidImport,
 }
 
 impl std::fmt::Display for Refusal {
@@ -136,8 +147,12 @@ impl std::fmt::Display for Refusal {
                 write!(f, "the {limit}-byte total for this run was reached")
             }
             Refusal::TooManyFiles { limit } => {
-                write!(f, "{limit} instruction files had already been loaded")
+                write!(f, "the {limit}-file or import-attempt limit was reached")
             }
+            Refusal::MissingImport => write!(f, "the imported file does not exist"),
+            Refusal::ImportOutsideScope => write!(f, "the import leaves its instruction scope"),
+            Refusal::ImportCycle => write!(f, "the import forms a cycle"),
+            Refusal::InvalidImport => write!(f, "the import is malformed"),
         }
     }
 }
@@ -162,17 +177,17 @@ pub enum Found {
 /// instruction discovery is trusted-side and runs before a loop, a permit or a
 /// tool exists.
 pub trait InstructionIo {
-    /// Read `path`, refusing anything that is not a regular non-symlinked
-    /// file of at most `max_bytes`.
+    /// Read `path`, refusing anything that is not a regular file of at most
+    /// `max_bytes`, including a symlink in its final or parent components.
     ///
-    /// An implementation must not follow a symlink at the final component,
+    /// An implementation must not follow a static symlink in the path,
     /// and must not read more than `max_bytes + 1` — one byte past the limit
     /// is what distinguishes "exactly at it" from "over it" without pulling
     /// an arbitrarily large file into memory.
     fn load(&self, path: &Path, max_bytes: u64) -> Found;
 }
 
-/// One loaded instruction file.
+/// One loaded instruction file, including an imported file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instruction {
     /// Where it was found. Ordering within a set is root-first, so a later
@@ -283,52 +298,207 @@ pub fn load(
     let paths = plan(root, cwd, selection)?;
     let mut set = InstructionSet::default();
     let mut total: u64 = 0;
-
+    let mut visited = HashSet::new();
+    let mut active = Vec::new();
+    let mut import_attempts = 0;
+    let scope = match selection {
+        Selection::Explicit(path) => path.parent().unwrap_or(root),
+        Selection::Ambient | Selection::Disabled => root,
+    };
     for path in paths {
-        if set.loaded.len() >= limits.max_files {
-            set.skipped.push(Skipped {
-                path,
-                reason: Refusal::TooManyFiles {
-                    limit: limits.max_files,
-                },
-            });
-            continue;
-        }
-
-        match io.load(&path, limits.max_file_bytes) {
-            Found::Absent => {}
-            Found::Refused(reason) => set.skipped.push(Skipped { path, reason }),
-            Found::Read { bytes } => {
-                let len = bytes.len() as u64;
-                if total + len > limits.max_total_bytes {
-                    set.skipped.push(Skipped {
-                        path,
-                        reason: Refusal::TotalTooLarge {
-                            limit: limits.max_total_bytes,
-                        },
-                    });
-                    continue;
-                }
-                match String::from_utf8(bytes) {
-                    Err(_) => set.skipped.push(Skipped {
-                        path,
-                        reason: Refusal::NotText,
-                    }),
-                    Ok(text) => {
-                        total += len;
-                        set.loaded.push(Instruction {
-                            path,
-                            digest: digest_of(text.as_bytes()),
-                            bytes: len,
-                            text,
-                        });
-                    }
-                }
-            }
-        }
+        load_one(
+            io,
+            &path,
+            false,
+            scope,
+            limits,
+            &mut set,
+            &mut total,
+            &mut visited,
+            &mut active,
+            &mut import_attempts,
+        );
     }
 
     Ok(set)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_one(
+    io: &dyn InstructionIo,
+    path: &Path,
+    imported: bool,
+    scope: &Path,
+    limits: Limits,
+    set: &mut InstructionSet,
+    total: &mut u64,
+    visited: &mut HashSet<PathBuf>,
+    active: &mut Vec<PathBuf>,
+    import_attempts: &mut usize,
+) {
+    if active.iter().any(|ancestor| ancestor == path) {
+        set.skipped.push(Skipped {
+            path: path.to_path_buf(),
+            reason: Refusal::ImportCycle,
+        });
+        return;
+    }
+    if visited.contains(path) {
+        return;
+    }
+    if set.loaded.len() >= limits.max_files {
+        set.skipped.push(Skipped {
+            path: path.to_path_buf(),
+            reason: Refusal::TooManyFiles {
+                limit: limits.max_files,
+            },
+        });
+        return;
+    }
+    visited.insert(path.to_path_buf());
+    let bytes = match io.load(path, limits.max_file_bytes) {
+        Found::Absent if imported => {
+            set.skipped.push(Skipped {
+                path: path.to_path_buf(),
+                reason: Refusal::MissingImport,
+            });
+            return;
+        }
+        Found::Absent => return,
+        Found::Refused(reason) => {
+            set.skipped.push(Skipped {
+                path: path.to_path_buf(),
+                reason,
+            });
+            return;
+        }
+        Found::Read { bytes } => bytes,
+    };
+    let len = bytes.len() as u64;
+    if *total + len > limits.max_total_bytes {
+        set.skipped.push(Skipped {
+            path: path.to_path_buf(),
+            reason: Refusal::TotalTooLarge {
+                limit: limits.max_total_bytes,
+            },
+        });
+        return;
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        set.skipped.push(Skipped {
+            path: path.to_path_buf(),
+            reason: Refusal::NotText,
+        });
+        return;
+    };
+    *total += len;
+    set.loaded.push(Instruction {
+        path: path.to_path_buf(),
+        digest: digest_of(text.as_bytes()),
+        bytes: len,
+        text: text.clone(),
+    });
+    active.push(path.to_path_buf());
+    for reference in import_lines(&text) {
+        if reference.is_empty() {
+            set.skipped.push(Skipped {
+                path: path.to_path_buf(),
+                reason: Refusal::InvalidImport,
+            });
+            continue;
+        }
+        let Some(target) = import_target(path, scope, &reference) else {
+            set.skipped.push(Skipped {
+                path: path.parent().unwrap_or(path).join(&reference),
+                reason: Refusal::ImportOutsideScope,
+            });
+            continue;
+        };
+        if !visited.contains(&target) && !active.contains(&target) {
+            if *import_attempts >= limits.max_files {
+                set.skipped.push(Skipped {
+                    path: target,
+                    reason: Refusal::TooManyFiles {
+                        limit: limits.max_files,
+                    },
+                });
+                continue;
+            }
+            *import_attempts += 1;
+        }
+        load_one(
+            io,
+            &target,
+            true,
+            scope,
+            limits,
+            set,
+            total,
+            visited,
+            active,
+            import_attempts,
+        );
+    }
+    active.pop();
+}
+
+/// Return only standalone references outside fenced and indented code.
+fn import_lines(text: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let indentation = line.bytes().take_while(|byte| *byte == b' ').count();
+        if indentation >= 4 || line.starts_with('\t') {
+            continue;
+        }
+        let trimmed = line.trim();
+        let marker = trimmed.chars().next().unwrap_or(' ');
+        let marker_count = trimmed.chars().take_while(|ch| *ch == marker).count();
+        if let Some((open_marker, open_count)) = fence {
+            if marker == open_marker
+                && marker_count >= open_count
+                && trimmed[marker_count..].trim().is_empty()
+            {
+                fence = None;
+            }
+            continue;
+        }
+        if (marker == '`' || marker == '~') && marker_count >= 3 {
+            fence = Some((marker, marker_count));
+            continue;
+        }
+        if let Some(reference) = trimmed.strip_prefix('@') {
+            if reference.chars().any(char::is_whitespace) {
+                references.push(String::new());
+            } else {
+                references.push(reference.to_owned());
+            }
+        }
+    }
+    references
+}
+
+/// Normalize lexically so an import cannot escape its trusted tree.
+fn import_target(containing: &Path, scope: &Path, reference: &str) -> Option<PathBuf> {
+    let reference = Path::new(reference);
+    if reference.is_absolute() {
+        return None;
+    }
+    let mut target = containing.parent()?.to_path_buf();
+    for component in reference.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(name) => target.push(name),
+            Component::ParentDir => {
+                target.pop();
+                if !target.starts_with(scope) {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    target.starts_with(scope).then_some(target)
 }
 
 /// The system prompt a set of instructions becomes, **and** the descriptors

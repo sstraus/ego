@@ -585,6 +585,57 @@ fn an_explicitly_named_instruction_file_is_described_and_never_quoted() {
     );
 }
 
+#[test]
+fn explicit_headless_instructions_include_relative_imports_without_ambient_text() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.file("AGENTS.md", "Ambient text must stay out of this request.");
+    ego.file("HOUSE-RULES.md", "House rule.\n@nested/detail.md\n");
+    ego.file("nested/detail.md", "Nested rule.");
+
+    let finished = ego
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--instructions",
+            "HOUSE-RULES.md",
+            "--output",
+            "jsonl",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    let started = finished.events().remove(0);
+    let sources = started["instructions"].as_array().expect("two descriptors");
+    assert_eq!(sources.len(), 2);
+    assert!(
+        sources[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("HOUSE-RULES.md")
+    );
+    assert!(
+        sources[1]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("nested/detail.md")
+    );
+    assert_eq!(sources[1]["scope"], "nested");
+    assert!(sources.iter().all(|source| source["source"] == "explicit"));
+    assert!(!finished.stdout.contains("Nested rule."));
+
+    let generations = stub.generations();
+    let system = generations[0]["messages"][0]["content"]
+        .as_str()
+        .expect("system prompt");
+    assert!(system.contains("House rule."));
+    assert!(system.contains("Nested rule."));
+    assert!(!system.contains("Ambient text must stay out"));
+}
+
 /// The same file named two ways is the same file, and the descriptor must not
 /// be able to tell which spelling the operator typed.
 ///

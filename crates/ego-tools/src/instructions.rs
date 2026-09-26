@@ -22,6 +22,26 @@ pub struct OsInstructionIo;
 
 impl InstructionIo for OsInstructionIo {
     fn load(&self, path: &Path, max_bytes: u64) -> Found {
+        // An import may be lexically inside its allowed tree while a parent
+        // directory redirects it elsewhere. Reject static redirections before
+        // opening the leaf; the remaining concurrent-swap window is P23.
+        for parent in path.ancestors().skip(1) {
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            match fs::symlink_metadata(parent) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Found::Refused(Refusal::Symlink);
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Found::Absent,
+                Err(err) => {
+                    return Found::Refused(Refusal::Unreadable {
+                        message: err.to_string(),
+                    });
+                }
+            }
+        }
         // `symlink_metadata`, not `metadata`: the whole point is to see the
         // link itself rather than what it points at. A symlinked instruction
         // file is refused, not resolved — see `Refusal::Symlink`.

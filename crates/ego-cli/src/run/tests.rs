@@ -18,6 +18,63 @@ use ego_core::store::session_store::{SessionStore, StoreError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
 
+#[test]
+fn trusted_project_instructions_begin_at_the_shared_gits_root() {
+    let tree = tempdir().expect("fixture directory");
+    let gits = tree.path().join("Gits");
+    let project = gits.join("personal/ego");
+    let cwd = project.join("src");
+    std::fs::create_dir_all(&cwd).expect("fixture hierarchy");
+    for (relative, text) in [
+        ("AGENTS.md", "shared"),
+        ("personal/AGENTS.md", "ancestor"),
+        ("personal/ego/AGENTS.md", "project"),
+        ("personal/ego/src/AGENTS.md", "local"),
+    ] {
+        std::fs::write(gits.join(relative), text).expect("fixture instruction");
+    }
+
+    let root = crate::trust::instruction_discovery_root(&project, tree.path());
+    let loaded = ego_core::config::load(
+        &ego_tools::instructions::OsInstructionIo,
+        &root,
+        &cwd,
+        &ego_core::config::Selection::Ambient,
+        ego_core::config::Limits::default(),
+    )
+    .expect("nested project is inside the discovery root");
+    let text: Vec<_> = loaded
+        .loaded
+        .iter()
+        .map(|file| file.text.as_str())
+        .collect();
+    assert_eq!(text, ["shared", "ancestor", "project", "local"]);
+
+    let bare = ego_core::config::load(
+        &ego_tools::instructions::OsInstructionIo,
+        &root,
+        &cwd,
+        &ego_core::config::Selection::Disabled,
+        ego_core::config::Limits::default(),
+    )
+    .expect("bare discovery is inert");
+    assert!(bare.loaded.is_empty());
+
+    let lookalike = tree.path().join("Gits-elsewhere/project");
+    assert_eq!(
+        crate::trust::instruction_discovery_root(&lookalike, tree.path()),
+        lookalike,
+        "a similarly named directory does not inherit shared instructions"
+    );
+
+    let scratch = gits.join(".tmp/test-fixture");
+    assert_eq!(
+        crate::trust::instruction_discovery_root(&scratch, tree.path()),
+        scratch,
+        "scratch fixtures do not inherit the human's shared instructions"
+    );
+}
+
 struct UnusedStore;
 
 impl ego_core::config::UserConfigStore for UnusedStore {

@@ -1,5 +1,6 @@
 //! Workspace decisions stored outside the workspace that cannot grant
-//! themselves.
+//! themselves. Their digest also covers shared and imported instructions
+//! the trusted session would load.
 //!
 //! See `docs/decisions/2026-09-05-a-trust-answer-is-remembered-per-root.md`.
 //! `ego-core` owns what each fact means and whether a stored answer still
@@ -12,11 +13,14 @@ use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use ego_core::config::INSTRUCTIONS_FILE;
 use ego_core::config::{
-    INSTRUCTIONS_FILE, TRUST_DIGEST_MAX_BYTES, Trust, TrustInventory, TrustLedger, TrustedContent,
+    TRUST_DIGEST_MAX_BYTES, Trust, TrustInventory, TrustLedger, TrustedContent,
 };
 #[cfg(windows)]
 use ego_core::config::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger};
+use ego_tools::instructions::OsInstructionIo;
 use ego_tools::privacy::{PrivatePathKind, harden_private_path};
 use fd_lock::RwLock;
 use serde::Serialize;
@@ -30,6 +34,22 @@ const PROJECT_CONFIGS: [&str; 2] = [".ego/config.toml", ".ego/config.local.toml"
 /// One directory per project skill, each holding one `SKILL.md`.
 const PROJECT_SKILLS: &str = ".ego/skills";
 const SKILL_FILE: &str = "SKILL.md";
+
+/// Shared project rules precede repository rules, but scratch fixtures under
+/// `~/Gits/.tmp` stay isolated from the human's instruction hierarchy.
+pub(crate) fn instruction_discovery_root(root: &Path, home: &Path) -> PathBuf {
+    let shared = home.join("Gits");
+    let is_scratch = root
+        .strip_prefix(&shared)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .is_some_and(|component| component.as_os_str() == ".tmp");
+    if root.starts_with(&shared) && !is_scratch {
+        shared
+    } else {
+        root.to_path_buf()
+    }
+}
 
 /// The one place a launch decides what a workspace's posture is.
 ///
@@ -207,10 +227,34 @@ fn inventory(root: &Path) -> TrustInventory {
         .iter()
         .map(|relative| root.join(relative))
         .collect();
-    paths.push(root.join(INSTRUCTIONS_FILE));
     paths.extend(skill_files(root));
     paths.extend(referenced_commands(root));
-    TrustInventory::new(paths.iter().filter_map(|path| content(root, path)))
+    let mut entries: Vec<_> = paths
+        .iter()
+        .filter_map(|path| content(root, path))
+        .collect();
+
+    let discovery_root = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| instruction_discovery_root(root, &home))
+        .unwrap_or_else(|| root.to_path_buf());
+    if let Ok(instructions) = ego_core::config::load(
+        &OsInstructionIo,
+        &discovery_root,
+        root,
+        &ego_core::config::Selection::Ambient,
+        ego_core::config::Limits::default(),
+    ) {
+        entries.extend(instructions.loaded.into_iter().filter_map(|file| {
+            let relative = file.path.strip_prefix(&discovery_root).ok()?;
+            Some(TrustedContent::regular(
+                relative.to_string_lossy(),
+                file.bytes,
+                file.text.as_bytes(),
+            ))
+        }));
+    }
+    TrustInventory::new(entries)
 }
 
 /// The workspace files a trusted config would run.
@@ -661,6 +705,30 @@ mod tests {
         fixture.write("AGENTS.md", "second\n");
         assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
         assert_eq!(fixture.asked.get(), 2, "an edit is a new question");
+    }
+
+    #[test]
+    fn editing_an_imported_instruction_requires_a_new_trust_answer() {
+        let fixture = Fixture::new();
+        fixture.write("AGENTS.md", "@details.md\n");
+        fixture.write("details.md", "first\n");
+        assert_eq!(
+            inventory(fixture.workspace.path()).entries().len(),
+            2,
+            "both the containing file and its import form the trust offer"
+        );
+
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Trusted);
+        assert_eq!(fixture.asked.get(), 1);
+
+        fixture.write("details.md", "second\n");
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(
+            fixture.asked.get(),
+            2,
+            "imported content changed the trust offer"
+        );
     }
 
     #[test]

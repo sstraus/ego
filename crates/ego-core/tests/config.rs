@@ -997,6 +997,212 @@ mod instructions {
     }
 
     #[test]
+    fn standalone_references_load_relative_to_their_file_before_nearer_rules() {
+        let io = Fake::new(vec![
+            (
+                "/ws/AGENTS.md",
+                read("outer\n@docs/shared.md\n```md\n@secret.md\n```\n"),
+            ),
+            ("/ws/docs/shared.md", read("shared\n@../src/detail.md\n")),
+            ("/ws/src/detail.md", read("detail")),
+            ("/ws/src/AGENTS.md", read("inner")),
+            ("/ws/secret.md", read("must stay unread")),
+        ]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .expect("cwd inside workspace");
+
+        assert_eq!(
+            texts(&set.loaded),
+            [
+                "outer\n@docs/shared.md\n```md\n@secret.md\n```\n",
+                "shared\n@../src/detail.md\n",
+                "detail",
+                "inner",
+            ]
+        );
+        assert!(
+            !io.calls().contains(&PathBuf::from("/ws/secret.md")),
+            "a fenced reference must never reach the I/O port"
+        );
+    }
+
+    #[test]
+    fn a_reference_on_the_first_line_loads_from_a_hidden_fixture_directory() {
+        let root = Path::new("/Users/example/Gits/.tmp/fixture");
+        let io = Fake::new(vec![
+            (
+                "/Users/example/Gits/.tmp/fixture/AGENTS.md",
+                read("@details.md\n"),
+            ),
+            (
+                "/Users/example/Gits/.tmp/fixture/details.md",
+                read("first\n"),
+            ),
+        ]);
+        let set = load(&io, root, root, &Selection::Ambient, Limits::default()).unwrap();
+
+        assert_eq!(texts(&set.loaded), ["@details.md\n", "first\n"]);
+    }
+
+    #[test]
+    fn cyclic_duplicate_and_missing_imports_are_bounded_and_visible() {
+        let io = Fake::new(vec![
+            (
+                "/ws/AGENTS.md",
+                read("@docs/one.md\n@docs/one.md\n@missing.md\n"),
+            ),
+            ("/ws/docs/one.md", read("one\n@../AGENTS.md\n")),
+        ]);
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .expect("workspace root");
+
+        assert_eq!(
+            texts(&set.loaded),
+            [
+                "@docs/one.md\n@docs/one.md\n@missing.md\n",
+                "one\n@../AGENTS.md\n"
+            ]
+        );
+        assert_eq!(
+            io.calls()
+                .iter()
+                .filter(|path| path == &&PathBuf::from("/ws/docs/one.md"))
+                .count(),
+            1
+        );
+        assert!(
+            set.skipped
+                .iter()
+                .any(|skipped| skipped.path == Path::new("/ws/AGENTS.md")
+                    && skipped.reason.to_string().contains("cycle"))
+        );
+        assert!(
+            set.skipped
+                .iter()
+                .any(|skipped| skipped.path == Path::new("/ws/missing.md")
+                    && skipped.reason.to_string().contains("does not exist"))
+        );
+    }
+
+    #[test]
+    fn missing_imports_cannot_exhaust_unbounded_filesystem_lookups() {
+        let io = Fake::new(vec![(
+            "/ws/AGENTS.md",
+            read("@missing-1.md\n@missing-2.md\n@missing-3.md\n@missing-4.md\n"),
+        )]);
+        let limits = Limits {
+            max_files: 2,
+            ..Limits::default()
+        };
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            limits,
+        )
+        .expect("workspace root");
+
+        assert_eq!(io.calls().len(), 3, "root plus two import attempts");
+        assert_eq!(set.loaded.len(), 1);
+        assert!(set.skipped.iter().any(|skipped| {
+            skipped.path == Path::new("/ws/missing-3.md")
+                && skipped.reason == Refusal::TooManyFiles { limit: 2 }
+        }));
+    }
+
+    #[test]
+    fn imports_cannot_leave_their_scope_or_reach_fenced_or_indented_paths() {
+        let io = Fake::new(vec![
+            (
+                "/ws/AGENTS.md",
+                read(
+                    "@../secret.md\n@/etc/passwd\n@\n@two words.md\n~~~~text\n@fenced.md\n~~~~\n    @indented.md\n",
+                ),
+            ),
+            ("/secret.md", read("private")),
+            ("/etc/passwd", read("private")),
+            ("/ws/fenced.md", read("private")),
+            ("/ws/indented.md", read("private")),
+        ]);
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(set.loaded.len(), 1);
+        assert_eq!(io.calls(), [PathBuf::from("/ws/AGENTS.md")]);
+        assert_eq!(
+            set.skipped
+                .iter()
+                .filter(|skipped| skipped.reason.to_string().contains("scope"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            set.skipped
+                .iter()
+                .filter(|skipped| skipped.reason.to_string().contains("malformed"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn explicit_headless_instructions_replace_ambient_rules_and_bound_imports_to_their_directory() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("ambient")),
+            (
+                "/chosen/rules.md",
+                read("chosen\n@details.md\n@../secret.md\n"),
+            ),
+            ("/chosen/details.md", read("details")),
+            ("/secret.md", read("private")),
+        ]);
+        let selection = Selection::of(Posture::Bare, Some(PathBuf::from("/chosen/rules.md")));
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            texts(&set.loaded),
+            ["chosen\n@details.md\n@../secret.md\n", "details"]
+        );
+        assert_eq!(
+            io.calls(),
+            [
+                PathBuf::from("/chosen/rules.md"),
+                PathBuf::from("/chosen/details.md")
+            ]
+        );
+        assert_eq!(set.skipped.len(), 1);
+        assert!(set.skipped[0].reason.to_string().contains("scope"));
+    }
+
+    #[test]
     fn instructions_refuse_a_working_directory_outside_the_root() {
         let err = plan(
             Path::new("/ws"),
