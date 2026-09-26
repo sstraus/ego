@@ -52,6 +52,10 @@ test:
 t filter="":
     cargo nextest run --workspace {{ if filter == "" { "" } else { "-E test(" + filter + ")" } }}
 
+# Build the local release binary without installing it.
+local:
+    cargo build --release -p ego-cli --bin ego
+
 # Kept out of `gate` because it depends on a fetched advisory database, so it
 # fails for reasons that have nothing to do with the commit under test.
 
