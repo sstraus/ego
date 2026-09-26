@@ -979,14 +979,17 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         completions: vec![Reply::Sse(text("PASTED-SLASH-PROMPT"))],
         ..Plan::default()
     });
-    let ego = Ego::against(&stub).conversing().args([
-        "--model",
-        "ollama/qwen3",
-        "--session-id",
-        support::FIXTURE_SESSION_ID,
-        "--sandbox",
-        "off",
-    ]);
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
     // These cases all begin by answering the trust question, so the workspace
     // has to hold something worth asking about. An empty checkout is asked
     // nothing at all.
@@ -1020,7 +1023,63 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             .contains("the local action handler is not installed"),
         "activation must complete before the first live prompt"
     );
+    until(&reader, &mut output, b"model=ollama/qwen3");
+    drain_until_quiet(&reader, &mut output);
 
+    let typing_start = output.len();
+    input.write_all(b"immagini").expect("type a draft");
+    input.flush().expect("draft flush");
+    until_from(&reader, &mut output, typing_start, b"immagini");
+    drain_until_quiet(&reader, &mut output);
+    let typed_frame =
+        String::from_utf8_lossy(&strip_csi(&output[typing_start..])).replace("\r\n", "\n");
+    assert!(
+        typed_frame.contains("\n> immagini"),
+        "the native status must occupy a row above the composer; raw PTY: {:?}",
+        String::from_utf8_lossy(&output[typing_start..])
+    );
+    let clear_start = output.len();
+    input.write_all(b"\x03").expect("clear draft");
+    input.flush().expect("clear draft flush");
+    until_prompt_from(&reader, &mut output, clear_start);
+
+    let resize_start = output.len();
+    pair.master
+        .resize(PtySize {
+            rows: 8,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("narrow resize");
+    until_from(&reader, &mut output, resize_start, b"model=ollama/qwen3");
+    drain_until_quiet(&reader, &mut output);
+    let narrow_start = output.len();
+    input.write_all(b"short").expect("type in narrow PTY");
+    input.flush().expect("narrow draft flush");
+    until_from(&reader, &mut output, narrow_start, b"short");
+    drain_until_quiet(&reader, &mut output);
+    let narrow_frame =
+        String::from_utf8_lossy(&strip_csi(&output[narrow_start..])).replace("\r\n", "\n");
+    assert!(
+        narrow_frame.contains("\n> short"),
+        "resizing must keep status above the composer: {narrow_frame:?}"
+    );
+    let narrow_clear = output.len();
+    input.write_all(b"\x15").expect("clear narrow draft");
+    input.flush().expect("clear narrow draft flush");
+    until_prompt_from(&reader, &mut output, narrow_clear);
+    let restore_start = output.len();
+    pair.master
+        .resize(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("restore size");
+    until_from(&reader, &mut output, restore_start, b"model=ollama/qwen3");
+    drain_until_quiet(&reader, &mut output);
     let slash_start = output.len();
     input.write_all(b"/model\r").expect("model slash action");
     input.flush().expect("model slash action flush");

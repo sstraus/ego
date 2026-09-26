@@ -1202,13 +1202,22 @@ fn status_right(status: &SharedStatus) -> String {
         .unwrap_or_default()
 }
 
+fn status_row(status: &SharedStatus) -> String {
+    let text = status_right(status);
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!("{text}\n")
+    }
+}
+
 impl Prompt for Waiting {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        Cow::Borrowed("")
+        Cow::Owned(status_row(&self.status))
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Owned(status_right(&self.status))
+        Cow::Borrowed("")
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
