@@ -33,6 +33,43 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{NativePtySystem, PtySize, PtySystem};
 
+pub fn wait_pty_child(
+    mut child: Box<dyn portable_pty::Child + Send + Sync>,
+    deadline: Duration,
+    transcript: &[u8],
+) -> Result<portable_pty::ExitStatus, String> {
+    let mut killer = child.clone_killer();
+    let (sent, received) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _ = sent.send(child.wait());
+    });
+    match received.recv_timeout(deadline) {
+        Ok(status) => {
+            waiter.join().expect("PTY child waiter thread");
+            status.map_err(|error| error.to_string())
+        }
+        Err(error) => {
+            let kill_error = killer.kill().err();
+            let reap = received.recv_timeout(Duration::from_secs(2));
+            if reap.is_ok() {
+                waiter.join().expect("PTY child waiter thread after kill");
+            }
+            let tail: String = String::from_utf8_lossy(transcript)
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            Err(format!(
+                "PTY child did not exit within {deadline:?} after EOF ({error}); \
+                 kill error: {kill_error:?}; reap: {reap:?}. Terminal tail:\n{tail}"
+            ))
+        }
+    }
+}
+
 #[cfg(not(windows))]
 pub fn fixture_path() -> OsString {
     OsString::from("/usr/bin:/bin")
@@ -1021,6 +1058,10 @@ impl Ego {
     }
 
     fn run_pty_script(self, prompt: &str, answer: &str, input: Option<&str>) -> Finished {
+        assert!(
+            input.is_none_or(|line| !line.contains('\r') && !line.contains('\n')),
+            "PTY script must be one unterminated line; the helper submits it"
+        );
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows: 24,
@@ -1029,7 +1070,7 @@ impl Ego {
                 pixel_height: 0,
             })
             .expect("pty");
-        let mut child = pair.slave.spawn_command(self.pty_command()).expect("spawn");
+        let child = pair.slave.spawn_command(self.pty_command()).expect("spawn");
         let master = pair.master;
         drop(pair.slave);
         let writer = Arc::new(Mutex::new(master.take_writer().expect("writer")));
@@ -1140,7 +1181,8 @@ impl Ego {
             }
         }
         drop(writer);
-        let status = child.wait().expect("child ran");
+        let status = wait_pty_child(child, Self::QUIET_DEADLINE, &output)
+            .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
         drop(master);
         let output = reader.join().expect("pty reader thread");
         Finished {

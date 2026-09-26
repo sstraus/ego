@@ -71,7 +71,7 @@ fn compaction_target_carries_old_skill_history_and_reopens_with_fresh_catalogue(
         .ego(&stub)
         .conversing()
         .args(["--sandbox", "off", "--session-id", FIXTURE_SESSION_ID])
-        .run_pty(&format!("/skills invoke {SOURCE_SKILL} {RAW_ARGUMENTS}\r"));
+        .run_pty(&format!("/skills invoke {SOURCE_SKILL} {RAW_ARGUMENTS}"));
     assert_eq!(
         source.code,
         Some(0),
@@ -150,9 +150,7 @@ fn compaction_target_carries_old_skill_history_and_reopens_with_fresh_catalogue(
         .subcommand("resume")
         .arg(&target)
         .args(["--sandbox", "off"])
-        .run_pty(&format!(
-            "/skills invoke {TARGET_SKILL} {TARGET_ARGUMENTS}\r"
-        ));
+        .run_pty(&format!("/skills invoke {TARGET_SKILL} {TARGET_ARGUMENTS}"));
     assert_eq!(
         resumed.code,
         Some(0),
