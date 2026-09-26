@@ -1252,6 +1252,28 @@ mod glob {
     }
 
     #[test]
+    fn recursive_glob_limits_the_visible_result_in_a_large_workspace() {
+        let ws = populated();
+        for index in 0..600 {
+            ws.file(&format!("src/generated/{index:04}.rs"), "// generated");
+        }
+
+        let content = ws
+            .call("glob", json!({ "pattern": "**/*" }))
+            .expect("the working directory is the workspace");
+        let paths = content
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+
+        assert!(paths.len() <= 512, "glob returned {} paths", paths.len());
+        assert!(
+            content.contains("this answer is incomplete"),
+            "a bounded result must report truncation: {content}"
+        );
+    }
+
+    #[test]
     fn glob_prepares_a_list_and_therefore_cannot_read_what_it_found() {
         // The whole point of `Op::List` existing. A glob expressed as
         // `Op::Read { path: root }` would come back holding the authority to
