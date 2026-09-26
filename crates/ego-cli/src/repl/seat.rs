@@ -759,7 +759,7 @@ struct SequentialSeat {
 }
 
 enum SeatKind {
-    Live(LiveSeat),
+    Live(Box<LiveSeat>),
     Sequential(Box<SequentialSeat>),
 }
 
@@ -899,7 +899,7 @@ impl Seat {
 
         Ok((
             Self {
-                kind: SeatKind::Live(LiveSeat {
+                kind: SeatKind::Live(Box::new(LiveSeat {
                     input,
                     control: seat_control,
                     activated: AtomicBool::new(false),
@@ -913,7 +913,7 @@ impl Seat {
                     })),
                     output_owner: Mutex::new(Some(output_owner)),
                     owner: Mutex::new(Some(owner)),
-                }),
+                })),
                 terminal,
                 registry,
                 coordinator: Mutex::new(Some(control)),
