@@ -1126,7 +1126,9 @@ async fn attempt(
     let Ok(arguments) = serde_json::to_string(&serde_json::json!({
         "argv": argv,
         "cwd": cwd.to_string(),
-        "timeout_ms": Duration::from_secs(2).as_millis() as u64,
+        // Probe success is a capability observation, not a latency target.
+        // A short deadline can turn scheduler contention into a false refusal.
+        "timeout_ms": Duration::from_secs(30).as_millis() as u64,
     })) else {
         return Err("not attempted: probe arguments did not serialise".to_owned());
     };
@@ -1220,6 +1222,35 @@ mod tests {
                 args_before_target: Vec::new(),
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_slow_allowed_probe_does_not_lose_its_capability_to_scheduler_delay() {
+        use std::ffi::OsString;
+
+        use ego_core::turn::CancelToken;
+
+        let dir = tempfile::tempdir().expect("probe workspace");
+        let cwd = CanonPath::new(std::fs::canonicalize(dir.path()).expect("canonical workspace"));
+        let evidence = super::probe_evidence().expect("probe evidence");
+        let backend: Arc<dyn Backend> = Arc::new(CacheBackend {
+            identity: BackendIdentity::new("test-probe", "v1"),
+        });
+
+        let result = futures::executor::block_on(super::attempt(
+            backend,
+            evidence.store,
+            CancelToken::new(),
+            crate::exec::ExecLimits::default(),
+            &cwd,
+            vec![OsString::from("/bin/sleep"), OsString::from("3")],
+        ));
+
+        assert!(
+            result.is_ok(),
+            "a delayed successful probe is still allowed: {result:?}"
+        );
     }
 
     fn policy() -> RunConfinement {
