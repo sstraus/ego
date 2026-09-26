@@ -1207,6 +1207,92 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
 }
 
 #[test]
+fn model_picker_title_remains_visible_in_a_short_terminal() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 8,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let activation_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, activation_start);
+    drain_until_quiet(&reader, &mut output);
+    let picker_start = output.len();
+    input.write_all(b"/model\r").expect("model action");
+    input.flush().expect("model action flush");
+    until_normalized(&reader, &mut output, picker_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+
+    let mut screen = vt100::Parser::new(8, 40, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    assert!(
+        visible.contains("Select model") && visible.contains("  3. "),
+        "picker heading and three useful choices must fit the terminal: {visible:?}; raw: {:?}",
+        String::from_utf8_lossy(&output[picker_start..])
+    );
+
+    let navigation_start = output.len();
+    for index in 2..=8 {
+        let move_start = output.len();
+        input.write_all(b"\x1b[B").expect("navigate down");
+        input.flush().expect("navigate down flush");
+        until_from(
+            &reader,
+            &mut output,
+            move_start,
+            format!("> {index}.").as_bytes(),
+        );
+        drain_until_quiet(&reader, &mut output);
+    }
+    screen.process(&output[navigation_start..]);
+    let visible = screen.screen().contents();
+    assert!(
+        visible.contains("Select model") && visible.contains("> 8."),
+        "selection and heading must stay visible after scrolling: {visible:?}"
+    );
+
+    input.write_all(b"\x1b").expect("close picker");
+    input.flush().expect("close picker flush");
+    let prompt_start = output.len();
+    until_prompt_from(&reader, &mut output, prompt_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+}
+
+#[test]
 fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
     let seed = "argv seed";
     let first = "typed follow-up one";

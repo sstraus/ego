@@ -1258,7 +1258,16 @@ impl Prompt for Question {
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Owned(status_right(&self.status))
+        if self
+            .status
+            .lock()
+            .expect("surface status lock")
+            .native_status
+        {
+            Cow::Borrowed("")
+        } else {
+            Cow::Owned(status_right(&self.status))
+        }
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
