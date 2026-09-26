@@ -1,14 +1,14 @@
 # trusted: first launch
 Trust project files in <workspace>? [y/N] yes
 εgo: ego 0.1.0 · ollama/qwen3
-/help commands · Alt-P models
+/help commands · F2 models
 hello
 a launch transcript
 εgo: 0 unsent drafts, 0 accepted inputs
 
 # trusted: next launch
 εgo: ego 0.1.0 · ollama/qwen3
-/help commands · Alt-P models
+/help commands · F2 models
 hello
 a launch transcript
 εgo: 0 unsent drafts, 0 accepted inputs
