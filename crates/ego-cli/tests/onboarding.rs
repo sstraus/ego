@@ -12,8 +12,8 @@ use support::{Ego, Plan, Stub};
 
 const DEFAULT_MODEL_MAP: &str = r#"
 [default_model]
-openai = "openai/gpt-5.6-sol"
-anthropic = "anthropic/claude-opus-5"
+openai = "openai/gpt-6-sol"
+anthropic = "anthropic/claude-opus-5-5"
 "#;
 
 const OPENAI_KEY: &str = "fixture-openai-key";
@@ -200,7 +200,11 @@ fn interactive_single_provider_persists_the_explicit_default_before_generation()
         .env("ANTHROPIC_API_KEY", ANTHROPIC_KEY);
     ego.home_file("models.toml", DEFAULT_MODEL_MAP);
     let config = ego.home_path().join("config.toml");
-    let result = ego.conversing().args(["--sandbox", "off"]).run_pty("hello");
+    let result = ego
+        .conversing()
+        .without_fixture_thinking()
+        .args(["--sandbox", "off"])
+        .run_pty("hello");
 
     assert_eq!(
         result.code,
@@ -209,7 +213,7 @@ fn interactive_single_provider_persists_the_explicit_default_before_generation()
         result.stdout
     );
     let config = fs::read_to_string(config).expect("auto-selection persisted atomically");
-    assert!(config.contains("model = \"anthropic/claude-opus-5\""));
+    assert!(config.contains("model = \"anthropic/claude-opus-5-5\""));
     assert!(
         !config.contains("thinking"),
         "automatic model selection must not persist a derived reasoning default"

@@ -49,27 +49,26 @@
 # test holds that. The revision is what a retirement error names, so a stale
 # constant would send an operator to the wrong catalogue.
 #
-# revision = 2026-09-12
+# revision = 2026-09-26
 
-# First-run policy selected on 2026-09-12; availability is still observed.
-# See docs/23-first-run-model-default-sources.md and the first-run ADR.
+# First-run policy refreshed on 2026-09-26; availability is still observed.
+# See docs/decisions/2026-09-26-current-model-bootstrap.md.
 [default_model]
-openai = "openai/gpt-5.6-sol"
-openai-codex = "openai-codex/gpt-5.6-sol"
-anthropic = "anthropic/claude-opus-5"
+openai = "openai/gpt-6-sol"
+openai-codex = "openai-codex/gpt-6-sol"
+anthropic = "anthropic/claude-opus-5-5"
 gemini = "gemini/gemini-3.8-flash"
 
 # ---------------------------------------------------------------------------
-# openai — read 2026-09-07 from https://developers.openai.com/api/docs/models,
+# openai — read 2026-09-26 from https://developers.openai.com/api/docs/models,
 # https://developers.openai.com/api/docs/guides/function-calling and
 # https://developers.openai.com/api/docs/guides/images-vision.
 #
 # Shared by every row below, and stated once here rather than in each comment:
 #
-# - `reasoning_carryover = "unsupported"`: the mapping this row speaks
-#   (`wire::openai_completions`) refuses a history carrying reasoning state
-#   with `ReasoningStateNotCarriable`. That is a property of Chat Completions,
-#   which returns no reasoning item to carry.
+# - `reasoning_carryover = "unsupported"`: the current public Responses
+#   mapping refuses ego's opaque reasoning state because it has no established
+#   projection for that state.
 # - `max_tools` omitted: the function-calling guide gives "fewer than 20 …
 #   though this is just a soft suggestion" and no hard limit. A soft
 #   suggestion is not a ceiling to refuse a request against.
@@ -102,7 +101,7 @@ kind = "supported"
 accepted_media_types = ["png", "jpeg", "webp", "gif"]
 max_images = 100
 
-[model."openai/gpt-5.6-sol".capabilities]
+[model."openai/gpt-6-sol".capabilities]
 # Context window 1,050,000; max output 128,000. Reasoning efforts: "none, low,
 # medium (default), high, xhigh, and max" — `none` is what this build spells
 # `off`.
@@ -117,7 +116,7 @@ cancel = "cooperative"
 cache = "short"
 transport = "sse"
 
-[model."openai/gpt-5.6-sol".capabilities.image_input]
+[model."openai/gpt-6-sol".capabilities.image_input]
 kind = "supported"
 accepted_media_types = ["png", "jpeg", "webp", "gif"]
 max_images = 100
@@ -125,27 +124,27 @@ max_images = 100
 # ---------------------------------------------------------------------------
 # openai-codex — read by `ego models` after `ego auth login openai-codex`.
 #
-# Sources read 2026-09-12:
-# - OpenAI's current gpt-5.6-sol model page: 1,050,000 API context / 128,000
+# Sources read 2026-09-26:
+# - OpenAI's current gpt-6-sol model page: 1,050,000 API context / 128,000
 #   maximum output.
 # - The authenticated Codex model cache: 272,000 effective context for this
 #   subscription surface.
 #
 # The subscription ceiling deliberately uses the lower authenticated value.
 # See docs/decisions/2026-09-12-openai-codex-subscription-bootstrap-ceiling.md.
-[model."openai-codex/gpt-5.6-sol".capabilities]
+[model."openai-codex/gpt-6-sol".capabilities]
 schema_version = 5
 max_context_tokens = 272000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
 reasoning_carryover = "unsupported"
 reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
-default_reasoning_effort = "low"
+default_reasoning_effort = "medium"
 cancel = "cooperative"
 cache = "none"
 transport = "sse"
 
-[model."openai/gpt-5.6-terra".capabilities]
+[model."openai/gpt-6-luna".capabilities]
 schema_version = 5
 max_context_tokens = 1050000
 max_output_tokens = 128000
@@ -157,33 +156,10 @@ cancel = "cooperative"
 cache = "short"
 transport = "sse"
 
-[model."openai/gpt-5.6-terra".capabilities.image_input]
+[model."openai/gpt-6-luna".capabilities.image_input]
 kind = "supported"
 accepted_media_types = ["png", "jpeg", "webp", "gif"]
 max_images = 100
-
-[model."openai/gpt-5.6-luna".capabilities]
-schema_version = 5
-max_context_tokens = 1050000
-max_output_tokens = 128000
-supports_parallel_tool_calls = true
-reasoning_carryover = "unsupported"
-reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
-default_reasoning_effort = "medium"
-cancel = "cooperative"
-cache = "short"
-transport = "sse"
-
-[model."openai/gpt-5.6-luna".capabilities.image_input]
-kind = "supported"
-accepted_media_types = ["png", "jpeg", "webp", "gif"]
-max_images = 100
-
-# `openai/gpt-5.6-cyber` is listed by the vendor and is absent here: its
-# context window and output ceiling are given as "Not specified" on the models
-# page, and a row with an unstated context window is one compaction and
-# occupancy reporting cannot use. Supply it in your own file if you have the
-# numbers.
 
 # ---------------------------------------------------------------------------
 # gemini — read 2026-09-08 from the current Gemini 3.8 Flash model,
@@ -213,8 +189,8 @@ cache = "short"
 transport = "sse"
 
 # ---------------------------------------------------------------------------
-# anthropic — read 2026-09-07 from
-# https://platform.claude.com/docs/en/about-claude/models/overview,
+# anthropic — read 2026-09-26 from
+# https://platform.claude.com/docs/en/models/overview,
 # https://platform.claude.com/docs/en/build-with-claude/effort and
 # https://platform.claude.com/docs/en/build-with-claude/vision.
 #
@@ -239,15 +215,14 @@ transport = "sse"
 
 [model."anthropic/claude-fable-5-1".capabilities]
 # Context window 1M; max output 128K. Effort: low, medium, high (default),
-# xhigh, max. `off` is included because this mapping spells it as *omitting*
-# thinking rather than as an effort value the provider must accept.
+# xhigh, max. Adaptive thinking is always on, so `off` is unavailable.
 schema_version = 5
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
 reasoning_carryover = "same_provider_only"
 reasoning_state_dialect = "anthropic-messages"
-reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
 default_reasoning_effort = "high"
 cancel = "cooperative"
 cache = "long"
@@ -261,22 +236,22 @@ max_bytes_per_image = 10485760
 max_width = 8000
 max_height = 8000
 
-[model."anthropic/claude-opus-5".capabilities]
-# Context window 1M; max output 128K. Effort: low, medium, high (default),
-# xhigh, max.
+[model."anthropic/claude-opus-5-5".capabilities]
+# Context window 1M; max output 128K. Effort: low, medium (default), high,
+# xhigh, max. Adaptive thinking is always on, so `off` is unavailable.
 schema_version = 5
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
 reasoning_carryover = "same_provider_only"
 reasoning_state_dialect = "anthropic-messages"
-reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
-default_reasoning_effort = "high"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "medium"
 cancel = "cooperative"
 cache = "long"
 transport = "sse"
 
-[model."anthropic/claude-opus-5".capabilities.image_input]
+[model."anthropic/claude-opus-5-5".capabilities.image_input]
 kind = "supported"
 accepted_media_types = ["jpeg", "png", "gif", "webp"]
 max_images = 100

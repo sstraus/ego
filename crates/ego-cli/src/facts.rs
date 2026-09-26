@@ -16,8 +16,8 @@
 //!
 //! Below both sits [`BUILTIN`], compiled in. It is there because without it a
 //! machine with a valid `ANTHROPIC_API_KEY` and no files could not run a
-//! hosted model at all: `--model anthropic/claude-opus-5` answered "no
-//! capabilities are configured", which is a true sentence about a product
+//! hosted model at all: the selected model answered "no capabilities are
+//! configured", which is a true sentence about a product
 //! nobody could start. `docs/decisions/2026-09-07-a-builtin-catalogue-layer-
 //! below-system-and-user.md` amends the ban on built-in facts to allow it,
 //! under three conditions this module enforces: it is the *weakest* layer, it
@@ -93,7 +93,7 @@ const BUILTIN: &str = include_str!("../catalogue/models.toml");
 /// refusal names, so a test holds it equal to the `revision =` line in the
 /// file itself — a constant that had drifted would send an operator to the
 /// wrong catalogue.
-pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-12";
+pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-26";
 
 /// One `models.toml`.
 #[derive(Debug, Default, Deserialize)]
@@ -616,6 +616,14 @@ transport = "sse"
         }
     }
 
+    #[test]
+    fn builtin_startup_defaults_name_current_models() {
+        let defaults = builtin().default_model;
+        assert_eq!(defaults["openai"], "openai/gpt-6-sol");
+        assert_eq!(defaults["openai-codex"], "openai-codex/gpt-6-sol");
+        assert_eq!(defaults["anthropic"], "anthropic/claude-opus-5-5");
+    }
+
     /// A tombstone refuses by name, and names somewhere to go.
     ///
     /// Read through [`retirement`] rather than the table, because the message
@@ -650,7 +658,7 @@ transport = "sse"
             "the refusal must name where to override it: {refusal}"
         );
         assert!(
-            retirement("anthropic/claude-opus-5").is_none(),
+            retirement("anthropic/claude-opus-5-5").is_none(),
             "a current model must not be reported as retired"
         );
     }

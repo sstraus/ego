@@ -1293,6 +1293,46 @@ fn model_picker_title_remains_visible_in_a_short_terminal() {
 }
 
 #[test]
+fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
+    let finished = Ego::nowhere()
+        .subcommand("models")
+        .arg("--json")
+        .run_pty_to_exit();
+    assert_eq!(finished.code, Some(0), "PTY output: {}", finished.stdout);
+    let output = finished.report();
+    let slugs: Vec<&str> = output["models"]
+        .as_array()
+        .expect("catalogue rows")
+        .iter()
+        .filter_map(|entry| entry["slug"].as_str())
+        .collect();
+    for current in [
+        "openai/gpt-6-astra",
+        "openai/gpt-6-sol",
+        "openai/gpt-6-luna",
+        "openai-codex/gpt-6-sol",
+        "anthropic/claude-fable-5-1",
+        "anthropic/claude-opus-5-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-4-5",
+    ] {
+        assert!(slugs.contains(&current), "missing {current} in {slugs:?}");
+    }
+    for superseded in [
+        "openai/gpt-5.6-sol",
+        "openai/gpt-5.6-terra",
+        "openai/gpt-5.6-luna",
+        "openai-codex/gpt-5.6-sol",
+        "anthropic/claude-opus-5",
+    ] {
+        assert!(
+            !slugs.contains(&superseded),
+            "stale {superseded} in {slugs:?}"
+        );
+    }
+}
+
+#[test]
 fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
     let seed = "argv seed";
     let first = "typed follow-up one";

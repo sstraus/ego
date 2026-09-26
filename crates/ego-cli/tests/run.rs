@@ -2716,12 +2716,12 @@ fn a_usage_error_still_goes_to_stderr_and_exits_two() {
 /// The out-of-the-box hosted path: a key, and nothing else.
 ///
 /// Story `regression_case`'s whole problem statement in one run. Before the builtin
-/// catalogue, this exact invocation answered "no capabilities are configured
-/// for `anthropic/claude-opus-5`" — a true sentence about a product nobody
-/// could start, because the repository shipped neither `/etc/ego/models.toml`
+/// catalogue, the equivalent hosted invocation answered "no capabilities are
+/// configured" — a true sentence about a product nobody could start,
+/// because the repository shipped neither `/etc/ego/models.toml`
 /// nor `$EGO_HOME/models.toml` and the only cure was to write one by hand.
 ///
-/// It ran on `openai/gpt-5.6-sol` until story `regression_case` moved that row to
+/// It ran on an older OpenAI Sol row until story `regression_case` moved that row to
 /// Responses and made it unselectable pending live evidence. The claim is the
 /// same one, made on the row that can still be selected.
 ///
@@ -2741,8 +2741,10 @@ fn a_hosted_model_runs_from_the_builtin_catalogue_with_no_models_toml() {
     let finished = Ego::against(&stub)
         .env("ANTHROPIC_API_KEY", "sk-test")
         .args([
+            "--thinking",
+            "medium",
             "--model",
-            "anthropic/claude-opus-5",
+            "anthropic/claude-opus-5-5",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "Ask",
@@ -2757,7 +2759,7 @@ fn a_hosted_model_runs_from_the_builtin_catalogue_with_no_models_toml() {
         finished.stderr
     );
     assert_eq!(
-        generations[0]["model"], "claude-opus-5",
+        generations[0]["model"], "claude-opus-5-5",
         "the request names the wrong model: {}",
         generations[0]
     );

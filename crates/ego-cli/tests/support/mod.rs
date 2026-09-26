@@ -923,6 +923,16 @@ impl Ego {
         self
     }
 
+    /// Exercise model-derived thinking without the Ollama fixture's explicit
+    /// `--thinking off` override.
+    pub fn without_fixture_thinking(mut self) -> Self {
+        if self.fixture_default_thinking {
+            self.args.drain(..2);
+            self.fixture_default_thinking = false;
+        }
+        self
+    }
+
     pub fn arg(mut self, arg: &str) -> Self {
         if self.fixture_default_thinking && (arg == "--thinking" || arg.starts_with("--thinking="))
         {
