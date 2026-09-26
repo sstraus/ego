@@ -1172,7 +1172,15 @@ fn status_prefix(status: &SharedStatus) -> String {
     let status = status.lock().expect("surface status lock");
     let mut rows = Vec::new();
     if status.activity {
-        rows.push(ACTIVITY_LABEL.to_string());
+        let elapsed = status
+            .activity_since
+            .map(|started| started.elapsed().as_secs())
+            .unwrap_or(0);
+        if elapsed == 0 {
+            rows.push(ACTIVITY_LABEL.to_string());
+        } else {
+            rows.push(format!("working for {elapsed}s — Esc cancels"));
+        }
     }
     if !status.native_status {
         if status.queue.pending_steers > 0 {
@@ -1202,13 +1210,22 @@ fn status_right(status: &SharedStatus) -> String {
         .unwrap_or_default()
 }
 
+fn status_row(status: &SharedStatus) -> String {
+    let text = status_right(status);
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!("{text}\n")
+    }
+}
+
 impl Prompt for Waiting {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        Cow::Borrowed("")
+        Cow::Owned(status_row(&self.status))
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Owned(status_right(&self.status))
+        Cow::Borrowed("")
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
@@ -1249,7 +1266,16 @@ impl Prompt for Question {
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Owned(status_right(&self.status))
+        if self
+            .status
+            .lock()
+            .expect("surface status lock")
+            .native_status
+        {
+            Cow::Borrowed("")
+        } else {
+            Cow::Owned(status_right(&self.status))
+        }
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {

@@ -761,11 +761,11 @@ mod tests {
     #[test]
     fn an_openai_codex_request_assembles_from_the_builtin_catalogue_alone() {
         let hosted = crate::facts::builtin_only();
-        let slug = ModelSlug::parse("openai-codex/gpt-5.6-sol").expect("a valid Codex slug");
+        let slug = ModelSlug::parse("openai-codex/gpt-6-sol").expect("a valid Codex slug");
         assert!(
             hosted
                 .iter()
-                .any(|(key, _)| key == "openai-codex/gpt-5.6-sol"),
+                .any(|(key, _)| key == "openai-codex/gpt-6-sol"),
             "the builtin catalogue does not carry the Codex default",
         );
 
@@ -870,11 +870,11 @@ mod tests {
     #[test]
     fn an_anthropic_request_assembles_from_the_builtin_catalogue_alone() {
         let hosted = crate::facts::builtin_only();
-        let slug = ModelSlug::parse("anthropic/claude-opus-5").expect("a valid slug");
+        let slug = ModelSlug::parse("anthropic/claude-opus-5-5").expect("a valid slug");
         assert!(
             hosted
                 .iter()
-                .any(|(key, _)| key == "anthropic/claude-opus-5"),
+                .any(|(key, _)| key == "anthropic/claude-opus-5-5"),
             "the builtin catalogue does not carry the row this asserts on",
         );
 
@@ -920,7 +920,7 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_slice(built.body.as_deref().expect("a JSON body"))
                 .expect("the body is JSON");
-        assert_eq!(body["model"], "claude-opus-5");
+        assert_eq!(body["model"], "claude-opus-5-5");
     }
 
     /// The exact selectable set. Any accidental promotion or omission fails

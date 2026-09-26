@@ -27,7 +27,13 @@ pub(super) fn run_model_picker(
     let result = loop {
         let view = picker.lock().expect("model picker lock").view();
         let width = status.lock().expect("surface status lock").width;
-        let prompt = Question::new(model_picker_prompt(&view, width), Arc::clone(status));
+        let height = crossterm::terminal::size()
+            .map(|(_, height)| usize::from(height))
+            .unwrap_or(24);
+        let prompt = Question::new(
+            model_picker_prompt(&view, width, height),
+            Arc::clone(status),
+        );
         let line = answer(false, editor.read_line(&prompt));
         let input = match &line {
             Line::HostCommand(HostCommand::ModelPicker(command)) => model_picker_input(command),
@@ -78,35 +84,52 @@ fn model_picker_input(command: &str) -> Option<PickerInput> {
     }
 }
 
-fn model_picker_prompt(view: &ModelPickerView, width: usize) -> String {
+fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> String {
     let width = width.max(40);
     let mut rows = Vec::new();
     match view.focus {
         PickerFocus::Model => {
-            rows.push("Select model".to_string());
-            rows.push("✓ available; ! unavailable".to_string());
-            rows.extend(view.models.iter().enumerate().map(|(index, row)| {
-                let id = row.slug.to_string();
-                let marker = if view.current_id.as_deref() == Some(id.as_str()) {
-                    ">"
-                } else {
-                    " "
-                };
-                model_row(
-                    marker,
-                    index + 1,
-                    &id,
-                    availability_symbol(&row.availability),
-                    width,
-                )
-            }));
-            rows.extend(wrap_instruction(
+            let instructions = wrap_instruction(
                 "Up/Down or number selects. Enter continues; Esc cancels.",
                 width,
+            );
+            let visible_rows = height.saturating_sub(3 + instructions.len()).max(1);
+            let selected = view
+                .models
+                .iter()
+                .position(|row| view.current_id.as_deref() == Some(row.slug.to_string().as_str()));
+            let (start, end) = window_bounds(view.models.len(), visible_rows, selected);
+            rows.push(format!(
+                "Select model ({}-{end} of {})",
+                if end == 0 { 0 } else { start + 1 },
+                view.models.len()
             ));
+            rows.push("✓ available; ! unavailable".to_string());
+            rows.extend(
+                view.models[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, row)| {
+                        let index = start + offset;
+                        let id = row.slug.to_string();
+                        let marker = if view.current_id.as_deref() == Some(id.as_str()) {
+                            ">"
+                        } else {
+                            " "
+                        };
+                        model_row(
+                            marker,
+                            index + 1,
+                            &id,
+                            availability_symbol(&row.availability),
+                            width,
+                        )
+                    }),
+            );
+            rows.extend(instructions);
         }
         PickerFocus::Reasoning => {
-            rows.extend(wrap_instruction(
+            let heading = wrap_instruction(
                 &format!(
                     "Select reasoning for {}",
                     view.selected_model
@@ -114,26 +137,48 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize) -> String {
                         .unwrap_or("the selected model")
                 ),
                 width,
-            ));
-            rows.extend(view.reasoning.iter().enumerate().map(|(index, reasoning)| {
-                let marker = if view.current_id.as_deref() == Some(reasoning.as_str()) {
-                    ">"
-                } else {
-                    " "
-                };
-                format!("{marker} {}. {reasoning:?}", index + 1)
-            }));
-            rows.extend(wrap_instruction(
+            );
+            let instructions = wrap_instruction(
                 if view.persistent_only {
                     "Up/Down or number selects. Enter saves the default; Esc cancels."
                 } else {
                     "Up/Down or number selects. Enter saves defaults; s uses this session; Esc cancels."
                 },
                 width,
+            );
+            let visible_rows = height
+                .saturating_sub(heading.len() + instructions.len() + 1)
+                .max(1);
+            let selected = view
+                .reasoning
+                .iter()
+                .position(|reasoning| view.current_id.as_deref() == Some(reasoning.as_str()));
+            let (start, end) = window_bounds(view.reasoning.len(), visible_rows, selected);
+            rows.extend(heading);
+            rows.extend(view.reasoning[start..end].iter().enumerate().map(
+                |(offset, reasoning)| {
+                    let index = start + offset;
+                    let marker = if view.current_id.as_deref() == Some(reasoning.as_str()) {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    format!("{marker} {}. {reasoning:?}", index + 1)
+                },
             ));
+            rows.extend(instructions);
         }
     }
     rows.join("\n")
+}
+
+fn window_bounds(total: usize, visible: usize, selected: Option<usize>) -> (usize, usize) {
+    let visible = visible.min(total);
+    let start = selected
+        .unwrap_or(0)
+        .saturating_sub(visible / 2)
+        .min(total.saturating_sub(visible));
+    (start, start + visible)
 }
 
 fn availability_symbol(availability: &ego_ai::catalogue::ModelAvailability) -> &'static str {
@@ -210,7 +255,7 @@ mod tests {
     #[test]
     fn model_rows_are_width_bounded_and_keep_availability_progressive() {
         for width in [80, 60, 40] {
-            let rendered = model_picker_prompt(&view(), width);
+            let rendered = model_picker_prompt(&view(), width, 24);
             assert!(
                 rendered
                     .lines()
@@ -230,7 +275,7 @@ mod tests {
         view.selected_model = Some("anthropic/claude-haiku-4-5".to_owned());
         view.reasoning = vec![ThinkingLevel::Off];
         for width in [80, 60, 40] {
-            let rendered = model_picker_prompt(&view, width);
+            let rendered = model_picker_prompt(&view, width, 24);
             assert!(rendered.lines().all(|line| line.width() <= width));
             assert!(rendered.contains("anthropic/claude-haiku-4-5"));
         }
@@ -243,7 +288,7 @@ mod tests {
         let (_ingress, coordinator) = interactive_control();
         let registry = Arc::new(ActionRegistry::final_surface());
         let seat = Seat {
-            kind: SeatKind::Live(LiveSeat {
+            kind: SeatKind::Live(Box::new(LiveSeat {
                 input,
                 control,
                 activated: AtomicBool::new(false),
@@ -253,9 +298,10 @@ mod tests {
                     &registry,
                 )))),
                 git_worker: Mutex::new(None),
+                activity_worker: Mutex::new(None),
                 output_owner: Mutex::new(None),
                 owner: Mutex::new(None),
-            }),
+            })),
             terminal: true,
             registry,
             coordinator: Mutex::new(Some(coordinator)),

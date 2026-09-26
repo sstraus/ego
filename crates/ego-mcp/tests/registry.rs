@@ -422,12 +422,6 @@ fn candidate_saying(
         instructions: Some(instructions.to_owned()),
     }
 }
-fn admitted_candidate(
-    admission: Arc<McpServerAdmission>,
-    tools: Vec<Arc<CountingTool>>,
-) -> McpAdmittedCandidate {
-    admitted_candidate_saying(admission, tools, None)
-}
 fn admitted_candidate_saying(
     admission: Arc<McpServerAdmission>,
     tools: Vec<Arc<CountingTool>>,

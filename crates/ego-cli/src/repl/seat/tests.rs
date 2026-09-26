@@ -422,7 +422,7 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let (_ingress, coordinator) = interactive_control();
     let registry = Arc::new(ActionRegistry::final_surface());
     let seat = Seat {
-        kind: SeatKind::Live(LiveSeat {
+        kind: SeatKind::Live(Box::new(LiveSeat {
             input,
             control: seat_control,
             activated: AtomicBool::new(false),
@@ -432,9 +432,10 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
                 &registry,
             )))),
             git_worker: Mutex::new(None),
+            activity_worker: Mutex::new(None),
             output_owner: Mutex::new(None),
             owner: Mutex::new(None),
-        }),
+        })),
         terminal: true,
         registry,
         coordinator: Mutex::new(Some(coordinator)),

@@ -10,6 +10,8 @@ use serde::Deserialize;
 
 use super::{note_truncation, only_op, root_of, scan_of, wrong_op};
 
+const GLOB_ENTRY_LIMIT: usize = 512;
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GlobParams {
     /// A glob pattern, matched against each file's path relative to the
@@ -33,7 +35,7 @@ impl TypedTool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files whose path matches a glob pattern. Returns paths relative to the search root, one per line; it does not read the files."
+        "Find files whose path matches a glob pattern. Returns paths relative to the search root, one per line; it does not read the files. Stops after 512 visited entries and marks an incomplete result."
     }
 
     fn prepare_typed(
@@ -67,7 +69,9 @@ impl TypedTool for GlobTool {
                 return Err(wrong_op(self.name()));
             };
             let matcher = compile(&pattern)?.compile_matcher();
-            let scan = io.list(&scan_of(root.clone()))?;
+            let mut request = scan_of(root.clone());
+            request.limits.max_entries = GLOB_ENTRY_LIMIT;
+            let scan = io.list(&request)?;
 
             // Files only. A glob pattern is how a model asks "which files",
             // and a directory that happens to match `**/*.rs` is not one of

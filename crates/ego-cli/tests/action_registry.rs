@@ -256,12 +256,16 @@ fn modal_enter_and_escape_are_exclusive_and_restore_exact_buffer_and_cursor() {
 }
 
 #[test]
-fn meta_p_and_model_slash_are_the_same_action() {
+fn model_shortcuts_and_slash_are_the_same_action() {
     let registry = ActionRegistry::final_surface();
     let meta_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::META);
     let alt_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT);
     assert_eq!(registry.resolve_key(meta_p), Some(ActionId::Model));
     assert_eq!(registry.resolve_key(alt_p), Some(ActionId::Model));
+    assert_eq!(
+        registry.resolve_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+        Some(ActionId::Model)
+    );
     assert_eq!(registry.resolve_slash("model"), Some(ActionId::Model));
     assert_ne!(
         registry.resolve_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),

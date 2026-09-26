@@ -844,6 +844,120 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "slow-exec",
+                "exec",
+                r#"{"argv":["slow-work"],"cwd":null,"timeout_ms":15000}"#,
+            )),
+            Reply::Sse(text("SLOW-TOOL-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "yolo",
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let executable = ego.home_file(
+        ".local/bin/slow-work",
+        "#!/bin/sh\nprintf started > \"$EGO_HOME/tool-started\"\ni=0\nwhile [ ! -f \"$EGO_HOME/tool-release\" ]; do\n  /bin/sleep 0.05\n  i=$((i + 1))\n  if [ \"$i\" -ge 300 ]; then exit 124; fi\ndone\nprintf 'TOOL-FINISHED\\n'\n",
+    );
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("slow tool metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("make slow tool executable");
+    let path = format!("{}:/usr/bin:/bin", executable.parent().unwrap().display());
+    let started = ego.home_path().join("tool-started");
+    let release = ego.home_path().join("tool-release");
+    let ego = ego.env("PATH", &path).env("TERM", "xterm-256color");
+
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"run slow tool\r").expect("first turn");
+    input.flush().expect("first turn flush");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "tool did not start: {:?}",
+            normalized(&output)
+        );
+        drain(&reader, &mut output);
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let draft_start = output.len();
+    input
+        .write_all(b"draft while tool runs")
+        .expect("busy draft");
+    input.flush().expect("busy draft flush");
+    until_from(&reader, &mut output, draft_start, b"draft while tool runs");
+    drain_until_quiet(&reader, &mut output);
+    let progress_start = output.len();
+    thread::sleep(Duration::from_millis(2200));
+    drain(&reader, &mut output);
+    let progress = normalized(&output[progress_start..]);
+
+    std::fs::write(&release, b"go").expect("release tool");
+    until(&reader, &mut output, b"SLOW-TOOL-DONE");
+    let clear_start = output.len();
+    input.write_all(b"\x03").expect("clear draft");
+    input.flush().expect("clear draft flush");
+    until_prompt_from(&reader, &mut output, clear_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+    assert!(
+        progress.contains("working for "),
+        "no elapsed progress while the tool ran: {progress:?}"
+    );
+    assert!(
+        !stub
+            .generations()
+            .iter()
+            .any(|generation| generation.to_string().contains("draft while tool runs")),
+        "unsent busy draft reached the provider"
+    );
+}
+
 #[test]
 fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     let queued = "steer while sampling";
@@ -979,14 +1093,17 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         completions: vec![Reply::Sse(text("PASTED-SLASH-PROMPT"))],
         ..Plan::default()
     });
-    let ego = Ego::against(&stub).conversing().args([
-        "--model",
-        "ollama/qwen3",
-        "--session-id",
-        support::FIXTURE_SESSION_ID,
-        "--sandbox",
-        "off",
-    ]);
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
     // These cases all begin by answering the trust question, so the workspace
     // has to hold something worth asking about. An empty checkout is asked
     // nothing at all.
@@ -1020,7 +1137,63 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             .contains("the local action handler is not installed"),
         "activation must complete before the first live prompt"
     );
+    until(&reader, &mut output, b"model=ollama/qwen3");
+    drain_until_quiet(&reader, &mut output);
 
+    let typing_start = output.len();
+    input.write_all(b"immagini").expect("type a draft");
+    input.flush().expect("draft flush");
+    until_from(&reader, &mut output, typing_start, b"immagini");
+    drain_until_quiet(&reader, &mut output);
+    let typed_frame =
+        String::from_utf8_lossy(&strip_csi(&output[typing_start..])).replace("\r\n", "\n");
+    assert!(
+        typed_frame.contains("\n> immagini"),
+        "the native status must occupy a row above the composer; raw PTY: {:?}",
+        String::from_utf8_lossy(&output[typing_start..])
+    );
+    let clear_start = output.len();
+    input.write_all(b"\x03").expect("clear draft");
+    input.flush().expect("clear draft flush");
+    until_prompt_from(&reader, &mut output, clear_start);
+
+    let resize_start = output.len();
+    pair.master
+        .resize(PtySize {
+            rows: 8,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("narrow resize");
+    until_from(&reader, &mut output, resize_start, b"model=ollama/qwen3");
+    drain_until_quiet(&reader, &mut output);
+    let narrow_start = output.len();
+    input.write_all(b"short").expect("type in narrow PTY");
+    input.flush().expect("narrow draft flush");
+    until_from(&reader, &mut output, narrow_start, b"short");
+    drain_until_quiet(&reader, &mut output);
+    let narrow_frame =
+        String::from_utf8_lossy(&strip_csi(&output[narrow_start..])).replace("\r\n", "\n");
+    assert!(
+        narrow_frame.contains("\n> short"),
+        "resizing must keep status above the composer: {narrow_frame:?}"
+    );
+    let narrow_clear = output.len();
+    input.write_all(b"\x15").expect("clear narrow draft");
+    input.flush().expect("clear narrow draft flush");
+    until_prompt_from(&reader, &mut output, narrow_clear);
+    let restore_start = output.len();
+    pair.master
+        .resize(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("restore size");
+    until_from(&reader, &mut output, restore_start, b"model=ollama/qwen3");
+    drain_until_quiet(&reader, &mut output);
     let slash_start = output.len();
     input.write_all(b"/model\r").expect("model slash action");
     input.flush().expect("model slash action flush");
@@ -1066,6 +1239,22 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     input.write_all(b"\x1b").expect("close Meta-P modal");
     input.flush().expect("close Meta-P modal flush");
     until_prompt_from(&reader, &mut output, meta_close_start);
+
+    let function_key_start = output.len();
+    input.write_all(b"\x1bOQ").expect("F2 model shortcut");
+    input.flush().expect("F2 model shortcut flush");
+    until_normalized(&reader, &mut output, function_key_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+    let function_key_modal = normalized(&output[function_key_start..]);
+    assert_eq!(
+        function_key_modal.rsplit_once("Select model").unwrap().1,
+        slash_modal.rsplit_once("Select model").unwrap().1,
+        "F2 and /model must present the same complete picker"
+    );
+    let function_key_close_start = output.len();
+    input.write_all(b"\x1b").expect("close F2 modal");
+    input.flush().expect("close F2 modal flush");
+    until_prompt_from(&reader, &mut output, function_key_close_start);
 
     #[cfg(not(windows))]
     {
@@ -1129,6 +1318,137 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+}
+
+#[test]
+fn model_picker_title_remains_visible_in_a_short_terminal() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 8,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let activation_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, activation_start);
+    drain_until_quiet(&reader, &mut output);
+    let picker_start = output.len();
+    input.write_all(b"/model\r").expect("model action");
+    input.flush().expect("model action flush");
+    until_normalized(&reader, &mut output, picker_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+
+    let mut screen = vt100::Parser::new(8, 40, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    assert!(
+        visible.contains("Select model") && visible.contains("  3. "),
+        "picker heading and three useful choices must fit the terminal: {visible:?}; raw: {:?}",
+        String::from_utf8_lossy(&output[picker_start..])
+    );
+
+    let navigation_start = output.len();
+    for index in 2..=8 {
+        let move_start = output.len();
+        input.write_all(b"\x1b[B").expect("navigate down");
+        input.flush().expect("navigate down flush");
+        until_from(
+            &reader,
+            &mut output,
+            move_start,
+            format!("> {index}.").as_bytes(),
+        );
+        drain_until_quiet(&reader, &mut output);
+    }
+    screen.process(&output[navigation_start..]);
+    let visible = screen.screen().contents();
+    assert!(
+        visible.contains("Select model") && visible.contains("> 8."),
+        "selection and heading must stay visible after scrolling: {visible:?}"
+    );
+
+    input.write_all(b"\x1b").expect("close picker");
+    input.flush().expect("close picker flush");
+    let prompt_start = output.len();
+    until_prompt_from(&reader, &mut output, prompt_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+    assert!(
+        normalized(&output[activation_start..]).contains("F2 models"),
+        "startup banner must advertise the portable picker key: {:?}",
+        normalized(&output[activation_start..])
+    );
+}
+
+#[test]
+fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
+    let finished = Ego::nowhere()
+        .subcommand("models")
+        .arg("--json")
+        .run_pty_to_exit();
+    assert_eq!(finished.code, Some(0), "PTY output: {}", finished.stdout);
+    let output = finished.report();
+    let slugs: Vec<&str> = output["models"]
+        .as_array()
+        .expect("catalogue rows")
+        .iter()
+        .filter_map(|entry| entry["slug"].as_str())
+        .collect();
+    for current in [
+        "openai/gpt-6-astra",
+        "openai/gpt-6-sol",
+        "openai/gpt-6-luna",
+        "openai-codex/gpt-6-sol",
+        "anthropic/claude-fable-5-1",
+        "anthropic/claude-opus-5-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-4-5",
+    ] {
+        assert!(slugs.contains(&current), "missing {current} in {slugs:?}");
+    }
+    for superseded in [
+        "openai/gpt-5.6-sol",
+        "openai/gpt-5.6-terra",
+        "openai/gpt-5.6-luna",
+        "openai-codex/gpt-5.6-sol",
+        "anthropic/claude-opus-5",
+    ] {
+        assert!(
+            !slugs.contains(&superseded),
+            "stale {superseded} in {slugs:?}"
+        );
+    }
 }
 
 #[test]

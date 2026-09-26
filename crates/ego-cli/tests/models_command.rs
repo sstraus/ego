@@ -646,7 +646,7 @@ fn stored_openai_codex_credential_lists_the_builtin_default_on_a_fresh_home() {
         .as_array()
         .expect("the report carries models")
         .iter()
-        .find(|model| model["slug"] == "openai-codex/gpt-5.6-sol")
+        .find(|model| model["slug"] == "openai-codex/gpt-6-sol")
         .expect("a fresh Codex subscription home lists its builtin default");
     assert_eq!(model["capabilities"]["max_context_tokens"], 272_000);
     assert_eq!(model["capabilities"]["max_output_tokens"], 128_000);
@@ -675,7 +675,7 @@ fn selecting_the_openai_row_reaches_the_transport_rather_than_a_gate() {
             "--sandbox",
             "off",
             "--model",
-            "openai/gpt-5.6-sol",
+            "openai/gpt-6-sol",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "Ask",

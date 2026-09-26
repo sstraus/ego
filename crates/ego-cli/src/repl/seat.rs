@@ -6,6 +6,7 @@ use std::io::{BufRead, IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Receiver, SendError, Sender, bounded};
 use crossterm::event::Event;
@@ -361,6 +362,7 @@ struct SurfaceStatus {
     queue: QueueStatus,
     drafts: usize,
     activity: bool,
+    activity_since: Option<Instant>,
     notice: Option<String>,
     origin: InputOrigin,
     native_status: bool,
@@ -387,6 +389,7 @@ impl Default for SurfaceStatus {
             queue: QueueStatus::default(),
             drafts: 0,
             activity: false,
+            activity_since: None,
             notice: None,
             origin: InputOrigin::Typed,
             native_status: false,
@@ -502,6 +505,11 @@ enum GitWork {
 
 struct GitWorker {
     sender: Sender<GitWork>,
+    owner: std::thread::JoinHandle<()>,
+}
+
+struct ActivityWorker {
+    stop: Sender<()>,
     owner: std::thread::JoinHandle<()>,
 }
 
@@ -733,6 +741,7 @@ struct LiveSeat {
     phase: SurfacePhase,
     status: SharedStatus,
     git_worker: Mutex<Option<GitWorker>>,
+    activity_worker: Mutex<Option<ActivityWorker>>,
     output_owner: Mutex<Option<std::thread::JoinHandle<()>>>,
     owner: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -750,7 +759,7 @@ struct SequentialSeat {
 }
 
 enum SeatKind {
-    Live(LiveSeat),
+    Live(Box<LiveSeat>),
     Sequential(Box<SequentialSeat>),
 }
 
@@ -867,9 +876,30 @@ impl Seat {
                 );
             })?;
 
+        let (activity_stop, activity_done) = bounded(1);
+        let activity_status = Arc::downgrade(&status);
+        let activity_phase = phase.clone();
+        let activity_owner = std::thread::Builder::new()
+            .name("ego-activity-tick".to_string())
+            .spawn(move || {
+                while matches!(
+                    activity_done.recv_timeout(Duration::from_secs(1)),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout)
+                ) {
+                    let Some(status) = activity_status.upgrade() else {
+                        break;
+                    };
+                    let busy = activity_phase.get() == EditPhase::Busy
+                        && status.lock().expect("surface status lock").activity;
+                    if busy {
+                        repaint_status(&status);
+                    }
+                }
+            })?;
+
         Ok((
             Self {
-                kind: SeatKind::Live(LiveSeat {
+                kind: SeatKind::Live(Box::new(LiveSeat {
                     input,
                     control: seat_control,
                     activated: AtomicBool::new(false),
@@ -877,9 +907,13 @@ impl Seat {
                     phase,
                     status,
                     git_worker: Mutex::new(None),
+                    activity_worker: Mutex::new(Some(ActivityWorker {
+                        stop: activity_stop,
+                        owner: activity_owner,
+                    })),
                     output_owner: Mutex::new(Some(output_owner)),
                     owner: Mutex::new(Some(owner)),
-                }),
+                })),
                 terminal,
                 registry,
                 coordinator: Mutex::new(Some(control)),
@@ -897,6 +931,7 @@ impl Seat {
                     live.phase.set(EditPhase::Busy);
                     let mut status = live.status.lock().expect("surface status lock");
                     status.activity = true;
+                    status.activity_since.get_or_insert_with(Instant::now);
                     drop(status);
                     repaint_status(&live.status);
                 }
@@ -951,6 +986,14 @@ impl Seat {
     /// Publish the lifecycle reason before waking Reedline out of its read.
     pub fn shutdown(&self) {
         if let SeatKind::Live(live) = &self.kind {
+            if let Some(worker) = live
+                .activity_worker
+                .lock()
+                .expect("activity worker lock")
+                .as_ref()
+            {
+                let _ = worker.stop.try_send(());
+            }
             if let Some(worker) = live.git_worker.lock().expect("Git worker lock").as_ref() {
                 let _ = worker.sender.try_send(GitWork::Shutdown);
             }
@@ -972,6 +1015,15 @@ impl Seat {
         }
         if let Some(worker) = live.git_worker.lock().expect("Git worker lock").take() {
             drop(worker.sender);
+            let _ = worker.owner.join();
+        }
+        if let Some(worker) = live
+            .activity_worker
+            .lock()
+            .expect("activity worker lock")
+            .take()
+        {
+            drop(worker.stop);
             let _ = worker.owner.join();
         }
     }
@@ -1350,6 +1402,7 @@ impl crate::run::InteractiveSeat for Seat {
             live.phase.set(EditPhase::Busy);
             let mut status = live.status.lock().expect("surface status lock");
             status.activity = true;
+            status.activity_since.get_or_insert_with(Instant::now);
             drop(status);
             repaint_status(&live.status);
         }
@@ -1366,6 +1419,7 @@ impl crate::run::InteractiveSeat for Seat {
             );
             let mut status = live.status.lock().expect("surface status lock");
             status.activity = false;
+            status.activity_since = None;
             drop(status);
             repaint_status(&live.status);
         }
