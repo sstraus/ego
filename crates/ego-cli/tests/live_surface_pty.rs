@@ -1404,6 +1404,11 @@ fn model_picker_title_remains_visible_in_a_short_terminal() {
     drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+    assert!(
+        normalized(&output[activation_start..]).contains("F2 models"),
+        "startup banner must advertise the portable picker key: {:?}",
+        normalized(&output[activation_start..])
+    );
 }
 
 #[test]
