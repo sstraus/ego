@@ -1172,7 +1172,15 @@ fn status_prefix(status: &SharedStatus) -> String {
     let status = status.lock().expect("surface status lock");
     let mut rows = Vec::new();
     if status.activity {
-        rows.push(ACTIVITY_LABEL.to_string());
+        let elapsed = status
+            .activity_since
+            .map(|started| started.elapsed().as_secs())
+            .unwrap_or(0);
+        if elapsed == 0 {
+            rows.push(ACTIVITY_LABEL.to_string());
+        } else {
+            rows.push(format!("working for {elapsed}s — Esc cancels"));
+        }
     }
     if !status.native_status {
         if status.queue.pending_steers > 0 {

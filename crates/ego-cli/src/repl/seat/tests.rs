@@ -432,6 +432,7 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
                 &registry,
             )))),
             git_worker: Mutex::new(None),
+            activity_worker: Mutex::new(None),
             output_owner: Mutex::new(None),
             owner: Mutex::new(None),
         }),
