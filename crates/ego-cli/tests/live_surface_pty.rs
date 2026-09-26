@@ -1126,6 +1126,22 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     input.flush().expect("close Meta-P modal flush");
     until_prompt_from(&reader, &mut output, meta_close_start);
 
+    let function_key_start = output.len();
+    input.write_all(b"\x1bOQ").expect("F2 model shortcut");
+    input.flush().expect("F2 model shortcut flush");
+    until_normalized(&reader, &mut output, function_key_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+    let function_key_modal = normalized(&output[function_key_start..]);
+    assert_eq!(
+        function_key_modal.rsplit_once("Select model").unwrap().1,
+        slash_modal.rsplit_once("Select model").unwrap().1,
+        "F2 and /model must present the same complete picker"
+    );
+    let function_key_close_start = output.len();
+    input.write_all(b"\x1b").expect("close F2 modal");
+    input.flush().expect("close F2 modal flush");
+    until_prompt_from(&reader, &mut output, function_key_close_start);
+
     #[cfg(not(windows))]
     {
         let pasted_start = output.len();
