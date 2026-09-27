@@ -783,6 +783,10 @@ where
         }
     }
 
+    pub fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
+        self.metadata.meta(id)
+    }
+
     pub fn create(&self, root: PathBuf) -> Result<CreatedSession, LifecycleError> {
         self.create_with_id(SessionId::new(), root)
     }

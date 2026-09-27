@@ -1072,6 +1072,12 @@ pub struct SessionState {
     /// Mutable display metadata, reduced from the authoritative event stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Compact resume description derived from durable conversation events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Completed turns whose text could not produce a synopsis.
+    #[serde(default)]
+    pub summary_failures: u32,
     /// A soft-deleted session remains readable only for internal lineage replay.
     #[serde(default)]
     pub deleted: bool,
@@ -1210,6 +1216,8 @@ impl Default for SessionState {
             last_seq: Seq::default(),
             lineage: None,
             title: None,
+            summary: None,
+            summary_failures: 0,
             deleted: false,
             pause: PauseState::Running,
             holds: HoldReceipts::default(),
@@ -1250,6 +1258,38 @@ impl Default for SessionState {
 }
 
 impl SessionState {
+    fn refresh_synopsis(&mut self, turn: TurnId) {
+        let prompt = self
+            .items
+            .values()
+            .filter(|item| item.turn == turn && item.kind == ItemKind::UserPrompt)
+            .min_by_key(|item| item.seq)
+            .map(|item| item.text.as_str())
+            .filter(|text| !text.trim().is_empty());
+        let answer = self
+            .items
+            .values()
+            .filter(|item| item.turn == turn && item.kind == ItemKind::Assistant)
+            .max_by_key(|item| item.seq)
+            .map(|item| item.text.as_str())
+            .filter(|text| !text.trim().is_empty());
+        let (Some(prompt), Some(answer)) = (prompt, answer) else {
+            self.summary_failures = self.summary_failures.saturating_add(1);
+            return;
+        };
+        if self.title.is_none() {
+            let first_prompt = self
+                .items
+                .values()
+                .filter(|item| item.kind == ItemKind::UserPrompt)
+                .filter(|item| !item.text.trim().is_empty())
+                .min_by_key(|item| item.seq)
+                .map_or(prompt, |item| item.text.as_str());
+            self.title = Some(synopsis_excerpt(first_prompt, 80));
+        }
+        self.summary = Some(synopsis_excerpt(&format!("{prompt} — {answer}"), 300));
+    }
+
     /// Rebuild the pure state from durable events in their supplied order.
     pub fn replay(events: impl IntoIterator<Item = DomainEvent>) -> Self {
         let mut state = Self::default();
@@ -1983,6 +2023,9 @@ impl SessionState {
                 turn.completed = true;
                 turn.ok = *ok;
                 turn.exit_reason = Some(*exit_reason);
+                if *ok {
+                    self.refresh_synopsis(ev.env.turn);
+                }
             }
             EventKind::CompactionSeeded {
                 source,
@@ -2000,8 +2043,12 @@ impl SessionState {
                     item.completed = true;
                     item.ok = Some(true);
                 }
+                self.summary = Some(synopsis_excerpt(checkpoint, 300));
             }
-            EventKind::Compacted { summary } => self.compactions.push(summary.clone()),
+            EventKind::Compacted { summary } => {
+                self.summary = Some(synopsis_excerpt(summary, 300));
+                self.compactions.push(summary.clone());
+            }
             EventKind::Forked { source, at_seq } => {
                 self.lineage = Some(SessionLineage::Fork {
                     source: *source,
@@ -2649,6 +2696,19 @@ impl SessionState {
         }
         Some(item)
     }
+}
+
+/// A UTF-8 byte ceiling bounds tokenizer output without depending on a model.
+fn synopsis_excerpt(text: &str, max_bytes: usize) -> String {
+    let plain = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut excerpt = String::new();
+    for character in plain.chars() {
+        if excerpt.len() + character.len_utf8() > max_bytes {
+            break;
+        }
+        excerpt.push(character);
+    }
+    excerpt
 }
 
 fn hook_subject_matches_envelope(subject: HookSubject, turn: TurnId, item: Option<ItemId>) -> bool {

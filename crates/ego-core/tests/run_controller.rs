@@ -113,6 +113,8 @@ impl SessionStore for RecordingSessionStore {
                 created: Timestamp::EPOCH,
                 updated: Timestamp::EPOCH,
                 title: None,
+                summary: None,
+                summary_failures: 0,
                 lineage: None,
             })
             .collect())

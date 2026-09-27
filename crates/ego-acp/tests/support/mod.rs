@@ -844,6 +844,8 @@ impl SessionLifecycleStore for Store {
                 created,
                 updated: created,
                 title: None,
+                summary: None,
+                summary_failures: 0,
                 lineage: None,
             },
         );
@@ -915,6 +917,8 @@ impl SessionLifecycleStore for Store {
                 created: Timestamp::EPOCH,
                 updated: Timestamp::EPOCH,
                 title,
+                summary: source_meta.summary,
+                summary_failures: source_meta.summary_failures,
                 lineage: Some(seed.lineage()),
             },
         );

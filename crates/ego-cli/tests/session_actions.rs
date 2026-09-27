@@ -57,6 +57,8 @@ fn catalogue_versions_the_listing_envelope_and_serialises_tagged_lineage_rows() 
         created: Timestamp::from_millis(1),
         updated: Timestamp::from_millis(2),
         title: Some("fork".to_owned()),
+        summary: None,
+        summary_failures: 0,
         lineage: Some(SessionLineage::Fork { source: id, at_seq }),
     };
     let compacted = SessionMeta {
@@ -66,6 +68,8 @@ fn catalogue_versions_the_listing_envelope_and_serialises_tagged_lineage_rows() 
         created: Timestamp::from_millis(3),
         updated: Timestamp::from_millis(4),
         title: Some("compacted".to_owned()),
+        summary: None,
+        summary_failures: 0,
         lineage: Some(SessionLineage::Compaction {
             source: id,
             source_seq: at_seq,

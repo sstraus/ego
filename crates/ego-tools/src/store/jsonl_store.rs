@@ -75,6 +75,8 @@ struct LogManifestFacts {
     hooks: HookCatalogueEvidence,
     evidence: ManifestEvidence,
     title: Option<String>,
+    summary: Option<String>,
+    summary_failures: u32,
     deleted: bool,
 }
 
@@ -86,6 +88,8 @@ fn meta_from_log_facts(id: SessionId, facts: &LogManifestFacts) -> SessionMeta {
         created: facts.created,
         updated: facts.last_ts.unwrap_or(facts.created),
         title: facts.title.clone(),
+        summary: facts.summary.clone(),
+        summary_failures: facts.summary_failures,
         lineage: facts.lineage,
     }
 }
@@ -375,7 +379,7 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
     let mut execution = None;
     let mut hooks = HookCatalogueEvidence::default();
     let mut evidence_records = Vec::new();
-    let mut title = None;
+    let mut state = SessionState::default();
     let mut deleted = false;
     for line in lines {
         let record = match decode_line(line)? {
@@ -394,8 +398,8 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
         match entry {
             SessionEntry::Event(event) => {
                 last_ts = Some(event.env.ts);
+                state.apply(&event);
                 match event.kind {
-                    EventKind::SessionTitleChanged { title: changed } => title = changed,
                     EventKind::SessionDeleted => deleted = true,
                     EventKind::CompactionSeeded {
                         source,
@@ -444,7 +448,9 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
         execution,
         hooks,
         evidence,
-        title,
+        title: state.title,
+        summary: state.summary,
+        summary_failures: state.summary_failures,
         deleted,
     }))
 }
@@ -1014,6 +1020,8 @@ impl JsonlStore {
             created: projected_meta.created,
             updated: projected_meta.updated,
             title: projected_meta.title,
+            summary: projected_meta.summary,
+            summary_failures: projected_meta.summary_failures,
             lineage: projected_meta.lineage,
         };
         let manifest = RunManifest {
@@ -1052,7 +1060,13 @@ impl JsonlStore {
         // session; a newly-created session has no earlier facts to recover,
         // and reading back the header and event just appended would turn its
         // first append into an unnecessary whole-log read.
-        let log_facts = if previous.is_none() && !is_new_session {
+        let refresh_synopsis = matches!(
+            ev.kind,
+            EventKind::TurnCompleted { .. }
+                | EventKind::CompactionSeeded { .. }
+                | EventKind::Compacted { .. }
+        );
+        let log_facts = if (previous.is_none() && !is_new_session) || refresh_synopsis {
             match self.io.read(&self.log_path(id))? {
                 Some(bytes) => log_manifest_facts(&bytes)?,
                 None => None,
@@ -1095,11 +1109,31 @@ impl JsonlStore {
             updated: ev.env.ts,
             title: match &ev.kind {
                 EventKind::SessionTitleChanged { title } => title.clone(),
-                _ => previous
+                _ => log_facts
                     .as_ref()
-                    .and_then(|manifest| manifest.meta.title.clone())
-                    .or_else(|| log_facts.as_ref().and_then(|facts| facts.title.clone())),
+                    .and_then(|facts| facts.title.clone())
+                    .or_else(|| {
+                        previous
+                            .as_ref()
+                            .and_then(|manifest| manifest.meta.title.clone())
+                    }),
             },
+            summary: log_facts
+                .as_ref()
+                .and_then(|facts| facts.summary.clone())
+                .or_else(|| {
+                    previous
+                        .as_ref()
+                        .and_then(|manifest| manifest.meta.summary.clone())
+                }),
+            summary_failures: log_facts.as_ref().map_or_else(
+                || {
+                    previous
+                        .as_ref()
+                        .map_or(0, |manifest| manifest.meta.summary_failures)
+                },
+                |facts| facts.summary_failures,
+            ),
             lineage: match &ev.kind {
                 EventKind::CompactionSeeded {
                     source,
@@ -1425,6 +1459,8 @@ impl JsonlStore {
                     created: Timestamp::EPOCH,
                     updated: Timestamp::EPOCH,
                     title: None,
+                    summary: None,
+                    summary_failures: 0,
                     lineage: None,
                 },
                 execution: None,

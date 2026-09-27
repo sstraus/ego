@@ -221,6 +221,8 @@ impl SessionLifecycleStore for FakeStore {
             created,
             updated: created,
             title: None,
+            summary: None,
+            summary_failures: 0,
             lineage: None,
         });
         Ok(LifecyclePublication::Published)
@@ -267,6 +269,8 @@ impl SessionLifecycleStore for FakeStore {
                 created: meta.created,
                 updated: meta.updated,
                 title: meta.title,
+                summary: meta.summary,
+                summary_failures: meta.summary_failures,
                 lineage: Some(seed.lineage()),
             });
         }
@@ -465,6 +469,8 @@ fn metadata(id: SessionId, root: &Path, created: u64) -> SessionMeta {
         created: Timestamp::from_millis(created),
         updated: Timestamp::from_millis(created),
         title: None,
+        summary: None,
+        summary_failures: 0,
         lineage: None,
     }
 }

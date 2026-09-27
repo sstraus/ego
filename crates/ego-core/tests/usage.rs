@@ -345,6 +345,8 @@ mod report_service {
             created: Timestamp::from_millis(1_000),
             updated: Timestamp::from_millis(updated),
             title: None,
+            summary: None,
+            summary_failures: 0,
             lineage: None,
         }
     }

@@ -1385,6 +1385,7 @@ trait LifecycleOperations: Send + Sync {
         root: Option<&Path>,
     ) -> Result<SessionPage, LifecycleError>;
     fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError>;
+    fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError>;
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment>;
     fn resume<'a>(
         &'a self,
@@ -1427,6 +1428,10 @@ where
 
     fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError> {
         SessionLifecycle::hold(self, id)
+    }
+
+    fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
+        SessionLifecycle::meta(self, id)
     }
 
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment> {
@@ -1758,18 +1763,23 @@ fn refused_params(error: impl fmt::Display) -> Error {
 /// sessions in no protocol-defined order, so recency is the only thing a host
 /// can sort a session picker by, and an agent that omits it hands back a list
 /// nobody can order.
-fn hold_meta(state: HoldState) -> serde_json::Map<String, serde_json::Value> {
-    serde_json::Map::from_iter([(
-        "ego".to_owned(),
-        serde_json::json!({"hold": {"state": state}}),
-    )])
+fn session_meta(
+    state: HoldState,
+    summary: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut ego = serde_json::json!({"hold": {"state": state}});
+    if let Some(summary) = summary {
+        ego["summary"] = serde_json::Value::String(summary.to_owned());
+    }
+    serde_json::Map::from_iter([("ego".to_owned(), ego)])
 }
 
 fn session_info(meta: SessionMeta, hold: HoldState) -> v1::SessionInfo {
+    let extension = session_meta(hold, meta.summary.as_deref());
     v1::SessionInfo::new(meta.id.to_string(), meta.workspace_root)
         .title(meta.title)
         .updated_at(meta.updated.to_rfc3339())
-        .meta(hold_meta(hold))
+        .meta(extension)
 }
 
 fn emit_info(
@@ -1782,7 +1792,11 @@ fn emit_info(
         v1::SessionUpdate::SessionInfoUpdate(
             v1::SessionInfoUpdate::new()
                 .title(meta.title.clone())
-                .updated_at(meta.updated.to_rfc3339()),
+                .updated_at(meta.updated.to_rfc3339())
+                .meta(serde_json::Map::from_iter([(
+                    "ego".to_owned(),
+                    serde_json::json!({"summary": meta.summary}),
+                )])),
         ),
     ))
 }
@@ -2206,7 +2220,7 @@ where
                     responder.respond(
                         v1::LoadSessionResponse::new()
                             .config_options(config_options(controls.as_ref(), id))
-                            .meta(hold_meta(hold)),
+                            .meta(session_meta(hold, attachment.meta.summary.as_deref())),
                     )?;
                     emit_attachment(&cx, &request.session_id, &attachment)
                 }
@@ -2581,6 +2595,7 @@ where
                     let spawner = Arc::clone(&spawner);
                     let sessions = sessions.clone();
                     let trust = trust.clone();
+                    let lifecycle = lifecycle.clone();
                     let connection = cx.clone();
                     let generation = correlation.generation;
                     cx.spawn(async move {
@@ -2746,6 +2761,17 @@ where
                         }
                         let snapshot = subscription.await;
                         let cancel_requested = sessions.finish(&id, generation, &snapshot);
+                        if let Some(lifecycle) = &lifecycle {
+                            match lifecycle.meta(durable_session) {
+                                Ok(meta) if meta.summary.is_some() => {
+                                    if let Err(error) = emit_info(&connection, &id, &meta) {
+                                        tracing::warn!(%error, "ACP session info update could not be delivered");
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => tracing::warn!(%error, "ACP session metadata could not be read after prompt"),
+                            }
+                        }
                         if cancel_requested && matches!(snapshot.settlement(), Some(RunSettlement::PermissionRequired { .. })) {
                             return responder.respond(v1::PromptResponse::new(v1::StopReason::Cancelled));
                         }

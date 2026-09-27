@@ -110,7 +110,15 @@ pub struct SessionMeta {
     pub updated: Timestamp,
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub summary_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<SessionLineage>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// A `SessionStore` failure.
