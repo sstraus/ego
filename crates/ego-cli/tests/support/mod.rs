@@ -1520,26 +1520,38 @@ impl AcpHost {
     /// Write one request and read until *its* answer, skipping the session
     /// updates that arrive first.
     pub fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        let id = self.next_id;
-        self.next_id += 1;
-        let frame = serde_json::json!({
-            "jsonrpc": "2.0", "id": id, "method": method, "params": params,
-        });
-        writeln!(self.outbox, "{frame}").expect("the agent is reading");
-        self.outbox.flush().expect("the agent is reading");
+        let id = self.send_request(method, params);
         loop {
-            let mut line = String::new();
-            let read = self
-                .inbox
-                .read_line(&mut line)
-                .expect("the agent is writing");
-            assert!(read > 0, "the agent closed without answering {method}");
-            let message: serde_json::Value = serde_json::from_str(&line)
-                .unwrap_or_else(|error| panic!("ACP stdout was not JSON-RPC ({error}): {line}"));
+            let message = self.read_frame();
             if message.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
                 return message;
             }
         }
+    }
+
+    pub fn send_request(&mut self, method: &str, params: serde_json::Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.write_frame(serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": params,
+        }));
+        id
+    }
+
+    pub fn write_frame(&mut self, frame: serde_json::Value) {
+        writeln!(self.outbox, "{frame}").expect("the agent is reading");
+        self.outbox.flush().expect("the agent is reading");
+    }
+
+    pub fn read_frame(&mut self) -> serde_json::Value {
+        let mut line = String::new();
+        let read = self
+            .inbox
+            .read_line(&mut line)
+            .expect("the agent is writing");
+        assert!(read > 0, "the agent closed without answering");
+        serde_json::from_str(&line)
+            .unwrap_or_else(|error| panic!("ACP stdout was not JSON-RPC ({error}): {line}"))
     }
 
     pub fn initialize(&mut self) -> serde_json::Value {

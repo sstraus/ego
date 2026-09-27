@@ -429,6 +429,10 @@ impl DurableAcpFixture {
         self.executor.block_next.store(true, Ordering::SeqCst);
     }
 
+    pub fn ask_permission_next_turn(&self) {
+        self.executor.ask_permission_next();
+    }
+
     pub fn fail_next_attach(&self, diagnostic: &str) {
         *self.executor.attach_error.lock().expect("attach failure") = Some(diagnostic.to_owned());
     }
@@ -876,6 +880,7 @@ impl SessionLifecycleStore for Store {
 #[derive(Default)]
 pub struct Executor {
     block_next: AtomicBool,
+    ask_permission_next: AtomicBool,
     recover_running: AtomicBool,
     block_observe: AtomicBool,
     attach_calls: AtomicUsize,
@@ -898,6 +903,9 @@ pub struct Executor {
 pub struct Prepared;
 
 impl Executor {
+    pub fn ask_permission_next(&self) {
+        self.ask_permission_next.store(true, Ordering::SeqCst);
+    }
     pub fn block_preparation(&self) {
         self.block_prepare.store(true, Ordering::SeqCst);
     }
@@ -1031,10 +1039,36 @@ impl RunExecutor for Executor {
         handle: &'a RunHandle,
         _prompt: &'a RunPrompt,
         _prepared: Self::Prepared,
-        _bindings: RunExecutionBindings,
+        bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
         self.submit_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
+            if self.ask_permission_next.swap(false, Ordering::SeqCst) {
+                use ego_core::permit::{
+                    Authority, CanonPath, Escalation, Op, OpName, PermissionDecision,
+                    PermissionRequest,
+                };
+                let human = bindings.human().expect("ACP supplies a human seat");
+                let request = PermissionRequest::new(
+                    "exec",
+                    vec![Op::Read {
+                        path: CanonPath::new("/workspace/file"),
+                    }],
+                    Escalation::ModeAsks {
+                        mode: ego_core::config::Mode::Default,
+                        op: OpName::Spawn,
+                        path: CanonPath::new("/workspace"),
+                    },
+                );
+                let decision = human.decide(ItemId::new(), &request).await;
+                return Ok(match decision {
+                    PermissionDecision::Allow => RunSettlement::completed(),
+                    _ => RunSettlement::permission_required(
+                        "exec: permission was refused",
+                        ego_core::run::DeniedBy::Decided(Authority::Party),
+                    ),
+                });
+            }
             if let Some(diagnostic) = self.submit_error.lock().expect("submit failure").take() {
                 return Err(RunExecutorError::new(diagnostic));
             }

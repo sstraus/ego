@@ -619,6 +619,7 @@ struct Registered {
     busy: bool,
     withdrawal: Option<Withdrawal>,
     active_cancel: Option<CancelKey>,
+    cancel_requested: bool,
     mcp: Option<Arc<dyn SessionMcpAdmission>>,
 }
 
@@ -742,6 +743,7 @@ impl Sessions {
                 busy: false,
                 withdrawal: None,
                 active_cancel: None,
+                cancel_requested: false,
                 mcp,
             },
         );
@@ -796,6 +798,7 @@ impl Sessions {
             .expect("the checked ACP session remains registered");
         session.generation = generation;
         session.busy = true;
+        session.cancel_requested = false;
         // Minted here, under the lock that publishes `busy`, so there is no
         // instant in which this session is accepting a prompt and a
         // `session/cancel` has nowhere to land.
@@ -885,6 +888,7 @@ impl Sessions {
             return Cancellation::Nothing;
         };
         if let Some(key) = session.active_cancel.clone() {
+            session.cancel_requested = true;
             return Cancellation::Admitted(key);
         }
         let Some(withdrawal) = session.withdrawal.as_mut() else {
@@ -904,18 +908,22 @@ impl Sessions {
         id: &v1::SessionId,
         generation: RegistrationGeneration,
         snapshot: &RunSnapshot,
-    ) {
+    ) -> bool {
         if let Some(session) = self
             .lock()
             .sessions
             .get_mut(id)
             .filter(|session| session.generation == generation)
         {
+            let cancel_requested = session.cancel_requested;
             session.run = Some((snapshot.run_id(), snapshot.revision()));
             session.withdrawal = None;
             session.active_cancel = None;
             session.busy = false;
+            session.cancel_requested = false;
+            return cancel_requested;
         }
+        false
     }
 
     fn refuse(&self, id: &v1::SessionId, generation: RegistrationGeneration) {
@@ -1370,6 +1378,7 @@ trait LifecycleOperations: Send + Sync {
         cursor: Option<&SessionCursor>,
         root: Option<&Path>,
     ) -> Result<SessionPage, LifecycleError>;
+    fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError>;
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment>;
     fn resume<'a>(
         &'a self,
@@ -1408,6 +1417,10 @@ where
         root: Option<&Path>,
     ) -> Result<SessionPage, LifecycleError> {
         SessionLifecycle::list(self, cursor, SESSION_PAGE_SIZE, root)
+    }
+
+    fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError> {
+        SessionLifecycle::hold(self, id)
     }
 
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment> {
@@ -1679,6 +1692,7 @@ fn parse_session(id: &v1::SessionId) -> Result<SessionId, Error> {
 /// contract and is documented with it; a host must not have to match on the
 /// wording of `data` to learn a retry is safe.
 const SESSION_BUSY: i32 = -32010;
+const SESSION_HELD: i32 = -32011;
 
 /// What a lifecycle refusal is, in the only vocabulary a host acts on.
 ///
@@ -1738,10 +1752,18 @@ fn refused_params(error: impl fmt::Display) -> Error {
 /// sessions in no protocol-defined order, so recency is the only thing a host
 /// can sort a session picker by, and an agent that omits it hands back a list
 /// nobody can order.
-fn session_info(meta: SessionMeta) -> v1::SessionInfo {
+fn hold_meta(state: HoldState) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::Map::from_iter([(
+        "ego".to_owned(),
+        serde_json::json!({"hold": {"state": state}}),
+    )])
+}
+
+fn session_info(meta: SessionMeta, hold: HoldState) -> v1::SessionInfo {
     v1::SessionInfo::new(meta.id.to_string(), meta.workspace_root)
         .title(meta.title)
         .updated_at(meta.updated.to_rfc3339())
+        .meta(hold_meta(hold))
 }
 
 fn emit_info(
@@ -2048,12 +2070,17 @@ where
                         Ok(cursor) => cursor,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
-                    match lifecycle.list(cursor.as_ref(), root.as_ref().map(RunRoot::as_path)) {
-                        Ok(page) => responder.respond(
-                            v1::ListSessionsResponse::new(
-                                page.items.into_iter().map(session_info).collect(),
-                            )
-                            .next_cursor(page.next_cursor.map(|cursor| cursor.to_string())),
+                    let page = match lifecycle.list(cursor.as_ref(), root.as_ref().map(RunRoot::as_path)) {
+                        Ok(page) => page,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                    };
+                    let items = page.items.into_iter().map(|meta| {
+                        lifecycle.hold(meta.id).map(|hold| session_info(meta, hold))
+                    }).collect::<Result<Vec<_>, _>>();
+                    match items {
+                        Ok(items) => responder.respond(
+                            v1::ListSessionsResponse::new(items)
+                                .next_cursor(page.next_cursor.map(|cursor| cursor.to_string())),
                         ),
                         Err(error) => responder.respond_with_error(lifecycle_error(&error)),
                     }
@@ -2098,6 +2125,10 @@ where
                     };
                     let attachment = match lifecycle.load(id, root.as_path()).await {
                         Ok(attachment) => attachment,
+                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                    };
+                    let hold = match lifecycle.hold(id) {
+                        Ok(hold) => hold,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
                     if let Err(error) =
@@ -2163,7 +2194,8 @@ where
                     // would be dropped.
                     responder.respond(
                         v1::LoadSessionResponse::new()
-                            .config_options(config_options(controls.as_ref(), id)),
+                            .config_options(config_options(controls.as_ref(), id))
+                            .meta(hold_meta(hold)),
                     )?;
                     emit_attachment(&cx, &request.session_id, &attachment)
                 }
@@ -2429,6 +2461,7 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let trust = trust.clone();
+                let lifecycle = lifecycle.clone();
                 async move |request: v1::PromptRequest, responder, cx: ConnectionTo<Client>| {
                     let id = request.session_id.clone();
                     let durable_session = match parse_session(&id) {
@@ -2471,6 +2504,22 @@ where
                             ));
                         }
                     };
+                    if let Some(lifecycle) = &lifecycle {
+                        match lifecycle.hold(durable_session) {
+                            Ok(HoldState::Paused) => {
+                                sessions.refuse(&id, correlation.generation);
+                                return responder.respond_with_error(Error::new(
+                                    SESSION_HELD,
+                                    "the session is held; continue it with `_ego/resume`",
+                                ));
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                sessions.refuse(&id, correlation.generation);
+                                return responder.respond_with_error(lifecycle_error(&error));
+                            }
+                        }
+                    }
                     let prompt = match prompt_content(&request.prompt) {
                         Ok(prompt) => prompt,
                         Err(refusal) => {
@@ -2684,7 +2733,10 @@ where
                             );
                         }
                         let snapshot = subscription.await;
-                        sessions.finish(&id, generation, &snapshot);
+                        let cancel_requested = sessions.finish(&id, generation, &snapshot);
+                        if cancel_requested && matches!(snapshot.settlement(), Some(RunSettlement::PermissionRequired { .. })) {
+                            return responder.respond(v1::PromptResponse::new(v1::StopReason::Cancelled));
+                        }
                         match prompt_result(&snapshot) {
                             Ok(stop_reason) => {
                                 responder.respond(v1::PromptResponse::new(stop_reason))
@@ -2695,10 +2747,12 @@ where
                                     .ok()
                                     .flatten()
                                     .unwrap_or_else(|| message.clone());
-                                responder.respond_with_error(
-                                    Error::new(i32::from(ErrorCode::InternalError), message)
-                                        .data(diagnostic),
-                                )
+                                let code = if matches!(snapshot.settlement(), Some(RunSettlement::Paused)) {
+                                    SESSION_HELD
+                                } else {
+                                    i32::from(ErrorCode::InternalError)
+                                };
+                                responder.respond_with_error(Error::new(code, message).data(diagnostic))
                             }
                         }
                     })?;

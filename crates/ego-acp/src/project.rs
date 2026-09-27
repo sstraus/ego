@@ -309,9 +309,7 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         RunTermination::PermissionRequired {
             action,
             by: DeniedBy::Decided(_),
-        } => Err(format!(
-            "the turn stopped because {action} was refused by a permission decision"
-        )),
+        } => Err(format!("the turn stopped because {action}")),
         RunTermination::PermissionRequired {
             action,
             by: DeniedBy::Nobody,
