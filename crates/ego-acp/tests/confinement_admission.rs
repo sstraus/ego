@@ -383,31 +383,114 @@ async fn session_new_settles_before_measurement_and_first_prompt_waits_for_it() 
         .await
         .expect("session/new reached confinement admission");
 
-    let early = tokio::time::timeout(Duration::from_millis(100), connection.response(request)).await;
+    let early =
+        tokio::time::timeout(Duration::from_millis(100), connection.response(request)).await;
     assert!(
         early.is_ok(),
         "session/new waited for the deliberately held measurement"
     );
     let (created, _) = early.expect("early session/new response");
     assert!(created["result"]["sessionId"].is_string(), "{created}");
-    assert!(created["result"].get("configOptions").is_none(), "{created}");
+    assert!(
+        created["result"].get("configOptions").is_none(),
+        "{created}"
+    );
     let session = created["result"]["sessionId"].as_str().unwrap();
-    let prompt = connection.send_request("session/prompt", serde_json::json!({
-        "sessionId": session, "prompt": [{"type": "text", "text": "hello"}],
-    })).await;
+    let prompt = connection
+        .send_request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session, "prompt": [{"type": "text", "text": "hello"}],
+            }),
+        )
+        .await;
     let before = fixture.executor_effect_counts();
-    let pending = tokio::time::timeout(Duration::from_millis(100), connection.response(prompt)).await;
-    assert!(pending.is_err(), "the first prompt crossed the probe barrier");
+    let pending =
+        tokio::time::timeout(Duration::from_millis(100), connection.response(prompt)).await;
+    assert!(
+        pending.is_err(),
+        "the first prompt crossed the probe barrier"
+    );
     assert_eq!(fixture.executor_effect_counts(), before);
 
     admission.release();
-    let (response, notifications) = tokio::time::timeout(Duration::from_secs(1), connection.response(prompt))
-        .await
-        .expect("first prompt answered after admission release");
+    let (response, notifications) =
+        tokio::time::timeout(Duration::from_secs(1), connection.response(prompt))
+            .await
+            .expect("first prompt answered after admission release");
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     let mut updates = notifications;
     updates.extend(connection.announced(ROOT).await);
-    assert!(updates.iter().any(|frame| frame["params"]["update"]["sessionUpdate"] == "config_option_update" && frame["params"]["update"]["configOptions"].is_array()), "measured offer was not announced: {updates:?}");
+    assert!(
+        updates
+            .iter()
+            .any(
+                |frame| frame["params"]["update"]["sessionUpdate"] == "config_option_update"
+                    && frame["params"]["update"]["configOptions"].is_array()
+            ),
+        "measured offer was not announced: {updates:?}"
+    );
+    connection.abort().await;
+}
+
+#[tokio::test]
+async fn closing_during_pending_measurement_cancels_the_first_prompt_without_a_run() {
+    let fixture = support::DurableAcpFixture::new();
+    let admission = Arc::new(Admission::default());
+    admission.blocks();
+    let controls: Arc<dyn SessionControls> = Arc::new(Seat::new(Confinement::Ro));
+    let mut connection =
+        support::Connected::new(router(&fixture, Some(controls), Arc::clone(&admission)));
+    let session = open(&mut connection, ROOT).await;
+    tokio::time::timeout(Duration::from_secs(1), admission.entered())
+        .await
+        .expect("session/new started the held measurement");
+
+    let prompt = connection
+        .send_request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{"type": "text", "text": "should never run"}],
+            }),
+        )
+        .await;
+    let (busy, _) = connection
+        .request(
+            "session/set_config_option",
+            serde_json::json!({
+                "sessionId": session,
+                "configId": "sandbox",
+                "value": "workspace",
+            }),
+        )
+        .await;
+    assert!(
+        busy["error"]["data"]
+            .as_str()
+            .is_some_and(|message| message.contains("already started")),
+        "the first prompt was not admitted before close: {busy}"
+    );
+    let close = connection
+        .send_request("session/close", serde_json::json!({"sessionId": session}))
+        .await;
+    let (answer, intervening) =
+        tokio::time::timeout(Duration::from_secs(1), connection.response(prompt))
+            .await
+            .expect("close must settle the prompt without waiting for the probe");
+    assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
+    let closed = if let Some(frame) = intervening
+        .iter()
+        .find(|frame| frame["id"].as_u64() == Some(close))
+    {
+        frame.clone()
+    } else {
+        connection.response(close).await.0
+    };
+    assert!(closed["result"].is_object(), "{closed}");
+    assert_eq!(fixture.executor_effect_counts(), (0, 0, 0));
+    assert!(!fixture.has_run(&session));
+    admission.release();
     connection.abort().await;
 }
 
@@ -429,10 +512,18 @@ async fn failed_initialization_leaves_a_session_but_refuses_its_first_prompt() {
         "failed admission exposed controls: {response}"
     );
     let session = response["result"]["sessionId"].as_str().unwrap();
-    let (prompt, _) = connection.request("session/prompt", serde_json::json!({
-        "sessionId": session, "prompt": [{"type": "text", "text": "hello"}],
-    })).await;
-    assert!(prompt["error"].is_object(), "unmeasured prompt ran: {prompt}");
+    let (prompt, _) = connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session, "prompt": [{"type": "text", "text": "hello"}],
+            }),
+        )
+        .await;
+    assert!(
+        prompt["error"].is_object(),
+        "unmeasured prompt ran: {prompt}"
+    );
     assert!(fixture.prepared_selections().is_none());
     connection.abort().await;
 }

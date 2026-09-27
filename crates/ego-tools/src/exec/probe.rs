@@ -251,7 +251,9 @@ async fn cache_key_async(
 ) -> Result<CapabilityCacheKey, ProcessError> {
     tokio::task::spawn_blocking(move || cache_key(&policy, backend.as_ref(), &runtime_roots))
         .await
-        .map_err(|error| ProcessError::Backend(format!("capability cache identity task failed: {error}")))?
+        .map_err(|error| {
+            ProcessError::Backend(format!("capability cache identity task failed: {error}"))
+        })?
 }
 
 fn cache_key_for_binary(
@@ -263,7 +265,9 @@ fn cache_key_for_binary(
     let identity = backend.identity();
     let digest = super::policy_digest_with_runtime_roots(policy, backend, runtime_roots)?;
     let binary = fs::read(binary).map_err(|error| {
-        ProcessError::Backend(format!("cannot read the current executable for cache identity: {error}"))
+        ProcessError::Backend(format!(
+            "cannot read the current executable for cache identity: {error}"
+        ))
     })?;
     let binary_hash = Sha256::digest(&binary).into();
     #[cfg(target_os = "linux")]

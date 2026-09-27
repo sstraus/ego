@@ -2095,7 +2095,7 @@ where
                     if let Some(pending) = pending_measurement {
                         let connection = cx.clone();
                         let controls = controls.clone();
-                        cx.spawn(async move {
+                        if let Err(error) = cx.spawn(async move {
                             match pending.await {
                                 Ok(()) => {
                                     if let Err(error) = emit_config_options(
@@ -2110,7 +2110,9 @@ where
                                 Err(error) => tracing::warn!(%error, "ACP confinement measurement failed after session/new"),
                             }
                             Ok(())
-                        });
+                        }) {
+                            tracing::warn!(%error, "ACP confinement update task could not start");
+                        }
                     }
                     Ok(())
                 }
@@ -2626,18 +2628,33 @@ where
                             root,
                             request_id,
                             run,
-                            withdrawn,
+                            mut withdrawn,
                             ..
                         } = correlation;
                         let outcome = match run {
                             None => {
-                                if let Err(error) = initialize_confinement(
-                                    confinement.as_ref(),
-                                    durable_session,
-                                    &root,
-                                )
-                                .await
-                                {
+                                // Closing or cancelling a session is effective
+                                // even while its first confinement probe is
+                                // still pending. The connection's background
+                                // task may finish the probe for later sessions.
+                                let initialized = {
+                                    let measurement = std::pin::pin!(initialize_confinement(
+                                        confinement.as_ref(),
+                                        durable_session,
+                                        &root,
+                                    ));
+                                    match futures::future::select(&mut withdrawn, measurement).await
+                                    {
+                                        Either::Left(_) => {
+                                            sessions.refuse(&id, generation);
+                                            return responder.respond(v1::PromptResponse::new(
+                                                v1::StopReason::Cancelled,
+                                            ));
+                                        }
+                                        Either::Right((result, _)) => result,
+                                    }
+                                };
+                                if let Err(error) = initialized {
                                     sessions.refuse(&id, generation);
                                     return responder.respond_with_error(error);
                                 }
