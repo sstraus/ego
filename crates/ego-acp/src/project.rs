@@ -47,11 +47,11 @@
 //! [`negotiate`](crate::negotiate::negotiate), and that is the whole reason
 //! the negotiated version must be a decision rather than an echo.
 //!
-//! ## `Option`, never `Vec`
+//! ## Stateless mapping and live notification sequence
 //!
-//! Every mapping below is 1-to-0-or-1: no public event needs more than one
-//! `SessionUpdate` to represent it. `Option<SessionUpdate>` says that
-//! directly; a `Vec` would imply a cardinality this projection never uses.
+//! The pointwise v1/v2 mappings below remain 1-to-0-or-1. The live v1
+//! sequence intentionally emits a second status update when a tool starts:
+//! pending, then in-progress. Replay follows that same sequence.
 //!
 //! ## The v1/v2 asymmetry principle
 //!
@@ -219,6 +219,58 @@ fn item_id_string(item: ItemId) -> String {
 /// dropping the value when it does not.
 fn tool_raw_input(raw: &str) -> serde_json::Value {
     serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+}
+
+fn tool_presentation(
+    name: &str,
+    input: &serde_json::Value,
+    root: Option<&std::path::Path>,
+) -> (String, v1::ToolKind, Vec<v1::ToolCallLocation>) {
+    let kind = match name {
+        "exec" => v1::ToolKind::Execute,
+        "read" | "read_tool_result" => v1::ToolKind::Read,
+        "edit" | "write" => v1::ToolKind::Edit,
+        "glob" | "grep" => v1::ToolKind::Search,
+        _ => v1::ToolKind::Other,
+    };
+    let title = if name == "exec" {
+        input
+            .get("argv")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|argv| {
+                argv.iter()
+                    .map(serde_json::Value::as_str)
+                    .collect::<Option<Vec<_>>>()
+            })
+            .filter(|argv| !argv.is_empty())
+            .map(|argv| argv.join(" "))
+            .unwrap_or_else(|| name.to_owned())
+    } else {
+        input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(|path| format!("{name} {path}"))
+            .unwrap_or_else(|| name.to_owned())
+    };
+    let locations = if matches!(name, "read" | "edit" | "write") {
+        input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(std::path::Path::new)
+            .and_then(|path| {
+                if path.is_absolute() {
+                    Some(path.to_path_buf())
+                } else {
+                    root.map(|root| root.join(path))
+                }
+            })
+            .map(|path| vec![v1::ToolCallLocation::new(path)])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    (title, kind, locations)
 }
 
 /// Map ego's turn-outcome vocabulary onto v2's `StopReason`.
@@ -402,10 +454,11 @@ pub fn project_acp_v1(
 pub fn project_replay_v1(
     frames: &[ReplayFrame],
     context_window: Option<u64>,
+    root: &std::path::Path,
 ) -> Vec<v1::SessionUpdate> {
     let mut updates = frames
         .iter()
-        .filter_map(|frame| project_v1(&frame.event))
+        .flat_map(|frame| project_updates_v1(&frame.event, root))
         .collect::<Vec<_>>();
     let Some(state) = frames.last().map(|frame| &frame.state) else {
         return updates;
@@ -447,6 +500,18 @@ pub fn project_acp_v2(
 ///
 /// See the module doc comment for the events with no v1 counterpart and why.
 pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
+    project_v1_with_root(event, None)
+}
+
+/// Project a public event with the workspace root admitted for this ACP session.
+pub fn project_v1_at(event: &PublicEvent, root: &std::path::Path) -> Option<v1::SessionUpdate> {
+    project_v1_with_root(event, Some(root))
+}
+
+fn project_v1_with_root(
+    event: &PublicEvent,
+    root: Option<&std::path::Path>,
+) -> Option<v1::SessionUpdate> {
     match event {
         PublicEvent::ItemStarted {
             item,
@@ -458,10 +523,18 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
             // A tool call with no name has no `ToolCall` to build: v1's
             // constructor requires one, and inventing a placeholder would put
             // a tool in the client's transcript under a name nothing called.
-            ItemKind::Tool => Some(v1::SessionUpdate::ToolCall(
-                v1::ToolCall::new(item_id_string(*item), name.clone()?)
-                    .raw_input(tool_raw_input(text.as_deref().unwrap_or(""))),
-            )),
+            ItemKind::Tool => {
+                let name = name.as_ref()?;
+                let input = tool_raw_input(text.as_deref().unwrap_or(""));
+                let (title, kind, locations) = tool_presentation(name, &input, root);
+                Some(v1::SessionUpdate::ToolCall(
+                    v1::ToolCall::new(item_id_string(*item), title)
+                        .kind(kind)
+                        .status(v1::ToolCallStatus::Pending)
+                        .locations(locations)
+                        .raw_input(input),
+                ))
+            }
             // Permissions travel over `session/request_permission`, and
             // subagents have no ACP concept — module doc comment. Messages and
             // reasoning never arrive as `ItemStarted`; that they are listed
@@ -547,6 +620,43 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
         | PublicEvent::Error { .. } => None,
+    }
+}
+
+/// Live and replay ordering for one public event. A tool starts pending, then
+/// immediately advances to in-progress under the same ACP id.
+pub fn project_updates_v1(event: &PublicEvent, root: &std::path::Path) -> Vec<v1::SessionUpdate> {
+    let Some(update) = project_v1_at(event, root) else {
+        return Vec::new();
+    };
+    let progress = if let v1::SessionUpdate::ToolCall(call) = &update {
+        Some(v1::SessionUpdate::ToolCallUpdate(v1::ToolCallUpdate::new(
+            call.tool_call_id.clone(),
+            v1::ToolCallUpdateFields::new().status(v1::ToolCallStatus::InProgress),
+        )))
+    } else {
+        None
+    };
+    let mut updates = vec![update];
+    if let Some(progress) = progress {
+        updates.push(progress);
+    }
+    updates
+}
+
+/// Complete live v1 projection including state-dependent usage and tool progress.
+pub fn project_acp_updates_v1(
+    event: &PublicEvent,
+    state_after: &SessionState,
+    caps: &ModelCapabilities,
+    root: &std::path::Path,
+) -> Vec<v1::SessionUpdate> {
+    if needs_state(event) {
+        project_acp_v1(event, state_after, caps)
+            .into_iter()
+            .collect()
+    } else {
+        project_updates_v1(event, root)
     }
 }
 

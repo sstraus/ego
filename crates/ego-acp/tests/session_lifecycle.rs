@@ -787,6 +787,54 @@ async fn load_replays_projectable_history_then_one_final_usage_and_current_info(
 }
 
 #[tokio::test]
+async fn load_replays_tool_presentation_and_failure_over_real_acp() {
+    let fixture = support::DurableAcpFixture::new();
+    let session_id = fixture.seed_tool_replay_session(ROOT);
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (loaded, before) = connection
+        .request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": session_id,
+                "cwd": ROOT,
+                "mcpServers": [],
+            }),
+        )
+        .await;
+    assert!(loaded.get("result").is_some(), "load failed: {loaded}");
+    assert!(before.is_empty(), "history preceded the load response");
+    let notifications = connection.announced().await;
+    let calls = updates(&notifications)
+        .iter()
+        .map(|params| &params["update"])
+        .filter(|update| {
+            matches!(
+                update["sessionUpdate"].as_str(),
+                Some("tool_call" | "tool_call_update")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls.len(),
+        3,
+        "expected start, progress and failure: {calls:?}"
+    );
+    assert_eq!(calls[0]["title"], "read src/main.rs");
+    assert_eq!(calls[0]["kind"], "read");
+    assert_eq!(
+        calls[0]["locations"][0]["path"],
+        format!("{ROOT}/src/main.rs")
+    );
+    assert_eq!(calls[1]["status"], "in_progress");
+    assert_eq!(calls[2]["status"], "failed");
+    assert_eq!(calls[0]["toolCallId"], calls[1]["toolCallId"]);
+    assert_eq!(calls[1]["toolCallId"], calls[2]["toolCallId"]);
+    connection.finish().await;
+}
+
+#[tokio::test]
 async fn resume_emits_current_info_but_no_history_or_usage() {
     let fixture = support::DurableAcpFixture::new();
     let seeded = fixture.seed_replay_session(ROOT, "Resume me", 200_000);

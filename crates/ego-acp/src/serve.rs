@@ -356,6 +356,7 @@ pub trait RunBindingsBuilder: Send + Sync {
         connection: ConnectionTo<Client>,
         session: v1::SessionId,
         capabilities: CapabilityCapture,
+        root: &RunRoot,
     ) -> ego_core::run::RunExecutionBindings;
 }
 
@@ -378,6 +379,7 @@ impl AcpRunBindingsBuilder {
 struct AcpSinkFactory {
     connection: ConnectionTo<Client>,
     session: v1::SessionId,
+    root: RunRoot,
 }
 
 impl EventSinkFactory for AcpSinkFactory {
@@ -386,6 +388,7 @@ impl EventSinkFactory for AcpSinkFactory {
             self.connection.clone(),
             self.session.clone(),
             capabilities.clone(),
+            self.root.as_path().to_path_buf(),
         ))
     }
 }
@@ -396,6 +399,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
         connection: ConnectionTo<Client>,
         session: v1::SessionId,
         capabilities: CapabilityCapture,
+        root: &RunRoot,
     ) -> ego_core::run::RunExecutionBindings {
         let elicitor =
             AcpQuestionAdapter::live(session.clone(), capabilities, connection.clone()).elicitor();
@@ -409,6 +413,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
             Arc::new(AcpSinkFactory {
                 connection,
                 session,
+                root: root.clone(),
             }),
             Some(elicitor),
         )
@@ -1071,9 +1076,10 @@ fn session_bindings(
     connection: ConnectionTo<Client>,
     session: v1::SessionId,
     capabilities: CapabilityCapture,
+    root: &RunRoot,
     mcp: Option<&Arc<dyn SessionMcpAdmission>>,
 ) -> RunExecutionBindings {
-    let bindings = builder.build(connection, session, capabilities);
+    let bindings = builder.build(connection, session, capabilities, root);
     match mcp {
         Some(mcp) => bindings.with_mcp(
             mcp.admitted_tools(),
@@ -1786,7 +1792,11 @@ fn emit_attachment(
     id: &v1::SessionId,
     attachment: &SessionAttachment,
 ) -> Result<(), Error> {
-    for update in project_replay_v1(&attachment.replay, attachment.context_window) {
+    for update in project_replay_v1(
+        &attachment.replay,
+        attachment.context_window,
+        &attachment.root,
+    ) {
         connection.send_notification(v1::SessionNotification::new(id.clone(), update))?;
     }
     emit_info(connection, id, &attachment.meta)
@@ -2148,6 +2158,7 @@ where
                         cx.clone(),
                         request.session_id.clone(),
                         capabilities,
+                        &root,
                         mcp.as_ref(),
                     );
                     let recovered = match recover_current_run(controller.as_ref(), id, bindings).await {
@@ -2258,6 +2269,7 @@ where
                         cx.clone(),
                         request.session_id.clone(),
                         capabilities,
+                        &root,
                         mcp.as_ref(),
                     );
                     let recovered = match recover_current_run(controller.as_ref(), id, bindings).await {
@@ -2532,7 +2544,7 @@ where
                     let capabilities = *client_capabilities
                         .lock()
                         .expect("initialize capability lock poisoned");
-                    let bindings = bindings_builder.build(cx.clone(), id.clone(), capabilities);
+                    let bindings = bindings_builder.build(cx.clone(), id.clone(), capabilities, &correlation.root);
                     let bindings = match correlation.mcp.as_ref() {
                         Some(mcp) => bindings.with_mcp(
                             mcp.admitted_tools(),

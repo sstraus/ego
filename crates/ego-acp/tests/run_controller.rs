@@ -142,6 +142,7 @@ impl RunBindingsBuilder for RecordingRunBindingsBuilder {
         connection: ConnectionTo<Client>,
         session: v1::SessionId,
         capabilities: CapabilityCapture,
+        _root: &ego_core::run::RunRoot,
     ) -> RunExecutionBindings {
         self.builds
             .lock()

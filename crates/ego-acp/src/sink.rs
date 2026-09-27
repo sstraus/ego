@@ -29,7 +29,7 @@
 //! stream, so this is a channel that exists precisely for the case where the
 //! protocol stream is the thing that broke.
 
-use std::sync::Mutex;
+use std::{path::PathBuf, sync::Mutex};
 
 use agent_client_protocol::{Client, ConnectionTo};
 use agent_client_protocol_schema::v1;
@@ -38,7 +38,7 @@ use ego_core::public::PublicEvent;
 use ego_core::sink::EventSink;
 use ego_core::state::SessionState;
 
-use crate::project::project_acp_v1;
+use crate::project::project_acp_updates_v1;
 
 /// Publishes a run's public events to an ACP client as `session/update`.
 ///
@@ -58,6 +58,7 @@ pub struct AcpSink {
     /// here, and these limits would then divide one model's occupancy by
     /// another's ceiling. See `project::usage_figures`.
     caps: ModelCapabilities,
+    root: PathBuf,
     /// Whether the failure below has already been reported.
     reported: Mutex<bool>,
 }
@@ -67,11 +68,13 @@ impl AcpSink {
         connection: ConnectionTo<Client>,
         session: v1::SessionId,
         caps: ModelCapabilities,
+        root: PathBuf,
     ) -> Self {
         AcpSink {
             connection,
             session,
             caps,
+            root,
             reported: Mutex::new(false),
         }
     }
@@ -79,26 +82,25 @@ impl AcpSink {
 
 impl EventSink for AcpSink {
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
-        // `project_acp_v1` and not `project_v1`: the complete entry point, which
-        // is the whole reason `publish` carries the reduction. See
+        // The complete entry point includes reduced usage and tool progress.
+        // That is why `publish` carries the reduction. See
         // `docs/decisions/2026-08-21-what-a-sink-is-handed.md`.
-        let Some(update) = project_acp_v1(event, state, &self.caps) else {
-            return;
-        };
-        let notification = v1::SessionNotification::new(self.session.clone(), update);
-        if let Err(err) = self.connection.send_notification(notification) {
-            let mut reported = self
-                .reported
-                .lock()
-                .expect("a poisoned lock means a publisher panicked mid-event");
-            if !*reported {
-                *reported = true;
-                tracing::warn!(
-                    session = %self.session,
-                    error = %err,
-                    "the client stopped listening; the rest of this turn's \
-                     updates cannot be delivered"
-                );
+        for update in project_acp_updates_v1(event, state, &self.caps, &self.root) {
+            let notification = v1::SessionNotification::new(self.session.clone(), update);
+            if let Err(err) = self.connection.send_notification(notification) {
+                let mut reported = self
+                    .reported
+                    .lock()
+                    .expect("a poisoned lock means a publisher panicked mid-event");
+                if !*reported {
+                    *reported = true;
+                    tracing::warn!(
+                        session = %self.session,
+                        error = %err,
+                        "the client stopped listening; the rest of this turn's \
+                         updates cannot be delivered"
+                    );
+                }
             }
         }
     }

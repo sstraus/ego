@@ -261,11 +261,58 @@ impl DurableAcpFixture {
             expected_replay_updates: ego_acp::project::project_replay_v1(
                 &attachment.replay,
                 attachment.context_window,
+                &attachment.root,
             )
             .into_iter()
             .map(|update| serde_json::to_value(update).unwrap())
             .collect(),
         }
+    }
+
+    pub fn seed_tool_replay_session(&self, root: &str) -> String {
+        let runs: Arc<dyn SessionRunLifecycle> = Arc::new(InactiveRuns);
+        let lifecycle = SessionLifecycle::new(Arc::clone(&self.store), runs, Arc::new(TestClock));
+        let session = lifecycle.create(PathBuf::from(root)).unwrap().id;
+        let turn = TurnId::new();
+        let item = ItemId::new();
+        let mut started = DomainEvent {
+            env: Envelope {
+                seq: serde_json::from_value(serde_json::json!(1)).unwrap(),
+                id: EventId::new(),
+                turn,
+                item: Some(item),
+                parent: None,
+                ts: Timestamp::EPOCH,
+                producer: Producer::Main,
+            },
+            kind: EventKind::ToolCallStarted {
+                name: "read".to_owned(),
+                args: r#"{"path":"src/main.rs"}"#.to_owned(),
+                call_id: Some("read-call".to_owned()),
+            },
+        };
+        self.store.append(&session, &started).unwrap();
+        self.store
+            .append(
+                &session,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: started.env.seq.next(),
+                        id: EventId::new(),
+                        turn,
+                        item: Some(item),
+                        parent: Some(started.env.id),
+                        ts: Timestamp::EPOCH,
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::ToolCallCompleted {
+                        ok: false,
+                        result: ego_core::permit::ToolResult::builtin("file unavailable"),
+                    },
+                },
+            )
+            .unwrap();
+        session.to_string()
     }
 
     pub fn seed_running_session(&self, root: &str) -> String {
