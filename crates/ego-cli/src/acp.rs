@@ -12,7 +12,8 @@ use ego_acp::serve::{
     SessionConfinementAdmission, SessionMcpAdmission, SessionTrustAdmission,
 };
 use ego_core::config::{
-    McpConfigProvenance, McpEnvironmentName, McpHttpAuth, McpServerConfig, McpServerName, Source,
+    McpConfigProvenance, McpEnvironmentName, McpHttpAuth, McpServerConfig, McpServerName,
+    ProfileName, Source, UserConfigTarget,
 };
 use ego_core::control::SessionControls;
 use ego_core::credentials::SecretMaterial;
@@ -42,6 +43,7 @@ use futures::future::BoxFuture;
 
 use crate::acp_confinement::CliSessionConfinementAdmission;
 use crate::acp_controls::AcpSessionControls;
+use crate::acp_permission::CliAcpPermissionRules;
 use crate::acp_trust::CliSessionTrustAdmission;
 use crate::cli::AcpArgs;
 use crate::confinement_diagnostics::Reporter;
@@ -394,7 +396,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     // scope this server already opened rather than a second egress: an `ego
     // acp` invocation is online by construction, so this adds no reach it did
     // not already have.
-    let (controls, ceiling) =
+    let (controls, ceiling, rule_target) =
         match run::protocol_effective(root.as_path(), args.session_dir.clone(), args.shape.clone())
         {
             Ok(effective) => {
@@ -427,9 +429,23 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                 // reached for is the one an untrusted headless resolution
                 // discards.
                 let ceiling = confinement_ceiling(args, effective.sandbox, admitted);
+                let rule_target = match effective.active_profile.as_ref() {
+                    Some(profile) => match ProfileName::parse(&profile.name) {
+                        Ok(name) => UserConfigTarget::Profile(name),
+                        Err(error) => {
+                            return RunTermination::UsageError {
+                                message: format!(
+                                    "the ACP profile cannot target user rules: {error}"
+                                ),
+                            };
+                        }
+                    },
+                    None => UserConfigTarget::Base,
+                };
                 (
                     Arc::new(AcpSessionControls::new(&effective, ceiling, catalogue)),
                     ceiling,
+                    rule_target,
                 )
             }
             Err(error) => {
@@ -456,6 +472,13 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     }
 
     let control_port: Arc<dyn SessionControls> = controls.clone();
+    let permission_rules: Option<Arc<dyn ego_acp::permission::PermissionRuleWriter>> =
+        crate::config::ego_home().map(|home| {
+            Arc::new(CliAcpPermissionRules::new(
+                home.join("config.toml"),
+                rule_target,
+            )) as Arc<dyn ego_acp::permission::PermissionRuleWriter>
+        });
     let confinement_port: Arc<dyn SessionConfinementAdmission> =
         Arc::new(CliSessionConfinementAdmission::with_reporter(
             Arc::clone(&store),
@@ -479,9 +502,10 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             roots.clone(),
             spawner.clone(),
             ids.clone(),
-            Arc::new(AcpRunBindingsBuilder::with_controls(Some(Arc::clone(
-                &control_port,
-            )))),
+            Arc::new(
+                AcpRunBindingsBuilder::with_controls(Some(Arc::clone(&control_port)))
+                    .with_permission_rules(permission_rules.clone()),
+            ),
             Arc::clone(&mcp_admitter),
             Arc::clone(&compaction),
             Some(Arc::clone(&control_port)),

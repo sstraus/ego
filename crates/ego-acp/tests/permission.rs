@@ -54,11 +54,10 @@ fn the_permission_prompt_names_the_tool_call_the_host_is_already_showing() {
     assert_eq!(request.session_id, session());
 }
 
-/// ego persists no permission decision, so it must not offer to remember
-/// one. Advertising `allow_always` would promise a store that does not
-/// exist and let one answer widen every later turn.
+/// The protocol helper has no user-rule writer and therefore offers only
+/// one-turn answers. The live ACP seat adds remembered options when wired.
 #[test]
-fn only_the_once_options_are_offered_because_ego_remembers_no_decision() {
+fn the_unwired_permission_helper_offers_only_once_options() {
     let request =
         AcpPermissionAdapter::permission_request(&session(), ItemId::new(), "exec", &ops(), &why());
     let kinds: Vec<_> = request.options.iter().map(|option| option.kind).collect();

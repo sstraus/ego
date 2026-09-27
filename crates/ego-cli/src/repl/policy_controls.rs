@@ -9,7 +9,7 @@ use ego_core::config::rule_management::{
     EffectiveRule, RememberPlan, RuleExplanation, RuleMutationComparison,
 };
 use ego_core::config::{
-    Mode, RuleMutation, RuleSnapshot, Ruleset, UserConfigStore, UserConfigTarget,
+    ManagedRuleEffect, Mode, RuleMutation, RuleSnapshot, Ruleset, UserConfigStore, UserConfigTarget,
 };
 use ego_core::permit::rule::RuleId;
 use ego_core::permit::{CanonPath, HumanApprover, PolicyEngine, PreparedCall};
@@ -471,7 +471,7 @@ impl PolicyApplicationOwner {
 
 impl PermissionRuleApplication for PolicyApplicationOwner {
     fn remember_allow(&self, plan: RememberPlan) -> Result<String, PolicyControlError> {
-        let preview = RememberPreview::presented_allow(plan);
+        let preview = RememberPreview::presented(ManagedRuleEffect::Allow, plan);
         let PolicyControlOutcome::Rule { receipt, .. } =
             self.apply_permission(PermissionInput::ConfirmRemember(preview))?
         else {

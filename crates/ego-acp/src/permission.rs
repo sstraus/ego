@@ -13,8 +13,19 @@ use std::sync::Arc;
 
 use agent_client_protocol::{Client, ConnectionTo};
 use agent_client_protocol_schema::v1;
+use ego_core::config::ManagedRuleEffect;
+use ego_core::config::rule_management::RememberPlan;
 use ego_core::event::id::ItemId;
 use ego_core::permit::{Escalation, HumanApprover, Op, PermissionDecision, PermissionRequest};
+
+/// Atomic user-rule mutation owned by the binary, never by the ACP host.
+pub trait PermissionRuleWriter: std::fmt::Debug + Send + Sync {
+    fn remember<'a>(
+        &'a self,
+        effect: ManagedRuleEffect,
+        plan: RememberPlan,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+}
 
 /// One connection's ACP permission boundary. Durable request ordering and the
 /// evaluation that follows the answer remain core-owned.
@@ -22,6 +33,7 @@ use ego_core::permit::{Escalation, HumanApprover, Op, PermissionDecision, Permis
 pub struct AcpPermissionAdapter {
     session: v1::SessionId,
     connection: Option<ConnectionTo<Client>>,
+    rule_writer: Option<Arc<dyn PermissionRuleWriter>>,
 }
 
 impl std::fmt::Debug for AcpPermissionAdapter {
@@ -29,25 +41,23 @@ impl std::fmt::Debug for AcpPermissionAdapter {
         f.debug_struct("AcpPermissionAdapter")
             .field("session", &self.session)
             .field("connected", &self.connection.is_some())
+            .field("remembering", &self.rule_writer.is_some())
             .finish()
     }
 }
 
 impl AcpPermissionAdapter {
-    /// The only option that grants, and the only one that refuses.
-    ///
-    /// ACP also defines `allow_always` and `reject_always`, and ego offers
-    /// neither. A remembered decision needs a store with a scope, a key and a
-    /// revocation rule; none exists. Advertising the option anyway would let
-    /// one answer widen every later turn, which is the exact thing
-    /// `2026-08-21-a-permit-nobody-can-widen.md` forbids.
+    /// Wire IDs for the one-turn and user-rule-backed answers.
     pub const ALLOW_ONCE: &'static str = "allow-once";
     pub const REJECT_ONCE: &'static str = "reject-once";
+    pub const ALLOW_ALWAYS: &'static str = "allow-always";
+    pub const REJECT_ALWAYS: &'static str = "reject-always";
 
     pub fn new(session: v1::SessionId) -> Self {
         Self {
             session,
             connection: None,
+            rule_writer: None,
         }
     }
 
@@ -55,7 +65,13 @@ impl AcpPermissionAdapter {
         Self {
             session,
             connection: Some(connection),
+            rule_writer: None,
         }
+    }
+
+    pub fn with_rule_writer(mut self, rule_writer: Option<Arc<dyn PermissionRuleWriter>>) -> Self {
+        self.rule_writer = rule_writer;
+        self
     }
 
     pub fn approver(&self) -> Arc<dyn HumanApprover> {
@@ -76,39 +92,80 @@ impl AcpPermissionAdapter {
         why: &Escalation,
     ) -> v1::RequestPermissionRequest {
         let title = PermissionRequest::new(tool, ops.to_vec(), why.clone()).to_string();
+        Self::wire_request(session, item, title, false)
+    }
+
+    fn wire_request(
+        session: &v1::SessionId,
+        item: ItemId,
+        title: String,
+        rememberable: bool,
+    ) -> v1::RequestPermissionRequest {
         let tool_call = v1::ToolCallUpdate::new(
             v1::ToolCallId::new(item.to_string()),
             v1::ToolCallUpdateFields::new().title(title),
         );
-        v1::RequestPermissionRequest::new(
-            session.clone(),
-            tool_call,
-            vec![
-                v1::PermissionOption::new(
-                    v1::PermissionOptionId::new(Self::ALLOW_ONCE),
-                    "Allow once",
-                    v1::PermissionOptionKind::AllowOnce,
-                ),
-                v1::PermissionOption::new(
-                    v1::PermissionOptionId::new(Self::REJECT_ONCE),
-                    "Reject once",
-                    v1::PermissionOptionKind::RejectOnce,
-                ),
-            ],
-        )
+        let mut options = vec![
+            v1::PermissionOption::new(
+                v1::PermissionOptionId::new(Self::ALLOW_ONCE),
+                "Allow once",
+                v1::PermissionOptionKind::AllowOnce,
+            ),
+            v1::PermissionOption::new(
+                v1::PermissionOptionId::new(Self::REJECT_ONCE),
+                "Reject once",
+                v1::PermissionOptionKind::RejectOnce,
+            ),
+        ];
+        if rememberable {
+            options.push(v1::PermissionOption::new(
+                v1::PermissionOptionId::new(Self::ALLOW_ALWAYS),
+                "Allow always (remember displayed rules)",
+                v1::PermissionOptionKind::AllowAlways,
+            ));
+            options.push(v1::PermissionOption::new(
+                v1::PermissionOptionId::new(Self::REJECT_ALWAYS),
+                "Reject always (remember displayed rules)",
+                v1::PermissionOptionKind::RejectAlways,
+            ));
+        }
+        v1::RequestPermissionRequest::new(session.clone(), tool_call, options)
+    }
+
+    fn live_request(
+        &self,
+        item: ItemId,
+        request: &PermissionRequest,
+    ) -> v1::RequestPermissionRequest {
+        let plan = self
+            .rule_writer
+            .as_ref()
+            .and_then(|_| request.presentation())
+            .and_then(|presentation| presentation.remember_plan().ok());
+        let mut title = request.to_string();
+        if let Some(plan) = plan {
+            for (_, rule) in plan.candidate_rows() {
+                title.push_str(&format!("\nRemembered rule: {rule}"));
+            }
+            for (_, dimension) in plan.omission_rows() {
+                title.push_str(&format!(
+                    "\nRemembering omits: {}",
+                    format!("{dimension:?}").to_lowercase()
+                ));
+            }
+        }
+        Self::wire_request(&self.session, item, title, plan.is_some())
     }
 
     /// What the host answered, in core's vocabulary.
     ///
-    /// Only the one option ego offered grants. `Cancelled` is the outcome a
-    /// client must send for every pending request when it cancels the turn,
-    /// and an option id ego never put on the wire is a client asserting an
-    /// authority it was not given — both deny, because the base decision says
-    /// an unreadable answer mints no permit.
+    /// Only a one-turn grant can be decided without the rule writer. The
+    /// `*_always` answers are handled by `decide_live` after persistence.
+    /// `Cancelled` and an unknown option ID deny.
     ///
     /// There is no `Amend`. ACP v1 has no shape for returning replacement
     /// tool parameters, so the ACP seat is a truthful two-answer downgrade of
-    /// the three-answer vocabulary rather than a pretend third option.
+    /// the three-answer vocabulary rather than a pretend amendment.
     pub fn decision(response: &v1::RequestPermissionResponse) -> PermissionDecision {
         match &response.outcome {
             v1::RequestPermissionOutcome::Selected(selected)
@@ -138,15 +195,35 @@ impl AcpPermissionAdapter {
             // is the second invisible human the ADR rejects.
             return PermissionDecision::Deny;
         };
-        let wire = Self::permission_request(
-            &self.session,
-            item,
-            request.tool(),
-            request.ops(),
-            request.why(),
-        );
+        let wire = self.live_request(item, &request);
         match connection.send_request(wire).block_task().await {
-            Ok(response) => Self::decision(&response),
+            Ok(response) => {
+                let v1::RequestPermissionOutcome::Selected(selected) = &response.outcome else {
+                    return PermissionDecision::Deny;
+                };
+                let effect = match selected.option_id.0.as_ref() {
+                    Self::ALLOW_ALWAYS => ManagedRuleEffect::Allow,
+                    Self::REJECT_ALWAYS => ManagedRuleEffect::Deny,
+                    _ => return Self::decision(&response),
+                };
+                let Some(writer) = &self.rule_writer else {
+                    return PermissionDecision::Deny;
+                };
+                let Some(plan) = request
+                    .presentation()
+                    .and_then(|presentation| presentation.remember_plan().ok())
+                else {
+                    return PermissionDecision::Deny;
+                };
+                match writer.remember(effect, plan.clone()).await {
+                    Ok(()) if effect == ManagedRuleEffect::Allow => PermissionDecision::Allow,
+                    Ok(()) => PermissionDecision::Deny,
+                    Err(error) => {
+                        tracing::warn!(%error, "ACP remembered permission could not be stored");
+                        PermissionDecision::Deny
+                    }
+                }
+            }
             // A transport failure settles the waiting boundary without
             // granting authority; the run records the denial, not a hang.
             Err(error) => {

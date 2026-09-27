@@ -364,6 +364,7 @@ pub trait RunBindingsBuilder: Send + Sync {
 #[derive(Debug, Default)]
 pub struct AcpRunBindingsBuilder {
     controls: Option<Arc<dyn SessionControls>>,
+    permission_rules: Option<Arc<dyn crate::permission::PermissionRuleWriter>>,
 }
 
 impl AcpRunBindingsBuilder {
@@ -372,7 +373,18 @@ impl AcpRunBindingsBuilder {
     /// The same seat the router answers `session/set_config_option` from, so
     /// what a host was told it picked is what the next generation reads.
     pub fn with_controls(controls: Option<Arc<dyn SessionControls>>) -> Self {
-        Self { controls }
+        Self {
+            controls,
+            permission_rules: None,
+        }
+    }
+
+    pub fn with_permission_rules(
+        mut self,
+        rules: Option<Arc<dyn crate::permission::PermissionRuleWriter>>,
+    ) -> Self {
+        self.permission_rules = rules;
+        self
     }
 }
 
@@ -408,6 +420,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
         // as an unanswerable internal error the host cannot act on.
         let human =
             crate::permission::AcpPermissionAdapter::live(session.clone(), connection.clone())
+                .with_rule_writer(self.permission_rules.clone())
                 .approver();
         let bindings = ego_core::run::RunExecutionBindings::new(
             Arc::new(AcpSinkFactory {

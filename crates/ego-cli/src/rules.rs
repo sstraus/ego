@@ -49,11 +49,8 @@ pub struct RememberPreview {
 }
 
 impl RememberPreview {
-    pub(crate) fn presented_allow(plan: RememberPlan) -> Self {
-        Self {
-            effect: ManagedRuleEffect::Allow,
-            plan,
-        }
+    pub(crate) fn presented(effect: ManagedRuleEffect, plan: RememberPlan) -> Self {
+        Self { effect, plan }
     }
 
     pub(crate) fn effect(&self) -> ManagedRuleEffect {
