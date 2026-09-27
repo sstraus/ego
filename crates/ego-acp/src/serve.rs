@@ -1801,6 +1801,21 @@ fn emit_info(
     ))
 }
 
+fn emit_config_options(
+    connection: &ConnectionTo<Client>,
+    id: &v1::SessionId,
+    controls: Option<&Arc<dyn SessionControls>>,
+    session: SessionId,
+) -> Result<(), Error> {
+    let Some(options) = config_options(controls, session) else {
+        return Ok(());
+    };
+    connection.send_notification(v1::SessionNotification::new(
+        id.clone(),
+        v1::SessionUpdate::ConfigOptionUpdate(v1::ConfigOptionUpdate::new(options)),
+    ))
+}
+
 fn emit_attachment(
     connection: &ConnectionTo<Client>,
     id: &v1::SessionId,
@@ -2042,11 +2057,9 @@ where
                     {
                         return responder.respond_with_error(lifecycle_error(&error));
                     }
-                    if let Err(error) =
-                        initialize_confinement(confinement.as_ref(), session, &root).await
-                    {
-                        return responder.respond_with_error(error);
-                    }
+                    let pending_measurement = confinement
+                        .as_ref()
+                        .map(|admission| admission.initialize(session, root.clone()));
                     let attachment_root = root.clone();
                     let _ = sessions.open(id.clone(), root, Some(start_request), None, mcp);
                     let announcement = if let Some(lifecycle) = &lifecycle {
@@ -2064,16 +2077,42 @@ where
                     // learns from *this* response, so a client that indexes
                     // sessions by the response — the ordering `project.rs`
                     // already documents — drops any update that precedes it.
-                    // Everything able to fail the request has happened above;
-                    // answering first therefore loses nothing.
+                    // Measurement now runs after the response. Its complete
+                    // offer arrives as a later config_option_update, while
+                    // the first prompt awaits the same admission.
                     responder.respond(
                         v1::NewSessionResponse::new(id.clone())
-                            .config_options(config_options(controls.as_ref(), session)),
+                            .config_options(
+                                pending_measurement
+                                    .is_none()
+                                    .then(|| config_options(controls.as_ref(), session))
+                                    .flatten(),
+                            ),
                     )?;
-                    match announcement {
-                        Some(meta) => emit_info(&cx, &id, &meta),
-                        None => Ok(()),
+                    if let Some(meta) = announcement {
+                        emit_info(&cx, &id, &meta)?;
                     }
+                    if let Some(pending) = pending_measurement {
+                        let connection = cx.clone();
+                        let controls = controls.clone();
+                        cx.spawn(async move {
+                            match pending.await {
+                                Ok(()) => {
+                                    if let Err(error) = emit_config_options(
+                                        &connection,
+                                        &id,
+                                        controls.as_ref(),
+                                        session,
+                                    ) {
+                                        tracing::warn!(%error, "measured ACP config options could not be delivered");
+                                    }
+                                }
+                                Err(error) => tracing::warn!(%error, "ACP confinement measurement failed after session/new"),
+                            }
+                            Ok(())
+                        });
+                    }
+                    Ok(())
                 }
             },
             on_receive_request!(),
@@ -2567,24 +2606,6 @@ where
                         ),
                         None => bindings,
                     };
-                    // Synchronous, and deliberately still on the event loop:
-                    // the registration lock serializes this pick against
-                    // `session/set_session_config_option`, and a refusal here
-                    // answers the prompt before any run exists to refuse.
-                    let selections = match correlation.run {
-                        None => match selected_confinement(
-                            controls.as_ref(),
-                            confinement.as_ref(),
-                            durable_session,
-                        ) {
-                            Ok(selections) => Some(selections),
-                            Err(error) => {
-                                sessions.refuse(&id, correlation.generation);
-                                return responder.respond_with_error(error);
-                            }
-                        },
-                        Some(_) => None,
-                    };
                     // Everything below runs off the event loop. `selected_trust`
                     // awaits the host, and an ACP handler that awaits a client
                     // round-trip stops the connection from processing messages
@@ -2596,6 +2617,8 @@ where
                     let sessions = sessions.clone();
                     let trust = trust.clone();
                     let lifecycle = lifecycle.clone();
+                    let controls = controls.clone();
+                    let confinement = confinement.clone();
                     let connection = cx.clone();
                     let generation = correlation.generation;
                     cx.spawn(async move {
@@ -2608,8 +2631,27 @@ where
                         } = correlation;
                         let outcome = match run {
                             None => {
-                                let selections = selections
-                                    .expect("a first prompt carries its confinement pick");
+                                if let Err(error) = initialize_confinement(
+                                    confinement.as_ref(),
+                                    durable_session,
+                                    &root,
+                                )
+                                .await
+                                {
+                                    sessions.refuse(&id, generation);
+                                    return responder.respond_with_error(error);
+                                }
+                                let selections = match selected_confinement(
+                                    controls.as_ref(),
+                                    confinement.as_ref(),
+                                    durable_session,
+                                ) {
+                                    Ok(selections) => selections,
+                                    Err(error) => {
+                                        sessions.refuse(&id, generation);
+                                        return responder.respond_with_error(error);
+                                    }
+                                };
                                 // Between the confinement pick and the start:
                                 // preparation derives the config layers, the
                                 // instruction file, the project MCP servers,

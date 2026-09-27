@@ -197,6 +197,29 @@ async fn initialize_once(
     session: SessionId,
     root: RunRoot,
 ) -> Result<(), ControlError> {
+    // A background `session/new` probe must not hold the session writer lease:
+    // the host may pause or close the newly returned session while measuring.
+    // Warm the process cache first, then replay its transcript into this
+    // session's ordinary evidence store under the short writer lease.
+    for confinement in Confinement::ALL
+        .into_iter()
+        .filter(|candidate| candidate.within(ceiling))
+    {
+        let policy = RunConfinement::new(confinement, false, CanonPath::new(root.as_path()))
+            .map_err(|error| {
+                ControlError::Internal(format!(
+                    "the ACP confinement policy could not be constructed: {error}"
+                ))
+            })?;
+        RunEffectPorts::diagnostic_capabilities(&policy, cancel.clone(), ExecLimits::default())
+            .await
+            .map_err(|error| {
+                ControlError::Internal(format!(
+                    "the `{confinement}` ACP confinement could not be measured: {error}"
+                ))
+            })?;
+    }
+
     let clock = SystemClock;
     let opened = crate::session::open(store.as_ref(), &session, &clock).map_err(|error| {
         ControlError::Internal(format!(

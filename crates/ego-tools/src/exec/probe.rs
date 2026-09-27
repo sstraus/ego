@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ use ego_core::permit::{
     CanonPath, Classification, Confinement, ExecCaps, ProcessError, RunConfinement, Tool, Typed,
 };
 use ego_core::turn::{CancelToken, ToolEffectPorts, Tools};
+use sha2::{Digest as _, Sha256};
 
 use crate::store::SessionEvidenceStore;
 
@@ -47,7 +49,7 @@ pub(crate) async fn landlock(
         &scratch_path,
         &runtime_roots,
     )?);
-    let cache_key = cache_key(policy, backend.as_ref(), &runtime_roots)?;
+    let cache_key = cache_key_async(policy.clone(), backend.clone(), runtime_roots.clone()).await?;
     let cached = cached_capabilities(cache_key);
     let measurement = cached
         .get_or_try_init(|| async {
@@ -95,7 +97,7 @@ pub(crate) async fn seatbelt(
     )?);
     backend.prerequisite(policy)?;
     let maximum = backend.maximum_demonstrable_caps();
-    let cache_key = cache_key(policy, backend.as_ref(), &runtime_roots)?;
+    let cache_key = cache_key_async(policy.clone(), backend.clone(), runtime_roots.clone()).await?;
     let cached = cached_capabilities(cache_key);
     let measurement = cached
         .get_or_try_init(|| async {
@@ -199,6 +201,7 @@ struct CapabilityCacheKey {
     os: &'static str,
     arch: &'static str,
     build_identity: Vec<u8>,
+    binary_hash: [u8; 32],
     backend_name: String,
     backend_revision: String,
     policy_digest: String,
@@ -235,8 +238,34 @@ fn cache_key(
     backend: &dyn Backend,
     runtime_roots: &[CanonPath],
 ) -> Result<CapabilityCacheKey, ProcessError> {
+    let binary = std::env::current_exe().map_err(|error| {
+        ProcessError::Backend(format!("cannot locate the current executable: {error}"))
+    })?;
+    cache_key_for_binary(policy, backend, runtime_roots, &binary)
+}
+
+async fn cache_key_async(
+    policy: RunConfinement,
+    backend: Arc<dyn Backend>,
+    runtime_roots: Vec<CanonPath>,
+) -> Result<CapabilityCacheKey, ProcessError> {
+    tokio::task::spawn_blocking(move || cache_key(&policy, backend.as_ref(), &runtime_roots))
+        .await
+        .map_err(|error| ProcessError::Backend(format!("capability cache identity task failed: {error}")))?
+}
+
+fn cache_key_for_binary(
+    policy: &RunConfinement,
+    backend: &dyn Backend,
+    runtime_roots: &[CanonPath],
+    binary: &Path,
+) -> Result<CapabilityCacheKey, ProcessError> {
     let identity = backend.identity();
     let digest = super::policy_digest_with_runtime_roots(policy, backend, runtime_roots)?;
+    let binary = fs::read(binary).map_err(|error| {
+        ProcessError::Backend(format!("cannot read the current executable for cache identity: {error}"))
+    })?;
+    let binary_hash = Sha256::digest(&binary).into();
     #[cfg(target_os = "linux")]
     let build_identity = fs::read("/proc/sys/kernel/osrelease").map_err(|error| {
         ProcessError::Backend(format!("cannot read Linux build identity: {error}"))
@@ -250,6 +279,7 @@ fn cache_key(
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         build_identity,
+        binary_hash,
         backend_name: identity.name().to_owned(),
         backend_revision: identity.revision().to_owned(),
         policy_digest: digest.as_str().to_owned(),
@@ -1156,7 +1186,8 @@ mod tests {
     use crate::exec::backend::{Backend, LaunchPrefix};
 
     use super::{
-        CachedCapabilities, CapabilityCacheKey, Measurement, cache_key, cached_capabilities,
+        CachedCapabilities, CapabilityCacheKey, Measurement, cache_key, cache_key_for_binary,
+        cached_capabilities,
     };
 
     /// The envelope the probe emits is the envelope the dispatcher accepts, and
@@ -1304,6 +1335,7 @@ mod tests {
             os: "test-os",
             arch: "test-arch",
             build_identity: build_identity.to_vec(),
+            binary_hash: [0; 32],
             backend_name: backend_name.to_owned(),
             backend_revision: backend_revision.to_owned(),
             policy_digest: "0".repeat(64),
@@ -1323,6 +1355,23 @@ mod tests {
             "revision",
             &["/runtime/root"],
         )
+    }
+
+    #[test]
+    fn capability_cache_invalidates_when_binary_bytes_change() {
+        let dir = tempfile::tempdir().expect("binary fixture directory");
+        let binary = dir.path().join("ego");
+        let backend = CacheBackend {
+            identity: BackendIdentity::new("backend", "revision"),
+        };
+        let roots = [CanonPath::new("/runtime/root")];
+        std::fs::write(&binary, b"binary version one").unwrap();
+        let first = cache_key_for_binary(&policy(), &backend, &roots, &binary).unwrap();
+        let same = cache_key_for_binary(&policy(), &backend, &roots, &binary).unwrap();
+        assert_eq!(first, same);
+        std::fs::write(&binary, b"binary version two").unwrap();
+        let changed = cache_key_for_binary(&policy(), &backend, &roots, &binary).unwrap();
+        assert_ne!(first, changed, "an upgraded binary must re-probe");
     }
 
     fn cached_fact(cell: &CachedCapabilities) -> Option<ExecCaps> {

@@ -34,6 +34,7 @@ struct Admission {
     unsupported: Mutex<Vec<Confinement>>,
     entered: Arc<Notify>,
     release: Arc<Notify>,
+    released: Arc<AtomicBool>,
     blocked: AtomicBool,
     fail: AtomicBool,
 }
@@ -55,7 +56,8 @@ impl Admission {
     }
 
     fn release(&self) {
-        self.release.notify_one();
+        self.released.store(true, Ordering::SeqCst);
+        self.release.notify_waiters();
     }
 
     fn refuses(&self, confinement: Confinement) {
@@ -105,9 +107,17 @@ impl ego_acp::serve::SessionConfinementAdmission for Admission {
         let blocked = self.blocked.load(Ordering::SeqCst);
         let fail = self.fail.load(Ordering::SeqCst);
         let release = Arc::clone(&self.release);
+        let released = Arc::clone(&self.released);
         Box::pin(async move {
             if blocked {
-                release.notified().await;
+                while !released.load(Ordering::SeqCst) {
+                    let notified = release.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if !released.load(Ordering::SeqCst) {
+                        notified.await;
+                    }
+                }
             }
             if fail {
                 Err(ControlError::Refused {
@@ -355,7 +365,7 @@ async fn reconnecting_the_same_session_reuses_its_admitted_snapshot() {
 }
 
 #[tokio::test]
-async fn initialization_is_a_barrier_before_session_new_exposes_controls() {
+async fn session_new_settles_before_measurement_and_first_prompt_waits_for_it() {
     let fixture = support::DurableAcpFixture::new();
     let admission = Arc::new(Admission::default());
     admission.blocks();
@@ -373,23 +383,36 @@ async fn initialization_is_a_barrier_before_session_new_exposes_controls() {
         .await
         .expect("session/new reached confinement admission");
 
-    let early =
-        tokio::time::timeout(Duration::from_millis(100), connection.response(request)).await;
+    let early = tokio::time::timeout(Duration::from_millis(100), connection.response(request)).await;
     assert!(
-        early.is_err(),
-        "session/new exposed its response before admission completed"
+        early.is_ok(),
+        "session/new waited for the deliberately held measurement"
     );
+    let (created, _) = early.expect("early session/new response");
+    assert!(created["result"]["sessionId"].is_string(), "{created}");
+    assert!(created["result"].get("configOptions").is_none(), "{created}");
+    let session = created["result"]["sessionId"].as_str().unwrap();
+    let prompt = connection.send_request("session/prompt", serde_json::json!({
+        "sessionId": session, "prompt": [{"type": "text", "text": "hello"}],
+    })).await;
+    let before = fixture.executor_effect_counts();
+    let pending = tokio::time::timeout(Duration::from_millis(100), connection.response(prompt)).await;
+    assert!(pending.is_err(), "the first prompt crossed the probe barrier");
+    assert_eq!(fixture.executor_effect_counts(), before);
 
     admission.release();
-    let (response, _) = tokio::time::timeout(Duration::from_secs(1), connection.response(request))
+    let (response, notifications) = tokio::time::timeout(Duration::from_secs(1), connection.response(prompt))
         .await
-        .expect("session/new answered after admission release");
-    assert!(response["result"]["configOptions"].is_array(), "{response}");
+        .expect("first prompt answered after admission release");
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let mut updates = notifications;
+    updates.extend(connection.announced(ROOT).await);
+    assert!(updates.iter().any(|frame| frame["params"]["update"]["sessionUpdate"] == "config_option_update" && frame["params"]["update"]["configOptions"].is_array()), "measured offer was not announced: {updates:?}");
     connection.abort().await;
 }
 
 #[tokio::test]
-async fn failed_initialization_publishes_no_session_controls() {
+async fn failed_initialization_leaves_a_session_but_refuses_its_first_prompt() {
     let fixture = support::DurableAcpFixture::new();
     let admission = Arc::new(Admission::failing());
     let controls: Arc<dyn SessionControls> = Arc::new(Seat::new(Confinement::Ro));
@@ -398,13 +421,19 @@ async fn failed_initialization_publishes_no_session_controls() {
     connection.initialize().await;
     let response = connection.new_session(ROOT).await;
     assert!(
-        response["error"].is_object(),
-        "failed admission was accepted: {response}"
+        response["result"]["sessionId"].is_string(),
+        "session/new did not settle: {response}"
     );
     assert!(
         response["result"].get("configOptions").is_none(),
         "failed admission exposed controls: {response}"
     );
+    let session = response["result"]["sessionId"].as_str().unwrap();
+    let (prompt, _) = connection.request("session/prompt", serde_json::json!({
+        "sessionId": session, "prompt": [{"type": "text", "text": "hello"}],
+    })).await;
+    assert!(prompt["error"].is_object(), "unmeasured prompt ran: {prompt}");
+    assert!(fixture.prepared_selections().is_none());
     connection.abort().await;
 }
 
