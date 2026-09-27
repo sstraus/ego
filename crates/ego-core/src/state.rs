@@ -4,7 +4,7 @@
 //! log, and compaction and forking are events *in* the log rather than
 //! operations *on* it.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,8 +17,8 @@ use crate::event::hook::{
     HookOccurrenceKey, HookOccurrenceOwner, HookPlan, HookResult, HookSubject,
 };
 use crate::event::id::{
-    AttemptId, EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId,
-    SubagentInvocationId, TurnId,
+    AttemptId, DetachedExecId, EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq,
+    SessionId, SubagentInvocationId, TurnId,
 };
 use crate::event::skill::{
     SkillCatalogueEvidence, SkillCatalogueGeneration, SkillContentDigest, SkillId,
@@ -28,7 +28,7 @@ use crate::event::time::Timestamp;
 use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use crate::generator::types::{ImageRef, ReasoningState};
 use crate::goal::{GoalRecord, GoalState, GoalTransition};
-use crate::permit::{ToolResult, ToolResultProvenance};
+use crate::permit::{DetachedExecSnapshot, ToolResult, ToolResultProvenance};
 use crate::question::{
     QuestionAnswer, QuestionError, QuestionOutcome, QuestionRequest, QuestionTarget,
 };
@@ -384,6 +384,7 @@ pub enum ItemKind {
     Reasoning,
     ToolCall,
     Question,
+    DetachedExecNotification,
 }
 
 /// Per-item state: accumulated text for messages, reasoning and tool calls.
@@ -1090,6 +1091,8 @@ pub struct SessionState {
     pub turns: HashMap<TurnId, TurnState>,
     /// Per-item state, keyed by item id.
     pub items: HashMap<ItemId, ItemState>,
+    #[serde(default)]
+    pub detached_execs: BTreeMap<DetachedExecId, Option<DetachedExecSnapshot>>,
     /// Every event id observed so far, used to resolve causal parents.
     pub known_events: HashSet<EventId>,
     /// Event ids whose declared causal parent has not (yet) been observed.
@@ -1216,6 +1219,7 @@ impl Default for SessionState {
             goal: None,
             turns: HashMap::default(),
             items: HashMap::default(),
+            detached_execs: BTreeMap::default(),
             known_events: HashSet::default(),
             unresolved_parents: Vec::default(),
             generations: HashMap::default(),
@@ -1250,6 +1254,12 @@ impl Default for SessionState {
 }
 
 impl SessionState {
+    pub fn unsettled_detached_execs(&self) -> Vec<DetachedExecId> {
+        self.detached_execs
+            .iter()
+            .filter_map(|(id, snapshot)| snapshot.is_none().then_some(*id))
+            .collect()
+    }
     /// Rebuild the pure state from durable events in their supplied order.
     pub fn replay(events: impl IntoIterator<Item = DomainEvent>) -> Self {
         let mut state = Self::default();
@@ -1862,6 +1872,19 @@ impl SessionState {
                     item.tool_result = Some(result.clone());
                     item.completed = true;
                     item.ok = Some(*ok);
+                }
+            }
+            EventKind::DetachedExecStarted { id } => {
+                self.detached_execs.entry(*id).or_insert(None);
+            }
+            EventKind::DetachedExecSettled { snapshot } => {
+                if let Some(entry @ None) = self.detached_execs.get_mut(&snapshot.id)
+                    && snapshot.outcome.is_some()
+                {
+                    *entry = Some(snapshot.clone());
+                    if let Some(item) = self.item_mut(ev, ItemKind::DetachedExecNotification) {
+                        item.text = snapshot.model_text();
+                    }
                 }
             }
             EventKind::QuestionRequested { request, target } => {

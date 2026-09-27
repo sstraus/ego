@@ -2,8 +2,21 @@ use std::ffi::OsString;
 
 use ego_core::permit::analysis::{RiskClass, RiskReason, assess};
 use ego_core::permit::{
-    CanonPath, Change, EnvName, EnvPolicy, ExplicitEnvBinding, Op, PreparedCall, SpawnSpec,
+    CanonPath, Change, EnvName, EnvPolicy, ExplicitEnvBinding, Op, PreparedCall,
+    SessionProcessAction, SpawnSpec,
 };
+
+#[test]
+fn cancelling_a_detached_exec_is_a_bounded_control_effect() {
+    let call = PreparedCall::new(
+        "exec_cancel",
+        Op::SessionProcess {
+            id: ego_core::event::id::DetachedExecId::new(),
+            action: SessionProcessAction::Cancel,
+        },
+    );
+    assert_eq!(assess(&call).class, RiskClass::Bounded);
+}
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/permission-analysis");
 const OTHER_ROOT: &str = concat!(

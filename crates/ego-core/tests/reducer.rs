@@ -38,6 +38,52 @@ use ego_core::store::blob::{BlobId, BlobRef};
 mod reducer {
     use super::*;
 
+    #[test]
+    fn detached_exec_settlement_replays_as_one_model_notification() {
+        use ego_core::event::id::DetachedExecId;
+        use ego_core::permit::{DetachedExecOutcome, DetachedExecSnapshot};
+
+        let id = DetachedExecId::new();
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+        let started = ev(
+            seq.next(),
+            turn,
+            None,
+            None,
+            EventKind::DetachedExecStarted { id },
+        );
+        let settled = ev(
+            seq.next(),
+            turn,
+            Some(ItemId::new()),
+            Some(started.env.id),
+            EventKind::DetachedExecSettled {
+                snapshot: DetachedExecSnapshot {
+                    id,
+                    outcome: Some(DetachedExecOutcome::Exited {
+                        code: 7,
+                        result: ToolResult::builtin("complete output reference"),
+                    }),
+                    stdout_tail: b"final output".to_vec(),
+                    stderr_tail: Vec::new(),
+                    stdout_omitted: 100_000,
+                    stderr_omitted: 0,
+                },
+            },
+        );
+        let state = SessionState::replay([started, settled]);
+        assert!(state.unsettled_detached_execs().is_empty());
+        let (conversation, repairs) =
+            ego_core::generator::history::conversation_from(&state).unwrap();
+        assert!(repairs.is_empty());
+        let text = format!("{conversation:?}");
+        assert!(text.contains(&id.to_string()), "{text}");
+        assert!(text.contains("7"), "{text}");
+        assert!(text.contains("final output"), "{text}");
+        assert_eq!(text.matches("final output").count(), 1, "{text}");
+    }
+
     fn blob_ref(bytes: u64) -> BlobRef {
         BlobRef::new(
             BlobId::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")

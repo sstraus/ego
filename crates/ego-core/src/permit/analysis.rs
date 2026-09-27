@@ -20,6 +20,7 @@ pub enum RiskClass {
 #[serde(rename_all = "snake_case")]
 pub enum RiskReason {
     ReadOnly,
+    SessionProcessControl,
     ScopedWrite,
     ProcessEffectsUnknown,
     IdentityIncomplete,
@@ -42,9 +43,18 @@ pub fn assess(call: &PreparedCall) -> RiskAssessment {
     };
     for op in call.ops() {
         let (class, reason) = match op {
-            Op::Read { .. } | Op::List { .. } | Op::Search { .. } | Op::ReadEvidence { .. } => {
-                (RiskClass::Low, RiskReason::ReadOnly)
-            }
+            Op::Read { .. }
+            | Op::List { .. }
+            | Op::Search { .. }
+            | Op::ReadEvidence { .. }
+            | Op::SessionProcess {
+                action: super::SessionProcessAction::Inspect,
+                ..
+            } => (RiskClass::Low, RiskReason::ReadOnly),
+            Op::SessionProcess {
+                action: super::SessionProcessAction::Cancel,
+                ..
+            } => (RiskClass::Bounded, RiskReason::SessionProcessControl),
             Op::Write { .. } => (RiskClass::Bounded, RiskReason::ScopedWrite),
             Op::Spawn { spec } => {
                 if spec.identity().is_none_or(|identity| !identity.complete()) {

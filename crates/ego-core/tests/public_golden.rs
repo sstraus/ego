@@ -43,6 +43,30 @@ mod common;
 mod public_golden {
     use super::*;
 
+    #[test]
+    fn detached_exec_settlement_does_not_impersonate_a_user_message() {
+        let id = ego_core::event::id::DetachedExecId::new();
+        let event = ev(
+            Seq::default().next(),
+            TurnId::new(),
+            Some(ItemId::new()),
+            EventKind::DetachedExecSettled {
+                snapshot: ego_core::permit::DetachedExecSnapshot {
+                    id,
+                    outcome: Some(ego_core::permit::DetachedExecOutcome::Interrupted),
+                    stdout_tail: Vec::new(),
+                    stderr_tail: Vec::new(),
+                    stdout_omitted: 0,
+                    stderr_omitted: 0,
+                },
+            },
+        );
+        assert!(
+            project_public(&event).is_none(),
+            "a process settlement must not appear as a human-authored message"
+        );
+    }
+
     use super::common::id;
 
     const SESSION: &str = "00000000-0000-0000-0000-000000000001";

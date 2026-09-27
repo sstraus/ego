@@ -13,8 +13,10 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 
+use super::SessionProcessAction;
 use super::{CanonPath, EnvName, EnvPolicy, SpawnSpec, ToolResult};
 use crate::credentials::SecretMaterial;
+use crate::event::id::DetachedExecId;
 use crate::generator::attempt::DeliveryCertainty;
 use crate::store::evidence::{EvidenceError, EvidenceRead};
 
@@ -354,6 +356,10 @@ pub enum Subject {
         params_digest: InvocationDigest,
     },
     Evidence(EvidenceRead),
+    SessionProcess {
+        id: DetachedExecId,
+        action: SessionProcessAction,
+    },
 }
 
 impl fmt::Display for Subject {
@@ -373,6 +379,7 @@ impl fmt::Display for Subject {
                     request.reference, request.offset
                 )
             }
+            Self::SessionProcess { id, action } => write!(f, "session process {id} {action:?}"),
         }
     }
 }
@@ -408,6 +415,11 @@ enum SubjectWire {
     Evidence {
         version: u8,
         request: EvidenceRead,
+    },
+    SessionProcess {
+        version: u8,
+        id: String,
+        action: SessionProcessAction,
     },
 }
 
@@ -491,6 +503,11 @@ impl Serialize for Subject {
             Self::Evidence(request) => SubjectWire::Evidence {
                 version: 1,
                 request: request.clone(),
+            },
+            Self::SessionProcess { id, action } => SubjectWire::SessionProcess {
+                version: 1,
+                id: id.to_string(),
+                action: *action,
             },
         };
         wire.serialize(serializer)
@@ -588,6 +605,17 @@ impl<'de> Deserialize<'de> for Subject {
             SubjectWire::Evidence { version, request } => {
                 validate_version(version).map_err(serde::de::Error::custom)?;
                 Ok(Self::Evidence(request))
+            }
+            SubjectWire::SessionProcess {
+                version,
+                id,
+                action,
+            } => {
+                validate_version(version).map_err(serde::de::Error::custom)?;
+                Ok(Self::SessionProcess {
+                    id: id.parse().map_err(serde::de::Error::custom)?,
+                    action,
+                })
             }
         }
     }

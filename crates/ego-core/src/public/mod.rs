@@ -469,6 +469,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::SessionResumed { .. }
         | EventKind::GoalSet { .. }
         | EventKind::GoalTransitioned { .. } => None,
+        EventKind::DetachedExecStarted { .. } | EventKind::DetachedExecSettled { .. } => None,
         EventKind::CompactionSeeded { checkpoint, .. } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
