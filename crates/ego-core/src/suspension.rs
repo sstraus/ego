@@ -186,21 +186,64 @@ impl<'s> McpResumeContext<'s> {
 
 /// The sole one-shot MCP resume value carried by guarded effects.
 pub struct GuardedMcpResume<'s> {
-    resume: PreparedResume,
+    resume: ResumePreparation,
     context: Option<McpResumeContext<'s>>,
+}
+
+enum ResumePreparation {
+    Sealed(PreparedResume),
+    Deferred(DeferredResume),
 }
 
 impl<'s> GuardedMcpResume<'s> {
     pub fn new(resume: PreparedResume, context: Option<McpResumeContext<'s>>) -> Self {
-        Self { resume, context }
+        Self {
+            resume: ResumePreparation::Sealed(resume),
+            context,
+        }
     }
 
-    pub fn into_parts(self) -> (PreparedResume, Option<McpResumeContext<'s>>) {
-        (self.resume, self.context)
+    pub fn deferred(resume: DeferredResume, context: Option<McpResumeContext<'s>>) -> Self {
+        Self {
+            resume: ResumePreparation::Deferred(resume),
+            context,
+        }
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> Result<(PreparedResume, Option<McpResumeContext<'s>>), ContinuationError> {
+        let resume = match self.resume {
+            ResumePreparation::Sealed(resume) => resume,
+            ResumePreparation::Deferred(resume) => resume.seal()?,
+        };
+        Ok((resume, self.context))
     }
 }
 
-/// Core-owned preparation of one sealed resume authority before foreign I/O.
+pub struct DeferredResume {
+    payload: Vec<u8>,
+    subject: ContinuationSubject,
+    fingerprints: ResumeFingerprints,
+    expires_at: Timestamp,
+    original_parameters: Vec<u8>,
+    keys: Arc<dyn ResumeKeySource>,
+}
+
+impl DeferredResume {
+    fn seal(self) -> Result<PreparedResume, ContinuationError> {
+        let grant = seal_payload(self.payload, self.keys.as_ref())?;
+        Ok(PreparedResume {
+            grant,
+            subject: self.subject,
+            fingerprints: self.fingerprints,
+            expires_at: self.expires_at,
+            original_parameters: self.original_parameters,
+        })
+    }
+}
+
+/// Core-owned preparation of immutable resume authority before foreign I/O.
 pub struct ResumeSealer {
     keys: Arc<dyn ResumeKeySource>,
     clock: Arc<dyn Clock>,
@@ -228,6 +271,14 @@ impl ResumeSealer {
         authorized: &Authorized,
         floor: ResumeFloor,
     ) -> Result<PreparedResume, ContinuationError> {
+        self.defer(authorized, floor)?.seal()
+    }
+
+    pub fn defer(
+        &self,
+        authorized: &Authorized,
+        floor: ResumeFloor,
+    ) -> Result<DeferredResume, ContinuationError> {
         let expires_at = Timestamp::from_millis(
             self.clock
                 .now()
@@ -235,7 +286,16 @@ impl ResumeSealer {
                 .checked_add(self.lifetime_ms)
                 .ok_or(ContinuationError::InvalidRecord)?,
         );
-        prepare_resume_until(authorized, floor, expires_at, self.keys.as_ref())
+        let (payload, subject, fingerprints, original_parameters) =
+            resume_payload(authorized, floor, expires_at)?;
+        Ok(DeferredResume {
+            payload,
+            subject,
+            fingerprints,
+            expires_at,
+            original_parameters,
+            keys: Arc::clone(&self.keys),
+        })
     }
 }
 
@@ -245,6 +305,23 @@ fn prepare_resume_until(
     expires_at: Timestamp,
     keys: &dyn ResumeKeySource,
 ) -> Result<PreparedResume, ContinuationError> {
+    let (payload, subject, fingerprints, original_parameters) =
+        resume_payload(authorized, floor, expires_at)?;
+    let grant = seal_payload(payload, keys)?;
+    Ok(PreparedResume {
+        grant,
+        subject,
+        fingerprints,
+        expires_at,
+        original_parameters,
+    })
+}
+
+fn resume_payload(
+    authorized: &Authorized,
+    floor: ResumeFloor,
+    expires_at: Timestamp,
+) -> Result<(Vec<u8>, ContinuationSubject, ResumeFingerprints, Vec<u8>), ContinuationError> {
     let envelope = authorized
         .call()
         .mcp_envelope()
@@ -262,21 +339,14 @@ fn prepare_resume_until(
         envelope.admission().schema(),
         envelope.transport_fingerprint(),
     )?;
-    let grant = seal_resume(
+    let payload = resume_payload_bytes(
         authorized,
         subject.clone(),
         fingerprints.clone(),
         floor,
         expires_at,
-        keys,
     )?;
-    Ok(PreparedResume {
-        grant,
-        subject,
-        fingerprints,
-        expires_at,
-        original_parameters,
-    })
+    Ok((payload, subject, fingerprints, original_parameters))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +494,17 @@ pub fn seal_resume(
     expires_at: Timestamp,
     keys: &dyn ResumeKeySource,
 ) -> Result<ResumeGrant, ContinuationError> {
+    let payload = resume_payload_bytes(authorized, subject, fingerprints, floor, expires_at)?;
+    seal_payload(payload, keys)
+}
+
+fn resume_payload_bytes(
+    authorized: &Authorized,
+    subject: ContinuationSubject,
+    fingerprints: ResumeFingerprints,
+    floor: ResumeFloor,
+    expires_at: Timestamp,
+) -> Result<Vec<u8>, ContinuationError> {
     validate_resume_binding(authorized.call(), &subject, &fingerprints)?;
     if matches!(
         authorized.by(),
@@ -431,7 +512,7 @@ pub fn seal_resume(
     ) {
         return Err(ContinuationError::AuthorityMismatch);
     }
-    let payload = serde_json::to_vec(&ResumePayload {
+    serde_json::to_vec(&ResumePayload {
         call_fingerprint: authorized.call().authority_fingerprint(),
         authority: authorized.by().clone(),
         subject,
@@ -439,7 +520,13 @@ pub fn seal_resume(
         floor,
         expires_at,
     })
-    .map_err(|_| ContinuationError::InvalidGrant)?;
+    .map_err(|_| ContinuationError::InvalidGrant)
+}
+
+fn seal_payload(
+    payload: Vec<u8>,
+    keys: &dyn ResumeKeySource,
+) -> Result<ResumeGrant, ContinuationError> {
     let key = keys.resume_key()?;
     validate_key(&key)?;
     let mac = hmac_sha256(&key, &payload);
