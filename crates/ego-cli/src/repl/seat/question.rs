@@ -1175,17 +1175,6 @@ impl Waiting {
 fn status_prefix(status: &SharedStatus) -> String {
     let status = status.lock().expect("surface status lock");
     let mut rows = Vec::new();
-    if status.activity {
-        let elapsed = status
-            .activity_since
-            .map(|started| started.elapsed().as_secs())
-            .unwrap_or(0);
-        if elapsed == 0 {
-            rows.push(ACTIVITY_LABEL.to_string());
-        } else {
-            rows.push(format!("working for {elapsed}s — Esc cancels"));
-        }
-    }
     if !status.native_status {
         if status.queue.pending_steers > 0 {
             rows.push(QUEUE_LABEL.to_string());
@@ -1215,6 +1204,26 @@ fn status_right(status: &SharedStatus) -> String {
 }
 
 fn status_row(status: &SharedStatus) -> String {
+    let activity = {
+        let status = status.lock().expect("surface status lock");
+        if !status.activity {
+            None
+        } else if status.reply_started.load(Ordering::Acquire) {
+            Some(String::new())
+        } else {
+            let elapsed = status
+                .activity_since
+                .map(|started| started.elapsed().as_secs())
+                .unwrap_or(0);
+            Some(format!(
+                "{} thinking for {elapsed}s — Esc cancels\n",
+                ACTIVITY_FRAMES[(elapsed as usize) % ACTIVITY_FRAMES.len()]
+            ))
+        }
+    };
+    if let Some(activity) = activity {
+        return activity;
+    }
     let text = status_right(status);
     if text.is_empty() {
         String::new()
@@ -1233,7 +1242,12 @@ impl Prompt for Waiting {
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
-        Cow::Owned(format!("{}> ", status_prefix(&self.status)))
+        let streaming = {
+            let status = self.status.lock().expect("surface status lock");
+            status.activity && status.reply_started.load(Ordering::Acquire)
+        };
+        let cancel = if streaming { "Esc cancels | " } else { "" };
+        Cow::Owned(format!("{}{cancel}> ", status_prefix(&self.status)))
     }
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,

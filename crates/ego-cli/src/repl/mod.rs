@@ -332,7 +332,7 @@ mod live_surface_red {
     use super::*;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use reedline::{EditMode, Emacs, ReedlineEvent, ReedlineRawEvent};
-    use std::sync::mpsc;
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
     use std::time::Duration;
 
     #[test]
@@ -438,7 +438,8 @@ mod live_surface_red {
     fn live_output_pump_keeps_generation_production_cancellable_and_finish_is_a_barrier() {
         let (external, rendered) = crossbeam::channel::bounded(1);
         let cancel = ego_core::turn::CancelToken::new();
-        let (mut output, pump) = SurfaceOutput::pumped(external, cancel);
+        let (mut output, pump) =
+            SurfaceOutput::pumped(external, cancel, Arc::new(AtomicBool::new(false)));
 
         output.write("first\nsecond\nthird").unwrap();
 
@@ -464,7 +465,8 @@ mod live_surface_red {
         let (external, rendered) = crossbeam::channel::bounded(1);
         drop(rendered);
         let cancel = ego_core::turn::CancelToken::new();
-        let (mut output, pump) = SurfaceOutput::pumped(external, cancel.clone());
+        let (mut output, pump) =
+            SurfaceOutput::pumped(external, cancel.clone(), Arc::new(AtomicBool::new(false)));
 
         output.write("undeliverable").unwrap();
         assert!(output.finish().is_err());

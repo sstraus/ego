@@ -33,6 +33,9 @@ pub trait Diagnostics: Send + Sync {
 
 pub trait TextOutput: Diagnostics {
     fn write(&self, text: &str);
+    fn answer(&self, text: &str) {
+        self.write(text);
+    }
     fn line(&self, text: &str);
     fn finish(&self) {}
 }
@@ -179,6 +182,12 @@ impl Diagnostics for InteractiveOutput {
 impl TextOutput for InteractiveOutput {
     fn write(&self, text: &str) {
         let _ = self.inner.lock().expect("surface output lock").write(text);
+    }
+
+    fn answer(&self, text: &str) {
+        let mut output = self.inner.lock().expect("surface output lock");
+        output.mark_reply_started();
+        let _ = output.write(text);
     }
 
     fn line(&self, text: &str) {
@@ -366,7 +375,7 @@ impl<'a> TextSink<'a> {
             .expect("a poisoned lock means a writer panicked mid-line");
         let rest = text.answer.finish();
         if !rest.is_empty() {
-            self.out.write(&rest);
+            self.out.answer(&rest);
             text.open = !rest.ends_with('\n');
         }
         if text.open {
@@ -384,7 +393,7 @@ impl<'a> TextSink<'a> {
         if ready.is_empty() {
             return;
         }
-        self.out.write(&ready);
+        self.out.answer(&ready);
         text.open = !ready.ends_with('\n');
     }
 }

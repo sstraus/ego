@@ -91,24 +91,41 @@ fn stream(
     reader: Box<dyn Read + Send>,
     dsr_responder: mpsc::SyncSender<WriteRequest>,
 ) -> (mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
+    stream_with_screen(reader, dsr_responder, None)
+}
+
+fn stream_with_screen(
+    reader: Box<dyn Read + Send>,
+    dsr_responder: mpsc::SyncSender<WriteRequest>,
+    screen_size: Option<(u16, u16)>,
+) -> (mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
     let (sender, receiver) = mpsc::channel();
     let join = thread::spawn(move || {
         let mut reader = reader;
         let mut chunk = [0; 1024];
         let mut pending = Vec::new();
+        let mut screen = screen_size.map(|(rows, cols)| vt100::Parser::new(rows, cols, 0));
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(length) => {
+                    if let Some(screen) = &mut screen {
+                        screen.process(&chunk[..length]);
+                    }
                     pending.extend_from_slice(&chunk[..length]);
                     while let Some(index) = pending
                         .windows(DSR_QUERY.len())
                         .position(|window| window == DSR_QUERY)
                     {
                         pending.drain(..index + DSR_QUERY.len());
-                        if dsr_responder
-                            .send(WriteRequest::Bytes(DSR_RESPONSE.to_vec()))
-                            .is_err()
+                        let response = screen.as_ref().map_or_else(
+                            || DSR_RESPONSE.to_vec(),
+                            |screen| {
+                                let (row, col) = screen.screen().cursor_position();
+                                format!("\x1b[{};{}R", row + 1, col + 1).into_bytes()
+                            },
+                        );
+                        if dsr_responder.send(WriteRequest::Bytes(response)).is_err()
                             || dsr_responder.send(WriteRequest::Flush).is_err()
                         {
                             return;
@@ -946,7 +963,7 @@ fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
     assert!(
-        progress.contains("working for "),
+        progress.contains("thinking for "),
         "no elapsed progress while the tool ran: {progress:?}"
     );
     assert!(
@@ -1417,6 +1434,270 @@ fn model_picker_title_remains_visible_in_a_short_terminal() {
         "startup banner must advertise the model picker key: {:?}",
         normalized(&output[activation_start..])
     );
+}
+
+#[test]
+fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Paced {
+            head: String::new(),
+            tail: text("ANSWER-ON-REPLY-ROW"),
+            pause: Duration::from_secs(2),
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((24, 80)),
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"layout check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, 0, "Esc cancels");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let user = lines
+        .iter()
+        .position(|line| line.contains("> layout check"))
+        .unwrap_or_else(|| {
+            panic!(
+                "user line absent: {visible:?}; raw: {:?}",
+                String::from_utf8_lossy(&output)
+            )
+        });
+    assert!(
+        lines[user + 1].contains("Esc cancels"),
+        "thinking must occupy the reply row: {visible:?}"
+    );
+    assert!(
+        !lines[user + 1].contains('>'),
+        "working row must have no input prompt: {visible:?}"
+    );
+    assert_eq!(
+        visible.matches("model=").count(),
+        1,
+        "status must occur once before the user turn: {visible:?}"
+    );
+
+    until_normalized(&reader, &mut output, 0, "ANSWER-ON-REPLY-ROW");
+    drain_until_quiet(&reader, &mut output);
+    let mut final_screen = vt100::Parser::new(24, 80, 0);
+    final_screen.process(&output);
+    let visible = final_screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let user = lines
+        .iter()
+        .position(|line| line.contains("> layout check"))
+        .expect("user line");
+    assert!(
+        lines[user + 1].contains("ANSWER-ON-REPLY-ROW"),
+        "reply replaces thinking at the same row: {visible:?}"
+    );
+    assert!(
+        !visible.contains("Esc cancels"),
+        "thinking must disappear when reply arrives: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+}
+
+#[test]
+fn streamed_reply_keeps_escape_hint_visible_without_a_stale_thinking_row() {
+    let (reply, gate) = gated_paced_line("PARTIAL-ANSWER\n");
+    let stub = Stub::start(Plan {
+        completions: vec![reply],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((24, 80)),
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"stream check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, 0, "PARTIAL-ANSWER");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    gate.release();
+    let lines: Vec<_> = visible.lines().collect();
+    let user = lines
+        .iter()
+        .position(|line| line.contains("> stream check"))
+        .expect("user line");
+    assert!(
+        lines[user + 1].contains("PARTIAL-ANSWER"),
+        "partial text must occupy the reply row: {visible:?}"
+    );
+    assert!(
+        visible.contains("Esc cancels"),
+        "the cancel hint must remain visible until the turn ends: {visible:?}"
+    );
+    assert!(
+        !visible.contains("thinking"),
+        "the thinking row must disappear after text starts: {visible:?}"
+    );
+
+    let finish_start = output.len();
+    until_prompt_from(&reader, &mut output, finish_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+}
+
+#[test]
+fn cancelling_before_reply_clears_the_thinking_row() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Paced {
+            head: String::new(),
+            tail: text("TOO-LATE"),
+            pause: Duration::from_secs(5),
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((24, 80)),
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"cancel check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, 0, "Esc cancels");
+    let cancel_start = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, cancel_start, "model=");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let user = lines
+        .iter()
+        .position(|line| line.contains("> cancel check"))
+        .expect("user line");
+    assert!(
+        !lines[user + 1].contains("thinking"),
+        "cancelled work must not leave a stale thinking row: {visible:?}"
+    );
+    assert!(
+        !visible.contains("TOO-LATE"),
+        "a cancelled reply must not arrive: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    assert_eq!(
+        status.exit_code(),
+        130,
+        "cancel exit: {status:?}; screen: {visible:?}"
+    );
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
 }
 
 #[test]

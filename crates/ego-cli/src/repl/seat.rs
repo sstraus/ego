@@ -69,7 +69,7 @@ pub(super) const PERMISSION_DECISION_COMMAND: &str = "ego:permission-decision:";
 pub(super) const MODAL_ESCAPE_COMMAND: &str = "ego:modal-escape";
 const QUEUE_LABEL: &str =
     "Messages to be submitted after next tool call (press esc to interrupt and send immediately)";
-const ACTIVITY_LABEL: &str = "working — Esc cancels";
+const ACTIVITY_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const DOUBLE_CTRL_C_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Clone)]
@@ -363,6 +363,7 @@ struct SurfaceStatus {
     drafts: usize,
     activity: bool,
     activity_since: Option<Instant>,
+    reply_started: Arc<AtomicBool>,
     notice: Option<String>,
     origin: InputOrigin,
     native_status: bool,
@@ -390,6 +391,7 @@ impl Default for SurfaceStatus {
             drafts: 0,
             activity: false,
             activity_since: None,
+            reply_started: Arc::new(AtomicBool::new(false)),
             notice: None,
             origin: InputOrigin::Typed,
             native_status: false,
@@ -602,6 +604,7 @@ pub struct SurfaceOutput {
     sender: SurfaceSender,
     pending: String,
     cancel: CancelToken,
+    reply_started: Arc<AtomicBool>,
 }
 
 impl SurfaceOutput {
@@ -610,12 +613,14 @@ impl SurfaceOutput {
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             cancel,
+            reply_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(super) fn pumped(
         external: Sender<String>,
         cancel: CancelToken,
+        reply_started: Arc<AtomicBool>,
     ) -> (Self, std::thread::JoinHandle<()>) {
         let (sender, receiver) = crossbeam::channel::unbounded();
         let pump_cancel = cancel.clone();
@@ -646,6 +651,7 @@ impl SurfaceOutput {
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 cancel,
+                reply_started,
             },
             owner,
         )
@@ -658,6 +664,10 @@ impl SurfaceOutput {
             self.send(row)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn mark_reply_started(&self) {
+        self.reply_started.store(true, Ordering::Release);
     }
 
     pub fn finish(&mut self) -> Result<(), SendError<String>> {
@@ -849,7 +859,9 @@ impl Seat {
             status.cursor_selectors = true;
         }
         let printer = ExternalPrinter::new(CHANNEL_CAPACITY);
-        let (output, output_owner) = SurfaceOutput::pumped(printer.sender(), cancel.clone());
+        let reply_started = Arc::clone(&status.lock().expect("surface status lock").reply_started);
+        let (output, output_owner) =
+            SurfaceOutput::pumped(printer.sender(), cancel.clone(), reply_started);
         let startup_output = printer.receiver().clone();
         let break_signal = Arc::new(AtomicBool::new(false));
         let (input_sender, input) = bounded(CHANNEL_CAPACITY);
@@ -933,6 +945,7 @@ impl Seat {
                     let mut status = live.status.lock().expect("surface status lock");
                     status.activity = true;
                     status.activity_since.get_or_insert_with(Instant::now);
+                    status.reply_started.store(false, Ordering::Release);
                     drop(status);
                     repaint_status(&live.status);
                 }
@@ -1404,6 +1417,7 @@ impl crate::run::InteractiveSeat for Seat {
             let mut status = live.status.lock().expect("surface status lock");
             status.activity = true;
             status.activity_since.get_or_insert_with(Instant::now);
+            status.reply_started.store(false, Ordering::Release);
             drop(status);
             repaint_status(&live.status);
         }
@@ -1421,6 +1435,7 @@ impl crate::run::InteractiveSeat for Seat {
             let mut status = live.status.lock().expect("surface status lock");
             status.activity = false;
             status.activity_since = None;
+            status.reply_started.store(false, Ordering::Release);
             drop(status);
             repaint_status(&live.status);
         }

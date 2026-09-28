@@ -165,11 +165,16 @@ fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
     }));
     let waiting = Waiting::new(status);
 
+    assert!(
+        waiting
+            .render_prompt_left()
+            .contains("thinking for 0s — Esc cancels\n")
+    );
     assert_eq!(
         waiting
             .render_prompt_indicator(PromptEditMode::Emacs)
             .as_ref(),
-        "working — Esc cancels | > "
+        "> "
     );
 }
 
