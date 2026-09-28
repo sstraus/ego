@@ -10,6 +10,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::{Client, ConnectionTo};
 use agent_client_protocol_schema::v1;
@@ -34,6 +35,7 @@ pub struct AcpPermissionAdapter {
     session: v1::SessionId,
     connection: Option<ConnectionTo<Client>>,
     rule_writer: Option<Arc<dyn PermissionRuleWriter>>,
+    session_approval: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for AcpPermissionAdapter {
@@ -51,6 +53,7 @@ impl AcpPermissionAdapter {
     pub const ALLOW_ONCE: &'static str = "allow-once";
     pub const REJECT_ONCE: &'static str = "reject-once";
     pub const ALLOW_ALWAYS: &'static str = "allow-always";
+    pub const ALLOW_SESSION: &'static str = "allow-session";
     pub const REJECT_ALWAYS: &'static str = "reject-always";
 
     pub fn new(session: v1::SessionId) -> Self {
@@ -58,6 +61,7 @@ impl AcpPermissionAdapter {
             session,
             connection: None,
             rule_writer: None,
+            session_approval: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -66,11 +70,17 @@ impl AcpPermissionAdapter {
             session,
             connection: Some(connection),
             rule_writer: None,
+            session_approval: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn with_rule_writer(mut self, rule_writer: Option<Arc<dyn PermissionRuleWriter>>) -> Self {
         self.rule_writer = rule_writer;
+        self
+    }
+
+    pub fn with_session_approval(mut self, approval: Arc<AtomicBool>) -> Self {
+        self.session_approval = approval;
         self
     }
 
@@ -115,6 +125,11 @@ impl AcpPermissionAdapter {
                 v1::PermissionOptionId::new(Self::REJECT_ONCE),
                 "Reject once",
                 v1::PermissionOptionKind::RejectOnce,
+            ),
+            v1::PermissionOption::new(
+                v1::PermissionOptionId::new(Self::ALLOW_SESSION),
+                "Allow all for this session",
+                v1::PermissionOptionKind::AllowAlways,
             ),
         ];
         if rememberable {
@@ -195,12 +210,19 @@ impl AcpPermissionAdapter {
             // is the second invisible human the ADR rejects.
             return PermissionDecision::Deny;
         };
+        if self.session_approval.load(Ordering::Acquire) {
+            return PermissionDecision::Allow;
+        }
         let wire = self.live_request(item, &request);
         match connection.send_request(wire).block_task().await {
             Ok(response) => {
                 let v1::RequestPermissionOutcome::Selected(selected) = &response.outcome else {
                     return PermissionDecision::Deny;
                 };
+                if selected.option_id.0.as_ref() == Self::ALLOW_SESSION {
+                    self.session_approval.store(true, Ordering::Release);
+                    return PermissionDecision::Allow;
+                }
                 let effect = match selected.option_id.0.as_ref() {
                     Self::ALLOW_ALWAYS => ManagedRuleEffect::Allow,
                     Self::REJECT_ALWAYS => ManagedRuleEffect::Deny,

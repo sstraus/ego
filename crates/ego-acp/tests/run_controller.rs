@@ -143,6 +143,7 @@ impl RunBindingsBuilder for RecordingRunBindingsBuilder {
         session: v1::SessionId,
         capabilities: CapabilityCapture,
         _root: &ego_core::run::RunRoot,
+        _session_approval: Arc<std::sync::atomic::AtomicBool>,
     ) -> RunExecutionBindings {
         self.builds
             .lock()

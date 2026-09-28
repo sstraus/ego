@@ -17,7 +17,7 @@ use ego_core::mcp::{
 use ego_core::permit::{PreparedCall, Tool, ToolError};
 use ego_core::suspension::{
     ContinuationJournal, ContinuationKind, ContinuationSubject, McpCapturePin, ResumeFingerprints,
-    ResumeFloor, ResumeKeySource,
+    ResumeFloor, ResumeKeySource, ResumeSealer,
 };
 use ego_core::turn::{
     AdmittedToolSource, CapturedToolCatalogue, GenerationPolicyCaptureStore,
@@ -1468,6 +1468,7 @@ impl AdmittedToolSource for RegistryToolSource {
 pub struct McpRegistryRuntime {
     controller: Arc<McpRegistryController>,
     continuations: Arc<McpContinuationOwner>,
+    resume_sealer: Arc<ResumeSealer>,
 }
 
 impl McpRegistryRuntime {
@@ -1488,6 +1489,13 @@ impl McpRegistryRuntime {
                 "invalid MCP runtime limits".to_owned(),
             ));
         }
+        let lifetime_ms = u64::try_from(timeout.as_millis()).map_err(|_| {
+            McpRegistryError::InvalidCandidate("invalid MCP runtime timeout".to_owned())
+        })?;
+        let resume_sealer = Arc::new(
+            ResumeSealer::new(Arc::clone(&keys), Arc::clone(&clock), lifetime_ms)
+                .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?,
+        );
         registry_journal.replay()?;
         let state = Arc::new(RwLock::new(PublishedState::empty()));
         let resolver: Arc<dyn McpCaptureResolver> = Arc::new(PublishedCaptureResolver {
@@ -1526,6 +1534,7 @@ impl McpRegistryRuntime {
         Ok(Self {
             controller,
             continuations,
+            resume_sealer,
         })
     }
 
@@ -1539,6 +1548,10 @@ impl McpRegistryRuntime {
 }
 
 impl McpRuntimeBinding for McpRegistryRuntime {
+    fn resume_sealer(&self) -> Option<Arc<ResumeSealer>> {
+        Some(Arc::clone(&self.resume_sealer))
+    }
+
     fn load_pending_foreign_policy(
         &self,
         continuation_id: &str,

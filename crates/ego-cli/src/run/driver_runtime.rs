@@ -156,6 +156,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                 })?,
                 None => Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd)),
             };
+            let tools = match McpRuntimeBinding::resume_sealer(mcp_runtime.as_ref()) {
+                Some(resume) => tools.with_resume(resume),
+                None => tools,
+            };
             let tools = match skill_resource_roots.as_ref() {
                 Some(roots) => tools.with_skill_resource_roots(roots.clone()),
                 None => tools,
@@ -1320,6 +1324,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                     CanonPath::new(&cwd),
                                                 ),
                                             };
+                                            let compaction_tools =
+                                                match McpRuntimeBinding::resume_sealer(
+                                                    mcp_runtime.as_ref(),
+                                                ) {
+                                                    Some(resume) => {
+                                                        compaction_tools.with_resume(resume)
+                                                    }
+                                                    None => compaction_tools,
+                                                };
                                             let compaction_tools =
                                                 match skill_resource_roots.as_ref() {
                                                     Some(roots) => compaction_tools

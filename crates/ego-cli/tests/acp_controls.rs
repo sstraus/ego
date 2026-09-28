@@ -3,7 +3,7 @@
 //! The wire half lives in `ego-acp`; this is the half that decides what a
 //! host may be offered at all. The rules it has to keep: never offer a model
 //! the catalogue calls unavailable, never offer an effort the model does not
-//! accept, never offer `yolo`, never offer `auto` without a judge, and never
+//! accept, offer `yolo` only by explicit host selection, never offer `auto` without a judge, and never
 //! report a chosen value the operator did not choose.
 
 use ego_ai::catalogue::{
@@ -294,26 +294,25 @@ fn an_effort_the_model_rejects_is_refused() {
     );
 }
 
-/// `yolo` is the mode that stops asking. The terminal seat reaches it only by
-/// typing the word; `session/set_config_option` carries a value id and no
-/// confirmation, so this seat does not offer it at all.
 #[test]
-fn yolo_is_neither_offered_nor_accepted_over_the_wire() {
-    let seat = seat(true);
+fn session_mode_picker_offers_yolo_and_applies_it_to_the_next_generation() {
+    let seat = seat(false);
     let session = SessionId::new();
     admit_all(&seat, session);
-    let state = seat.state(session).expect("a readable seat");
-    assert!(!state.mode.available.contains(&Mode::Yolo));
-    let refusal = seat
+    let before = seat.state(session).expect("session controls");
+    assert!(before.mode.available.contains(&Mode::Yolo));
+    let selected = seat
         .stage(session, SessionControlChange::Mode(Mode::Yolo))
-        .expect_err("yolo must never be staged from the wire");
-    assert!(matches!(
-        refusal,
-        ControlError::Refused {
-            control: "mode",
-            ..
-        }
-    ));
+        .expect("the host selected the offered mode");
+    assert_eq!(selected.mode.current, Some(Mode::Yolo));
+    assert_eq!(selected.mode.chosen, Some(Mode::Yolo));
+    assert_eq!(
+        seat.state(session)
+            .expect("the next generation reads controls")
+            .mode
+            .current,
+        Some(Mode::Yolo)
+    );
 }
 
 /// `auto` delegates to a judge model. Without one the run refuses at startup,

@@ -68,6 +68,16 @@ fn select(host: &mut AcpHost, request: &serde_json::Value, option: &str) {
     }));
 }
 
+fn send_prompt(host: &mut AcpHost, session: &str) -> u64 {
+    host.send_request(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session,
+            "prompt": [{"type": "text", "text": "Run ls"}],
+        }),
+    )
+}
+
 fn settle_without_question(host: &mut AcpHost, prompt_id: u64) -> serde_json::Value {
     loop {
         let frame = host.read_frame();
@@ -90,6 +100,203 @@ fn listed_rules(places: &Places, profile: Option<&str>) -> serde_json::Value {
     let result = ego.run();
     assert_eq!(result.code, Some(0), "{}", result.stderr);
     serde_json::from_str(&result.stdout).expect("rules ls JSON")
+}
+
+#[test]
+fn session_allow_answers_five_later_calls_without_a_prompt_then_expires() {
+    let places = Places::new();
+    configure(&places);
+    let mut completions = Vec::new();
+    for index in 0..7 {
+        completions.extend([
+            Reply::Sse(tool_call(
+                &format!("session-exec-{index}"),
+                "exec",
+                r#"{"argv":["ls"]}"#,
+            )),
+            Reply::Sse(text("done")),
+        ]);
+    }
+    let stub = Stub::start(Plan {
+        completions,
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    let (session, first_id) = prompt(&mut host, &places);
+    let question = permission(&mut host);
+    assert!(
+        question["params"]["options"]
+            .as_array()
+            .expect("ACP permission options")
+            .iter()
+            .any(|option| option["optionId"] == "allow-session"),
+        "the host cannot approve this session: {question}"
+    );
+    select(&mut host, &question, "allow-session");
+    assert!(settle_without_question(&mut host, first_id)["result"].is_object());
+    for _ in 0..5 {
+        let id = send_prompt(&mut host, &session);
+        let frame = settle_without_question(&mut host, id);
+        assert!(frame["result"].is_object(), "{frame}");
+    }
+    let other = host.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
+    let _ = send_prompt(&mut host, &other);
+    let returned = permission(&mut host);
+    assert!(returned["params"]["options"].is_array());
+    host.finish();
+    assert!(
+        listed_rules(&places, Some(PROFILE))["rules"]
+            .as_array()
+            .expect("profile rules")
+            .is_empty()
+    );
+}
+
+#[test]
+fn mode_yolo_selected_after_a_turn_avoids_the_next_permission_prompt() {
+    let places = Places::new();
+    configure(&places);
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("before-yolo", "exec", r#"{"argv":["ls"]}"#)),
+            Reply::Sse(text("first done")),
+            Reply::Sse(tool_call("after-yolo", "exec", r#"{"argv":["ls"]}"#)),
+            Reply::Sse(text("second done")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    let (session, first_id) = prompt(&mut host, &places);
+    let question = permission(&mut host);
+    select(&mut host, &question, "allow-once");
+    assert!(settle_without_question(&mut host, first_id)["result"].is_object());
+    let changed = host.request(
+        "session/set_config_option",
+        serde_json::json!({"sessionId": session, "configId": "mode", "value": "yolo"}),
+    );
+    let mode = changed["result"]["configOptions"]
+        .as_array()
+        .expect("ACP config options")
+        .iter()
+        .find(|option| option["id"] == "mode")
+        .expect("mode option");
+    assert_eq!(mode["currentValue"], "yolo", "{changed}");
+    let second_id = send_prompt(&mut host, &session);
+    let result = settle_without_question(&mut host, second_id);
+    assert!(result["result"].is_object(), "{result}");
+    host.finish();
+}
+
+#[test]
+fn configured_tool_rule_skips_the_acp_question_for_an_opaque_mcp_call() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[permissions]\nallow = [\"tool(tuicommander/search_tools)\"]\n\n[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    )
+    .expect("isolated profile configuration");
+    let stub = Stub::start_mcp_tool(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("mcp-search", "search_tools", "{}")),
+            Reply::Sse(text("search done")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    host.initialize();
+    let opened = host.request(
+        "session/new",
+        serde_json::json!({
+            "cwd": places.workspace_path(),
+            "mcpServers": [{"type":"http","name":"tuicommander","url":format!("http://{}/mcp", stub.address),"headers":[]}],
+        }),
+    );
+    let session = opened["result"]["sessionId"].as_str().unwrap_or_else(|| {
+        panic!(
+            "MCP session was not opened: {opened}; requests: {:?}",
+            stub.requests()
+        )
+    });
+    let id = send_prompt(&mut host, session);
+    let finished = settle_without_question(&mut host, id);
+    assert!(finished["result"].is_object(), "{finished}");
+    host.finish();
+    assert!(
+        stub.generations()
+            .iter()
+            .any(
+                |generation| generation["tools"].as_array().is_some_and(|tools| tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "search_tools"))
+            ),
+        "the MCP tool was not offered to the model"
+    );
+}
+
+#[test]
+fn permitted_acp_mcp_call_does_not_fail_for_a_missing_resume_sealer() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    )
+    .expect("isolated profile configuration");
+    let stub = Stub::start_mcp_tool(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("mcp-search-permitted", "search_tools", "{}")),
+            Reply::Sse(text("search done")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    host.initialize();
+    let opened = host.request(
+        "session/new",
+        serde_json::json!({
+            "cwd": places.workspace_path(),
+            "mcpServers": [{"type":"http","name":"tuicommander","url":format!("http://{}/mcp", stub.address),"headers":[]}],
+        }),
+    );
+    let session = opened["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("MCP session was not opened: {opened}"));
+    let id = send_prompt(&mut host, session);
+    let question = permission(&mut host);
+    assert!(
+        question["params"]["toolCall"]["title"]
+            .as_str()
+            .is_some_and(|title| title.contains("search_tools")),
+        "the MCP call did not reach the ACP permission seat: {question}"
+    );
+    select(&mut host, &question, "allow-once");
+    let mut updates = Vec::new();
+    let finished = loop {
+        let frame = host.read_frame();
+        if frame["id"].as_u64() == Some(id) {
+            break frame;
+        }
+        updates.push(frame);
+    };
+    assert!(finished["result"].is_object(), "{finished}");
+    host.finish();
+    let report = serde_json::to_string(&updates).expect("ACP updates");
+    assert!(
+        !report.contains("invalid resume sealing key"),
+        "the permitted call lacked a resume sealer: {report}"
+    );
+    let calls = stub
+        .requests()
+        .into_iter()
+        .filter(|request| request.path == "/mcp")
+        .filter(|request| {
+            serde_json::from_str::<serde_json::Value>(&request.body)
+                .is_ok_and(|body| body["method"] == "tools/call")
+        })
+        .count();
+    assert!(
+        calls == 1 || report.contains("native resume key is unavailable"),
+        "the allowed tool neither reached MCP nor reported unavailable native key: {report}"
+    );
 }
 
 #[test]
