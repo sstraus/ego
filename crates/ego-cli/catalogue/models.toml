@@ -314,18 +314,40 @@ max_height = 8000
 # ---------------------------------------------------------------------------
 # Tombstones.
 #
-# A slug the vendor has switched off. Without these, `--model
+# A slug removed from the builtin catalogue. Without these, `--model
 # anthropic/claude-3-opus-20240229` is answered with "no capabilities are
 # configured", which sends someone to write a `models.toml` entry for a model
-# that will never answer again. With them the refusal names the retirement and
-# the replacement the vendor recommends.
+# that may not answer. With them the refusal names the retirement and
+# a replacement.
 #
-# `replacement` is the vendor's own recommendation, verbatim, and is not
-# promised to be in this catalogue — it is a fact about their lineup, not
-# about ours. `retired` is the date they stopped serving it.
+# `replacement` need not be in this catalogue. For historical Anthropic
+# tombstones, `retired` is the provider shutdown date. For superseded builtin
+# rows, it is the date ego removed the row.
 #
 # Read 2026-09-07 from
 # https://platform.claude.com/docs/en/about-claude/model-deprecations.
+
+# These slugs left the builtin catalogue on 2026-09-26. This date records
+# ego's catalogue change, not a claim that the provider stopped serving them.
+[retired."openai/gpt-5.6-sol"]
+replacement = "openai/gpt-6-sol"
+retired = "2026-09-26"
+
+[retired."openai-codex/gpt-5.6-sol"]
+replacement = "openai-codex/gpt-6-sol"
+retired = "2026-09-26"
+
+[retired."openai/gpt-5.6-terra"]
+replacement = "openai/gpt-6-luna"
+retired = "2026-09-26"
+
+[retired."openai/gpt-5.6-luna"]
+replacement = "openai/gpt-6-luna"
+retired = "2026-09-26"
+
+[retired."anthropic/claude-opus-5"]
+replacement = "anthropic/claude-opus-5-5"
+retired = "2026-09-26"
 
 [retired."anthropic/claude-opus-4-1-20250805"]
 replacement = "anthropic/claude-opus-4-8"

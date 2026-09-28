@@ -314,14 +314,7 @@ impl CliPrepared {
             Stderr.note(&note_text);
         }
         let mut no_status = None;
-        let GenerationPreflight {
-            source,
-            selection: _,
-            capabilities: model_capabilities,
-            judge_available,
-            proof_directory,
-            proof_evidence,
-        } = generation_preflight(
+        let preflight = generation_preflight(
             GenerationPreflightInput {
                 session_id: self.session_id,
                 confinement: &self.confinement,
@@ -334,8 +327,23 @@ impl CliPrepared {
             },
             &mut no_status,
         )
-        .await
-        .map_err(run_executor_error)?;
+        .await;
+        let GenerationPreflight {
+            source,
+            selection: _,
+            capabilities: model_capabilities,
+            judge_available,
+            proof_directory,
+            proof_evidence,
+        } = match preflight {
+            Ok(preflight) => preflight,
+            Err(RunTermination::UsageError { message }) => {
+                return Ok(RunSettlement::Interrupted {
+                    diagnostic: Some(format!("configuration error: {message}")),
+                });
+            }
+            Err(error) => return Err(run_executor_error(error)),
+        };
         drop(proof_directory);
         drop(proof_evidence);
         let mcp_errors = bindings.mcp_errors().to_vec();
