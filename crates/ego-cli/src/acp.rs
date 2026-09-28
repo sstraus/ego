@@ -42,6 +42,7 @@ use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
 use ego_tools::store::OsIo;
 use futures::future::BoxFuture;
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
 use crate::acp_confinement::CliSessionConfinementAdmission;
 use crate::acp_controls::AcpSessionControls;
@@ -103,75 +104,100 @@ const MAX_ADMISSION_BACKOFF: Duration = Duration::from_secs(15 * 60);
 struct AdmissionRetry {
     failures: u32,
     retry_after: Instant,
-    active: bool,
+    active: Option<watch::Receiver<Option<Result<(), McpSessionAdmissionError>>>>,
 }
 
 struct AdmissionAttempt {
     key: [u8; 32],
     state: Arc<Mutex<HashMap<[u8; 32], AdmissionRetry>>>,
+    completion: watch::Sender<Option<Result<(), McpSessionAdmissionError>>>,
     finished: bool,
 }
 
+enum AdmissionReservation {
+    Wait(watch::Receiver<Option<Result<(), McpSessionAdmissionError>>>),
+    Start(watch::Sender<Option<Result<(), McpSessionAdmissionError>>>),
+}
+
 impl AdmissionAttempt {
-    fn begin(
+    async fn begin(
         state: Arc<Mutex<HashMap<[u8; 32], AdmissionRetry>>>,
         key: [u8; 32],
     ) -> Result<Self, McpSessionAdmissionError> {
-        let now = Instant::now();
-        let mut retries = state
-            .lock()
-            .map_err(|_| safe_mcp_error("ACP MCP admission state could not be read"))?;
-        if let Some(retry) = retries.get_mut(&key) {
-            if retry.active || now < retry.retry_after {
-                return Err(safe_mcp_error(
-                    "the supplied MCP servers could not be admitted; retry later",
-                ));
-            }
-            retry.active = true;
-        } else {
-            if retries.len() >= MAX_FAILED_ADMISSIONS {
-                let evict = retries
-                    .iter()
-                    .filter(|(_, retry)| !retry.active)
-                    .min_by_key(|(_, retry)| retry.retry_after)
-                    .map(|(key, _)| *key);
-                let Some(evict) = evict else {
-                    return Err(safe_mcp_error(
-                        "too many MCP admissions are in progress; retry later",
-                    ));
-                };
-                retries.remove(&evict);
-            }
-            retries.insert(
-                key,
-                AdmissionRetry {
+        loop {
+            let reservation = {
+                let mut retries = state
+                    .lock()
+                    .map_err(|_| safe_mcp_error("ACP MCP admission state could not be read"))?;
+                if !retries.contains_key(&key) && retries.len() >= MAX_FAILED_ADMISSIONS {
+                    let evict = retries
+                        .iter()
+                        .filter(|(_, retry)| retry.active.is_none())
+                        .min_by_key(|(_, retry)| retry.retry_after)
+                        .map(|(key, _)| *key);
+                    let Some(evict) = evict else {
+                        return Err(safe_mcp_error(
+                            "too many MCP admissions are in progress; retry later",
+                        ));
+                    };
+                    retries.remove(&evict);
+                }
+                let now = Instant::now();
+                let retry = retries.entry(key).or_insert_with(|| AdmissionRetry {
                     failures: 0,
                     retry_after: now,
-                    active: true,
+                    active: None,
+                });
+                if let Some(active) = retry.active.clone() {
+                    AdmissionReservation::Wait(active)
+                } else if now < retry.retry_after {
+                    return Err(safe_mcp_error(
+                        "the supplied MCP servers could not be admitted; retry later",
+                    ));
+                } else {
+                    let (completion, active) = watch::channel(None);
+                    retry.active = Some(active);
+                    AdmissionReservation::Start(completion)
+                }
+            };
+            match reservation {
+                AdmissionReservation::Wait(mut active) => loop {
+                    if let Some(result) = active.borrow_and_update().clone() {
+                        result?;
+                        break;
+                    }
+                    active.changed().await.map_err(|_| {
+                        safe_mcp_error("the concurrent MCP admission ended without a result")
+                    })?;
                 },
-            );
+                AdmissionReservation::Start(completion) => {
+                    return Ok(Self {
+                        key,
+                        state,
+                        completion,
+                        finished: false,
+                    });
+                }
+            }
         }
-        drop(retries);
-        Ok(Self {
-            key,
-            state,
-            finished: false,
-        })
     }
 
-    fn finish(mut self, success: bool) {
-        self.record(success);
+    fn finish(mut self, result: Result<(), McpSessionAdmissionError>) {
+        self.record(result);
         self.finished = true;
     }
 
-    fn record(&self, success: bool) {
+    fn record(&self, result: Result<(), McpSessionAdmissionError>) {
         let Ok(mut retries) = self.state.lock() else {
+            let _ = self.completion.send(Some(Err(safe_mcp_error(
+                "ACP MCP admission state could not be read",
+            ))));
             return;
         };
-        if success {
+        if result.is_ok() {
             retries.remove(&self.key);
         } else if let Some(retry) = retries.get_mut(&self.key) {
-            retry.active = false;
+            retry.active = None;
             retry.failures = retry.failures.saturating_add(1);
             let multiplier = 1_u64 << retry.failures.saturating_sub(1).min(4);
             let backoff = INITIAL_ADMISSION_BACKOFF
@@ -184,13 +210,15 @@ impl AdmissionAttempt {
                 "ACP MCP admission failed; delaying another attempt for the same server selection"
             );
         }
+        drop(retries);
+        let _ = self.completion.send(Some(result));
     }
 }
 
 impl Drop for AdmissionAttempt {
     fn drop(&mut self) {
         if !self.finished {
-            self.record(false);
+            self.record(Err(safe_mcp_error("ACP MCP admission was interrupted")));
         }
     }
 }
@@ -231,7 +259,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                 .map_err(|_| safe_mcp_error("the supplied MCP servers could not be identified"))?;
             let key: [u8; 32] = Sha256::digest(&serialized).into();
             let admissions = map_mcp_servers(servers)?;
-            let attempt = AdmissionAttempt::begin(failed_admissions, key)?;
+            let attempt = AdmissionAttempt::begin(failed_admissions, key).await?;
             let result = async {
                 let refresh = McpRegistryRefresh::new(
                     admissions,
@@ -278,7 +306,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                 ))
             }
             .await;
-            attempt.finish(result.is_ok());
+            attempt.finish(result.as_ref().map(|_| ()).map_err(Clone::clone));
             result
         })
     }
@@ -743,5 +771,69 @@ mod confinement_ceiling_tests {
             error.to_string(),
             "plaintext HTTP requires allow_insecure_loopback = true"
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_concurrency_tests {
+    use std::sync::Arc;
+
+    use ego_acp::serve::McpSessionAdmitter;
+    use ego_core::turn::CancelToken;
+    use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
+
+    use super::{
+        AcpMcpSessionAdmitter, CommandHttpScope, MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
+        MCP_DEFAULT_OPERATION_TIMEOUT,
+    };
+
+    #[tokio::test]
+    async fn two_simultaneous_sessions_with_the_same_working_server_both_admit() {
+        let directory = tempfile::tempdir().expect("test files");
+        let script = directory.path().join("working-mcp.py");
+        std::fs::write(
+            &script,
+            r#"import json, sys, time
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "server/discover":
+        time.sleep(3)
+        result = {"resultType": "complete", "supportedVersions": ["2026-07-28"], "capabilities": {}, "ttlMs": 0, "cacheScope": "private"}
+    else:
+        result = {"resultType": "complete", "tools": [], "resources": [], "prompts": [], "nextCursor": None, "ttlMs": 0, "cacheScope": "private"}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"#,
+        )
+        .expect("working stdio server");
+        let server = serde_json::json!({
+            "name": "working",
+            "command": "/usr/bin/python3",
+            "args": [script],
+            "env": []
+        });
+        let effects = CommandHttpScope::online(CancelToken::new())
+            .await
+            .expect("MCP effects");
+        let http = Arc::new(RunMcpHttpEffects::new(Arc::clone(effects.ports())));
+        let stdio = Arc::new(RunMcpDuplexEffectsFactory::new(
+            effects.ports().duplex_handle(),
+        ));
+        let admitter = AcpMcpSessionAdmitter::new(
+            http,
+            stdio,
+            MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
+            MCP_DEFAULT_OPERATION_TIMEOUT,
+        );
+        let selection = || vec![serde_json::from_value(server.clone()).expect("ACP server")];
+        let (first, second) =
+            tokio::join!(admitter.admit(selection()), admitter.admit(selection()));
+        if let Err(error) = first {
+            panic!("first session: {error}");
+        }
+        if let Err(error) = second {
+            panic!("second session: {error}");
+        }
     }
 }

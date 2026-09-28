@@ -105,3 +105,69 @@ fn changed_acp_mcp_selection_can_retry_after_a_different_selection_failed() {
         "a changed server selection must get its own discovery: {requests}"
     );
 }
+
+#[test]
+fn concurrent_identical_acp_loads_each_admit_their_own_session() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = 'ollama/qwen3'\nthinking = 'off'\nsandbox = 'off'\nmode = 'default'\n",
+    )
+    .expect("isolated profile configuration");
+    let starts = places.workspace_path().join("mcp-starts.txt");
+    let server = places.file(
+        "working-mcp.py",
+        r#"import json, os, sys, time
+with open(sys.argv[1], "a", encoding="utf-8") as starts:
+    starts.write(f"{os.getpid()}\n")
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "server/discover":
+        time.sleep(3)
+        result = {"resultType": "complete", "supportedVersions": ["2026-07-28"], "capabilities": {}, "ttlMs": 0, "cacheScope": "private"}
+    else:
+        result = {"resultType": "complete", "tools": [], "resources": [], "prompts": [], "nextCursor": None, "ttlMs": 0, "cacheScope": "private"}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"#,
+    );
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), None)
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let cwd = places.workspace_path().to_str().expect("UTF-8 root");
+    let sessions = [host.new_session(cwd), host.new_session(cwd)];
+    let ids = sessions.map(|session| {
+        host.send_request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": session,
+                "cwd": cwd,
+                "mcpServers": [{
+                    "name": "working",
+                    "command": "/usr/bin/python3",
+                    "args": [server, starts],
+                    "env": []
+                }]
+            }),
+        )
+    });
+    let mut replies = std::collections::HashMap::new();
+    while replies.len() < ids.len() {
+        let frame = host.read_frame();
+        if let Some(id) = frame["id"].as_u64() {
+            replies.insert(id, frame);
+        }
+    }
+    for id in ids {
+        let reply = &replies[&id];
+        assert!(reply["result"].is_object(), "both tabs must load: {reply}");
+    }
+    host.finish();
+    let starts = std::fs::read_to_string(starts).expect("working server starts recorded");
+    assert_eq!(starts.lines().count(), 2, "one child per session: {starts}");
+}
