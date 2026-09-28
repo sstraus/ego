@@ -145,6 +145,49 @@ fn json_is_exactly_the_snapshot_envelope_with_one_newline_and_clean_stdout() {
 }
 
 #[test]
+fn embedding_only_ollama_model_is_absent_from_chat_catalogue_and_refused_for_run() {
+    // Catches: the CLI catalogue hides the embedding row but explicit --model
+    // still sends a chat request to it.
+    let tags = r#"{"models":[{"name":"qwen3","capabilities":["completion"]},{"name":"embeddinggemma:300m-qat-q8_0","capabilities":["embedding"]}]}"#;
+    let stub = Stub::start(Plan {
+        tags_refusal: Some((200, tags.to_string())),
+        ..Plan::default()
+    });
+    let listing = Ego::against(&stub)
+        .subcommand("models")
+        .args(["--provider", "ollama", "--refresh", "--json"])
+        .run();
+    assert_eq!(listing.code, Some(0), "{}", listing.stderr);
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&listing.stdout).expect("catalogue JSON");
+    let slugs: Vec<_> = snapshot["models"]
+        .as_array()
+        .expect("model rows")
+        .iter()
+        .filter_map(|row| row["slug"].as_str())
+        .collect();
+    assert_eq!(slugs, ["ollama/qwen3"]);
+
+    let stub = Stub::start(Plan {
+        tags_refusal: Some((200, tags.to_string())),
+        ..Plan::default()
+    });
+    let run = Ego::against(&stub)
+        .args(["--model", "ollama/embeddinggemma:300m-qat-q8_0", "Ask"])
+        .run();
+    assert_ne!(run.code, Some(0));
+    assert!(run.stderr.contains("embedding-only"), "{}", run.stderr);
+    assert_eq!(
+        stub.requests()
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/api/tags"],
+        "explicit chat selection must stop before model load or generation"
+    );
+}
+
+#[test]
 fn provider_filter_is_applied_before_transport_and_refresh_is_filter_scoped() {
     let stub = Stub::start(Plan::default());
     let result = Ego::against(&stub)

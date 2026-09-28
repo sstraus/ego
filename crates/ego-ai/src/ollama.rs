@@ -99,6 +99,11 @@ pub async fn resolve(
     }
 
     let tag = installed(row, model, http).await?;
+    if embedding_only(&tag) {
+        return Err(ResolveError::NotChatCapable {
+            model: model.to_string(),
+        });
+    }
     let context = served_context(row, model, http).await?;
 
     Ok(ResolvedModel {
@@ -215,6 +220,9 @@ pub async fn enumerate(
             ));
             continue;
         }
+        if embedding_only(&tag) {
+            continue;
+        }
         models.push(ModelDiscoveryEntry {
             slug: ModelSlug {
                 provider: row.id().to_owned(),
@@ -234,6 +242,16 @@ pub async fn enumerate(
         failures,
         complete,
     )
+}
+
+fn embedding_only(tag: &Tag) -> bool {
+    tag.capabilities
+        .iter()
+        .any(|capability| capability == "embedding")
+        && !tag
+            .capabilities
+            .iter()
+            .any(|capability| capability == "completion")
 }
 
 /// The daemon's own entry for `model`, or the list it does serve.

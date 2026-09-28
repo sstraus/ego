@@ -278,7 +278,6 @@ pub struct ActionRegistration {
     description: &'static str,
     aliases: Vec<&'static str>,
     shortcuts: Vec<char>,
-    function_keys: Vec<u8>,
     kind: ActionKind,
     availability: Availability,
 }
@@ -291,7 +290,6 @@ impl ActionRegistration {
             description: "",
             aliases: Vec::new(),
             shortcuts: Vec::new(),
-            function_keys: Vec::new(),
             kind,
             availability: Availability::Enabled,
         }
@@ -302,10 +300,6 @@ impl ActionRegistration {
     }
     pub fn shortcut(mut self, shortcut: char) -> Self {
         self.shortcuts.push(shortcut);
-        self
-    }
-    pub fn function_key(mut self, key: u8) -> Self {
-        self.function_keys.push(key);
         self
     }
     pub fn description(mut self, description: &'static str) -> Self {
@@ -330,9 +324,6 @@ impl ActionRegistration {
     }
     pub fn shortcuts(&self) -> &[char] {
         &self.shortcuts
-    }
-    pub fn function_keys(&self) -> &[u8] {
-        &self.function_keys
     }
     pub fn disabled_reason(&self) -> Option<&'static str> {
         match self.availability {
@@ -385,7 +376,6 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
         let mut names = HashSet::new();
         let mut aliases = HashSet::new();
         let mut shortcuts = HashSet::new();
-        let mut function_keys = HashSet::new();
         for action in &value {
             if !ids.insert(action.id) {
                 return Err(RegistryError("duplicate action id"));
@@ -401,11 +391,6 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
             for shortcut in &action.shortcuts {
                 if !shortcuts.insert(*shortcut) {
                     return Err(RegistryError("duplicate action shortcut"));
-                }
-            }
-            for key in &action.function_keys {
-                if !function_keys.insert(*key) {
-                    return Err(RegistryError("duplicate action function key"));
                 }
             }
         }
@@ -430,9 +415,7 @@ impl ActionRegistry {
         };
         Self::try_from([
             enabled(Help, "help", "Show interactive actions and shortcuts"),
-            enabled(Model, "model", "Choose the current model")
-                .shortcut('p')
-                .function_key(2),
+            enabled(Model, "model", "Choose the current model").shortcut('p'),
             enabled(Thinking, "thinking", "Choose reasoning effort"),
             enabled(Mode, "mode", "Inspect or change execution mode")
                 .unavailable("the interactive mode controller"),
@@ -508,10 +491,7 @@ impl ActionRegistry {
     }
     pub fn resolve_key(&self, key: KeyEvent) -> Option<ActionId> {
         match (key.code, key.modifiers) {
-            (KeyCode::F(number), KeyModifiers::NONE) => self
-                .iter()
-                .find(|action| action.function_keys.contains(&number))
-                .map(|action| action.id),
+            (KeyCode::Char('π'), KeyModifiers::NONE) => self.resolve_shortcut('p'),
             (KeyCode::Char(character), modifiers)
                 if modifiers == KeyModifiers::ALT || modifiers == KeyModifiers::META =>
             {

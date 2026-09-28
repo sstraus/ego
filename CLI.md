@@ -1063,8 +1063,8 @@ settlement, usage, cost, or tool-result accounting.
 ### 6.4 Menus, model selection, and questions
 
 `Option-P` on macOS and `Alt-P` elsewhere, normalised as terminal `Meta-P`,
-open the same action as `/model`. `F2` is a second terminal key for Mac
-terminals that do not expose Option as Meta; `/model` remains the exact
+open the same action as `/model`. On macOS, a terminal that emits the composed
+`π` character for Option-P opens that action too. `/model` remains the exact
 keyboard-independent equivalent. The picker shows provider,
 model, context capability, and reasoning effort. Arrow keys navigate; `Enter`
 sets the default for new sessions, `s` applies only to this session, and `Esc`

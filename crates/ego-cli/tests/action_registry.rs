@@ -264,6 +264,10 @@ fn model_shortcuts_and_slash_are_the_same_action() {
     assert_eq!(registry.resolve_key(alt_p), Some(ActionId::Model));
     assert_eq!(
         registry.resolve_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+        None
+    );
+    assert_eq!(
+        registry.resolve_key(KeyEvent::new(KeyCode::Char('π'), KeyModifiers::NONE)),
         Some(ActionId::Model)
     );
     assert_eq!(registry.resolve_slash("model"), Some(ActionId::Model));

@@ -852,6 +852,8 @@ pub enum ResolveError {
         model: String,
         installed: Vec<String>,
     },
+    /// A listed local model cannot serve chat requests.
+    NotChatCapable { model: String },
     /// A local identifier that the daemon may relay upstream, which is
     /// therefore not unmetered and cannot take the zero quote. Refused rather
     /// than priced at zero: under-reserving a metered call to nothing is the
@@ -927,6 +929,10 @@ impl fmt::Display for ResolveError {
                 } else {
                     installed.join(", ")
                 }
+            ),
+            ResolveError::NotChatCapable { model } => write!(
+                f,
+                "`{model}` is an embedding-only model and cannot serve chat; choose a model with completion capability"
             ),
             ResolveError::NotLocallyServed { model } => write!(
                 f,

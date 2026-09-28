@@ -1089,7 +1089,11 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
 
 #[test]
 fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() {
+    // A real Ollama /api/tags response includes embedding-only rows. The
+    // picker must project only chat models from that response.
+    let tags = r#"{"models":[{"name":"qwen3","capabilities":["completion","tools"]},{"name":"embeddinggemma:300m-qat-q8_0","capabilities":["embedding"]}]}"#;
     let stub = Stub::start(Plan {
+        tags_refusal: Some((200, tags.to_string())),
         completions: vec![Reply::Sse(text("PASTED-SLASH-PROMPT"))],
         ..Plan::default()
     });
@@ -1201,6 +1205,10 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     drain_until_quiet(&reader, &mut output);
     let slash_modal = normalized(&output[slash_start..]);
     assert!(slash_modal.contains("Select model"));
+    assert!(
+        !slash_modal.contains("embeddinggemma"),
+        "embedding-only models cannot appear in the chat picker: {slash_modal}"
+    );
     let enter_start = output.len();
     input.write_all(b"\r").expect("model picker enter");
     input.flush().expect("model picker enter flush");
@@ -1240,21 +1248,21 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     input.flush().expect("close Meta-P modal flush");
     until_prompt_from(&reader, &mut output, meta_close_start);
 
-    let function_key_start = output.len();
-    input.write_all(b"\x1bOQ").expect("F2 model shortcut");
-    input.flush().expect("F2 model shortcut flush");
-    until_normalized(&reader, &mut output, function_key_start, "Select model");
+    let composed_start = output.len();
+    input.write_all("π".as_bytes()).expect("composed Option-P");
+    input.flush().expect("composed Option-P flush");
+    until_normalized(&reader, &mut output, composed_start, "Select model");
     drain_until_quiet(&reader, &mut output);
-    let function_key_modal = normalized(&output[function_key_start..]);
+    let composed_modal = normalized(&output[composed_start..]);
     assert_eq!(
-        function_key_modal.rsplit_once("Select model").unwrap().1,
+        composed_modal.rsplit_once("Select model").unwrap().1,
         slash_modal.rsplit_once("Select model").unwrap().1,
-        "F2 and /model must present the same complete picker"
+        "composed Option-P and /model must present the same complete picker"
     );
-    let function_key_close_start = output.len();
-    input.write_all(b"\x1b").expect("close F2 modal");
-    input.flush().expect("close F2 modal flush");
-    until_prompt_from(&reader, &mut output, function_key_close_start);
+    let composed_close_start = output.len();
+    input.write_all(b"\x1b").expect("close composed modal");
+    input.flush().expect("close composed modal flush");
+    until_prompt_from(&reader, &mut output, composed_close_start);
 
     #[cfg(not(windows))]
     {
@@ -1405,8 +1413,8 @@ fn model_picker_title_remains_visible_in_a_short_terminal() {
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
     assert!(
-        normalized(&output[activation_start..]).contains("F2 models"),
-        "startup banner must advertise the portable picker key: {:?}",
+        normalized(&output).contains("Option+P models"),
+        "startup banner must advertise the model picker key: {:?}",
         normalized(&output[activation_start..])
     );
 }
