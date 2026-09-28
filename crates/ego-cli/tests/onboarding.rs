@@ -267,35 +267,43 @@ fn interactive_default_persistence_failure_blocks_generation() {
 #[test]
 fn startup_banner_names_ego_version_model_and_help_unless_quiet() {
     let stub = Stub::start(Plan::default());
-    let normal = Ego::against(&stub)
-        .conversing()
-        .args([
-            "--model",
-            "ollama/qwen3",
-            "--thinking",
-            "off",
-            "--sandbox",
-            "off",
-        ])
-        .run_pty("hello");
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--thinking",
+        "off",
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# trust ordering fixture\n");
+    let normal = ego.run_pty("hello");
     let normal_text = normal.stdout.to_ascii_lowercase();
     assert!(normal_text.contains("ego"));
     assert!(normal_text.contains("model"));
     assert!(normal_text.contains("qwen3"));
     assert!(normal_text.contains("/help"));
+    let banner = normal_text
+        .find("ego 0.1.0 · ollama/qwen3")
+        .expect("banner identity");
+    let trust = normal_text
+        .find("trust project files")
+        .expect("first-run trust question");
+    assert!(
+        banner < trust,
+        "the program must identify itself before requesting trust: {normal_text}"
+    );
 
-    let quiet = Ego::against(&stub)
-        .conversing()
-        .args([
-            "--model",
-            "ollama/qwen3",
-            "--thinking",
-            "off",
-            "--sandbox",
-            "off",
-            "--quiet",
-        ])
-        .run_pty("hello");
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--thinking",
+        "off",
+        "--sandbox",
+        "off",
+        "--quiet",
+    ]);
+    ego.file("AGENTS.md", "# quiet trust ordering fixture\n");
+    let quiet = ego.run_pty("hello");
     let quiet_text = quiet.stdout.to_ascii_lowercase();
     assert!(
         !quiet_text.contains("/help"),

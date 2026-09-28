@@ -61,7 +61,18 @@ pub(super) fn run_trust(
     match driver {
         Driver::Once => Trust::Untrusted,
         Driver::Interactive { seat, .. } if !args.bare && seat.has_human() => {
-            crate::trust::resolve(root, home, diagnostics, |context| seat.trust(root, context))
+            crate::trust::resolve(root, home, diagnostics, |context| {
+                let question_context = if args.quiet {
+                    context.to_string()
+                } else {
+                    format!(
+                        "ego {} · {}\n{context}",
+                        env!("CARGO_PKG_VERSION"),
+                        args.model.as_deref().unwrap_or("model pending")
+                    )
+                };
+                seat.trust(root, &question_context)
+            })
         }
         Driver::Interactive { .. } => Trust::Untrusted,
     }

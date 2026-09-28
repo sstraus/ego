@@ -466,6 +466,36 @@ fn a_local_model_the_daemon_does_not_serve_is_refused_with_the_ones_it_does() {
 }
 
 #[test]
+fn an_embedding_only_local_model_is_neither_offered_nor_resolved_for_chat() {
+    // Catches: a daemon's installed embedding model becomes a chat choice.
+    const TAGS_WITH_EMBEDDING: &str = r#"{"models":[
+      {"name":"qwen3:latest","capabilities":["completion","tools"]},
+      {"name":"embeddinggemma:300m-qat-q8_0","capabilities":["embedding"]}
+    ]}"#;
+    let (http, stub) = server([(200, TAGS_WITH_EMBEDDING)]);
+    let report = block_on(ollama::enumerate(&local_row(), &http)).expect("daemon model list");
+    assert_eq!(
+        report
+            .models()
+            .iter()
+            .map(|row| row.slug.model.as_str())
+            .collect::<Vec<_>>(),
+        ["qwen3:latest"]
+    );
+    assert_eq!(stub.paths(), ["/api/tags"]);
+
+    let (http, stub) = server([(200, TAGS_WITH_EMBEDDING)]);
+    let refusal = block_on(ollama::resolve(
+        &local_row(),
+        "embeddinggemma:300m-qat-q8_0",
+        &http,
+    ))
+    .expect_err("embedding-only model cannot serve chat");
+    assert!(refusal.to_string().contains("embedding"), "{refusal}");
+    assert_eq!(stub.paths(), ["/api/tags"]);
+}
+
+#[test]
 fn a_cloud_relayed_model_is_refused_rather_than_priced_at_zero() {
     // `http.rs` documents Ollama's cloudPassthroughMiddleware proxying a
     // `:cloud` model from localhost:11434 to ollama.com. So a loopback

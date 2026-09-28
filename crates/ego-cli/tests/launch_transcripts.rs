@@ -91,7 +91,27 @@ fn readable(raw: &str) -> String {
         while let Some(rest) = line.strip_prefix("> ").or_else(|| line.strip_prefix("… ")) {
             line = rest.to_owned();
         }
-        let line = undouble(line.trim());
+        let mut line = undouble(line.trim());
+        let mut repainted_modal = false;
+        if line.starts_with("Trust project files")
+            && let Some((_, redrawn_banner)) = line.split_once(" ego ")
+        {
+            line = format!("ego {redrawn_banner}");
+            repainted_modal = true;
+        }
+        if line.starts_with("ego ")
+            && let Some(start) = lines
+                .iter()
+                .position(|previous| previous.starts_with("ego "))
+            && (repainted_modal
+                || lines[start..]
+                    .iter()
+                    .any(|previous| previous.starts_with("Trust project files")))
+        {
+            // Reedline repainted the entire modal. Keep its last complete
+            // frame, which carries the operator's answer.
+            lines.truncate(start);
+        }
         // A bare marker is a prompt this harness happened to catch mid-draw,
         // with nothing typed into it yet.
         if line == ">" || line == "…" || is_prompt_repaint(&line) {
@@ -193,6 +213,15 @@ fn readable_discards_status_prompt_repaints_but_keeps_transcript_rows() {
     let raw = "\x1b]0;C:\\ego.exe\x07Trust files? [y/N]\r\nTrust files? [y/N] yes\r\nhello\r\nworking — Esc cancels | > working — Esc cancels | >\r\nanswer\r\n> ";
 
     assert_eq!(readable(raw), "Trust files? [y/N] yes\nhello\nanswer\n");
+}
+
+#[test]
+fn readable_keeps_the_last_complete_trust_modal_frame() {
+    let raw = "ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] yes\n";
+    assert_eq!(
+        readable(raw),
+        "ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] yes\n"
+    );
 }
 
 fn golden_path(case: &str) -> std::path::PathBuf {

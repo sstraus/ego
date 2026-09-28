@@ -135,7 +135,7 @@ async fn open_scope_phase(
         })
     {
         host.diagnostics.note(&format!(
-            "ego {} · {model}\n     /help commands · F2 models",
+            "ego {} · {model}\n     /help commands · Option+P models",
             env!("CARGO_PKG_VERSION")
         ));
     }
