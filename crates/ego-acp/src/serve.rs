@@ -2700,7 +2700,7 @@ where
                                 // even while its first confinement probe is
                                 // still pending. The connection's background
                                 // task may finish the probe for later sessions.
-                                let initialized = {
+                                let initialized = if confinement.is_some() {
                                     let measurement = std::pin::pin!(initialize_confinement(
                                         confinement.as_ref(),
                                         durable_session,
@@ -2716,6 +2716,10 @@ where
                                         }
                                         Either::Right((result, _)) => result,
                                     }
+                                } else {
+                                    // With no probe to wait for, cancellation must reach the
+                                    // admitted run instead of withdrawing the prompt early.
+                                    Ok(())
                                 };
                                 if let Err(error) = initialized {
                                     sessions.refuse(&id, generation);
