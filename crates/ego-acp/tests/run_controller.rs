@@ -1252,7 +1252,12 @@ async fn immediate_cancel_uses_the_first_admitted_turn_and_does_not_retarget_a_l
         )
         .await;
     let id = session.parse::<SessionId>().expect("session identity");
-    executor.wait_for_submit_start().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        executor.wait_for_submit_start(),
+    )
+    .await
+    .expect("the immediate cancel must reach the first admitted submit");
     assert!(
         executor
             .calls()
