@@ -54,10 +54,10 @@ fn the_permission_prompt_names_the_tool_call_the_host_is_already_showing() {
     assert_eq!(request.session_id, session());
 }
 
-/// The protocol helper has no user-rule writer and therefore offers only
-/// one-turn answers. The live ACP seat adds remembered options when wired.
+/// The protocol helper has no user-rule writer. Session approval still has
+/// a distinct lifetime and does not need one.
 #[test]
-fn the_unwired_permission_helper_offers_only_once_options() {
+fn the_unwired_permission_helper_offers_session_approval_without_persistence() {
     let request =
         AcpPermissionAdapter::permission_request(&session(), ItemId::new(), "exec", &ops(), &why());
     let kinds: Vec<_> = request.options.iter().map(|option| option.kind).collect();
@@ -65,7 +65,8 @@ fn the_unwired_permission_helper_offers_only_once_options() {
         kinds,
         vec![
             v1::PermissionOptionKind::AllowOnce,
-            v1::PermissionOptionKind::RejectOnce
+            v1::PermissionOptionKind::RejectOnce,
+            v1::PermissionOptionKind::AllowAlways,
         ]
     );
 }

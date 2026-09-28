@@ -7,6 +7,7 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::negotiate::{SERVED, negotiate};
@@ -357,6 +358,7 @@ pub trait RunBindingsBuilder: Send + Sync {
         session: v1::SessionId,
         capabilities: CapabilityCapture,
         root: &RunRoot,
+        session_approval: Arc<AtomicBool>,
     ) -> ego_core::run::RunExecutionBindings;
 }
 
@@ -412,6 +414,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
         session: v1::SessionId,
         capabilities: CapabilityCapture,
         root: &RunRoot,
+        session_approval: Arc<AtomicBool>,
     ) -> ego_core::run::RunExecutionBindings {
         let elicitor =
             AcpQuestionAdapter::live(session.clone(), capabilities, connection.clone()).elicitor();
@@ -421,6 +424,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
         let human =
             crate::permission::AcpPermissionAdapter::live(session.clone(), connection.clone())
                 .with_rule_writer(self.permission_rules.clone())
+                .with_session_approval(session_approval)
                 .approver();
         let bindings = ego_core::run::RunExecutionBindings::new(
             Arc::new(AcpSinkFactory {
@@ -639,6 +643,7 @@ struct Registered {
     active_cancel: Option<CancelKey>,
     cancel_requested: bool,
     mcp: Option<Arc<dyn SessionMcpAdmission>>,
+    session_approval: Arc<AtomicBool>,
 }
 
 /// A `session/cancel` that arrives while a prompt is accepted but the run it
@@ -690,6 +695,7 @@ struct PromptCorrelation {
     /// that closed mid-question is not one to start a run for either.
     withdrawn: oneshot::Receiver<()>,
     mcp: Option<Arc<dyn SessionMcpAdmission>>,
+    session_approval: Arc<AtomicBool>,
 }
 
 enum BeginPrompt {
@@ -740,6 +746,7 @@ impl Sessions {
         start_request: Option<RequestId>,
         run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
         mcp: Option<Arc<dyn SessionMcpAdmission>>,
+        session_approval: Arc<AtomicBool>,
     ) -> Option<RegistrationGeneration> {
         let mut sessions = self.lock();
         if sessions
@@ -763,6 +770,7 @@ impl Sessions {
                 active_cancel: None,
                 cancel_requested: false,
                 mcp,
+                session_approval,
             },
         );
         Some(generation)
@@ -858,6 +866,7 @@ impl Sessions {
             run: session.run,
             withdrawn,
             mcp: session.mcp.as_ref().map(Arc::clone),
+            session_approval: Arc::clone(&session.session_approval),
         })
     }
 
@@ -1091,8 +1100,9 @@ fn session_bindings(
     capabilities: CapabilityCapture,
     root: &RunRoot,
     mcp: Option<&Arc<dyn SessionMcpAdmission>>,
+    session_approval: Arc<AtomicBool>,
 ) -> RunExecutionBindings {
-    let bindings = builder.build(connection, session, capabilities, root);
+    let bindings = builder.build(connection, session, capabilities, root, session_approval);
     match mcp {
         Some(mcp) => bindings.with_mcp(
             mcp.admitted_tools(),
@@ -2074,7 +2084,14 @@ where
                         .as_ref()
                         .map(|admission| admission.initialize(session, root.clone()));
                     let attachment_root = root.clone();
-                    let _ = sessions.open(id.clone(), root, Some(start_request), None, mcp);
+                    let _ = sessions.open(
+                        id.clone(),
+                        root,
+                        Some(start_request),
+                        None,
+                        mcp,
+                        Arc::new(AtomicBool::new(false)),
+                    );
                     let announcement = if let Some(lifecycle) = &lifecycle {
                         match lifecycle.resume(session, attachment_root.as_path()).await {
                             Ok(attachment) => Some(attachment.meta),
@@ -2221,6 +2238,7 @@ where
                     let capabilities = *client_capabilities
                         .lock()
                         .expect("initialize capability lock poisoned");
+                    let session_approval = Arc::new(AtomicBool::new(false));
                     let bindings = session_bindings(
                         bindings_builder.as_ref(),
                         cx.clone(),
@@ -2228,6 +2246,7 @@ where
                         capabilities,
                         &root,
                         mcp.as_ref(),
+                        Arc::clone(&session_approval),
                     );
                     let recovered = match recover_current_run(controller.as_ref(), id, bindings).await {
                         Ok(run) => run,
@@ -2239,6 +2258,7 @@ where
                         recovered.run.is_none().then(|| RequestId::from_uuid(ids.next_uuid())),
                         recovered.run,
                         mcp,
+                        session_approval,
                     ) else {
                         return responder.respond_with_error(Error::invalid_request().data(
                             format!("session {} already has a turn running", request.session_id),
@@ -2332,6 +2352,7 @@ where
                     let capabilities = *client_capabilities
                         .lock()
                         .expect("initialize capability lock poisoned");
+                    let session_approval = Arc::new(AtomicBool::new(false));
                     let bindings = session_bindings(
                         bindings_builder.as_ref(),
                         cx.clone(),
@@ -2339,6 +2360,7 @@ where
                         capabilities,
                         &root,
                         mcp.as_ref(),
+                        Arc::clone(&session_approval),
                     );
                     let recovered = match recover_current_run(controller.as_ref(), id, bindings).await {
                         Ok(run) => run,
@@ -2350,6 +2372,7 @@ where
                         recovered.run.is_none().then(|| RequestId::from_uuid(ids.next_uuid())),
                         recovered.run,
                         mcp,
+                        session_approval,
                     ) else {
                         return responder.respond_with_error(Error::invalid_request().data(
                             format!("session {} already has a turn running", request.session_id),
@@ -2443,6 +2466,7 @@ where
                         Some(RequestId::from_uuid(ids.next_uuid())),
                         None,
                         mcp,
+                        Arc::new(AtomicBool::new(false)),
                     );
                     // The child's id reaches the client here and nowhere else,
                     // so its own announcement cannot precede this. The failure
@@ -2612,7 +2636,13 @@ where
                     let capabilities = *client_capabilities
                         .lock()
                         .expect("initialize capability lock poisoned");
-                    let bindings = bindings_builder.build(cx.clone(), id.clone(), capabilities, &correlation.root);
+                    let bindings = bindings_builder.build(
+                        cx.clone(),
+                        id.clone(),
+                        capabilities,
+                        &correlation.root,
+                        Arc::clone(&correlation.session_approval),
+                    );
                     let bindings = match correlation.mcp.as_ref() {
                         Some(mcp) => bindings.with_mcp(
                             mcp.admitted_tools(),

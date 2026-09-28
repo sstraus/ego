@@ -68,6 +68,16 @@ fn select(host: &mut AcpHost, request: &serde_json::Value, option: &str) {
     }));
 }
 
+fn send_prompt(host: &mut AcpHost, session: &str) -> u64 {
+    host.send_request(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session,
+            "prompt": [{"type": "text", "text": "Run ls"}],
+        }),
+    )
+}
+
 fn settle_without_question(host: &mut AcpHost, prompt_id: u64) -> serde_json::Value {
     loop {
         let frame = host.read_frame();
@@ -90,6 +100,91 @@ fn listed_rules(places: &Places, profile: Option<&str>) -> serde_json::Value {
     let result = ego.run();
     assert_eq!(result.code, Some(0), "{}", result.stderr);
     serde_json::from_str(&result.stdout).expect("rules ls JSON")
+}
+
+#[test]
+fn session_allow_answers_five_later_calls_without_a_prompt_then_expires() {
+    let places = Places::new();
+    configure(&places);
+    let mut completions = Vec::new();
+    for index in 0..7 {
+        completions.extend([
+            Reply::Sse(tool_call(
+                &format!("session-exec-{index}"),
+                "exec",
+                r#"{"argv":["ls"]}"#,
+            )),
+            Reply::Sse(text("done")),
+        ]);
+    }
+    let stub = Stub::start(Plan {
+        completions,
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    let (session, first_id) = prompt(&mut host, &places);
+    let question = permission(&mut host);
+    assert!(
+        question["params"]["options"]
+            .as_array()
+            .expect("ACP permission options")
+            .iter()
+            .any(|option| option["optionId"] == "allow-session"),
+        "the host cannot approve this session: {question}"
+    );
+    select(&mut host, &question, "allow-session");
+    assert!(settle_without_question(&mut host, first_id)["result"].is_object());
+    for _ in 0..5 {
+        let id = send_prompt(&mut host, &session);
+        let frame = settle_without_question(&mut host, id);
+        assert!(frame["result"].is_object(), "{frame}");
+    }
+    let other = host.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
+    let _ = send_prompt(&mut host, &other);
+    let returned = permission(&mut host);
+    assert!(returned["params"]["options"].is_array());
+    host.finish();
+    assert!(
+        listed_rules(&places, Some(PROFILE))["rules"]
+            .as_array()
+            .expect("profile rules")
+            .is_empty()
+    );
+}
+
+#[test]
+fn mode_yolo_selected_after_a_turn_avoids_the_next_permission_prompt() {
+    let places = Places::new();
+    configure(&places);
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("before-yolo", "exec", r#"{"argv":["ls"]}"#)),
+            Reply::Sse(text("first done")),
+            Reply::Sse(tool_call("after-yolo", "exec", r#"{"argv":["ls"]}"#)),
+            Reply::Sse(text("second done")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    let (session, first_id) = prompt(&mut host, &places);
+    let question = permission(&mut host);
+    select(&mut host, &question, "allow-once");
+    assert!(settle_without_question(&mut host, first_id)["result"].is_object());
+    let changed = host.request(
+        "session/set_config_option",
+        serde_json::json!({"sessionId": session, "configId": "mode", "value": "yolo"}),
+    );
+    let mode = changed["result"]["configOptions"]
+        .as_array()
+        .expect("ACP config options")
+        .iter()
+        .find(|option| option["id"] == "mode")
+        .expect("mode option");
+    assert_eq!(mode["currentValue"], "yolo", "{changed}");
+    let second_id = send_prompt(&mut host, &session);
+    let result = settle_without_question(&mut host, second_id);
+    assert!(result["result"].is_object(), "{result}");
+    host.finish();
 }
 
 #[test]

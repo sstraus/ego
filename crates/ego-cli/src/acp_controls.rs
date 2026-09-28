@@ -25,13 +25,15 @@ use crate::model_picker::reasoning_levels;
 
 /// Every mode an ACP host may select.
 ///
-/// `Mode::Yolo` is deliberately absent. The terminal seat only reaches it by
-/// typing the word `yolo` into a confirmation, because it is the mode that
-/// stops asking; ACP's `session/set_config_option` carries a value id and
-/// nothing else, so serving it here would turn a two-step confirmation into
-/// one click. A host that wants it configures it, where the choice is
-/// written down and reviewable.
-const HOST_MODES: [Mode; 4] = [Mode::Plan, Mode::Default, Mode::Edits, Mode::Auto];
+/// The host is the human seat and shows each mode before the operator selects
+/// it. A selection changes only this session's subsequent generations.
+const HOST_MODES: [Mode; 5] = [
+    Mode::Plan,
+    Mode::Default,
+    Mode::Edits,
+    Mode::Auto,
+    Mode::Yolo,
+];
 
 /// What one ACP session's operator has picked, if anything.
 #[derive(Debug, Clone, Default)]
@@ -438,9 +440,6 @@ impl SessionControls for AcpSessionControls {
                         why: match mode {
                             Mode::Auto => {
                                 "`auto` needs a configured `[permissions] judge`".to_owned()
-                            }
-                            Mode::Yolo => {
-                                "`yolo` is set in configuration, never over the wire".to_owned()
                             }
                             other => format!("`{other}` is not offered on this connection"),
                         },
