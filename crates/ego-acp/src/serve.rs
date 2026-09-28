@@ -330,23 +330,20 @@ pub trait SessionConfinementAdmission: Send + Sync {
     ) -> Result<ExecObservation, ControlError>;
 }
 
-/// Consumer-owned boundary naming what one workspace holds that only trust
-/// admits.
-///
-/// The adapter asks the question and the host answers it, but *which* files
-/// the answer is about is not ACP's to know: the trust ADR gives `ego-cli`
-/// "which paths are probed, the reads that build the inventory". This port is
-/// that division, and nothing more — it reads, it never remembers, and it is
-/// never consulted for an answer.
+/// The CLI owns the ledger and the executable surface; ACP owns elicitation.
+pub enum SessionTrustStatus {
+    Empty,
+    Remembered(Trust),
+    Question {
+        content: String,
+        fingerprint: String,
+    },
+}
+
 pub trait SessionTrustAdmission: Send + Sync {
-    /// The workspace content a trust answer would change, rendered for a
-    /// human, or `None` when there is none.
-    ///
-    /// `None` means trusted and untrusted would open the same session, and
-    /// the session is opened untrusted with no question asked. A question
-    /// whose answers do not differ teaches the reader that trust questions do
-    /// not matter, which is the one habit a trust dialog must not build.
-    fn trustable(&self, root: &RunRoot) -> Option<String>;
+    fn status(&self, root: &RunRoot) -> SessionTrustStatus;
+    /// False means executable authority changed while the question was open.
+    fn record_answer(&self, root: &RunRoot, fingerprint: &str, decision: Trust) -> bool;
 }
 
 /// Builds live execution bindings from the connection that accepted a prompt.
@@ -1559,7 +1556,7 @@ fn selected_confinement(
 const TRUST_GRANT: &str = "trusted";
 const TRUST_REFUSE: &str = "untrusted";
 
-/// The trust question this prompt raises, or `None` when it raises none.
+/// A remembered answer, a new question, or no trustable content.
 ///
 /// Every condition here is synchronous, and that is the point: the caller uses
 /// a `Some` to mean "this prompt is about to wait on a person". A prompt that
@@ -1567,39 +1564,50 @@ const TRUST_REFUSE: &str = "untrusted";
 /// down to where a `session/cancel` lands on it, so the three ways there is no
 /// question are answered before anything is awaited.
 ///
-/// The capability is re-read here rather than left to the adapter because the
-/// two readings answer different questions. The adapter's decides whether it
-/// can render a form; this one decides whether this prompt has a host to wait
-/// for. The adapter remains the authority on the first.
+/// A remembered answer is used even without form elicitation. A new answer
+/// needs a host that advertises a form.
+enum TrustChoice {
+    None,
+    Remembered(Trust),
+    Question(QuestionRequest, String),
+}
+
 fn trust_question(
     admission: Option<&Arc<dyn SessionTrustAdmission>>,
     capabilities: CapabilityCapture,
     root: &RunRoot,
-) -> Option<QuestionRequest> {
-    let admission = admission?;
-    // Asked before the workspace is read, because reading it is the expensive
-    // half and a host that cannot render a form will never see the answer.
+) -> TrustChoice {
+    let Some(admission) = admission else {
+        return TrustChoice::None;
+    };
+    let (trustable, fingerprint) = match admission.status(root) {
+        SessionTrustStatus::Empty => return TrustChoice::None,
+        SessionTrustStatus::Remembered(decision) => return TrustChoice::Remembered(decision),
+        SessionTrustStatus::Question {
+            content,
+            fingerprint,
+        } => (content, fingerprint),
+    };
     if !capabilities.form_available() {
-        return None;
+        return TrustChoice::None;
     }
-    // Nothing only trust admits: both answers open the same session, and a
-    // question whose answers do not differ teaches a host that trust questions
-    // do not matter.
-    let trustable = admission.trustable(root)?;
-    Some(QuestionRequest::new(
-        format!(
-            "Trust the workspace at {}?\n\nTrusting it lets this session read its project \
+    TrustChoice::Question(
+        QuestionRequest::new(
+            format!(
+                "Trust the workspace at {}?\n\nTrusting it lets this session read its project \
              configuration, its AGENTS.md, its project MCP servers, its skills and its hooks, \
-             and run the programs those name. It holds:\n{trustable}",
-            root.as_path().display()
+             and run the programs those name. Review:\n{trustable}",
+                root.as_path().display()
+            ),
+            QuestionMode::Single,
+            vec![
+                QuestionOption::new(TRUST_GRANT, "Trust this workspace"),
+                QuestionOption::new(TRUST_REFUSE, "Keep this session bare"),
+            ],
+            false,
         ),
-        QuestionMode::Single,
-        vec![
-            QuestionOption::new(TRUST_GRANT, "Trust this workspace for this session"),
-            QuestionOption::new(TRUST_REFUSE, "Keep this session bare"),
-        ],
-        false,
-    ))
+        fingerprint,
+    )
 }
 
 /// Put one trust question to the host and read the posture out of the answer.
@@ -1611,10 +1619,8 @@ fn trust_question(
 /// `session/new` it would be a form raised before the person had asked for
 /// anything; asked after preparation it would answer a settled question.
 ///
-/// The answer governs this session and is neither read from nor written to
-/// the per-root ledger the terminal seat keeps. That is the stricter half of
-/// the choice on purpose: a `y` typed once in a terminal must not become a
-/// posture some other program's session inherits without anyone being asked.
+/// Explicit answers are written to the same per-root ledger the terminal
+/// uses. A matching remembered answer is applied before this function runs.
 ///
 /// Every way of not answering — a decline, a cancel, a host with no form, a
 /// transport failure — leaves the session exactly as untrusted as it was
@@ -1625,6 +1631,9 @@ async fn selected_trust(
     session: &v1::SessionId,
     capabilities: CapabilityCapture,
     selections: RunSelections,
+    admission: &dyn SessionTrustAdmission,
+    root: &RunRoot,
+    fingerprint: &str,
 ) -> RunSelections {
     let elicitor = AcpQuestionAdapter::live(session.clone(), capabilities, connection.clone());
     let question = ItemId::new();
@@ -1641,6 +1650,12 @@ async fn selected_trust(
     // the host that produced them.
     match outcome {
         QuestionOutcome::Answered(QuestionAnswer::Single(answer)) if answer == TRUST_GRANT => {
+            if !admission.record_answer(root, fingerprint, Trust::Trusted) {
+                tracing::warn!(
+                    "the workspace executable surface changed while the trust form was open"
+                );
+                return selections;
+            }
             tracing::info!(
                 outcome = "trusted",
                 "the host trusted this workspace for this session"
@@ -1648,6 +1663,12 @@ async fn selected_trust(
             selections.with_trust(Trust::Trusted)
         }
         QuestionOutcome::Answered(QuestionAnswer::Single(_)) => {
+            if !admission.record_answer(root, fingerprint, Trust::Untrusted) {
+                tracing::warn!(
+                    "the workspace executable surface changed while the trust form was open"
+                );
+                return selections;
+            }
             tracing::info!(outcome = "untrusted", "the host kept this session bare");
             selections.with_trust(Trust::Untrusted)
         }
@@ -2705,8 +2726,9 @@ where
                                     // exactly as a prompt on a router without
                                     // a trust port does -- including where a
                                     // `session/cancel` lands on it.
-                                    None => selections,
-                                    Some(request) => {
+                                    TrustChoice::None => selections,
+                                    TrustChoice::Remembered(decision) => selections.with_trust(decision),
+                                    TrustChoice::Question(request, fingerprint) => {
                                         let answered = {
                                             let question = std::pin::pin!(selected_trust(
                                                 request,
@@ -2714,6 +2736,9 @@ where
                                                 &id,
                                                 capabilities,
                                                 selections,
+                                                trust.as_ref().expect("question needs trust admission").as_ref(),
+                                                &root,
+                                                &fingerprint,
                                             ));
                                             match futures::future::select(withdrawn, question)
                                                 .await

@@ -718,7 +718,7 @@ impl InteractiveSeat for CompactionDecisionSeat {
         panic!("compaction fixture must not ask for startup model selection");
     }
 
-    fn trust(&self, _workspace: &Path) -> Trust {
+    fn trust(&self, _workspace: &Path, _context: &str) -> Trust {
         Trust::Trusted
     }
 
@@ -782,7 +782,7 @@ impl InteractiveSeat for TrustingSeat {
         panic!("trust fixture must not ask for startup model selection");
     }
 
-    fn trust(&self, _workspace: &Path) -> Trust {
+    fn trust(&self, _workspace: &Path, _context: &str) -> Trust {
         self.asked.fetch_add(1, Ordering::SeqCst);
         Trust::Trusted
     }

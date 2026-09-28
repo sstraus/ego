@@ -1,8 +1,8 @@
 //! Workspace decisions stored outside the workspace that cannot grant
-//! themselves. Their digest also covers shared and imported instructions
-//! the trusted session would load.
+//! themselves. Executable authority invalidates a decision; instructions do
+//! not.
 //!
-//! See `docs/decisions/2026-09-05-a-trust-answer-is-remembered-per-root.md`.
+//! See `docs/decisions/2026-09-28-one-workspace-trust-answer-across-seats.md`.
 //! `ego-core` owns what each fact means and whether a stored answer still
 //! applies. This module owns trust inventory reads and the separate locked
 //! documents under `$EGO_HOME`. Records live outside the workspace on purpose:
@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use ego_core::config::INSTRUCTIONS_FILE;
 use ego_core::config::{
-    TRUST_DIGEST_MAX_BYTES, Trust, TrustInventory, TrustLedger, TrustedContent,
+    ExecutableDeclaration, ExecutableSurface, ProgramEvidence, TRUST_DIGEST_MAX_BYTES, Trust,
+    TrustInventory, TrustLedger, TrustedContent,
 };
 #[cfg(windows)]
 use ego_core::config::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger};
@@ -25,6 +26,7 @@ use ego_tools::privacy::{PrivatePathKind, harden_private_path};
 use fd_lock::RwLock;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 
 use crate::output::Diagnostics;
 
@@ -51,31 +53,37 @@ pub(crate) fn instruction_discovery_root(root: &Path, home: &Path) -> PathBuf {
     }
 }
 
-/// The one place a launch decides what a workspace's posture is.
+/// The terminal launch resolves the same per-root answer ACP uses.
 ///
-/// `ask` is called at most once, and only when this workspace has content the
-/// answer would change and no still-valid answer on record.
+/// `ask` is called at most once, when the workspace has trustable content and
+/// no answer for its current executable surface.
 pub(crate) fn resolve(
     root: &Path,
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
-    ask: impl FnOnce() -> Trust,
+    ask: impl FnOnce(&str) -> Trust,
 ) -> Trust {
-    let inventory = inventory(root);
-    if inventory.is_empty() {
+    let Some(content) = trustable_content(root) else {
         // No project config, no instructions, no skills: `y` and `n` would
         // open the same session, and a question whose answers do not differ
         // teaches the reader that trust questions do not matter.
         return Trust::Untrusted;
-    }
+    };
 
-    let digest = inventory.digest();
+    let surface = executable_surface(root);
     let key = root.display().to_string();
     let store = home.map(TrustStore::new);
     if let Some(store) = &store {
         match store.read() {
             Ok(ledger) => {
-                if let Some(remembered) = ledger.remembered(&key, &digest) {
+                if let Some(remembered) = ledger.remembered(&key, &surface) {
+                    if ledger.is_legacy(&key)
+                        && let Err(error) = store.migrate_legacy(&key, surface.clone(), remembered)
+                    {
+                        diagnostics.note(&format!(
+                            "the old workspace trust record could not be migrated ({error})"
+                        ));
+                    }
                     return remembered;
                 }
             }
@@ -87,9 +95,26 @@ pub(crate) fn resolve(
         }
     }
 
-    let decision = ask();
+    let changes = store
+        .as_ref()
+        .and_then(|store| store.read().ok())
+        .and_then(|ledger| {
+            ledger
+                .prior_surface(&key)
+                .map(|old| surface.changes_from(old))
+        })
+        .filter(|changes| !changes.is_empty());
+    let context = match changes {
+        Some(changes) => format!("Executable changes since the last answer:\n{changes}\n"),
+        None => content,
+    };
+    let decision = ask(&context);
+    if executable_surface(root) != surface {
+        diagnostics.note("the workspace executable surface changed while trust was being answered; this answer was not applied");
+        return Trust::Untrusted;
+    }
     if let Some(store) = &store
-        && let Err(error) = store.remember(&key, &digest, decision)
+        && let Err(error) = store.remember(&key, surface, decision)
     {
         // The person answered, and this session honours that answer. Losing
         // the memory of it costs one more question next launch, which is not
@@ -100,6 +125,265 @@ pub(crate) fn resolve(
         ));
     }
     decision
+}
+
+/// Redacted executable declarations and the programs they run. Kept separate
+/// from the full inventory shown to a first-time reviewer.
+pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
+    let mut surface = ExecutableSurface::default();
+    let configs = project_configs(root);
+    let programs: Vec<_> = configs
+        .iter()
+        .flat_map(|(_, config)| commands_in(config))
+        .filter_map(|command| inside(root, &command))
+        .collect();
+    for (relative, config) in configs {
+        if let Some(servers) = config
+            .get("mcp")
+            .and_then(|mcp| mcp.get("servers"))
+            .and_then(toml::Value::as_table)
+        {
+            for (name, entry) in servers {
+                let command = entry
+                    .get("command")
+                    .or_else(|| entry.get("url"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_default();
+                surface.declarations.insert(
+                    format!("{relative}:mcp:{name}"),
+                    ExecutableDeclaration {
+                        config: relative.to_owned(),
+                        kind: "MCP server".to_owned(),
+                        name: name.to_owned(),
+                        command: command.to_owned(),
+                        args: args_in(entry),
+                        env_keys: env_keys_in(entry),
+                        details: details_in(
+                            entry,
+                            &["transport", "cwd", "allow_insecure_loopback"],
+                        ),
+                    },
+                );
+            }
+        }
+        if let Some(hooks) = config.get("hooks").and_then(toml::Value::as_array) {
+            for (index, hook) in hooks.iter().enumerate() {
+                let handler = hook.get("handler").unwrap_or(hook);
+                let name = format!(
+                    "{}#{}",
+                    hook.get("event")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("hook"),
+                    index + 1
+                );
+                surface.declarations.insert(
+                    format!("{relative}:hook:{name}"),
+                    ExecutableDeclaration {
+                        config: relative.to_owned(),
+                        kind: "hook".to_owned(),
+                        name,
+                        command: handler
+                            .get("command")
+                            .and_then(toml::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        args: args_in(handler),
+                        env_keys: env_keys_in(handler),
+                        details: details_in(hook, &["matcher", "event"])
+                            .into_iter()
+                            .chain(details_in(
+                                handler,
+                                &["type", "if", "shell", "timeout", "prompt"],
+                            ))
+                            .collect(),
+                    },
+                );
+            }
+        }
+        if let Some(auth) = config.get("auth").and_then(toml::Value::as_table) {
+            for (name, entry) in auth {
+                if let Some(command) = entry
+                    .get("credential_command")
+                    .and_then(toml::Value::as_str)
+                {
+                    surface.declarations.insert(
+                        format!("{relative}:credential:{name}"),
+                        ExecutableDeclaration {
+                            config: relative.to_owned(),
+                            kind: "credential command".to_owned(),
+                            name: name.to_owned(),
+                            command: command.to_owned(),
+                            args: Vec::new(),
+                            env_keys: Vec::new(),
+                            details: Default::default(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    for path in programs {
+        let Ok(link_metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let link_target = link_metadata
+            .file_type()
+            .is_symlink()
+            .then(|| fs::read_link(&path).ok())
+            .flatten()
+            .map(|target| target.to_string_lossy().into_owned());
+        if !link_metadata.is_file() && link_target.is_none() {
+            continue;
+        }
+        let Some(relative) = path.strip_prefix(root).ok() else {
+            continue;
+        };
+        let resolved = fs::canonicalize(&path).ok();
+        if !resolved.as_ref().is_some_and(|path| path.starts_with(root)) {
+            if let Some(target) = link_target {
+                surface.programs.insert(
+                    relative.to_string_lossy().into_owned(),
+                    ProgramEvidence {
+                        bytes: 0,
+                        digest: format!("{:x}", Sha256::digest(target.as_bytes())),
+                        executable: false,
+                        link_target: Some(target),
+                    },
+                );
+            }
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(mut file) = File::open(&path) else {
+            continue;
+        };
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        let digest = loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break Some(format!("{:x}", hasher.finalize())),
+                Ok(count) => hasher.update(&buffer[..count]),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "an executable program could not be fingerprinted");
+                    break None;
+                }
+            }
+        };
+        let Some(digest) = digest else { continue };
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = false;
+        surface.programs.insert(
+            relative.to_string_lossy().into_owned(),
+            ProgramEvidence {
+                bytes: metadata.len(),
+                digest,
+                executable,
+                link_target,
+            },
+        );
+    }
+    surface
+}
+
+pub(crate) fn remembered_decision(
+    root: &Path,
+    home: Option<&Path>,
+    surface: &ExecutableSurface,
+) -> Option<Trust> {
+    let store = TrustStore::new(home?);
+    let key = root.display().to_string();
+    let ledger = match store.read() {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            tracing::warn!(%error, "the workspace trust ledger could not be read");
+            return None;
+        }
+    };
+    let decision = ledger.remembered(&key, surface)?;
+    if ledger.is_legacy(&key)
+        && let Err(error) = store.migrate_legacy(&key, surface.clone(), decision)
+    {
+        tracing::warn!(%error, "the legacy workspace trust record could not be migrated");
+    }
+    Some(decision)
+}
+
+pub(crate) fn executable_changes(
+    root: &Path,
+    home: Option<&Path>,
+    surface: &ExecutableSurface,
+) -> Option<String> {
+    let ledger = TrustStore::new(home?).read().ok()?;
+    let changes = surface.changes_from(ledger.prior_surface(&root.display().to_string())?);
+    (!changes.is_empty()).then_some(changes)
+}
+
+pub(crate) fn record_answer(
+    root: &Path,
+    home: Option<&Path>,
+    fingerprint: &str,
+    decision: Trust,
+) -> bool {
+    let surface = executable_surface(root);
+    if surface.fingerprint() != fingerprint {
+        return false;
+    }
+    if let Some(home) = home
+        && let Err(error) =
+            TrustStore::new(home).remember(&root.display().to_string(), surface, decision)
+    {
+        tracing::warn!(%error, "the workspace trust answer could not be remembered");
+    }
+    true
+}
+
+fn args_in(entry: &toml::Value) -> Vec<String> {
+    entry
+        .get("args")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn env_keys_in(entry: &toml::Value) -> Vec<String> {
+    let mut keys: Vec<String> = entry
+        .get("inherit_env")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    if let Some(env) = entry.get("env").and_then(toml::Value::as_table) {
+        keys.extend(env.keys().cloned());
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn details_in(entry: &toml::Value, names: &[&str]) -> std::collections::BTreeMap<String, String> {
+    names
+        .iter()
+        .filter_map(|name| {
+            entry
+                .get(*name)
+                .map(|value| ((*name).to_owned(), value.to_string()))
+        })
+        .collect()
 }
 
 /// Resolve the separate host-risk acknowledgement for one canonical workspace.
@@ -275,14 +559,22 @@ fn inventory(root: &Path) -> TrustInventory {
 /// only when that path is a file inside the root. `foo && bar` names no such
 /// file and adds nothing; `./scripts/hook.sh` names the file it runs.
 fn referenced_commands(root: &Path) -> Vec<PathBuf> {
-    PROJECT_CONFIGS
-        .iter()
-        .filter_map(|relative| fs::read_to_string(root.join(relative)).ok())
-        // A config that does not parse declares nothing this build would run:
-        // it fails the load that comes later, so it names no command to cover.
-        .filter_map(|text| text.parse::<toml::Table>().ok())
+    project_configs(root)
+        .into_iter()
+        .map(|(_, config)| config)
         .flat_map(|config| commands_in(&config))
         .filter_map(|command| inside(root, &command))
+        .collect()
+}
+
+fn project_configs(root: &Path) -> Vec<(&'static str, toml::Table)> {
+    PROJECT_CONFIGS
+        .into_iter()
+        .filter_map(|relative| {
+            let text = fs::read_to_string(root.join(relative)).ok()?;
+            // A config that does not parse cannot declare a runnable command.
+            Some((relative, text.parse().ok()?))
+        })
         .collect()
 }
 
@@ -531,9 +823,27 @@ impl TrustStore {
         self.0.read()
     }
 
-    fn remember(&self, root: &str, digest: &str, decision: Trust) -> Result<(), String> {
+    fn remember(
+        &self,
+        root: &str,
+        surface: ExecutableSurface,
+        decision: Trust,
+    ) -> Result<(), String> {
         self.0
-            .update(|ledger| ledger.remember(root, digest, decision))
+            .update(|ledger| ledger.remember(root, surface, decision))
+    }
+
+    fn migrate_legacy(
+        &self,
+        root: &str,
+        surface: ExecutableSurface,
+        decision: Trust,
+    ) -> Result<(), String> {
+        self.0.update(|ledger| {
+            if ledger.is_legacy(root) && ledger.remembered(root, &surface) == Some(decision) {
+                ledger.remember(root, surface, decision);
+            }
+        })
     }
 }
 
@@ -656,7 +966,7 @@ mod tests {
                 self.workspace.path(),
                 Some(self.home.path()),
                 &Silent,
-                || {
+                |_| {
                     self.asked.set(self.asked.get() + 1);
                     answer
                 },
@@ -694,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_is_remembered_until_the_content_changes() {
+    fn instruction_edits_do_not_revoke_a_workspace_answer() {
         let fixture = Fixture::new();
         fixture.write("AGENTS.md", "first\n");
 
@@ -703,12 +1013,16 @@ mod tests {
         assert_eq!(fixture.asked.get(), 1, "the second launch asked nothing");
 
         fixture.write("AGENTS.md", "second\n");
-        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
-        assert_eq!(fixture.asked.get(), 2, "an edit is a new question");
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Trusted);
+        assert_eq!(
+            fixture.asked.get(),
+            1,
+            "instructions do not add an executable"
+        );
     }
 
     #[test]
-    fn editing_an_imported_instruction_requires_a_new_trust_answer() {
+    fn editing_an_imported_instruction_keeps_the_trust_answer() {
         let fixture = Fixture::new();
         fixture.write("AGENTS.md", "@details.md\n");
         fixture.write("details.md", "first\n");
@@ -723,11 +1037,155 @@ mod tests {
         assert_eq!(fixture.asked.get(), 1);
 
         fixture.write("details.md", "second\n");
-        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Trusted);
         assert_eq!(
             fixture.asked.get(),
-            2,
-            "imported content changed the trust offer"
+            1,
+            "imported instructions cannot add an executable"
+        );
+    }
+
+    #[test]
+    fn editing_a_project_skill_keeps_the_trust_answer() {
+        let fixture = Fixture::new();
+        fixture.write(".ego/skills/local/SKILL.md", "first\n");
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        fixture.write(".ego/skills/local/SKILL.md", "second\n");
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Trusted);
+        assert_eq!(fixture.asked.get(), 1);
+    }
+
+    #[test]
+    fn adding_a_project_mcp_server_requires_a_new_answer() {
+        let fixture = Fixture::new();
+        fixture.write("AGENTS.md", "rules\n");
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        fixture.write(
+            ".ego/config.toml",
+            "[mcp.servers.new]\ntype = 'stdio'\ncommand = '/usr/bin/env'\n",
+        );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2);
+    }
+
+    #[test]
+    fn changing_a_referenced_hook_program_requires_a_new_answer() {
+        let fixture = Fixture::new();
+        fixture.write("scripts/hook.sh", "#!/bin/sh\ntrue\n");
+        fixture.write(".ego/config.toml", "[[hooks]]\nevent = 'pre_tool_use'\n[hooks.handler]\ntype = 'command'\ncommand = './scripts/hook.sh'\n");
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        fixture.write("scripts/hook.sh", "#!/bin/sh\nfalse\n");
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2);
+    }
+
+    #[test]
+    fn a_same_size_program_edit_after_one_mebibyte_requires_a_new_answer() {
+        let fixture = Fixture::new();
+        fixture.write(
+            ".ego/config.toml",
+            "[mcp.servers.local]\ntransport='stdio'\ncommand='./server'\n",
+        );
+        let mut bytes = vec![b'a'; TRUST_DIGEST_MAX_BYTES + 1];
+        fixture.write("server", &String::from_utf8(bytes.clone()).expect("ASCII"));
+        let before = executable_surface(fixture.workspace.path()).fingerprint();
+        bytes[TRUST_DIGEST_MAX_BYTES] = b'b';
+        fixture.write("server", &String::from_utf8(bytes).expect("ASCII"));
+        assert_ne!(
+            before,
+            executable_surface(fixture.workspace.path()).fingerprint()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changing_only_a_referenced_programs_executable_bit_requires_a_new_answer() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        fixture.write(
+            ".ego/config.toml",
+            "[mcp.servers.local]\ntransport='stdio'\ncommand='./server'\n",
+        );
+        fixture.write("server", "#!/bin/sh\n");
+        let path = fixture.workspace.path().join("server");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("permissions");
+        let before = executable_surface(fixture.workspace.path()).fingerprint();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("permissions");
+        assert_ne!(
+            before,
+            executable_surface(fixture.workspace.path()).fingerprint()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editing_an_in_workspace_symlinked_program_requires_a_new_answer() {
+        let fixture = Fixture::new();
+        fixture.write(
+            ".ego/config.toml",
+            "[mcp.servers.local]\ntransport='stdio'\ncommand='./link.sh'\n",
+        );
+        fixture.write("target.sh", "#!/bin/sh\necho old\n");
+        std::os::unix::fs::symlink("target.sh", fixture.workspace.path().join("link.sh"))
+            .expect("link");
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        fixture.write("target.sh", "#!/bin/sh\necho new\n");
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2);
+    }
+
+    #[test]
+    fn legacy_digest_only_approval_is_migrated_without_a_question() {
+        let fixture = Fixture::new();
+        fixture.write("AGENTS.md", "changed since approval\n");
+        let root = fixture.workspace.path().display().to_string();
+        fs::write(
+            fixture.home.path().join("trust.json"),
+            serde_json::json!({
+                "v": 1,
+                "workspaces": {root: {"decision": "trusted", "digest": "old-content-digest"}}
+            })
+            .to_string(),
+        )
+        .expect("legacy ledger");
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Trusted);
+        assert_eq!(fixture.asked.get(), 0);
+        let stored: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixture.home.path().join("trust.json")).expect("ledger"),
+        )
+        .expect("json");
+        assert!(
+            stored["workspaces"][fixture.workspace.path().display().to_string()]
+                .get("executable_surface")
+                .is_some()
+        );
+        assert_eq!(stored["v"], 2);
+    }
+
+    #[test]
+    fn stale_legacy_migration_cannot_replace_a_newer_refusal() {
+        let fixture = Fixture::new();
+        let root = fixture.workspace.path().display().to_string();
+        fs::write(
+            fixture.home.path().join("trust.json"),
+            serde_json::json!({
+                "v": 1,
+                "workspaces": {root.clone(): {"decision": "trusted", "digest": "old"}}
+            })
+            .to_string(),
+        )
+        .expect("legacy ledger");
+        let store = TrustStore::new(fixture.home.path());
+        let surface = ExecutableSurface::default();
+        store
+            .remember(&root, surface.clone(), Trust::Untrusted)
+            .expect("new refusal");
+        store
+            .migrate_legacy(&root, surface.clone(), Trust::Trusted)
+            .expect("stale migration");
+        assert_eq!(
+            store.read().expect("ledger").remembered(&root, &surface),
+            Some(Trust::Untrusted)
         );
     }
 
@@ -774,7 +1232,7 @@ mod tests {
 
         for _ in 0..2 {
             assert_eq!(
-                resolve(fixture.workspace.path(), None, &Silent, || {
+                resolve(fixture.workspace.path(), None, &Silent, |_| {
                     fixture.asked.set(fixture.asked.get() + 1);
                     Trust::Trusted
                 }),

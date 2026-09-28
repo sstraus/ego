@@ -710,6 +710,7 @@ enum Control {
     },
     Trust {
         workspace: String,
+        context: String,
         reply: Sender<Trust>,
     },
     WindowsUnconfined {
@@ -1457,7 +1458,7 @@ impl crate::run::InteractiveSeat for Seat {
         self.request(|reply| Control::ActivateSession { target, reply }, false)
     }
 
-    fn trust(&self, workspace: &Path) -> Trust {
+    fn trust(&self, workspace: &Path, context: &str) -> Trust {
         // Piped stdin may itself be the first prompt. Consuming it as a trust
         // answer would turn user content into authority. With no terminal
         // there is no human seat, so the only truthful answer is untrusted.
@@ -1467,6 +1468,7 @@ impl crate::run::InteractiveSeat for Seat {
         self.request(
             |reply| Control::Trust {
                 workspace: workspace.display().to_string(),
+                context: context.to_owned(),
                 reply,
             },
             Trust::Untrusted,

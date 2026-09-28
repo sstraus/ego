@@ -165,9 +165,13 @@ pub(super) fn answer_control(
             };
             (Reply::Compaction(reply, confirmed), EditPhase::Idle, true)
         }
-        Control::Trust { workspace, reply } => {
+        Control::Trust {
+            workspace,
+            context,
+            reply,
+        } => {
             let prompt = Question::new(
-                format!("Trust project files in {workspace}? [y/N] "),
+                format!("{context}\nTrust project files in {workspace}? [y/N] "),
                 Arc::clone(surface.status),
             );
             let trust = loop {

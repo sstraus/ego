@@ -40,5 +40,6 @@ pub use source::{Source, Sourced, Trust};
 pub use vocabulary::{ManagedConfigKey, ManagedConfigValue, ProfileName, UserConfigTarget};
 pub use windows_unconfined::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger, UnconfinedRecord};
 pub use workspace_trust::{
-    TRUST_DIGEST_MAX_BYTES, TrustInventory, TrustLedger, TrustRecord, TrustedContent,
+    ExecutableDeclaration, ExecutableSurface, ProgramEvidence, TRUST_DIGEST_MAX_BYTES,
+    TrustInventory, TrustLedger, TrustRecord, TrustedContent,
 };

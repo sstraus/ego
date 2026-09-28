@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ego_acp::serve::SessionTrustAdmission;
+use ego_acp::serve::{SessionTrustAdmission, SessionTrustStatus};
 use ego_core::config::Trust;
 use ego_core::run::RunRoot;
 
@@ -20,6 +20,7 @@ const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case"
 struct Lister {
     trustable: Option<String>,
     roots: Mutex<Vec<String>>,
+    decision: Mutex<Option<Trust>>,
 }
 
 impl Lister {
@@ -27,6 +28,7 @@ impl Lister {
         Arc::new(Self {
             trustable: Some(content.to_owned()),
             roots: Mutex::new(Vec::new()),
+            decision: Mutex::new(None),
         })
     }
 
@@ -40,12 +42,25 @@ impl Lister {
 }
 
 impl SessionTrustAdmission for Lister {
-    fn trustable(&self, root: &RunRoot) -> Option<String> {
+    fn status(&self, root: &RunRoot) -> SessionTrustStatus {
         self.roots
             .lock()
             .expect("asked roots")
             .push(root.as_path().display().to_string());
-        self.trustable.clone()
+        match (&self.trustable, *self.decision.lock().expect("decision")) {
+            (None, _) => SessionTrustStatus::Empty,
+            (_, Some(decision)) => SessionTrustStatus::Remembered(decision),
+            (Some(content), None) => SessionTrustStatus::Question {
+                content: content.clone(),
+                fingerprint: "fixture-surface".to_owned(),
+            },
+        }
+    }
+
+    fn record_answer(&self, _root: &RunRoot, fingerprint: &str, decision: Trust) -> bool {
+        assert_eq!(fingerprint, "fixture-surface");
+        *self.decision.lock().expect("decision") = Some(decision);
+        true
     }
 }
 
@@ -212,12 +227,106 @@ async fn a_host_that_keeps_the_session_bare_prepares_an_untrusted_session() {
     connection.abort().await;
 }
 
+#[tokio::test]
+async fn a_trust_answer_is_reused_by_a_second_session_without_a_form() {
+    let executor = Arc::new(support::Executor::default());
+    let lister = Lister::holding("- AGENTS.md\n");
+    let mut connection = support::Connected::new(router(
+        Some(Arc::clone(&lister) as Arc<dyn SessionTrustAdmission>),
+        Arc::clone(&executor),
+    ));
+    let first = opened(&mut connection, true).await;
+    prompt_answering(
+        &mut connection,
+        &first,
+        serde_json::json!({
+            "action": "accept", "content": {"answer": "trusted"}
+        }),
+    )
+    .await;
+    let second = connection.new_session(ROOT).await["result"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    let (answer, notifications) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        connection.request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": second, "prompt": [{"type":"text","text":"hello"}]
+            }),
+        ),
+    )
+    .await
+    .expect("prompt without another form");
+    assert_eq!(answer["result"]["stopReason"], "end_turn");
+    assert!(
+        notifications.iter().all(|item| item
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|method| !method.contains("elicit"))),
+        "{notifications:?}"
+    );
+    assert_eq!(
+        executor.prepared_selections().expect("preparation").trust(),
+        Some(Trust::Trusted)
+    );
+    connection.abort().await;
+}
+
+#[tokio::test]
+async fn a_dont_trust_answer_is_reused_by_a_second_session_without_a_form() {
+    let executor = Arc::new(support::Executor::default());
+    let lister = Lister::holding("- AGENTS.md\n");
+    let mut connection = support::Connected::new(router(
+        Some(Arc::clone(&lister) as Arc<dyn SessionTrustAdmission>),
+        Arc::clone(&executor),
+    ));
+    let first = opened(&mut connection, true).await;
+    prompt_answering(
+        &mut connection,
+        &first,
+        serde_json::json!({
+            "action": "accept", "content": {"answer": "untrusted"}
+        }),
+    )
+    .await;
+    let second = connection.new_session(ROOT).await["result"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    let (answer, notifications) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        connection.request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": second, "prompt": [{"type":"text","text":"hello"}]
+            }),
+        ),
+    )
+    .await
+    .expect("prompt without another form");
+    assert_eq!(answer["result"]["stopReason"], "end_turn");
+    assert!(
+        notifications.iter().all(|item| item
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|method| !method.contains("elicit"))),
+        "{notifications:?}"
+    );
+    assert_eq!(
+        executor.prepared_selections().expect("preparation").trust(),
+        Some(Trust::Untrusted)
+    );
+    connection.abort().await;
+}
+
 /// A refusal is a decision; a withdrawal is not. Both run bare.
 ///
 /// They stay two values rather than one so the host that produced them can
 /// still tell them apart afterwards — the acceptance criterion this pins.
 #[tokio::test]
-async fn a_refusal_is_recorded_and_a_withdrawal_is_not_and_neither_is_trusted() {
+async fn declining_or_cancelling_a_form_records_no_workspace_answer() {
     for (action, expected) in [
         (
             serde_json::json!({ "action": "decline" }),
@@ -226,8 +335,9 @@ async fn a_refusal_is_recorded_and_a_withdrawal_is_not_and_neither_is_trusted() 
         (serde_json::json!({ "action": "cancel" }), None),
     ] {
         let executor = Arc::new(support::Executor::default());
+        let lister = Lister::holding("- AGENTS.md\n");
         let mut connection = support::Connected::new(router(
-            Some(Lister::holding("- AGENTS.md\n") as Arc<dyn SessionTrustAdmission>),
+            Some(Arc::clone(&lister) as Arc<dyn SessionTrustAdmission>),
             Arc::clone(&executor),
         ));
         let session = opened(&mut connection, true).await;
@@ -238,6 +348,7 @@ async fn a_refusal_is_recorded_and_a_withdrawal_is_not_and_neither_is_trusted() 
             expected,
             "{action} must prepare {expected:?}"
         );
+        assert_eq!(*lister.decision.lock().expect("decision"), None);
         connection.abort().await;
     }
 }
@@ -324,8 +435,9 @@ async fn an_empty_workspace_raises_no_form_at_all() {
 #[tokio::test]
 async fn a_cancel_while_the_form_is_open_prepares_nothing() {
     let executor = Arc::new(support::Executor::default());
+    let lister = Lister::holding("- AGENTS.md\n");
     let mut connection = support::Connected::new(router(
-        Some(Lister::holding("- AGENTS.md\n") as Arc<dyn SessionTrustAdmission>),
+        Some(Arc::clone(&lister) as Arc<dyn SessionTrustAdmission>),
         Arc::clone(&executor),
     ));
     let session = opened(&mut connection, true).await;
@@ -342,6 +454,7 @@ async fn a_cancel_while_the_form_is_open_prepares_nothing() {
         executor.prepared_selections().is_none(),
         "a withdrawn prompt must not prepare a run"
     );
+    assert_eq!(*lister.decision.lock().expect("decision"), None);
     connection.abort().await;
 }
 
@@ -538,8 +651,9 @@ async fn a_session_closed_while_the_form_is_open_prepares_nothing() {
 #[tokio::test]
 async fn a_host_that_fails_the_trust_request_runs_the_turn_untrusted() {
     let executor = Arc::new(support::Executor::default());
+    let lister = Lister::holding("- AGENTS.md\n");
     let mut connection = support::Connected::new(router(
-        Some(Lister::holding("- AGENTS.md\n") as Arc<dyn SessionTrustAdmission>),
+        Some(Arc::clone(&lister) as Arc<dyn SessionTrustAdmission>),
         Arc::clone(&executor),
     ));
     let session = opened(&mut connection, true).await;
@@ -559,6 +673,7 @@ async fn a_host_that_fails_the_trust_request_runs_the_turn_untrusted() {
         None,
         "an unanswered question is not an answer"
     );
+    assert_eq!(*lister.decision.lock().expect("decision"), None);
     connection.abort().await;
 }
 
