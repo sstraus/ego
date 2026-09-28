@@ -1467,8 +1467,10 @@ async fn an_integrity_failure_answers_an_error_and_not_a_cancelled_stop() {
     assert!(
         answer["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("interrupted by an internal failure")),
-        "the error does not say the agent broke: {answer}"
+            .is_some_and(
+                |message| message.contains("the turn failed") && message.contains("another run")
+            ),
+        "the error does not say why the agent broke: {answer}"
     );
     assert!(
         answer["error"]["data"]

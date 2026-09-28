@@ -825,9 +825,8 @@ pub enum ResolveError {
     ///
     /// Distinct from [`HostedModelNotConfigured`] because the two send an
     /// operator to opposite places. "No capabilities are configured" means
-    /// *supply them*, and doing that for a retired model produces a file that
-    /// will never work: the endpoint is gone, not unstated. This says so, and
-    /// names the replacement the vendor recommends.
+    /// *supply them*. A catalogue retirement instead names the current
+    /// replacement; an operator may still override the builtin facts.
     ///
     /// Every field is data the caller supplies. This crate holds no list of
     /// retired models and should not — the tombstones live beside the
@@ -910,7 +909,7 @@ impl fmt::Display for ResolveError {
                 revision,
             } => write!(
                 f,
-                "`{slug}` was retired by its provider on {retired}; it recommends \
+                "`{slug}` was retired from the builtin catalogue on {retired}; use \
                  `{replacement}`. Catalogue revision {revision}. To use it anyway, \
                  state its capabilities in {}",
                 overrides.join(" or ")

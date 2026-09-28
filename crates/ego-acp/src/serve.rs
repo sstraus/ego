@@ -1344,14 +1344,13 @@ fn prompt_result(snapshot: &RunSnapshot) -> Result<v1::StopReason, String> {
                 ego_core::run::Signal::Int,
             ))
         }
-        // An internal invariant failed. This used to answer `cancelled`
+        // A known turn failure. This used to answer `cancelled`
         // alongside the line above, which told a host its own cancellation
         // had succeeded when in fact this agent had broken. It is an error,
         // for the same reason `Uncertain` below is one.
-        Some(settlement @ RunSettlement::Interrupted { .. }) => Err(failure_message(
-            "the turn was interrupted by an internal failure and did not run",
-            settlement,
-        )),
+        Some(settlement @ RunSettlement::Interrupted { .. }) => {
+            Err(failure_message("the turn failed", settlement))
+        }
         Some(RunSettlement::PermissionRequired { action, by }) => {
             stop_reason_v1(&ego_core::run::RunTermination::PermissionRequired {
                 action: action.clone(),
@@ -2877,17 +2876,17 @@ where
                                 responder.respond(v1::PromptResponse::new(stop_reason))
                             }
                             Err(message) => {
-                                let diagnostic = diagnostic_rx
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_else(|| message.clone());
+                                let diagnostic = diagnostic_rx.await.ok().flatten();
                                 let code = if matches!(snapshot.settlement(), Some(RunSettlement::Paused)) {
                                     SESSION_HELD
                                 } else {
                                     i32::from(ErrorCode::InternalError)
                                 };
-                                responder.respond_with_error(Error::new(code, message).data(diagnostic))
+                                let error = Error::new(code, message);
+                                responder.respond_with_error(match diagnostic {
+                                    Some(diagnostic) => error.data(diagnostic),
+                                    None => error,
+                                })
                             }
                         }
                     })?;

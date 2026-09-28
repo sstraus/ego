@@ -2,6 +2,7 @@
 
 mod support;
 
+use ego_cli::auth::{AuthEntry, AuthStore};
 use support::{AcpHost, Ego, Places, Plan, ReleaseGate, Reply, Stub, paced, tool_call};
 
 const HOLD_REQUEST: &str = "00000000-0000-0000-0000-000000000154";
@@ -24,6 +25,96 @@ fn prompt(session: &str) -> serde_json::Value {
         "sessionId": session,
         "prompt": [{"type": "text", "text": "Run ls"}],
     })
+}
+
+#[test]
+fn retired_configured_model_is_a_single_actionable_pre_send_error() {
+    let places = Places::new();
+    let stub = Stub::start(Plan::default());
+    AuthStore::new(places.home_path())
+        .put(
+            "openai-codex",
+            AuthEntry::OAuth {
+                access: "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig".into(),
+                refresh: None,
+                expires: None,
+            },
+        )
+        .expect("isolated test credential");
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "model = \"openai-codex/gpt-5.6-sol\"\nsandbox = \"workspace\"\n",
+    )
+    .expect("isolated ACP configuration");
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+            .subcommand("acp")
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let session = host.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
+    let answer = host.request("session/prompt", prompt(&session));
+    let message = answer["error"]["message"]
+        .as_str()
+        .expect("ACP error message");
+    assert!(message.contains("configuration error"), "{answer}");
+    assert!(message.contains("retired"), "{answer}");
+    assert!(message.contains("openai-codex/gpt-6-sol"), "{answer}");
+    assert!(!message.contains("uncertain"), "{answer}");
+    let detail = answer["error"]["data"].as_str().unwrap_or("");
+    assert_eq!(
+        format!("{message} {detail}")
+            .matches("openai-codex/gpt-5.6-sol")
+            .count(),
+        1,
+        "retirement detail repeated: {answer}"
+    );
+    assert!(
+        stub.requests()
+            .iter()
+            .all(|request| request.path == "/api/tags"),
+        "model refusal reached generation: {:?}",
+        stub.requests()
+    );
+    host.finish();
+}
+
+#[test]
+fn unknown_configured_model_is_a_configuration_error_without_recovery() {
+    let places = Places::new();
+    let stub = Stub::start(Plan::default());
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "model = \"openai/no-such-model\"\nsandbox = \"workspace\"\n",
+    )
+    .expect("isolated ACP configuration");
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+            .env("OPENAI_API_KEY", "sk-test")
+            .subcommand("acp")
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let session = host.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
+    let answer = host.request("session/prompt", prompt(&session));
+    let message = answer["error"]["message"]
+        .as_str()
+        .expect("ACP error message");
+    assert!(message.contains("configuration error"), "{answer}");
+    assert!(
+        message.contains("no capabilities are configured"),
+        "{answer}"
+    );
+    assert!(!message.contains("uncertain"), "{answer}");
+    assert!(answer["error"].get("data").is_none(), "{answer}");
+    assert!(
+        stub.requests()
+            .iter()
+            .all(|request| request.path == "/api/tags"),
+        "unknown model reached generation: {:?}",
+        stub.requests()
+    );
+    host.finish();
 }
 
 #[test]

@@ -795,8 +795,9 @@ pub enum RunSettlement {
     /// one. The distinction the surfaces need is failure-versus-cancellation,
     /// and that is exactly what this variant encodes and no more.
     CancelledBeforeStart,
-    /// An internal invariant failed and the turn could not proceed. Never a
-    /// user's doing, and never reported as a successful stop.
+    /// A known failure prevented a successful turn. This includes an internal
+    /// invariant failure or a configuration refusal during preflight. It is
+    /// never reported as a successful stop.
     ///
     /// The `diagnostic` is why. It is the sanitized [`RunError`] display the
     /// *original* caller was handed, kept here because that caller is the only

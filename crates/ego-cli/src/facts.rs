@@ -113,7 +113,7 @@ struct Facts {
     /// one entry.
     #[serde(default)]
     model: BTreeMap<String, Supplied>,
-    /// Slugs the provider has switched off.
+    /// Slugs removed from the builtin catalogue.
     ///
     /// Decoded from every layer rather than only from [`BUILTIN`], because
     /// the type is one and an operator's file that says `[retired."x"]` is
@@ -125,16 +125,13 @@ struct Facts {
     retired: BTreeMap<String, Retired>,
 }
 
-/// A tombstone: what the provider did, and what it says to use instead.
+/// A tombstone: when the builtin row was removed and what to use instead.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Retired {
-    /// The vendor's own recommendation, verbatim, and **not** promised to be
-    /// in this catalogue. It is a fact about their lineup, not about ours,
-    /// and rewriting it to the nearest row we happen to ship would be
-    /// answering a question the vendor did not ask.
+    /// A replacement slug; it need not be in this catalogue.
     replacement: String,
-    /// The date they stopped serving it.
+    /// The date the row was removed or the provider retirement date.
     retired: String,
 }
 
@@ -622,6 +619,22 @@ transport = "sse"
         assert_eq!(defaults["openai"], "openai/gpt-6-sol");
         assert_eq!(defaults["openai-codex"], "openai-codex/gpt-6-sol");
         assert_eq!(defaults["anthropic"], "anthropic/claude-opus-5-5");
+    }
+
+    #[test]
+    fn superseded_builtin_slugs_remain_actionable() {
+        for (old, replacement) in [
+            ("openai/gpt-5.6-sol", "openai/gpt-6-sol"),
+            ("openai-codex/gpt-5.6-sol", "openai-codex/gpt-6-sol"),
+            ("openai/gpt-5.6-terra", "openai/gpt-6-luna"),
+            ("openai/gpt-5.6-luna", "openai/gpt-6-luna"),
+            ("anthropic/claude-opus-5", "anthropic/claude-opus-5-5"),
+        ] {
+            let refusal = retirement(old)
+                .unwrap_or_else(|| panic!("removed builtin slug `{old}` has no retirement"))
+                .to_string();
+            assert!(refusal.contains(replacement), "{refusal}");
+        }
     }
 
     /// A tombstone refuses by name, and names somewhere to go.
