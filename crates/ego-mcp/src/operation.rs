@@ -872,7 +872,27 @@ pub(crate) fn stdio_spawn_spec(
     let mut argv = Vec::with_capacity(config.args.len() + 1);
     argv.push(OsString::from(&config.command));
     argv.extend(config.args.iter().map(OsString::from));
-    let cwd = config.cwd.clone().map(CanonPath::new);
+    let cwd = match &config.cwd {
+        Some(cwd) => cwd.clone(),
+        None => std::env::current_dir().map_err(|_| {
+            McpError::new(
+                McpFailure::InvalidValue,
+                "MCP stdio working directory cannot be resolved",
+            )
+        })?,
+    };
+    let cwd = std::fs::canonicalize(cwd).map_err(|_| {
+        McpError::new(
+            McpFailure::InvalidValue,
+            "MCP stdio working directory cannot be resolved",
+        )
+    })?;
+    if !cwd.is_dir() {
+        return Err(McpError::new(
+            McpFailure::InvalidValue,
+            "MCP stdio working directory is not a directory",
+        ));
+    }
     let environment = admission
         .stdio_environment()
         .ok_or_else(|| {
@@ -886,7 +906,7 @@ pub(crate) fn stdio_spawn_spec(
         .collect::<Result<Vec<_>, McpError>>()?;
     let env = EnvPolicy::exact(environment)
         .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
-    SpawnSpec::new(argv, cwd, Some(timeout), env)
+    SpawnSpec::new(argv, Some(CanonPath::new(cwd)), Some(timeout), env)
         .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))
 }
 
@@ -1922,6 +1942,275 @@ fn cancellation_from_duplex(
             CancellationClassification::Failed
         }
         DuplexEnd::Interrupted => CancellationClassification::Uncertain,
+    }
+}
+
+#[cfg(test)]
+mod stdio_fingerprint_tests {
+    use super::*;
+    use ego_core::credentials::SecretMaterial;
+    use ego_core::permit::{TransportError, TransportFailure};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DuplexProbe(AtomicBool);
+
+    impl<'io> GuardedIo<'io> for DuplexProbe {
+        fn write(&self, _: &CanonPath, _: &[u8]) -> Result<(), ego_core::permit::IoDenied> {
+            unreachable!("stdio selection does not write a file")
+        }
+
+        fn read(&self, _: &CanonPath) -> Result<Vec<u8>, ego_core::permit::IoDenied> {
+            unreachable!("stdio selection does not read a file")
+        }
+
+        fn list(
+            &self,
+            _: &ego_core::permit::ScanRequest,
+        ) -> Result<ego_core::permit::Scan, ego_core::permit::IoDenied> {
+            unreachable!("stdio selection does not list files")
+        }
+
+        fn search(
+            &self,
+            _: &ego_core::permit::ScanRequest,
+            _: &dyn ego_core::permit::LineMatcher,
+        ) -> Result<ego_core::permit::Found, ego_core::permit::IoDenied> {
+            unreachable!("stdio selection does not search files")
+        }
+
+        fn exec<'a>(
+            &'a self,
+            _: &'a SpawnSpec,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult, ego_core::permit::ProcessError>>
+        {
+            unreachable!("stdio selection uses guarded duplex")
+        }
+
+        fn read_evidence<'a>(
+            &'a self,
+            _: &'a ego_core::store::evidence::EvidenceRead,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<ego_core::store::evidence::EvidencePage, ToolError>,
+        > {
+            unreachable!("stdio selection does not read evidence")
+        }
+
+        fn guarded_http(
+            &self,
+            _: PreparedCall,
+            _: ego_core::permit::HttpRequest,
+        ) -> futures::future::BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+            unreachable!("stdio selection does not use HTTP")
+        }
+
+        fn claim_mcp_http(&self, _: PreparedCall) -> Result<McpHttpClaim, TransportError> {
+            unreachable!("stdio selection does not use HTTP")
+        }
+
+        fn guarded_duplex(
+            &self,
+            _: PreparedCall,
+        ) -> futures::future::BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+            self.0.store(true, Ordering::SeqCst);
+            Box::pin(std::future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::Exchange("duplex probe".into()),
+            ))))
+        }
+
+        fn store_evidence(
+            &self,
+            _: &[u8],
+        ) -> Result<ego_core::store::evidence::EvidenceRef, ToolError> {
+            unreachable!("stdio selection does not store evidence")
+        }
+    }
+
+    fn tuic_admission() -> McpServerAdmission {
+        let environment = [
+            ("TUIC_SOCKET", "/repo/mcp.sock"),
+            ("TUIC_SESSION", "550e8400-e29b-41d4-a716-446655440a01"),
+        ];
+        let config = McpServerConfig::stdio(
+            "/opt/tuic/tuic-bridge".into(),
+            Vec::new(),
+            None,
+            environment
+                .iter()
+                .map(|(name, _)| name.parse().expect("TUIC variable name"))
+                .collect(),
+        )
+        .expect("TUIC stdio config");
+        let material = crate::McpTransportMaterial::stdio(
+            environment
+                .into_iter()
+                .map(|(name, value)| {
+                    crate::McpEnvironmentBinding::new(
+                        name.parse().expect("TUIC variable name"),
+                        SecretMaterial::new(value.as_bytes().to_vec()),
+                    )
+                })
+                .collect(),
+        );
+        McpServerAdmission::new(
+            "tuicommander".parse().expect("TUIC server name"),
+            config,
+            material,
+        )
+        .expect("TUIC admission")
+    }
+
+    #[test]
+    fn tuic_stdio_selection_survives_process_cwd_observation() {
+        let server_admission = tuic_admission();
+        let McpServerConfig::Stdio(config) = server_admission.config() else {
+            panic!("TUIC admission must be stdio")
+        };
+        let fingerprint =
+            McpAdmissionFingerprint::new("capture-v1", "tuicommander/search_tools", "schema-v1")
+                .expect("admission");
+        let planned = stdio_spawn_spec(&server_admission, config, Duration::from_secs(30))
+            .expect("planned spawn");
+        let observed = SpawnSpec::new(
+            planned.argv().to_vec(),
+            Some(CanonPath::new(
+                std::fs::canonicalize(std::env::current_dir().expect("current directory"))
+                    .expect("canonical current directory"),
+            )),
+            planned.timeout(),
+            planned.env_policy().clone(),
+        )
+        .expect("observed spawn");
+
+        assert_eq!(
+            stdio_transport_fingerprint(config, &fingerprint, &planned),
+            stdio_transport_fingerprint(config, &fingerprint, &observed),
+            "process observation must not invalidate the selected TUIC transport"
+        );
+    }
+
+    #[test]
+    fn selected_tuic_search_reaches_guarded_duplex_after_observation() {
+        let server_admission = tuic_admission();
+        let McpServerConfig::Stdio(config) = server_admission.config() else {
+            panic!("TUIC admission must be stdio")
+        };
+        let subject = McpSubject::Tool {
+            server: "tuicommander".into(),
+            name: "search_tools".into(),
+        };
+        let input = serde_json::json!({"query": "terminal"});
+        let invocation = (
+            ego_core::permit::ForeignToolId::new("tuicommander", "search_tools")
+                .expect("selected tool"),
+            InvocationDigest::from_bytes(&serde_json::to_vec(&input).expect("selected input")),
+        );
+        let operation = McpOperation::captured(
+            subject.clone(),
+            McpOperationKind::CallTool,
+            McpAdmissionFingerprint::new("capture-v1", "tuicommander/search_tools", "schema-v1")
+                .expect("admission fingerprint"),
+            input.clone(),
+            vec![invocation.clone()],
+        );
+        let planned = prepare_stdio(
+            &server_admission,
+            config,
+            operation,
+            Duration::from_secs(30),
+        )
+        .expect("planned selected call");
+        let envelope = planned.mcp_envelope().expect("selected envelope");
+        let observed = SpawnSpec::new(
+            vec![OsString::from(&config.command)],
+            Some(CanonPath::new(
+                std::fs::canonicalize(std::env::current_dir().expect("current directory"))
+                    .expect("canonical current directory"),
+            )),
+            Some(Duration::from_secs(30)),
+            planned
+                .ops()
+                .iter()
+                .find_map(|op| match op {
+                    ego_core::permit::Op::Spawn { spec } => Some(spec.env_policy().clone()),
+                    _ => None,
+                })
+                .expect("planned environment"),
+        )
+        .expect("observed spawn");
+        let selected = PreparedCall::mcp_stdio(
+            subject,
+            McpOperationKind::CallTool,
+            vec![invocation],
+            envelope.admission().clone(),
+            envelope.transport_fingerprint(),
+            "tuicommander",
+            observed,
+            &input,
+        )
+        .expect("observed selected call");
+        let probe = DuplexProbe(AtomicBool::new(false));
+        let result = futures::executor::block_on(execute_stdio_hook(
+            config,
+            selected,
+            &probe,
+            OperationLimits::new(64 * 1024, Duration::from_secs(30)).expect("limits"),
+            EffectScope::new(Duration::from_secs(30)),
+        ));
+
+        assert!(result.is_err(), "probe intentionally has no bridge process");
+        assert!(
+            probe.0.load(Ordering::SeqCst),
+            "selected search must reach the guarded duplex"
+        );
+    }
+
+    #[test]
+    fn explicit_stdio_cwd_is_canonical_before_selection() {
+        let current = std::env::current_dir().expect("current directory");
+        let config = McpStdioConfig::new(
+            "/opt/tuic/tuic-bridge".into(),
+            Vec::new(),
+            Some(current.join("src").join("..")),
+            Vec::new(),
+        )
+        .expect("stdio config");
+        let admission = McpServerAdmission::new(
+            "tuicommander".parse().expect("server name"),
+            McpServerConfig::Stdio(config.clone()),
+            crate::McpTransportMaterial::stdio(Vec::new()),
+        )
+        .expect("admission");
+
+        let planned =
+            stdio_spawn_spec(&admission, &config, Duration::from_secs(30)).expect("planned spawn");
+        assert_eq!(
+            planned.cwd().expect("explicit cwd").as_path(),
+            std::fs::canonicalize(current).expect("canonical cwd")
+        );
+    }
+
+    #[test]
+    fn stdio_selection_rejects_cwd_that_is_not_a_directory() {
+        let config = McpStdioConfig::new(
+            "/opt/tuic/tuic-bridge".into(),
+            Vec::new(),
+            Some(
+                std::env::current_dir()
+                    .expect("current directory")
+                    .join("Cargo.toml"),
+            ),
+            Vec::new(),
+        )
+        .expect("stdio config");
+        let admission = McpServerAdmission::new(
+            "tuicommander".parse().expect("server name"),
+            McpServerConfig::Stdio(config.clone()),
+            crate::McpTransportMaterial::stdio(Vec::new()),
+        )
+        .expect("admission");
+
+        assert!(stdio_spawn_spec(&admission, &config, Duration::from_secs(30)).is_err());
     }
 }
 
