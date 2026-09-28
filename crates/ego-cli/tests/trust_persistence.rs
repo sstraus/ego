@@ -60,7 +60,7 @@ fn the_first_launch_asks_and_the_next_one_remembers_the_answer() {
 }
 
 #[test]
-fn changed_trusted_content_is_asked_about_again() {
+fn changed_instruction_content_does_not_reask() {
     let places = Places::new();
     let stub = stub();
     places.ego(&stub).file("AGENTS.md", "# be careful here\n");
@@ -74,8 +74,40 @@ fn changed_trusted_content_is_asked_about_again() {
     let after_edit = launch(places.ego(&stub));
 
     assert!(
-        after_edit.contains(QUESTION),
-        "an edited instruction file is a new question:\n{after_edit}"
+        !after_edit.contains(QUESTION),
+        "an instruction edit is not new executable authority:\n{after_edit}"
+    );
+}
+
+#[test]
+fn terminal_reask_describes_changed_hook_and_program() {
+    let places = Places::new();
+    let stub = stub();
+    places.ego(&stub).file("scripts/hook.sh", "echo old\n");
+    places.ego(&stub).file(".ego/config.toml", "[[hooks]]\nevent='PreToolUse'\n[hooks.handler]\ntype='command'\ncommand='./scripts/hook.sh'\nargs=['--old']\n");
+    let first = launch(places.ego(&stub));
+    assert!(first.contains(QUESTION), "{first}");
+    places
+        .ego(&stub)
+        .file("scripts/hook.sh", "echo changed and longer\n");
+    places.ego(&stub).file(".ego/config.toml", "[[hooks]]\nevent='PreToolUse'\n[hooks.handler]\ntype='command'\ncommand='./scripts/hook.sh'\nargs=['--new']\n");
+    let second = launch(places.ego(&stub));
+    assert!(second.contains(QUESTION), "{second}");
+    assert!(
+        second.contains("Executable changes since the last answer"),
+        "{second}"
+    );
+    assert!(
+        second.contains(".ego/config.toml") && second.contains("PreToolUse#1"),
+        "{second}"
+    );
+    assert!(
+        second.contains("--old") && second.contains("--new"),
+        "{second}"
+    );
+    assert!(
+        second.contains("size=9") && second.contains("size=24"),
+        "{second}"
     );
 }
 

@@ -95,7 +95,11 @@ fn an_unconfined_document_is_not_a_trust_decision() {
     );
 
     let mut trust = TrustLedger::default();
-    trust.remember(FIRST_ROOT, "inventory-digest", Trust::Trusted);
+    trust.remember(
+        FIRST_ROOT,
+        ego_core::config::ExecutableSurface::default(),
+        Trust::Trusted,
+    );
     let trust_json = serde_json::to_value(&trust).expect("trust ledger is serialisable");
     assert!(
         serde_json::from_value::<UnconfinedLedger>(trust_json).is_err(),

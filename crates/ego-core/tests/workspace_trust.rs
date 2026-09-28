@@ -7,7 +7,24 @@
 //! decisions live in core. See
 //! `docs/decisions/2026-09-05-a-trust-answer-is-remembered-per-root.md`.
 
-use ego_core::config::{Trust, TrustInventory, TrustLedger, TrustedContent};
+use ego_core::config::{
+    ExecutableDeclaration, ExecutableSurface, ProgramEvidence, Trust, TrustInventory, TrustLedger,
+    TrustedContent,
+};
+
+fn surface(label: &str) -> ExecutableSurface {
+    let mut value = ExecutableSurface::default();
+    value.programs.insert(
+        "handler.sh".to_owned(),
+        ProgramEvidence {
+            bytes: 10,
+            digest: label.to_owned(),
+            executable: true,
+            link_target: None,
+        },
+    );
+    value
+}
 
 fn file(path: &str, bytes: &[u8]) -> TrustedContent {
     TrustedContent::regular(path, bytes.len() as u64, bytes)
@@ -63,22 +80,25 @@ fn the_same_bytes_under_a_different_name_are_a_different_inventory() {
 fn an_empty_ledger_has_never_been_asked() {
     let ledger = TrustLedger::default();
 
-    assert_eq!(ledger.remembered("/ws", "digest"), None);
+    assert_eq!(ledger.remembered("/ws", &surface("digest")), None);
 }
 
 #[test]
 fn a_remembered_answer_is_honoured_only_against_the_digest_it_answered() {
     let mut ledger = TrustLedger::default();
-    ledger.remember("/ws", "before", Trust::Trusted);
+    ledger.remember("/ws", surface("before"), Trust::Trusted);
 
-    assert_eq!(ledger.remembered("/ws", "before"), Some(Trust::Trusted));
     assert_eq!(
-        ledger.remembered("/ws", "after"),
+        ledger.remembered("/ws", &surface("before")),
+        Some(Trust::Trusted)
+    );
+    assert_eq!(
+        ledger.remembered("/ws", &surface("after")),
         None,
         "changed content re-asks"
     );
     assert_eq!(
-        ledger.remembered("/elsewhere", "before"),
+        ledger.remembered("/elsewhere", &surface("before")),
         None,
         "a remembered root is not a remembered machine"
     );
@@ -87,10 +107,10 @@ fn a_remembered_answer_is_honoured_only_against_the_digest_it_answered() {
 #[test]
 fn a_refusal_is_remembered_as_a_refusal() {
     let mut ledger = TrustLedger::default();
-    ledger.remember("/ws", "digest", Trust::Untrusted);
+    ledger.remember("/ws", surface("digest"), Trust::Untrusted);
 
     assert_eq!(
-        ledger.remembered("/ws", "digest"),
+        ledger.remembered("/ws", &surface("digest")),
         Some(Trust::Untrusted),
         "`no` is an answer, not the absence of one"
     );
@@ -99,23 +119,97 @@ fn a_refusal_is_remembered_as_a_refusal() {
 #[test]
 fn re_answering_replaces_the_record_rather_than_adding_one() {
     let mut ledger = TrustLedger::default();
-    ledger.remember("/ws", "before", Trust::Trusted);
-    ledger.remember("/ws", "after", Trust::Untrusted);
+    ledger.remember("/ws", surface("before"), Trust::Trusted);
+    ledger.remember("/ws", surface("after"), Trust::Untrusted);
 
-    assert_eq!(ledger.remembered("/ws", "before"), None);
-    assert_eq!(ledger.remembered("/ws", "after"), Some(Trust::Untrusted));
+    assert_eq!(ledger.remembered("/ws", &surface("before")), None);
+    assert_eq!(
+        ledger.remembered("/ws", &surface("after")),
+        Some(Trust::Untrusted)
+    );
 }
 
 #[test]
 fn the_ledger_round_trips_through_its_versioned_document() {
     let mut ledger = TrustLedger::default();
-    ledger.remember("/ws", "digest", Trust::Trusted);
+    ledger.remember("/ws", surface("digest"), Trust::Trusted);
 
     let encoded = serde_json::to_value(&ledger).expect("one versioned document");
-    assert_eq!(encoded["v"], 1);
+    assert_eq!(encoded["v"], 2);
     assert_eq!(encoded["workspaces"]["/ws"]["decision"], "trusted");
-    assert_eq!(encoded["workspaces"]["/ws"]["digest"], "digest");
+    assert_eq!(
+        encoded["workspaces"]["/ws"]["executable_surface"]["programs"]["handler.sh"]["digest"],
+        "digest"
+    );
 
     let decoded: TrustLedger = serde_json::from_value(encoded).expect("a readable ledger");
-    assert_eq!(decoded.remembered("/ws", "digest"), Some(Trust::Trusted));
+    assert_eq!(
+        decoded.remembered("/ws", &surface("digest")),
+        Some(Trust::Trusted)
+    );
+}
+
+#[test]
+fn legacy_digest_only_records_keep_their_decision() {
+    let ledger: TrustLedger = serde_json::from_value(serde_json::json!({
+        "v": 1,
+        "workspaces": {"/ws": {"decision": "trusted", "digest": "old-inventory"}}
+    }))
+    .expect("old ledger");
+
+    assert_eq!(
+        ledger.remembered("/ws", &surface("current-executable")),
+        Some(Trust::Trusted)
+    );
+}
+
+#[test]
+fn executable_change_summary_names_only_changed_entries_without_environment_values() {
+    let mut before = ExecutableSurface::default();
+    let old = ExecutableDeclaration {
+        config: ".ego/config.toml".to_owned(),
+        kind: "MCP server".to_owned(),
+        name: "local".to_owned(),
+        command: "./server".to_owned(),
+        args: vec!["--safe".to_owned()],
+        env_keys: vec!["TOKEN".to_owned()],
+        details: Default::default(),
+    };
+    before
+        .declarations
+        .insert("mcp:local".to_owned(), old.clone());
+    let mut stable = old.clone();
+    stable.name = "unchanged".to_owned();
+    before
+        .declarations
+        .insert("mcp:unchanged".to_owned(), stable);
+    before.programs.insert(
+        "server".to_owned(),
+        ProgramEvidence {
+            bytes: 10,
+            digest: "before".to_owned(),
+            executable: false,
+            link_target: None,
+        },
+    );
+    let mut after = before.clone();
+    after.declarations.get_mut("mcp:local").expect("local").args = vec!["--danger".to_owned()];
+    after.programs.get_mut("server").expect("program").bytes = 20;
+    after
+        .programs
+        .get_mut("server")
+        .expect("program")
+        .executable = true;
+    let summary = after.changes_from(&before);
+    assert!(summary.contains(".ego/config.toml"), "{summary}");
+    assert!(
+        summary.contains("--safe") && summary.contains("--danger"),
+        "{summary}"
+    );
+    assert!(summary.contains("TOKEN"), "{summary}");
+    assert!(
+        summary.contains("size=10 executable=false") && summary.contains("size=20 executable=true"),
+        "{summary}"
+    );
+    assert!(!summary.contains("unchanged"), "{summary}");
 }

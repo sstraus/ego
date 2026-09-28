@@ -61,7 +61,7 @@ pub(super) fn run_trust(
     match driver {
         Driver::Once => Trust::Untrusted,
         Driver::Interactive { seat, .. } if !args.bare && seat.has_human() => {
-            crate::trust::resolve(root, home, diagnostics, || seat.trust(root))
+            crate::trust::resolve(root, home, diagnostics, |context| seat.trust(root, context))
         }
         Driver::Interactive { .. } => Trust::Untrusted,
     }
@@ -114,7 +114,7 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn activate_session(&self, _target: SessionId) -> bool {
         false
     }
-    fn trust(&self, workspace: &Path) -> Trust;
+    fn trust(&self, workspace: &Path, context: &str) -> Trust;
     /// Acknowledge the Windows host's lack of confinement for this workspace.
     /// Test and non-human seats deny unless they explicitly own this authority.
     fn acknowledge_windows_unconfined(&self, _workspace: &Path) -> bool {
