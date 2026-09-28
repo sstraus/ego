@@ -185,7 +185,7 @@
 //!   (v2 *does* have a mapping — see [`project_v2`]'s arm.)
 
 use agent_client_protocol_schema::{v1, v2};
-use ego_core::cost::Money;
+use ego_core::cost::{CostAttribution, CostDelta, Money};
 use ego_core::event::domain::ExitReason;
 use ego_core::event::id::ItemId;
 use ego_core::generator::capabilities::ModelCapabilities;
@@ -410,6 +410,21 @@ fn acp_cost(total: &Money) -> (f64, String) {
     )
 }
 
+/// A currency total is incomplete when any generation had no currency price.
+fn acp_visible_cost(state: &SessionState) -> Option<&Money> {
+    state.cost.known().filter(|_| {
+        !state.charges.iter().any(|charge| {
+            matches!(
+                &charge.cost,
+                CostDelta::Known {
+                    attribution: CostAttribution::MeteringPolicy { .. },
+                    ..
+                }
+            )
+        })
+    })
+}
+
 /// Whether this event is one only reduced state can answer.
 ///
 /// Both usage-shaped public events land here, and they are the only two: see
@@ -438,7 +453,7 @@ pub fn project_acp_v1(
     }
     let (used, size) = usage_figures(state_after, caps)?;
     let mut update = v1::UsageUpdate::new(used, size);
-    if let Some(total) = state_after.cost.known() {
+    if let Some(total) = acp_visible_cost(state_after) {
         let (amount, currency) = acp_cost(total);
         update = update.cost(Some(v1::Cost::new(amount, currency)));
     }
@@ -465,7 +480,7 @@ pub fn project_replay_v1(
     };
     if let (Some(used), Some(size)) = (state.context.used_tokens, context_window) {
         let mut usage = v1::UsageUpdate::new(used, size);
-        if let Some(total) = state.cost.known() {
+        if let Some(total) = acp_visible_cost(state) {
             let (amount, currency) = acp_cost(total);
             usage = usage.cost(Some(v1::Cost::new(amount, currency)));
         }
@@ -489,7 +504,7 @@ pub fn project_acp_v2(
     }
     let (used, size) = usage_figures(state_after, caps)?;
     let mut update = v2::UsageUpdate::new(used, size);
-    if let Some(total) = state_after.cost.known() {
+    if let Some(total) = acp_visible_cost(state_after) {
         let (amount, currency) = acp_cost(total);
         update = update.cost(Some(v2::Cost::new(amount, currency)));
     }

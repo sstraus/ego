@@ -38,7 +38,8 @@
 use agent_client_protocol_schema::{v1, v2};
 use ego_acp::project::{project_acp_v1, project_acp_v2, project_v1, project_v2};
 use ego_core::cost::{
-    Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost,
+    Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
+    UnknownCost,
 };
 use ego_core::event::domain::{
     CancelCause, DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
@@ -70,6 +71,7 @@ use ego_core::question::{
     QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest, QuestionTarget,
 };
 use ego_core::run::{RunId, RunSelections};
+use ego_core::session_lifecycle::ReplayFrame;
 use ego_core::state::{SessionState, Usage};
 use ego_core::store::blob::{BlobId, BlobRef};
 
@@ -697,6 +699,15 @@ mod acp_golden {
         }
     }
 
+    fn subscription_without_token_price() -> CostDelta {
+        CostDelta::free(
+            CurrencyCode::new("USD").expect("USD is a valid code"),
+            CostAttribution::MeteringPolicy {
+                revision: MeteringRevision("ego/builtin/openai-codex-subscription/v1".to_owned()),
+            },
+        )
+    }
+
     /// Capabilities with a stated context window, so `UsageUpdate.size` is
     /// known. `max_context_tokens: None` is the case that must suppress the
     /// update entirely.
@@ -1261,6 +1272,123 @@ mod acp_golden {
             panic!("expected a v2 UsageUpdate, got {v2_update:?}");
         };
         assert_eq!((v2_usage.used, v2_usage.size), (165, 200_000));
+        let v2_cost = v2_usage.cost.expect("priced total remains visible in v2");
+        assert_eq!(v2_cost.currency, "USD");
+        assert!((v2_cost.amount - 0.001035).abs() < 1e-12);
+    }
+
+    #[test]
+    fn subscription_usage_keeps_context_but_omits_unpriced_cost_live_and_on_replay() {
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+        let log = vec![
+            ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::UsageUpdated {
+                    usage: tokens(120, 45),
+                    cost_delta: subscription_without_token_price(),
+                    attempt: None,
+                },
+            ),
+            ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: 165,
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                    window: None,
+                },
+            ),
+        ];
+        let state = state_after(&log);
+        let caps = caps(Some(200_000));
+        let v1::SessionUpdate::UsageUpdate(v1) = acp_state_v1(&log[1], &state, &caps).unwrap()
+        else {
+            panic!("expected v1 usage update");
+        };
+        assert!(serde_json::to_value(&v1).unwrap().get("cost").is_none());
+        assert_eq!((v1.used, v1.size, v1.cost), (165, 200_000, None));
+        let v2::SessionUpdate::UsageUpdate(v2) = acp_state_v2(&log[1], &state, &caps).unwrap()
+        else {
+            panic!("expected v2 usage update");
+        };
+        assert!(serde_json::to_value(&v2).unwrap().get("cost").is_none());
+        assert_eq!((v2.used, v2.size, v2.cost), (165, 200_000, None));
+        let replay = ego_acp::project::project_replay_v1(
+            &[ReplayFrame {
+                event: project_public(&log[1]).expect("public occupancy event"),
+                state,
+            }],
+            Some(200_000),
+            std::path::Path::new("/workspace"),
+        );
+        let Some(v1::SessionUpdate::UsageUpdate(replayed)) = replay.last() else {
+            panic!("expected replay usage update");
+        };
+        assert!(
+            serde_json::to_value(replayed)
+                .unwrap()
+                .get("cost")
+                .is_none()
+        );
+        assert_eq!(
+            (replayed.used, replayed.size, replayed.cost.clone()),
+            (165, 200_000, None)
+        );
+    }
+
+    #[test]
+    fn mixed_priced_and_subscription_usage_omits_incomplete_total() {
+        for costs in [
+            [priced("0.25"), subscription_without_token_price()],
+            [subscription_without_token_price(), priced("0.25")],
+        ] {
+            let turn = TurnId::new();
+            let mut seq = Seq::default();
+            let mut log = costs
+                .into_iter()
+                .map(|cost_delta| {
+                    ev(
+                        seq.next(),
+                        turn,
+                        None,
+                        EventKind::UsageUpdated {
+                            usage: tokens(10, 5),
+                            cost_delta,
+                            attempt: None,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            log.push(ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: 30,
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                    window: None,
+                },
+            ));
+            let state = state_after(&log);
+            let last = log.last().unwrap();
+            let caps = caps(Some(200_000));
+            let v1::SessionUpdate::UsageUpdate(v1) = acp_state_v1(last, &state, &caps).unwrap()
+            else {
+                panic!("expected v1 usage update");
+            };
+            assert!(serde_json::to_value(&v1).unwrap().get("cost").is_none());
+            assert_eq!((v1.used, v1.size, v1.cost), (30, 200_000, None));
+            let v2::SessionUpdate::UsageUpdate(v2) = acp_state_v2(last, &state, &caps).unwrap()
+            else {
+                panic!("expected v2 usage update");
+            };
+            assert!(serde_json::to_value(&v2).unwrap().get("cost").is_none());
+            assert_eq!((v2.used, v2.size, v2.cost), (30, 200_000, None));
+        }
     }
 
     /// The window reported is the one the generation that produced the
