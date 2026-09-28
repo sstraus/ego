@@ -1,8 +1,9 @@
 //! `ego acp`: production composition for the inbound ACP adapter.
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::{ConnectTo, Stdio};
 use agent_client_protocol_schema::v1;
@@ -40,6 +41,7 @@ use ego_tools::mcp_continuation::JsonlContinuationJournal;
 use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
 use ego_tools::store::OsIo;
 use futures::future::BoxFuture;
+use sha2::{Digest, Sha256};
 
 use crate::acp_confinement::CliSessionConfinementAdmission;
 use crate::acp_controls::AcpSessionControls;
@@ -91,6 +93,106 @@ struct AcpMcpSessionAdmitter {
     stdio_management: Arc<dyn McpDuplexEffectsFactory>,
     max_sse_event_size: usize,
     timeout: Duration,
+    failed_admissions: Arc<Mutex<HashMap<[u8; 32], AdmissionRetry>>>,
+}
+
+const MAX_FAILED_ADMISSIONS: usize = 64;
+const INITIAL_ADMISSION_BACKOFF: Duration = Duration::from_secs(60);
+const MAX_ADMISSION_BACKOFF: Duration = Duration::from_secs(15 * 60);
+
+struct AdmissionRetry {
+    failures: u32,
+    retry_after: Instant,
+    active: bool,
+}
+
+struct AdmissionAttempt {
+    key: [u8; 32],
+    state: Arc<Mutex<HashMap<[u8; 32], AdmissionRetry>>>,
+    finished: bool,
+}
+
+impl AdmissionAttempt {
+    fn begin(
+        state: Arc<Mutex<HashMap<[u8; 32], AdmissionRetry>>>,
+        key: [u8; 32],
+    ) -> Result<Self, McpSessionAdmissionError> {
+        let now = Instant::now();
+        let mut retries = state
+            .lock()
+            .map_err(|_| safe_mcp_error("ACP MCP admission state could not be read"))?;
+        if let Some(retry) = retries.get_mut(&key) {
+            if retry.active || now < retry.retry_after {
+                return Err(safe_mcp_error(
+                    "the supplied MCP servers could not be admitted; retry later",
+                ));
+            }
+            retry.active = true;
+        } else {
+            if retries.len() >= MAX_FAILED_ADMISSIONS {
+                let evict = retries
+                    .iter()
+                    .filter(|(_, retry)| !retry.active)
+                    .min_by_key(|(_, retry)| retry.retry_after)
+                    .map(|(key, _)| *key);
+                let Some(evict) = evict else {
+                    return Err(safe_mcp_error(
+                        "too many MCP admissions are in progress; retry later",
+                    ));
+                };
+                retries.remove(&evict);
+            }
+            retries.insert(
+                key,
+                AdmissionRetry {
+                    failures: 0,
+                    retry_after: now,
+                    active: true,
+                },
+            );
+        }
+        drop(retries);
+        Ok(Self {
+            key,
+            state,
+            finished: false,
+        })
+    }
+
+    fn finish(mut self, success: bool) {
+        self.record(success);
+        self.finished = true;
+    }
+
+    fn record(&self, success: bool) {
+        let Ok(mut retries) = self.state.lock() else {
+            return;
+        };
+        if success {
+            retries.remove(&self.key);
+        } else if let Some(retry) = retries.get_mut(&self.key) {
+            retry.active = false;
+            retry.failures = retry.failures.saturating_add(1);
+            let multiplier = 1_u64 << retry.failures.saturating_sub(1).min(4);
+            let backoff = INITIAL_ADMISSION_BACKOFF
+                .saturating_mul(multiplier as u32)
+                .min(MAX_ADMISSION_BACKOFF);
+            retry.retry_after = Instant::now() + backoff;
+            tracing::warn!(
+                attempt = retry.failures,
+                retry_after_seconds = backoff.as_secs(),
+                "ACP MCP admission failed; delaying another attempt for the same server selection"
+            );
+        }
+    }
+}
+
+impl Drop for AdmissionAttempt {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.record(false);
+        }
+    }
 }
 
 impl AcpMcpSessionAdmitter {
@@ -105,6 +207,7 @@ impl AcpMcpSessionAdmitter {
             stdio_management,
             max_sse_event_size,
             timeout,
+            failed_admissions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -122,53 +225,61 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
         let stdio_management = Arc::clone(&self.stdio_management);
         let max_sse_event_size = self.max_sse_event_size;
         let timeout = self.timeout;
+        let failed_admissions = Arc::clone(&self.failed_admissions);
         Box::pin(async move {
+            let serialized = serde_json::to_vec(&servers)
+                .map_err(|_| safe_mcp_error("the supplied MCP servers could not be identified"))?;
+            let key: [u8; 32] = Sha256::digest(&serialized).into();
             let admissions = map_mcp_servers(servers)?;
-            let refresh = McpRegistryRefresh::new(
-                admissions,
-                RegistryTrigger::ConfigChanged,
-                RegistryScope::All,
-            )
-            .map_err(|_| safe_mcp_error("the supplied MCP servers are invalid"))?;
-            let storage = tempfile::tempdir()
-                .map_err(|_| safe_mcp_error("ACP MCP session storage could not be created"))?;
-            let registry_root = storage.path().join("registry");
-            let continuation_root = storage.path().join("continuations");
-            let registry_journal =
-                Arc::new(JsonlMcpRegistryJournal::new(registry_root, Box::new(OsIo)));
-            let continuation_journal: Arc<dyn ContinuationJournal> = Arc::new(
-                JsonlContinuationJournal::open(continuation_root).map_err(|_| {
-                    safe_mcp_error("ACP MCP continuation storage could not be opened")
-                })?,
-            );
-            let runtime = Arc::new(
-                McpRegistryRuntime::new(
-                    registry_journal,
-                    continuation_journal,
-                    Arc::new(OsGenerationPolicyCaptureStore::default()),
-                    http_management,
-                    stdio_management,
-                    Arc::new(OsResumeKey::open(storage.path())),
-                    Arc::new(SystemClock),
-                    max_sse_event_size,
-                    timeout,
+            let attempt = AdmissionAttempt::begin(failed_admissions, key)?;
+            let result = async {
+                let refresh = McpRegistryRefresh::new(
+                    admissions,
+                    RegistryTrigger::ConfigChanged,
+                    RegistryScope::All,
                 )
-                .map_err(|_| safe_mcp_error("ACP MCP runtime could not be created"))?,
-            );
-            runtime
-                .controller()
-                .reconcile(refresh)
-                .await
-                .map_err(|_| safe_mcp_error("the supplied MCP servers could not be admitted"))?;
-            if !runtime.controller().status().mcp_errors().is_empty() {
-                return Err(safe_mcp_error(
-                    "the supplied MCP servers could not be admitted",
-                ));
+                .map_err(|_| safe_mcp_error("the supplied MCP servers are invalid"))?;
+                let storage = tempfile::tempdir()
+                    .map_err(|_| safe_mcp_error("ACP MCP session storage could not be created"))?;
+                let registry_root = storage.path().join("registry");
+                let continuation_root = storage.path().join("continuations");
+                let registry_journal =
+                    Arc::new(JsonlMcpRegistryJournal::new(registry_root, Box::new(OsIo)));
+                let continuation_journal: Arc<dyn ContinuationJournal> = Arc::new(
+                    JsonlContinuationJournal::open(continuation_root).map_err(|_| {
+                        safe_mcp_error("ACP MCP continuation storage could not be opened")
+                    })?,
+                );
+                let runtime = Arc::new(
+                    McpRegistryRuntime::new(
+                        registry_journal,
+                        continuation_journal,
+                        Arc::new(OsGenerationPolicyCaptureStore::default()),
+                        http_management,
+                        stdio_management,
+                        Arc::new(OsResumeKey::open(storage.path())),
+                        Arc::new(SystemClock),
+                        max_sse_event_size,
+                        timeout,
+                    )
+                    .map_err(|_| safe_mcp_error("ACP MCP runtime could not be created"))?,
+                );
+                runtime.controller().reconcile(refresh).await.map_err(|_| {
+                    safe_mcp_error("the supplied MCP servers could not be admitted")
+                })?;
+                if !runtime.controller().status().mcp_errors().is_empty() {
+                    return Err(safe_mcp_error(
+                        "the supplied MCP servers could not be admitted",
+                    ));
+                }
+                Ok(Some(
+                    Arc::new(AcpSessionMcpAdmission::from_runtime(runtime, storage))
+                        as Arc<dyn SessionMcpAdmission>,
+                ))
             }
-            Ok(Some(
-                Arc::new(AcpSessionMcpAdmission::from_runtime(runtime, storage))
-                    as Arc<dyn SessionMcpAdmission>,
-            ))
+            .await;
+            attempt.finish(result.is_ok());
+            result
         })
     }
 }
