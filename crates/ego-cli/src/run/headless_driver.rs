@@ -210,6 +210,10 @@ pub(super) async fn drive_headless_turn(
         }
         None => Tools::from_registry(registry, effect_ports, CanonPath::new(cwd)),
     };
+    let tools = match mcp_runtime.as_ref().and_then(|mcp| mcp.resume_sealer()) {
+        Some(resume) => tools.with_resume(resume),
+        None => tools,
+    };
     let loop_ = TurnLoop::from_shared_journal(
         active.id(),
         journal.clone(),

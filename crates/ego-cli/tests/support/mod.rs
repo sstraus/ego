@@ -339,6 +339,7 @@ pub struct Stub {
 enum StubMode {
     ProviderOnly,
     ProviderAndMcp,
+    ProviderAndMcpTool,
 }
 
 impl Stub {
@@ -351,6 +352,10 @@ impl Stub {
     /// network adapter.
     pub fn start_mcp(plan: Plan) -> Self {
         Self::start_mode(plan, StubMode::ProviderAndMcp)
+    }
+
+    pub fn start_mcp_tool(plan: Plan) -> Self {
+        Self::start_mode(plan, StubMode::ProviderAndMcpTool)
     }
 
     fn start_mode(plan: Plan, mode: StubMode) -> Self {
@@ -440,8 +445,16 @@ fn serve(
         body: body.clone(),
     });
 
-    if matches!(mode, StubMode::ProviderAndMcp) && path == "/mcp" {
-        return mcp_response(&mut stream, &body);
+    if matches!(
+        mode,
+        StubMode::ProviderAndMcp | StubMode::ProviderAndMcpTool
+    ) && path == "/mcp"
+    {
+        return mcp_response(
+            &mut stream,
+            &body,
+            matches!(mode, StubMode::ProviderAndMcpTool),
+        );
     }
 
     match path.as_str() {
@@ -489,7 +502,7 @@ fn serve(
     }
 }
 
-fn mcp_response(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+fn mcp_response(stream: &mut TcpStream, body: &str, tool: bool) -> std::io::Result<()> {
     let request: serde_json::Value =
         serde_json::from_str(body).expect("MCP probe receives JSON-RPC request");
     let Some(id) = request.get("id") else {
@@ -501,19 +514,24 @@ fn mcp_response(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
     };
     let method = request["method"].as_str().unwrap_or_default();
     let result = match method {
-        "initialize" => serde_json::json!({
+        "server/discover" => serde_json::json!({
             "resultType": "complete",
             "supportedVersions": ["2026-07-28"],
-            "capabilities": {},
+            "capabilities": if tool { serde_json::json!({"tools":{"listChanged":false}}) } else { serde_json::json!({}) },
             "ttlMs": 0,
             "cacheScope": "private"
         }),
         "tools/list" => serde_json::json!({
             "resultType": "complete",
-            "tools": [],
+            "tools": if tool { serde_json::json!([{"name":"search_tools","description":"fixture search","inputSchema":{"type":"object","additionalProperties":false}}]) } else { serde_json::json!([]) },
             "nextCursor": null,
             "ttlMs": 0,
             "cacheScope": "private"
+        }),
+        "tools/call" if tool => serde_json::json!({
+            "resultType": "complete",
+            "content": [{"type":"text","text":"lookup-complete"}],
+            "isError": false
         }),
         _ => serde_json::json!({
             "resultType": "complete",

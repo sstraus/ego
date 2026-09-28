@@ -188,6 +188,118 @@ fn mode_yolo_selected_after_a_turn_avoids_the_next_permission_prompt() {
 }
 
 #[test]
+fn configured_tool_rule_skips_the_acp_question_for_an_opaque_mcp_call() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[permissions]\nallow = [\"tool(tuicommander/search_tools)\"]\n\n[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    )
+    .expect("isolated profile configuration");
+    let stub = Stub::start_mcp_tool(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("mcp-search", "search_tools", "{}")),
+            Reply::Sse(text("search done")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    host.initialize();
+    let opened = host.request(
+        "session/new",
+        serde_json::json!({
+            "cwd": places.workspace_path(),
+            "mcpServers": [{"type":"http","name":"tuicommander","url":format!("http://{}/mcp", stub.address),"headers":[]}],
+        }),
+    );
+    let session = opened["result"]["sessionId"].as_str().unwrap_or_else(|| {
+        panic!(
+            "MCP session was not opened: {opened}; requests: {:?}",
+            stub.requests()
+        )
+    });
+    let id = send_prompt(&mut host, session);
+    let finished = settle_without_question(&mut host, id);
+    assert!(finished["result"].is_object(), "{finished}");
+    host.finish();
+    assert!(
+        stub.generations()
+            .iter()
+            .any(
+                |generation| generation["tools"].as_array().is_some_and(|tools| tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "search_tools"))
+            ),
+        "the MCP tool was not offered to the model"
+    );
+}
+
+#[test]
+fn permitted_acp_mcp_call_does_not_fail_for_a_missing_resume_sealer() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    )
+    .expect("isolated profile configuration");
+    let stub = Stub::start_mcp_tool(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("mcp-search-permitted", "search_tools", "{}")),
+            Reply::Sse(text("search done")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    host.initialize();
+    let opened = host.request(
+        "session/new",
+        serde_json::json!({
+            "cwd": places.workspace_path(),
+            "mcpServers": [{"type":"http","name":"tuicommander","url":format!("http://{}/mcp", stub.address),"headers":[]}],
+        }),
+    );
+    let session = opened["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("MCP session was not opened: {opened}"));
+    let id = send_prompt(&mut host, session);
+    let question = permission(&mut host);
+    assert!(
+        question["params"]["toolCall"]["title"]
+            .as_str()
+            .is_some_and(|title| title.contains("search_tools")),
+        "the MCP call did not reach the ACP permission seat: {question}"
+    );
+    select(&mut host, &question, "allow-once");
+    let mut updates = Vec::new();
+    let finished = loop {
+        let frame = host.read_frame();
+        if frame["id"].as_u64() == Some(id) {
+            break frame;
+        }
+        updates.push(frame);
+    };
+    assert!(finished["result"].is_object(), "{finished}");
+    host.finish();
+    let report = serde_json::to_string(&updates).expect("ACP updates");
+    assert!(
+        !report.contains("invalid resume sealing key"),
+        "the permitted call lacked a resume sealer: {report}"
+    );
+    let calls = stub
+        .requests()
+        .into_iter()
+        .filter(|request| request.path == "/mcp")
+        .filter(|request| {
+            serde_json::from_str::<serde_json::Value>(&request.body)
+                .is_ok_and(|body| body["method"] == "tools/call")
+        })
+        .count();
+    assert!(
+        calls == 1 || report.contains("native resume key is unavailable"),
+        "the allowed tool neither reached MCP nor reported unavailable native key: {report}"
+    );
+}
+
+#[test]
 fn allow_always_writes_one_profile_rule_and_revoke_restores_the_question() {
     let places = Places::new();
     configure(&places);
