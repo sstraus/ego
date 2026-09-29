@@ -139,6 +139,12 @@ pub(super) async fn drive_execution<S: EventSink>(
 
     let mut config = TurnConfig {
         system,
+        identity: Some(AgentIdentity {
+            version: crate::build_info::VERSION.to_owned(),
+            sandbox: confinement.level(),
+            offline: confinement.offline(),
+            host: None,
+        }),
         token_ceiling: effective.ceilings.tokens,
         retry: args.retry,
         fallbacks: args.fallbacks.clone(),

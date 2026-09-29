@@ -1828,6 +1828,7 @@ mod end_to_end {
                     gate,
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -1934,6 +1935,7 @@ mod end_to_end {
                     gate,
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),

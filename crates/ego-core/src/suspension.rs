@@ -101,6 +101,10 @@ pub trait McpCapturePin: Send + Sync {
     /// they could outlive or precede the catalogue they explain, which is the
     /// one thing a generation-scoped catalogue exists to prevent.
     fn instructions(&self) -> &[McpServerInstructions];
+
+    /// Every server in this capture, in ascending name order, whether or not
+    /// it described itself.
+    fn server_names(&self) -> Vec<String>;
 }
 
 /// A type-erased strong pin for one exact immutable MCP registry capture.
@@ -123,6 +127,10 @@ impl McpCaptureAuthority {
 
     pub fn instructions(&self) -> &[McpServerInstructions] {
         self.pin.instructions()
+    }
+
+    pub fn server_names(&self) -> Vec<String> {
+        self.pin.server_names()
     }
 }
 

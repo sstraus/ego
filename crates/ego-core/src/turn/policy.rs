@@ -52,6 +52,14 @@ impl GenerationPolicySnapshot {
         self.digest.clone()
     }
 
+    pub fn workspace(&self) -> &CanonPath {
+        &self.workspace
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
     /// Copy the canonical bytes into a fresh zeroizing owner for storage.
     pub fn encode_confidential(&self) -> SecretMaterial {
         SecretMaterial::new(self.canonical.expose_secret_bytes().to_vec())

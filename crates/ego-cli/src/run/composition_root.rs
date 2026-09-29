@@ -387,6 +387,12 @@ impl CliPrepared {
             ));
         let config = TurnConfig {
             system: self.system,
+            identity: Some(AgentIdentity {
+                version: crate::build_info::VERSION.to_owned(),
+                sandbox: self.confinement.level(),
+                offline: self.confinement.offline(),
+                host: bindings.host(),
+            }),
             token_ceiling: self.effective.ceilings.tokens,
             retry: self.retry,
             fallbacks: self.fallbacks,

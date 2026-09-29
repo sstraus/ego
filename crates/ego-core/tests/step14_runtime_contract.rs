@@ -650,6 +650,7 @@ mod turn_execution_observation {
                     gate: self.gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),

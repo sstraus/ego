@@ -1236,6 +1236,7 @@ pub struct RunExecutionBindings {
     effect_tools: Option<Arc<BTreeSet<String>>>,
     human: Option<Arc<dyn HumanApprover>>,
     controls: Option<Arc<dyn crate::control::SessionControls>>,
+    host: Option<crate::turn::HostClient>,
 }
 
 impl RunExecutionBindings {
@@ -1253,7 +1254,19 @@ impl RunExecutionBindings {
             effect_tools: None,
             human: None,
             controls: None,
+            host: None,
         }
+    }
+
+    /// Attach the client that initialized this execution's connection, so the
+    /// model can be told which host it serves.
+    pub fn with_host(mut self, host: crate::turn::HostClient) -> Self {
+        self.host = Some(host);
+        self
+    }
+
+    pub fn host(&self) -> Option<crate::turn::HostClient> {
+        self.host.clone()
     }
 
     /// Attach the human permission seat this execution context owns.

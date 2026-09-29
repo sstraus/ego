@@ -1724,6 +1724,7 @@ mod turn {
             gate: gate.clone(),
             config: TurnConfig {
                 system,
+                identity: None,
                 token_ceiling,
                 retry: 0,
                 fallbacks: Vec::new(),
@@ -6272,6 +6273,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -6509,6 +6511,7 @@ mod turn {
                 gate: fx.gate.borrow().clone(),
                 config: TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: Vec::new(),
@@ -6799,6 +6802,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -6925,6 +6929,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -6986,6 +6991,7 @@ mod turn {
                         gate: gate.clone(),
                         config: TurnConfig {
                             system: None,
+                            identity: None,
                             token_ceiling: None,
                             retry: 0,
                             fallbacks: Vec::new(),
@@ -7051,6 +7057,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7140,6 +7147,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7237,6 +7245,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7313,6 +7322,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7382,6 +7392,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7462,6 +7473,7 @@ mod turn {
                         gate: gate.clone(),
                         config: TurnConfig {
                             system: None,
+                            identity: None,
                             token_ceiling: None,
                             retry: 0,
                             fallbacks: Vec::new(),
@@ -7566,6 +7578,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7681,6 +7694,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7795,6 +7809,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: vec![ModelRef(fallback_slug.to_owned())],
@@ -7822,6 +7837,88 @@ mod turn {
         /// regression case: one logical generation owns an ordered, delivery-safe
         /// retry/fallback plan. Every wire journey is fresh, but all four
         /// attempts remain attributable to the same generation.
+        /// Attack on the runtime identity: rendered once from the primary, a
+        /// fallback's request would tell the model it is a model it is not.
+        #[test]
+        fn a_fallback_generation_names_the_fallback_model_in_its_identity() {
+            let unsent = vec![
+                AiEvent::Error {
+                    message: "refused before write".to_owned(),
+                    kind: ErrorKind::Transient,
+                },
+                AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                AiEvent::Stop(StopReason::Error),
+            ];
+            let answered = vec![
+                AiEvent::TextDelta {
+                    text: "fallback answer".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ];
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile_with_carryover(
+                        "ollama/primary-model",
+                        unsent,
+                        &trace,
+                        ReasoningCarryover::Portable,
+                        None,
+                    )),
+                    Ok(profile_with_carryover(
+                        "openai/fallback-model",
+                        answered,
+                        &trace,
+                        ReasoningCarryover::Portable,
+                        None,
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let (_, ok, _) = run_scripted(
+                &fx,
+                SessionState::default(),
+                "which model?",
+                source,
+                TurnConfig {
+                    system: None,
+                    identity: Some(ego_core::turn::AgentIdentity {
+                        version: "0.0.0".to_owned(),
+                        sandbox: Confinement::Workspace,
+                        offline: false,
+                        host: None,
+                    }),
+                    token_ceiling: None,
+                    retry: 0,
+                    fallbacks: vec![ModelRef("openai/fallback-model".to_owned())],
+                },
+            );
+            assert!(ok, "the fallback answered");
+
+            let identities: Vec<String> = trace
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| match &request.messages.messages()[0].content[0] {
+                    ContentBlock::Text { text } => text.clone(),
+                    other => panic!("the first message is not the identity: {other:?}"),
+                })
+                .collect();
+            assert_eq!(identities.len(), 2);
+            assert!(
+                identities[0].contains("- Model: ollama/primary-model ("),
+                "{}",
+                identities[0]
+            );
+            assert!(
+                identities[1].contains("- Model: openai/fallback-model ("),
+                "{}",
+                identities[1]
+            );
+        }
+
         #[test]
         fn retry_and_fallback_are_ordered_per_candidate_and_delivery_safe() {
             let primary = "ollama/primary-model";
@@ -7888,6 +7985,7 @@ mod turn {
                 source.clone(),
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 1,
                     fallbacks: vec![fallback.clone()],
@@ -8005,6 +8103,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 1,
                     fallbacks: vec![fallback.clone()],
@@ -8050,6 +8149,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 1,
                     fallbacks: vec![fallback.clone()],
@@ -8129,6 +8229,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: vec![ModelRef(fallback.to_owned())],
@@ -8235,6 +8336,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: vec![ModelRef("openai/too-small".to_owned())],
@@ -8300,6 +8402,7 @@ mod turn {
                     source,
                     TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -8375,6 +8478,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: Vec::new(),
