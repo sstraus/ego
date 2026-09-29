@@ -121,7 +121,7 @@ use session_commands::{exported, finalize_ci_bundle, finalize_ci_error};
 use turns::{
     Driver, InteractiveStatus, RunHost, SeatApprover, Turns, last_assistant_message, run_trust,
 };
-pub use turns::{InteractiveSeat, Reads, stop_signal};
+pub use turns::{InteractiveSeat, PasteboardKind, Reads, stop_signal};
 
 use crate::budget;
 use crate::cli::{Args, ModelsArgs, Output, ResumeAnswer, SessionChoice, SessionShape, UsageError};

@@ -979,10 +979,17 @@ makes pasting a stack trace impossible. A paste arrives as one edit, never as
 keystrokes, so it is never interpreted as a slash command or a control
 sequence.
 
-εgo does not read a platform pasteboard and assigns no image semantics to
-`Ctrl+V`. Terminal text paste remains ordinary editor input. Image input uses
-the explicit, scriptable `--attach IMAGE_PATH|HTTPS_IMAGE_URL` grammar; no
-clipboard fallback or OSC 52 read path is part of the product.
+`Ctrl+V` reads the OS pasteboard: macOS `public.png`/`public.tiff`, Linux
+`wl-paste`/`xclip`, Windows `CF_DIB`. A pasteboard image, or an entire
+bracketed paste that names an existing supported image file, stages a
+removable chip and submits with the next turn through the same durable
+`--attach` path (`docs/decisions/2026-09-29-interactive-image-paste.md`).
+Escape removes the newest staged chip. Pasteboard text, and a path that is
+missing or not a supported image, remain ordinary editor text; an
+unsupported or unknown model capability refuses staging before any bytes are
+read; an oversized image is refused with its observed size. Image input also
+uses the explicit, scriptable `--attach IMAGE_PATH|HTTPS_IMAGE_URL` grammar;
+no OSC 52 read path is part of the product.
 
 ### 6.2 Availability — what ships today
 
@@ -997,13 +1004,13 @@ bounded channels.
 |---|---|---|
 | Input line, history, multiline | **yes** | reedline. Active `Ctrl+C` requests cancellation and reports it immediately. Idle `Ctrl+C` abandons the line; a second idle `Ctrl+C` within 500 ms exits. `Ctrl+D` ends it |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
-| Ctrl+V | legacy image action unavailable | M5 removes the special image placeholder; the final surface leaves text paste to the terminal/editor and uses `--attach` for images |
+| Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
 | Slash commands | **yes** | one shared 24-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
 | Ctrl-S drafts, prompt queue, steering | **yes** | exact LIFO drafts, durable FIFO busy input, safe-boundary steering, expedited Esc delivery, replay, and exit accounting |
 | Model/question menus and status line | **yes** | the shared model picker, typed question path, and width-aware status projection are live |
-| `--attach` | **yes** | §3.1's durable image path; no pasteboard spelling is required |
+| `--attach` | **yes** | §3.1's durable image path; interactive `Ctrl+V` and bracketed image paths use the same admission and blob commit |
 | OSC 133 A (prompt mark), OSC 7 (cwd) | excluded | not part of the final M5 terminal contract. `ego run` retains 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
 
 ### 6.3 Live composer, drafts, queue, and steering

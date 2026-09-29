@@ -15,7 +15,7 @@ use reedline::{KeyCode, KeyModifiers};
 pub(super) enum Intercept {
     /// Not ours. The editor's own keymap decides, and ego never sees it.
     Editor,
-    /// The pasteboard image this build has nowhere to put.
+    /// `Ctrl+V`: inspect the OS pasteboard and stage its image, or insert its text.
     ClipboardImage,
     /// Save or restore one exact composer draft.
     Draft,
