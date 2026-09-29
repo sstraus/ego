@@ -196,6 +196,7 @@ fn materialize_admissions(
                 let material = match server {
                     McpServerConfig::Stdio(_) => McpTransportMaterial::stdio(Vec::new()),
                     McpServerConfig::Http(_) => McpTransportMaterial::http(Vec::new()),
+                    McpServerConfig::Acp { .. } => McpTransportMaterial::acp(),
                 };
                 Some((
                     Arc::new(

@@ -9,7 +9,8 @@
     },
     "mcpCapabilities": {
       "http": true,
-      "sse": false
+      "sse": false,
+      "acp": true
     },
     "sessionCapabilities": {
       "list": {},
