@@ -48,10 +48,14 @@ fn layer(source: Source, text: &str) -> Sourced<ConfigLayer> {
 }
 
 fn exec_plan() -> Plan {
+    exec_plan_with_timeout(1000)
+}
+
+fn exec_plan_with_timeout(timeout_ms: u64) -> Plan {
     let arguments = serde_json::json!({
         "argv": ECHO_ARGV,
         "cwd": null,
-        "timeout_ms": 1000,
+        "timeout_ms": timeout_ms,
     });
     Plan {
         completions: vec![
@@ -531,7 +535,9 @@ fn linux_landlock_hidden_current_exe_helper_runs_before_clap_and_provider() {
 
 #[test]
 fn cli_offline_refuses_even_when_filesystem_sandbox_is_off() {
-    let stub = Stub::start(exec_plan());
+    // Offline capability measurement dominates this test's wall time. Give
+    // the subsequent echo room for host load without changing its authority.
+    let stub = Stub::start(exec_plan_with_timeout(5000));
     let finished = Ego::against(&stub)
         .args([
             "--model",
@@ -566,7 +572,8 @@ fn cli_offline_refuses_even_when_filesystem_sandbox_is_off() {
         }
         Some(event) => {
             panic!(
-                "a missing offline capability must refuse before the provider/tool event: {event}"
+                "a missing offline capability must refuse before the provider/tool event: {event}; stderr: {}",
+                finished.stderr
             );
         }
         None => {
