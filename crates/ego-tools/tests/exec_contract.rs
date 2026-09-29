@@ -1289,7 +1289,7 @@ fn linux_target_argv_must_name_an_exact_executable_file() {
         return;
     };
 
-    let fixture_dir = tempfile::tempdir_in(&root).expect("target fixture directory");
+    let fixture_dir = tempfile::tempdir_in(root.as_path()).expect("target fixture directory");
     let non_executable = fixture_dir.path().join("not-executable");
     std::fs::write(&non_executable, b"not a program").expect("target fixture");
     let directory = fixture_dir.path().join("directory-target");
