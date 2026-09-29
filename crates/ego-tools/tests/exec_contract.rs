@@ -686,6 +686,90 @@ fn __ego_internal_network_probe_v1() {
     assert!(delivered, "the probe child could not deliver its sentinel");
 }
 
+/// A libtest host handed the Landlock helper envelope runs the helper and
+/// nothing else.
+///
+/// The old envelope reached libtest as test-name filters, so a helper child
+/// ran the real tests matching `workspace`, each of which spawned more helper
+/// children: an unbounded re-exec storm that outlived the test run. Here the
+/// helper refuses a malformed protocol before any effect, so the child must
+/// exit at once, after selecting exactly one test, with the production
+/// refusal on stderr. A deadline bounds the child in case it regresses.
+///
+/// The envelope is spelled out because the builder is private to
+/// `landlock.rs`; `the_helper_envelope_is_the_one_both_hosts_dispatch` pins
+/// the builder to the same words.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_libtest_host_runs_only_the_landlock_helper_for_its_envelope() {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(std::env::current_exe().expect("the test executable"))
+        .args(["--ignored", "--exact", "__ego_internal_landlock_exec_v1"])
+        .args(["--nocapture", "--", "not-a-level"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the helper child runs");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("helper child status") {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the helper child did not exit: libtest ran more than the helper");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout pipe")
+        .read_to_string(&mut stdout)
+        .expect("helper stdout");
+    child
+        .stderr
+        .take()
+        .expect("stderr pipe")
+        .read_to_string(&mut stderr)
+        .expect("helper stderr");
+
+    assert!(!status.success(), "a refused helper must fail: {stdout}");
+    assert!(
+        stdout.contains("running 1 test\n"),
+        "libtest must select only the helper: {stdout}"
+    );
+    assert!(
+        stderr.contains("ego Landlock helper refused execution"),
+        "the production dispatcher must claim the envelope: {stderr}"
+    );
+}
+
+/// The Linux Landlock helper, hosted by libtest.
+///
+/// The backend re-execs `current_exe()` with its private envelope. Inside a
+/// test binary that executable is libtest, so without this the protocol was
+/// parsed as test-name filters: the child ran whichever real tests matched,
+/// and every confined probe timed out instead of running `cat` or `touch`.
+/// The body calls the production dispatcher, so the confinement these tests
+/// measure is the one a real run installs. Success never returns: the helper
+/// replaces this process with the confined target.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "hosts the Landlock helper; not a test of its own"]
+fn __ego_internal_landlock_exec_v1() {
+    let refused = ego_tools::exec::dispatch_landlock_helper(std::env::args_os())
+        .expect("libtest was handed the helper envelope but did not recognise it");
+    // A refusal exits non-zero, which is what the paired probe looks for.
+    panic!("the Landlock helper refused execution: {refused:?}");
+}
+
 #[test]
 fn guarded_exec_runs_the_exact_argv_without_reparse_or_mutation() {
     let workspace = cwd();
