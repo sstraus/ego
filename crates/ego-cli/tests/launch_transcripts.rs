@@ -91,7 +91,14 @@ fn readable(raw: &str) -> String {
         while let Some(rest) = line.strip_prefix("> ").or_else(|| line.strip_prefix("… ")) {
             line = rest.to_owned();
         }
-        let mut line = undouble(line.trim());
+        // The fixed `hello` fixture may carry its prompt twice across one
+        // cursor redraw. Do not collapse arbitrary answer text like `A> A`.
+        let line = if line.trim() == "hello> hello" {
+            "hello"
+        } else {
+            line.trim()
+        };
+        let mut line = undouble(line);
         let mut repainted_modal = false;
         if line.starts_with("Trust project files")
             && let Some((_, redrawn_banner)) = line.split_once(" ego ")
@@ -114,7 +121,7 @@ fn readable(raw: &str) -> String {
         }
         // A bare marker is a prompt this harness happened to catch mid-draw,
         // with nothing typed into it yet.
-        if line == ">" || line == "…" || is_prompt_repaint(&line) {
+        if line == ">" || line == "…" || is_prompt_repaint(&line) || is_thinking_repaint(&line) {
             continue;
         }
         if line.is_empty() || lines.last().is_some_and(|last| *last == line) {
@@ -136,9 +143,20 @@ fn readable(raw: &str) -> String {
 
 fn is_prompt_repaint(line: &str) -> bool {
     line.replace("working — Esc cancels |", "")
+        .replace("Esc cancels |", "")
         .replace('>', "")
         .trim()
         .is_empty()
+}
+
+fn is_thinking_repaint(line: &str) -> bool {
+    let Some((frame, elapsed)) = line.split_once(" thinking for ") else {
+        return false;
+    };
+    ["◐", "◓", "◑", "◒"].contains(&frame)
+        && elapsed
+            .strip_suffix("s — Esc cancels")
+            .is_some_and(|seconds| seconds.parse::<u64>().is_ok())
 }
 
 /// Drop a repaint that landed on the same line as the draw it replaced.
@@ -213,6 +231,19 @@ fn readable_discards_status_prompt_repaints_but_keeps_transcript_rows() {
     let raw = "\x1b]0;C:\\ego.exe\x07Trust files? [y/N]\r\nTrust files? [y/N] yes\r\nhello\r\nworking — Esc cancels | > working — Esc cancels | >\r\nanswer\r\n> ";
 
     assert_eq!(readable(raw), "Trust files? [y/N] yes\nhello\nanswer\n");
+}
+
+#[test]
+fn readable_discards_reply_row_repaints_but_keeps_the_answer() {
+    // The real PTY stream after the reply-row change redraws an echoed prompt,
+    // a timed thinking row, and a busy composer before the answer arrives.
+    let raw = "hello> hello\r\n◐ thinking for 0s — Esc cancels\r\n◓ thinking for 1s — Esc cancels\r\nEsc cancels | >\r\na launch transcript\r\n";
+    assert_eq!(readable(raw), "hello\na launch transcript\n");
+}
+
+#[test]
+fn readable_keeps_answer_text_that_looks_like_a_prompt_echo() {
+    assert_eq!(readable("hello\r\nA> A\r\n"), "hello\nA> A\n");
 }
 
 #[test]
