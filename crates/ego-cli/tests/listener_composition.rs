@@ -264,8 +264,33 @@ struct SessionClient {
 
 impl ConnectTo<Agent> for SessionClient {
     async fn connect_to(self, agent: impl ConnectTo<Client>) -> Result<(), Error> {
+        let options = Arc::clone(&self.options);
+        let update_session = Arc::new(Mutex::new(None::<String>));
+        let update_session_for_handler = Arc::clone(&update_session);
+        let update_ready = Arc::new(Notify::new());
+        let update_ready_for_handler = Arc::clone(&update_ready);
         Client
             .builder()
+            .on_receive_notification(
+                async move |notification: v1::SessionNotification, _cx| {
+                    if let v1::SessionUpdate::ConfigOptionUpdate(update) = notification.update
+                        && update
+                            .config_options
+                            .iter()
+                            .any(|option| option.id.0.as_ref() == "sandbox")
+                    {
+                        *options.lock().expect("session options mutex") =
+                            Some(update.config_options);
+                        *update_session_for_handler
+                            .lock()
+                            .expect("update session mutex") =
+                            Some(notification.session_id.to_string());
+                        update_ready_for_handler.notify_one();
+                    }
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
             .connect_with(agent, async move |connection| {
                 let initialized = connection
                     .send_request(
@@ -279,8 +304,20 @@ impl ConnectTo<Agent> for SessionClient {
                     .send_request(v1::NewSessionRequest::new(self.workspace))
                     .block_task()
                     .await?;
-                *self.options.lock().expect("session options mutex") =
-                    Some(session.config_options.unwrap_or_default());
+                let session_id = session.session_id.to_string();
+                tokio::time::timeout(Duration::from_secs(45), update_ready.notified())
+                    .await
+                    .map_err(|_| {
+                        Error::internal_error().data("measured ACP config update did not arrive")
+                    })?;
+                if update_session
+                    .lock()
+                    .expect("update session mutex")
+                    .as_deref()
+                    != Some(session_id.as_str())
+                {
+                    return Err(Error::internal_error().data("config update named another session"));
+                }
                 self.ready.notify_one();
                 Ok(())
             })
