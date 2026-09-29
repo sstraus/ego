@@ -956,14 +956,14 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     if listener.is_some() {
         let policy = RunConfinement::new(ceiling, false, CanonPath::new(root.as_path()))
             .expect("the resolved ACP process root is absolute");
-        reporter.report(
-            RunEffectPorts::diagnostic_capabilities(
-                &policy,
-                mcp_cancel.clone(),
-                ExecLimits::default(),
-            )
-            .await,
-        );
+        let reporter = Arc::clone(&reporter);
+        let cancel = mcp_cancel.clone();
+        tokio::spawn(async move {
+            reporter.report(
+                RunEffectPorts::diagnostic_capabilities(&policy, cancel, ExecLimits::default())
+                    .await,
+            );
+        });
     }
 
     let control_port: Arc<dyn SessionControls> = controls.clone();
