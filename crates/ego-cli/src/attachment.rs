@@ -229,7 +229,7 @@ fn commit_staged(staged: Vec<Staged>) -> Result<Vec<ImageRef>, UsageError> {
     Ok(references)
 }
 
-fn supported_limits<'a>(
+pub(crate) fn supported_limits<'a>(
     capabilities: &'a ModelCapabilities,
     profile: &str,
     resolved_model: &str,
@@ -504,7 +504,7 @@ fn append_bounded(
     Ok(())
 }
 
-fn media_type(bytes: &[u8]) -> Option<ImageMediaType> {
+pub(crate) fn media_type(bytes: &[u8]) -> Option<ImageMediaType> {
     if bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]) {
         Some(ImageMediaType::Png)
     } else if bytes.starts_with(&[0xff, 0xd8]) {

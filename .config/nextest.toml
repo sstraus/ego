@@ -1,0 +1,10 @@
+[test-groups]
+# The real macOS general pasteboard is one machine-wide resource. nextest
+# runs each test as its own process, so an in-process lock cannot serialize
+# them; only a nextest test group can. Without this, one `#[ignore]`d
+# clipboard test's `setData_forType` races another's `clearContents`.
+macos-clipboard = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(image_paste_clipboard)'
+test-group = 'macos-clipboard'

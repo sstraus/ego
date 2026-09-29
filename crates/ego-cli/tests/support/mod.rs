@@ -33,6 +33,35 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{NativePtySystem, PtySize, PtySystem};
 
+pub const PNG_1X1: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
+    0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240, 31, 0,
+    5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
+pub const READS_PICTURES: &str = r#"image_input = { kind = "supported", accepted_media_types = ["png"], max_images = 4, max_bytes_per_image = 65536, max_total_bytes = 65536, max_width = 16384, max_height = 16384, max_pixels = 100000000 }"#;
+pub const READS_NO_PICTURES: &str = r#"image_input = "unsupported""#;
+
+pub fn vision_model_facts(image_input: &str) -> String {
+    format!(
+        r#"
+[model."anthropic/fixture-vision".capabilities]
+schema_version = 5
+max_context_tokens = 128000
+max_output_tokens = 4096
+max_tools = 16
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = "any"
+default_reasoning_effort = "off"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+{image_input}
+"#
+    )
+}
+
 // ACP measures every offered confinement twice before announcing options.
 // Under the parallel workspace suite, that work has exceeded 45 seconds.
 pub const ACP_MEASURED_OPTIONS_DEADLINE: Duration = Duration::from_secs(180);
