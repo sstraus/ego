@@ -14,7 +14,7 @@
 
 mod support;
 
-use support::{Ego, Plan, Stub, text};
+use support::{Ego, Plan, READS_NO_PICTURES, READS_PICTURES, Stub, text};
 
 fn persisted_probe(ego: &Ego, answered: &serde_json::Value) -> String {
     let Some(message) = answered["error"]["message"].as_str() else {
@@ -63,37 +63,8 @@ fn persisted_probe(ego: &Ego, answered: &serde_json::Value) -> String {
     )
 }
 
-/// The 1×1 PNG the attachment tests use, so both paths are measured on one
-/// fixture rather than on two pictures that could differ in what they prove.
-const PNG_1X1: &[u8] = &[
-    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
-    0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240, 31, 0,
-    5, 0, 1, 255, 137, 153, 61, 29, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-];
-
-/// The `image_input` fact that admits this PNG, and the one that admits none.
-const READS_PICTURES: &str = r#"image_input = { kind = "supported", accepted_media_types = ["png"], max_images = 4, max_bytes_per_image = 65536, max_total_bytes = 65536, max_width = 16384, max_height = 16384, max_pixels = 100000000 }"#;
-const READS_NO_PICTURES: &str = r#"image_input = "unsupported""#;
-
-fn facts(image_input: &str) -> String {
-    format!(
-        r#"
-[model."anthropic/fixture-vision".capabilities]
-schema_version = 5
-max_context_tokens = 128000
-max_output_tokens = 4096
-max_tools = 16
-supports_parallel_tool_calls = false
-reasoning_carryover = "unsupported"
-reasoning_efforts = "any"
-default_reasoning_effort = "off"
-cancel = "cooperative"
-cache = "none"
-transport = "sse"
-{image_input}
-"#
-    )
-}
+/// The 1×1 PNG used by the other attachment tests too.
+const PNG_1X1: &[u8] = support::PNG_1X1;
 
 /// Base64, written out rather than pulled in as a dependency of `ego-cli`.
 ///
@@ -131,7 +102,7 @@ struct Host(support::AcpHost);
 impl Host {
     fn start(stub: &Stub, image_input: &str) -> (Self, Ego) {
         let ego = Ego::against(stub);
-        ego.home_file("models.toml", &facts(image_input));
+        ego.home_file("models.toml", &support::vision_model_facts(image_input));
         ego.home_file(
             "config.toml",
             "model = \"anthropic/fixture-vision\"\nsandbox = \"off\"\n",

@@ -34,7 +34,10 @@ use super::status::{
     SurfaceSnapshot,
 };
 use super::surface::InteractivePainter;
-use super::{BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, answer};
+use super::{
+    BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, PASTE_PATH_COMMAND,
+    REMOVE_PASTE_IMAGE_COMMAND, answer,
+};
 use crate::cli::{managed_rule, managed_rule_effect, managed_rule_id};
 use crate::model::{GenerationSelection, GenerationSelectionSnapshot};
 use crate::model_picker::{
@@ -365,6 +368,7 @@ struct SurfaceStatus {
     activity_since: Option<Instant>,
     reply_started: Arc<AtomicBool>,
     notice: Option<String>,
+    image_chips: Vec<String>,
     origin: InputOrigin,
     native_status: bool,
     width: usize,
@@ -403,6 +407,7 @@ impl Default for SurfaceStatus {
             activity_since: None,
             reply_started: Arc::new(AtomicBool::new(false)),
             notice: None,
+            image_chips: Vec::new(),
             origin: InputOrigin::Typed,
             native_status: false,
             width: 0,
@@ -737,6 +742,9 @@ impl SurfaceOutput {
 }
 
 enum Control {
+    InsertPasteText {
+        text: String,
+    },
     Activate {
         session: SessionId,
     },
@@ -1227,6 +1235,23 @@ impl Seat {
         repaint_status(&live.status);
     }
 
+    pub(crate) fn set_image_chips(&self, chips: Vec<String>) {
+        let SeatKind::Live(live) = &self.kind else {
+            return;
+        };
+        live.status.lock().expect("surface status lock").image_chips = chips;
+        repaint_status(&live.status);
+    }
+
+    fn insert_paste_text(&self, text: String) {
+        let SeatKind::Live(live) = &self.kind else {
+            return;
+        };
+        if live.control.send(Control::InsertPasteText { text }).is_ok() {
+            live.wake_owner();
+        }
+    }
+
     /// Activate native status after session, selection and config are known.
     pub fn configure_status(&self, setup: StatusSetup) {
         let SeatKind::Live(live) = &self.kind else {
@@ -1417,6 +1442,29 @@ impl crate::run::Reads for Seat {
 }
 
 impl crate::run::InteractiveSeat for Seat {
+    fn pasteboard_kind(&self) -> Result<crate::run::PasteboardKind, String> {
+        super::clipboard::kind()
+    }
+
+    fn pasteboard_image(&self, max_bytes: u64) -> Result<Vec<u8>, String> {
+        super::clipboard::image(max_bytes)
+    }
+
+    fn pasteboard_text(&self) -> Result<String, String> {
+        super::clipboard::text()
+    }
+
+    fn insert_paste_text(&self, text: String) {
+        Seat::insert_paste_text(self, text);
+    }
+    fn set_image_chips(&self, chips: Vec<String>) {
+        Seat::set_image_chips(self, chips);
+    }
+
+    fn set_notice(&self, notice: String) {
+        Seat::set_notice(self, notice);
+    }
+
     fn has_human(&self) -> bool {
         self.terminal
     }

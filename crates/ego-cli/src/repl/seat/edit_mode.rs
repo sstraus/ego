@@ -68,7 +68,21 @@ impl EditMode for SurfaceEditMode {
         }
 
         match &raw {
-            Event::Paste(_) if !picker_open && !question_selector_open => {
+            Event::Paste(text) if !picker_open && !question_selector_open => {
+                let path = std::path::Path::new(text);
+                let image_extension = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        ["png", "jpg", "jpeg", "gif", "webp"]
+                            .iter()
+                            .any(|image| extension.eq_ignore_ascii_case(image))
+                    });
+                if image_extension && path.is_file() {
+                    return ReedlineEvent::ExecuteHostCommand(format!(
+                        "{PASTE_PATH_COMMAND}{text}"
+                    ));
+                }
                 self.status.lock().expect("surface status lock").origin =
                     InputOrigin::BracketedPaste;
             }
@@ -155,6 +169,18 @@ impl EditMode for SurfaceEditMode {
         }
 
         if let Event::Key(key) = &raw {
+            if self.phase.get() == EditPhase::Idle
+                && key.code == KeyCode::Esc
+                && key.modifiers.is_empty()
+                && !self
+                    .status
+                    .lock()
+                    .expect("surface status lock")
+                    .image_chips
+                    .is_empty()
+            {
+                return ReedlineEvent::ExecuteHostCommand(REMOVE_PASTE_IMAGE_COMMAND.to_owned());
+            }
             if self.phase.get() == EditPhase::Modal
                 && key.code == reedline::KeyCode::Esc
                 && key.modifiers.is_empty()

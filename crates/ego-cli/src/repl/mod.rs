@@ -4,6 +4,7 @@
 //! Rendered rows enter through Reedline's bounded external printer, so editing
 //! and transcript output stay live without creating a second terminal writer.
 
+mod clipboard;
 mod keys;
 mod seat;
 
@@ -27,25 +28,12 @@ use policy_controls::PolicyControlRequest;
 
 use reedline::Signal;
 
-/// Why `Ctrl+V` cannot do what `CLI.md` §6.1 says it will.
-///
-/// §6.1 says `Ctrl+V` asks the platform pasteboard for an image first and text
-/// second. The image half has nowhere to go: it is the same gap that refuses
-/// `--attach` in [`crate::cli`], so both close on the same day and this text
-/// says so rather than making the reader find that out.
-///
-/// It refuses instead of quietly pasting text, because a key that silently
-/// does something other than what the document promises cannot be discovered,
-/// and one that refuses by name can.
-pub const CLIPBOARD_IMAGE_WAITING_ON: &str = "a non-text content block — the \
-     same gap that refuses `--attach`. The conversation model carries text, \
-     tool calls and tool results, so an image read from the pasteboard has no \
-     representation to be sent in. Name the file instead, once `--attach` \
-     lands";
-
 pub(super) const DRAFT_COMMAND: &str = "ego:draft";
 pub(super) const BUSY_SUBMIT_COMMAND: &str = "ego:busy-submit";
 pub(super) const INTERRUPT_COMMAND: &str = "ego:interrupt";
+pub(super) const PASTE_PATH_COMMAND: &str = "ego:paste-path:";
+pub(super) const REMOVE_PASTE_IMAGE_COMMAND: &str = "ego:remove-paste-image";
+pub(super) const CLIPBOARD_PASTE_COMMAND: &str = "ego:clipboard-paste";
 
 /// A non-prompt editor event addressed to the interactive host.
 ///
@@ -73,6 +61,9 @@ pub enum HostCommand {
     ModelPicker(String),
     QuestionSelector(String),
     PermissionDecision(String),
+    PastePath(String),
+    RemovePasteImage,
+    ClipboardPaste,
 }
 
 impl HostCommand {
@@ -91,6 +82,15 @@ impl HostCommand {
         }
         if command == seat::MODAL_ESCAPE_COMMAND {
             return Some(Self::ModalEscape);
+        }
+        if let Some(path) = command.strip_prefix(PASTE_PATH_COMMAND) {
+            return Some(Self::PastePath(path.to_owned()));
+        }
+        if command == REMOVE_PASTE_IMAGE_COMMAND {
+            return Some(Self::RemovePasteImage);
+        }
+        if command == CLIPBOARD_PASTE_COMMAND {
+            return Some(Self::ClipboardPaste);
         }
         if let Some(name) = command.strip_prefix(seat::ACTION_COMMAND) {
             return actions::ActionRegistry::final_surface()
@@ -162,7 +162,7 @@ impl Line {
 /// half-written prompt as though Enter had been pressed.
 fn answer(asked_for_image: bool, signal: std::io::Result<Signal>) -> Line {
     if asked_for_image {
-        return Line::Refused(CLIPBOARD_IMAGE_WAITING_ON);
+        return Line::HostCommand(HostCommand::ClipboardPaste);
     }
     match signal {
         Ok(signal) => Line::of(signal),
@@ -256,8 +256,8 @@ mod tests {
         let half_written = Ok(Signal::Success("explain this err".to_string()));
 
         match answer(true, half_written) {
-            Line::Refused(why) => assert_eq!(why, CLIPBOARD_IMAGE_WAITING_ON),
-            other => panic!("Ctrl+V must refuse and submit nothing, not {other:?}"),
+            Line::HostCommand(HostCommand::ClipboardPaste) => {}
+            other => panic!("Ctrl+V must request paste without submitting, not {other:?}"),
         }
     }
 

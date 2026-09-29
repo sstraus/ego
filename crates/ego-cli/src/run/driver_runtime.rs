@@ -2,6 +2,45 @@
 
 use super::*;
 
+enum StagedPasteSource {
+    Path(String),
+    Inline(Image),
+}
+
+struct StagedPasteImage {
+    label: String,
+    source: StagedPasteSource,
+}
+
+async fn paste_image_limits(
+    source: &Arc<model::CliGenerationModelSource>,
+    confinement: &RunConfinement,
+    evidence: &SessionEvidenceStore,
+    run_deadline: Option<std::time::Instant>,
+) -> Result<ego_core::generator::capabilities::ImageLimits, String> {
+    let paste_cancel = CancelToken::new();
+    let (ports, _, _) = effect_scope(confinement, evidence, &paste_cancel, run_deadline)
+        .await
+        .map_err(|error| format!("image paste could not check the model: {error:?}"))?;
+    let http = Arc::new(ProviderHttpAdapter::new(ports)) as Arc<dyn ego_ai::http::Http>;
+    let profile = source
+        .bind(http, paste_cancel, run_deadline)
+        .resolve(GenerationModelRequest::new(GenerationRole::Main))
+        .await
+        .map_err(|error| format!("image paste could not resolve the model: {error}"))?;
+    attachment::supported_limits(
+        &profile.capabilities,
+        profile.identity.0.as_str(),
+        &profile.request_model,
+    )
+    .cloned()
+    .map_err(|error| error.to_string())
+}
+
+fn paste_chips(images: &[StagedPasteImage]) -> Vec<String> {
+    images.iter().map(|image| image.label.clone()).collect()
+}
+
 pub(super) struct DriverExecution<'host, 'store, S: EventSink> {
     pub(super) args: Args,
     pub(super) cancel: CancelToken,
@@ -418,6 +457,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
             let mut resumed = resume;
             let mut pending_attachments = args.attach.clone();
+            let mut staged_images = Vec::<StagedPasteImage>::new();
             let mut epoch_start = EpochStart::Initial;
 
             // Borrow-scoped session authorities live in one lexical epoch.
@@ -643,6 +683,130 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 };
 
                                 match line {
+                                    repl::Line::HostCommand(
+                                        repl::HostCommand::RemovePasteImage,
+                                    ) => {
+                                        if staged_images.pop().is_some() {
+                                            seat.set_image_chips(paste_chips(&staged_images));
+                                        }
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::ClipboardPaste) => {
+                                        if pending_work {
+                                            seat.set_notice("image paste is unavailable while source work is pending".to_owned());
+                                            continue;
+                                        }
+                                        let kind = match seat.pasteboard_kind() {
+                                            Ok(kind) => kind,
+                                            Err(error) => {
+                                                seat.set_notice(format!(
+                                                    "pasteboard could not be inspected: {error}"
+                                                ));
+                                                continue;
+                                            }
+                                        };
+                                        match kind {
+                                            PasteboardKind::Image => {
+                                                let limits = match paste_image_limits(
+                                                    &source,
+                                                    &confinement,
+                                                    active.evidence(),
+                                                    run_deadline,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(limits) => limits,
+                                                    Err(error) => {
+                                                        seat.set_notice(error);
+                                                        continue;
+                                                    }
+                                                };
+                                                let cap = limits.max_bytes_per_image().map_or(
+                                                    ego_core::generator::types::MAX_IMAGE_BYTES,
+                                                    |limit| limit.get(),
+                                                );
+                                                let bytes = match seat.pasteboard_image(cap) {
+                                                    Ok(bytes) => bytes,
+                                                    Err(error) => {
+                                                        seat.set_notice(error);
+                                                        continue;
+                                                    }
+                                                };
+                                                let image = match Image::new(
+                                                    bytes,
+                                                    ego_core::generator::types::ImageMediaType::Png,
+                                                ) {
+                                                    Ok(image) => image,
+                                                    Err(error) => {
+                                                        seat.set_notice(format!(
+                                                            "pasteboard image is invalid: {error}"
+                                                        ));
+                                                        continue;
+                                                    }
+                                                };
+                                                staged_images.push(StagedPasteImage {
+                                                    label: "clipboard".to_owned(),
+                                                    source: StagedPasteSource::Inline(image),
+                                                });
+                                                seat.set_image_chips(paste_chips(&staged_images));
+                                            }
+                                            PasteboardKind::Text => match seat.pasteboard_text() {
+                                                Ok(text) => seat.insert_paste_text(text),
+                                                Err(error) => seat.set_notice(error),
+                                            },
+                                            PasteboardKind::Empty => seat.set_notice(
+                                                "pasteboard has no image or text".to_owned(),
+                                            ),
+                                        }
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::PastePath(path)) => {
+                                        if pending_work {
+                                            seat.set_notice("image paste is unavailable while source work is pending".to_owned());
+                                            continue;
+                                        }
+                                        let limits = match paste_image_limits(
+                                            &source,
+                                            &confinement,
+                                            active.evidence(),
+                                            run_deadline,
+                                        )
+                                        .await
+                                        {
+                                            Ok(limits) => limits,
+                                            Err(error) => {
+                                                seat.set_notice(error);
+                                                continue;
+                                            }
+                                        };
+                                        let size = match std::fs::metadata(&path) {
+                                            Ok(metadata) => metadata.len(),
+                                            Err(error) => {
+                                                seat.set_notice(format!(
+                                                    "image paste could not inspect {path}: {error}"
+                                                ));
+                                                continue;
+                                            }
+                                        };
+                                        let cap = limits.max_bytes_per_image().map_or(
+                                            ego_core::generator::types::MAX_IMAGE_BYTES,
+                                            |limit| limit.get(),
+                                        );
+                                        if size > cap {
+                                            seat.set_notice(format!("image paste is {size} bytes, above the {cap}-byte limit"));
+                                            continue;
+                                        }
+                                        let name = std::path::Path::new(&path)
+                                            .file_name()
+                                            .map(|name| name.to_string_lossy().into_owned())
+                                            .unwrap_or_else(|| path.clone());
+                                        staged_images.push(StagedPasteImage {
+                                            label: name,
+                                            source: StagedPasteSource::Path(path),
+                                        });
+                                        seat.set_image_chips(paste_chips(&staged_images));
+                                        continue;
+                                    }
                                     repl::Line::Submitted(text) => {
                                         Some(InteractiveTurnInput::Prompt(text))
                                     }
@@ -1510,17 +1674,31 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 run_deadline,
                             )
                             .await?;
+                            let inline = staged_images
+                                .iter()
+                                .filter_map(|staged| match &staged.source {
+                                    StagedPasteSource::Inline(image) => Some(image.clone()),
+                                    StagedPasteSource::Path(_) => None,
+                                })
+                                .collect::<Vec<_>>();
+                            let specs = pending_attachments
+                                .iter()
+                                .cloned()
+                                .chain(staged_images.iter().filter_map(
+                                    |staged| match &staged.source {
+                                        StagedPasteSource::Path(path) => Some(path.clone()),
+                                        StagedPasteSource::Inline(_) => None,
+                                    },
+                                ))
+                                .collect::<Vec<_>>();
                             let images =
                                 if matches!(asked.as_ref(), Some(InteractiveTurnInput::Prompt(_)))
-                                    && !pending_attachments.is_empty()
+                                    && (!inline.is_empty() || !specs.is_empty())
                                 {
                                     let images = acquire_attachments(
                                         Attachments {
-                                            // The interactive surface attaches
-                                            // by spec; a typed prompt carries
-                                            // no inline bytes of its own.
-                                            inline: &[],
-                                            specs: &pending_attachments,
+                                            inline: &inline,
+                                            specs: &specs,
                                         },
                                         &source,
                                         &ports,
@@ -1531,6 +1709,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     )
                                     .await?;
                                     pending_attachments.clear();
+                                    staged_images.clear();
+                                    seat.set_image_chips(Vec::new());
                                     images
                                 } else {
                                     Vec::new()

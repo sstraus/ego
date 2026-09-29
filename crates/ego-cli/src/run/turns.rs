@@ -88,6 +88,13 @@ pub trait Reads {
     fn read(&self) -> repl::Line;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteboardKind {
+    Image,
+    Text,
+    Empty,
+}
+
 /// The two explicit decisions only a human-driven run may make.
 pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn has_human(&self) -> bool;
@@ -108,6 +115,18 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     ) -> crate::model_picker::PickerOutcome;
     fn busy(&self) {}
     fn idle(&self) {}
+    fn set_image_chips(&self, _chips: Vec<String>) {}
+    fn set_notice(&self, _notice: String) {}
+    fn pasteboard_kind(&self) -> Result<PasteboardKind, String> {
+        Err("OS pasteboard is unavailable".to_owned())
+    }
+    fn pasteboard_image(&self, _max_bytes: u64) -> Result<Vec<u8>, String> {
+        Err("OS pasteboard image is unavailable".to_owned())
+    }
+    fn pasteboard_text(&self) -> Result<String, String> {
+        Err("OS pasteboard text is unavailable".to_owned())
+    }
+    fn insert_paste_text(&self, _text: String) {}
     /// Hand the session-long core control endpoint to the turn coordinator.
     fn take_control(&self) -> InteractiveControl {
         let (_ingress, control) = interactive_control();

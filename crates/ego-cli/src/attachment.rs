@@ -229,7 +229,7 @@ fn commit_staged(staged: Vec<Staged>) -> Result<Vec<ImageRef>, UsageError> {
     Ok(references)
 }
 
-fn supported_limits<'a>(
+pub(crate) fn supported_limits<'a>(
     capabilities: &'a ModelCapabilities,
     profile: &str,
     resolved_model: &str,

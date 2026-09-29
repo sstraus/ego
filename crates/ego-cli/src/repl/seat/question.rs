@@ -59,6 +59,13 @@ pub(super) fn answer_control(
     control: Control,
 ) -> bool {
     let control = match control {
+        Control::InsertPasteText { text } => {
+            editor.run_edit_commands(&[EditCommand::InsertString(text)]);
+            surface.status.lock().expect("surface status lock").origin =
+                InputOrigin::BracketedPaste;
+            repaint_status(surface.status);
+            return true;
+        }
         Control::ActivateSession { target, reply } => {
             surface.drafts.activate(target);
             {
@@ -307,6 +314,9 @@ pub(super) fn answer_control(
             (Reply::Question(reply, outcome), EditPhase::Busy, true)
         }
         Control::Shutdown => return false,
+        Control::InsertPasteText { .. } => {
+            unreachable!("paste text is inserted before modal entry")
+        }
         Control::ActivateSession { .. } => unreachable!("activation is handled before modal entry"),
         Control::Activate { .. } => unreachable!("activation is handled before modal entry"),
         Control::ConfirmRemember { .. } => {
@@ -1174,6 +1184,12 @@ impl Waiting {
 
 fn status_prefix(status: &SurfaceStatus) -> String {
     let mut rows = Vec::new();
+    rows.extend(
+        status
+            .image_chips
+            .iter()
+            .map(|name| format!("[image: {name}]")),
+    );
     if !status.native_status {
         if status.queue.pending_steers > 0 {
             rows.push(QUEUE_LABEL.to_string());
