@@ -1,0 +1,239 @@
+#![cfg(unix)]
+
+mod support;
+
+use serde_json::Value;
+use support::{Ego, Plan, Reply, Stub, text, tool_call};
+
+const SERVER: &str = r#"
+import json
+import sys
+
+mode = sys.argv[1]
+definition = {
+    "name": "repo",
+    "description": "List repositories",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"action": {"type": "string", "enum": ["list"]}},
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+}
+management = [
+    {
+        "name": "search_tools",
+        "description": "Find a tool",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_tool_schema",
+        "description": "Get a tool definition",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"tool_name": {"type": "string"}},
+            "required": ["tool_name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "call_tool",
+        "description": "Call a selected tool",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {"type": "string"},
+                "arguments": {"type": "object"},
+            },
+            "required": ["tool_name", "arguments"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    method = request["method"]
+    if method == "server/discover":
+        result = {
+            "resultType": "complete",
+            "supportedVersions": ["2026-07-28"],
+            "capabilities": {"tools": {"listChanged": False}},
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "fixture", "version": "1"}},
+        }
+    elif method == "tools/list":
+        result = {
+            "resultType": "complete",
+            "tools": management,
+            "nextCursor": None,
+            "ttlMs": 0,
+            "cacheScope": "private",
+        }
+    elif method == "tools/call":
+        operation = request["params"]["name"]
+        assert request["params"]["arguments"]["tool_name"] == "repo"
+        result = {"resultType": "complete", "isError": False}
+        if operation == "call_tool":
+            assert request["params"]["arguments"]["arguments"] == {"action": "list"}
+            result["content"] = [{"type": "text", "text": "fixture-repository"}]
+        elif operation == "get_tool_schema" and mode == "text":
+            result["content"] = [{"type": "text", "text": json.dumps(definition)}]
+        elif operation == "get_tool_schema" and mode == "both":
+            result["structuredContent"] = definition
+            result["content"] = [{"type": "text", "text": "not JSON"}]
+        elif operation == "get_tool_schema" and mode == "malformed":
+            result["content"] = [{"type": "text", "text": "{broken"}]
+        elif operation == "get_tool_schema" and mode == "multiple":
+            result["content"] = [
+                {"type": "text", "text": json.dumps(definition)},
+                {"type": "text", "text": json.dumps(definition)},
+            ]
+        elif operation == "get_tool_schema" and mode == "empty":
+            result["content"] = []
+        elif operation == "get_tool_schema" and mode == "nontext":
+            result["content"] = [{"type": "image", "data": "AA==", "mimeType": "image/png"}]
+        else:
+            raise AssertionError((operation, mode))
+    else:
+        raise AssertionError(method)
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"#;
+
+fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
+    let mut completions = vec![Reply::Sse(tool_call(
+        "schema-call",
+        "get_tool_schema",
+        r#"{"tool_name":"repo"}"#,
+    ))];
+    if matches!(mode, "text" | "both") {
+        completions.push(Reply::Sse(tool_call(
+            "repo-call",
+            "call_tool",
+            r#"{"tool_name":"repo","arguments":{"action":"list"}}"#,
+        )));
+        completions.push(Reply::Sse(text("REPO-LIST-COMPLETE")));
+    } else {
+        completions.push(Reply::Sse(text("LOOKUP-REFUSED-COMPLETE")));
+    }
+    let stub = Stub::start(Plan {
+        completions,
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "yolo",
+        "--sandbox",
+        "off",
+        "--output",
+        "jsonl",
+    ]);
+    let server = ego.file("collapsed-server.py", SERVER);
+    let selector = ego.file(
+        "mcp.json",
+        &serde_json::json!({
+            "name": "fixture",
+            "transport": "stdio",
+            "command": "/usr/bin/python3",
+            "args": [server, mode],
+            "inherit_env": []
+        })
+        .to_string(),
+    );
+    let finished = ego
+        .arg("--mcp")
+        .arg(&format!("@{}", selector.display()))
+        .arg("Get the repo tool schema")
+        .run();
+    (finished, stub.generations())
+}
+
+fn offers_tool(generation: &Value, name: &str) -> bool {
+    generation["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool["function"]["name"] == name))
+}
+
+#[test]
+fn text_only_schema_lookup_publishes_the_inner_tool() {
+    let (finished, generations) = run_lookup("text");
+    assert_eq!(finished.code, Some(0), "{finished:?}");
+    assert!(
+        finished.stdout.contains("REPO-LIST-COMPLETE"),
+        "{finished:?}"
+    );
+    assert!(
+        generations
+            .first()
+            .is_some_and(|first| !offers_tool(first, "call_tool")),
+        "call_tool appeared before lookup: {generations:?}"
+    );
+    assert!(
+        generations
+            .iter()
+            .skip(1)
+            .any(|next| offers_tool(next, "call_tool")),
+        "call_tool was not published after text lookup: {generations:?}; {finished:?}"
+    );
+    assert!(
+        generations.iter().any(
+            |request| request["messages"]
+                .as_array()
+                .is_some_and(|messages| messages.iter().any(|message| {
+                    message["role"] == "tool"
+                        && message["content"]
+                            .as_str()
+                            .is_some_and(|content| content.contains("fixture-repository"))
+                }))
+        ),
+        "the inner repo call did not return its listing: {generations:?}; {finished:?}"
+    );
+}
+
+#[test]
+fn structured_schema_wins_over_invalid_text() {
+    let (finished, generations) = run_lookup("both");
+    assert_eq!(finished.code, Some(0), "{finished:?}");
+    assert!(
+        generations
+            .iter()
+            .skip(1)
+            .any(|next| offers_tool(next, "call_tool")),
+        "structured schema did not publish call_tool: {generations:?}; {finished:?}"
+    );
+}
+
+#[test]
+fn malformed_or_multiple_text_blocks_refuse_schema_publication() {
+    for mode in ["malformed", "multiple", "empty", "nontext"] {
+        let (finished, generations) = run_lookup(mode);
+        assert!(
+            generations
+                .iter()
+                .all(|next| !offers_tool(next, "call_tool")),
+            "{mode} published call_tool: {generations:?}; {finished:?}"
+        );
+        let report = format!("{generations:?}");
+        assert!(
+            report.contains("collapsed schema lookup")
+                && report.contains(match mode {
+                    "malformed" => "not valid JSON",
+                    "nontext" => "not JSON text",
+                    _ => "exactly one JSON text content block",
+                }),
+            "{mode} did not report a named protocol error: {report}"
+        );
+    }
+}
