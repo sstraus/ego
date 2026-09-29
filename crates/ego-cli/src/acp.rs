@@ -991,6 +991,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
 
     let roots = Arc::new(CanonicalRoots { base: root });
     let spawner = Arc::new(TokioExecutionSpawner);
+    let notices = ego_acp::serve::AcpNotices::default();
     let factory = move || {
         ego_acp::serve::durable_agent_with_compaction(
             Arc::clone(&controller),
@@ -1007,6 +1008,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             Some(Arc::clone(&control_port)),
             Some(Arc::clone(&confinement_port)),
             Some(Arc::clone(&trust_port)),
+            notices.clone(),
         )
     };
     let outcome = match listener {

@@ -81,6 +81,52 @@ fn tool_start_publishes_pending_then_in_progress_for_the_same_id() {
 }
 
 #[test]
+fn tool_activity_is_marked_on_creation_and_progress_without_changing_acp_fields() {
+    let updates = project_updates_v1(
+        &started("exec", r#"{"argv":["git","status"]}"#),
+        Path::new("/workspace"),
+    );
+    let created = serde_json::to_value(&updates[0]).unwrap();
+    let running = serde_json::to_value(&updates[1]).unwrap();
+    assert_eq!(created["_meta"]["ego"]["salience"], "activity");
+    assert_eq!(running["_meta"]["ego"]["salience"], "activity");
+    assert_eq!(created["sessionUpdate"], "tool_call");
+    assert_eq!(running["sessionUpdate"], "tool_call_update");
+    assert_eq!(created["toolCallId"], running["toolCallId"]);
+
+    for mut wire in [created, running] {
+        wire.as_object_mut().unwrap().remove("_meta");
+        let _: SessionUpdate = serde_json::from_value(wire)
+            .expect("a client ignoring ego metadata still reads an ACP update");
+    }
+}
+
+#[test]
+fn reasoning_and_failed_tool_completion_remain_collapsible_activity() {
+    let turn = TurnId::new();
+    let reasoning = project_v1(&PublicEvent::ItemDelta {
+        turn,
+        item: ItemId::new(),
+        kind: ItemKind::Reasoning,
+        text: "checking the repository".to_owned(),
+    })
+    .unwrap();
+    let failed_tool = project_v1(&PublicEvent::ItemCompleted {
+        turn,
+        item: ItemId::new(),
+        kind: ItemKind::Tool,
+        ok: false,
+        text: Some("exit status 1".to_owned()),
+    })
+    .unwrap();
+    for update in [reasoning, failed_tool] {
+        let wire = serde_json::to_value(update).unwrap();
+        assert_eq!(wire["_meta"]["ego"]["salience"], "activity", "{wire}");
+        assert!(wire["_meta"]["ego"].get("action").is_none());
+    }
+}
+
+#[test]
 fn reconnect_replays_the_same_tool_progress_and_absolute_location() {
     let frames = [ReplayFrame {
         event: started("read", r#"{"path":"src/main.rs"}"#),

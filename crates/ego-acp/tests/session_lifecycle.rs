@@ -7,8 +7,10 @@
 use std::future::Future;
 use std::time::Duration;
 
-use agent_client_protocol::{ConnectTo, Lines};
+use agent_client_protocol::{ConnectTo, ErrorCode, Lines};
 use agent_client_protocol_schema::ProtocolVersion;
+use ego_acp::project::{AcpNotice, NoticeAction};
+use ego_acp::serve::AcpNotices;
 use ego_core::run::RunStatus;
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
@@ -181,6 +183,140 @@ impl Connected {
         self.agent.abort();
         let _ = self.agent.await;
     }
+}
+
+#[tokio::test]
+async fn notice_published_between_prompts_reaches_the_session_as_an_acp_update() {
+    let notices = AcpNotices::default();
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router_with_notices(notices.clone()));
+    assert!(connection.initialize().await["result"].is_object());
+    let (session, _) = connection.new_session(ROOT).await;
+    let session_id = session.clone().into();
+    let card = AcpNotice {
+        id: "result-42".to_owned(),
+        text: "Worker finished: RESULT".to_owned(),
+        action: NoticeAction::OpenResult {
+            path: "/workspace/results/worker.md".into(),
+        },
+    };
+    let unknown = notices
+        .publish(&"unknown-session".into(), &card)
+        .expect_err("a notice must not be sent to a different session");
+    assert_eq!(unknown.code, ErrorCode::ResourceNotFound);
+
+    notices
+        .publish(&session_id, &card)
+        .expect("the active ACP host can receive a notice without a prompt");
+
+    let updates = connection.announced().await;
+    assert_eq!(updates.len(), 1, "exactly one notice: {updates:?}");
+    let notice = &updates[0];
+    assert_eq!(notice["method"], "session/update");
+    assert_eq!(notice["params"]["sessionId"], session);
+    assert_eq!(
+        notice["params"]["update"]["sessionUpdate"],
+        "agent_message_chunk"
+    );
+    assert_eq!(
+        notice["params"]["update"]["content"]["text"],
+        "Worker finished: RESULT"
+    );
+    assert_eq!(
+        notice["params"]["update"]["_meta"]["ego"]["salience"],
+        "card"
+    );
+    connection.finish().await;
+    let closed = notices
+        .publish(&session_id, &card)
+        .expect_err("a closed host must not be told a later notice was delivered");
+    assert_eq!(closed.code, ErrorCode::ResourceNotFound);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_notices_each_reach_the_idle_session_once() {
+    let notices = AcpNotices::default();
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router_with_notices(notices.clone()));
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let mut sends = Vec::new();
+    for id in ["notice-a", "notice-b"] {
+        let notices = notices.clone();
+        let session = session.clone().into();
+        let barrier = barrier.clone();
+        sends.push(tokio::spawn(async move {
+            barrier.wait().await;
+            notices.publish(
+                &session,
+                &AcpNotice {
+                    id: id.to_owned(),
+                    text: id.to_owned(),
+                    action: NoticeAction::Answer {
+                        question_id: id.to_owned(),
+                    },
+                },
+            )
+        }));
+    }
+    barrier.wait().await;
+    for send in sends {
+        send.await.unwrap().expect("both notices can be queued");
+    }
+    let updates = connection.announced().await;
+    let mut ids = updates
+        .iter()
+        .map(|update| update["params"]["update"]["messageId"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    assert_eq!(ids, ["notice-a", "notice-b"]);
+    connection.finish().await;
+}
+
+#[tokio::test]
+async fn old_host_closure_does_not_remove_a_resumed_hosts_notice_route() {
+    let notices = AcpNotices::default();
+    let fixture = support::DurableAcpFixture::new();
+    let mut first = Connected::new(fixture.router_with_notices(notices.clone()));
+    first.initialize().await;
+    let (session, _) = first.new_session(ROOT).await;
+
+    let mut resumed = Connected::new(fixture.router_with_notices(notices.clone()));
+    resumed.initialize().await;
+    let (answer, _) = resumed
+        .request(
+            "session/resume",
+            serde_json::json!({
+                "sessionId": session,
+                "cwd": ROOT,
+                "mcpServers": [],
+            }),
+        )
+        .await;
+    assert!(answer.get("result").is_some(), "resume failed: {answer}");
+    resumed.announced().await;
+    first.finish().await;
+
+    notices
+        .publish(
+            &session.clone().into(),
+            &AcpNotice {
+                id: "resumed-result".to_owned(),
+                text: "Result after reconnect".to_owned(),
+                action: NoticeAction::OpenResult {
+                    path: "/workspace/results/resumed.md".into(),
+                },
+            },
+        )
+        .expect("the resumed host still owns the notice route");
+    let updates = resumed.announced().await;
+    assert_eq!(updates.len(), 1, "exactly one resumed notice: {updates:?}");
+    assert_eq!(
+        updates[0]["params"]["update"]["messageId"],
+        "resumed-result"
+    );
+    resumed.finish().await;
 }
 
 fn updates(messages: &[serde_json::Value]) -> Vec<&serde_json::Value> {
