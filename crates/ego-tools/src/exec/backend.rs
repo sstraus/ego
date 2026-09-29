@@ -90,6 +90,7 @@ pub(crate) fn prefixed_command(
     });
     let mut command = match prefix.program {
         Some(wrapper) => {
+            super::identity::require_launchable(executable, spec)?;
             let mut command = Command::new(wrapper);
             command.args(prefix.args_before_target);
             command.arg(executable);
