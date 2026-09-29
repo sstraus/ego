@@ -38,6 +38,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::client::{MCP_PROTOCOL_REVISION, current_client_capabilities};
 use crate::dynamic::{McpCollapsedBootstrap, McpOperation, McpOperationFactory};
 use crate::http::AdmittedMcpHttpProfile;
 use crate::registry::{
@@ -1613,7 +1614,8 @@ impl SplitMcpHttpEffects {
         }
         if matches!(
             method,
-            "initialize"
+            "server/discover"
+                | "initialize"
                 | "notifications/initialized"
                 | "notifications/cancelled"
                 | "ping"
@@ -1637,7 +1639,7 @@ impl SplitMcpHttpEffects {
             || body.get("id").is_none()
             || body.get("method").and_then(Value::as_str)
                 != Some(self.envelope.operation().method())
-            || params != self.expected_wire_params
+            || !selected_wire_params_match(params, &self.expected_wire_params)
         {
             return Err(authority("selected MCP HTTP method or parameters changed"));
         }
@@ -1705,6 +1707,33 @@ impl SplitMcpHttpEffects {
             None => McpHttpSettlement::new(request_id, end, request.delivery),
         }
     }
+}
+
+fn selected_wire_params_match(mut actual: Value, expected: &Value) -> bool {
+    let Some(params) = actual.as_object_mut() else {
+        return false;
+    };
+    let Some(Value::Object(mut metadata)) = params.remove("_meta") else {
+        return false;
+    };
+    let Some(progress) = metadata.remove("progressToken") else {
+        return false;
+    };
+    if !progress.is_u64() && !progress.as_str().is_some_and(|value| !value.is_empty()) {
+        return false;
+    }
+    let Ok(capabilities) = serde_json::to_value(current_client_capabilities()) else {
+        return false;
+    };
+    let expected_metadata = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_REVISION,
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "ego",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "io.modelcontextprotocol/clientCapabilities": capabilities
+    });
+    Value::Object(metadata) == expected_metadata && &actual == expected
 }
 
 impl McpHttpEffects for SplitMcpHttpEffects {
@@ -2211,6 +2240,56 @@ mod stdio_fingerprint_tests {
         .expect("admission");
 
         assert!(stdio_spawn_spec(&admission, &config, Duration::from_secs(30)).is_err());
+    }
+
+    #[test]
+    fn selected_http_parameters_reject_post_permission_authority_changes() {
+        let expected = serde_json::json!({"name":"search_tools","arguments":{}});
+        let actual = serde_json::json!({
+            "name": "search_tools",
+            "arguments": {},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_REVISION,
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "ego",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "elicitation": {"form": {"schemaValidation": true}}
+                },
+                "progressToken": 7
+            }
+        });
+        assert!(selected_wire_params_match(actual.clone(), &expected));
+
+        for changed in [
+            {
+                let mut value = actual.clone();
+                value["name"] = serde_json::json!("another_tool");
+                value
+            },
+            {
+                let mut value = actual.clone();
+                value["arguments"] = serde_json::json!({"unexpected": true});
+                value
+            },
+            {
+                let mut value = actual.clone();
+                value["_meta"]["inputResponses"] = serde_json::json!({"secret": "forged"});
+                value
+            },
+            {
+                let mut value = actual.clone();
+                value["_meta"]["io.modelcontextprotocol/protocolVersion"] =
+                    serde_json::json!("2025-11-25");
+                value
+            },
+        ] {
+            assert!(
+                !selected_wire_params_match(changed.clone(), &expected),
+                "changed selected HTTP authority was accepted: {changed}"
+            );
+        }
     }
 }
 
