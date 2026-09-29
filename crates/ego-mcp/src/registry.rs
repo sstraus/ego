@@ -1484,6 +1484,33 @@ impl McpRegistryRuntime {
         max_sse_event_size: usize,
         timeout: Duration,
     ) -> Result<Self, McpRegistryError> {
+        Self::new_with_acp(
+            registry_journal,
+            continuation_journal,
+            policy_captures,
+            http_management,
+            stdio_management,
+            keys,
+            clock,
+            max_sse_event_size,
+            timeout,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_acp(
+        registry_journal: Arc<dyn McpRegistryJournal>,
+        continuation_journal: Arc<dyn ContinuationJournal>,
+        policy_captures: Arc<dyn GenerationPolicyCaptureStore>,
+        http_management: Arc<dyn McpHttpEffects>,
+        stdio_management: Arc<dyn McpDuplexEffectsFactory>,
+        keys: Arc<dyn ResumeKeySource>,
+        clock: Arc<dyn Clock>,
+        max_sse_event_size: usize,
+        timeout: Duration,
+        acp_management: Option<Arc<dyn crate::McpAcpEffects>>,
+    ) -> Result<Self, McpRegistryError> {
         if max_sse_event_size == 0 || timeout.is_zero() {
             return Err(McpRegistryError::InvalidCandidate(
                 "invalid MCP runtime limits".to_owned(),
@@ -1522,6 +1549,7 @@ impl McpRegistryRuntime {
                     schemas,
                     max_sse_event_size,
                     timeout,
+                    acp_management,
                 ));
             McpRegistryController {
                 journal: registry_journal,
@@ -2275,6 +2303,10 @@ impl StableCaptureHasher {
                     self.field("header-name", header.name().as_bytes());
                     self.field("header-value", header.value().expose_secret_bytes());
                 }
+            }
+            McpServerConfig::Acp { server_id } => {
+                self.field("transport", b"acp");
+                self.field("server-id", server_id.as_bytes());
             }
         }
         Ok(())

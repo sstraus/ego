@@ -281,6 +281,7 @@ pub struct ForeignTransportTarget(ForeignTransportKind);
 enum ForeignTransportKind {
     Http(HttpRoute),
     Stdio { server: String },
+    Acp { server: String },
 }
 
 impl ForeignTransportTarget {
@@ -297,22 +298,35 @@ impl ForeignTransportTarget {
         }))
     }
 
+    pub fn acp(server: &str) -> Result<Self, ForeignValueError> {
+        if !valid_identity_part(server) {
+            return Err(ForeignValueError::InvalidTransport);
+        }
+        Ok(Self(ForeignTransportKind::Acp {
+            server: server.to_owned(),
+        }))
+    }
+
     pub(crate) fn http_route(&self) -> Option<&HttpRoute> {
         match &self.0 {
             ForeignTransportKind::Http(route) => Some(route),
-            ForeignTransportKind::Stdio { .. } => None,
+            ForeignTransportKind::Stdio { .. } | ForeignTransportKind::Acp { .. } => None,
         }
     }
 
     pub(crate) fn into_http_route(self) -> Option<HttpRoute> {
         match self.0 {
             ForeignTransportKind::Http(route) => Some(route),
-            ForeignTransportKind::Stdio { .. } => None,
+            ForeignTransportKind::Stdio { .. } | ForeignTransportKind::Acp { .. } => None,
         }
     }
 
     pub(crate) fn is_stdio(&self) -> bool {
         matches!(&self.0, ForeignTransportKind::Stdio { .. })
+    }
+
+    pub(crate) fn is_acp(&self) -> bool {
+        matches!(&self.0, ForeignTransportKind::Acp { .. })
     }
 }
 
@@ -323,6 +337,7 @@ impl fmt::Display for ForeignTransportTarget {
                 write!(f, "{}://{}", route.scheme.as_str(), route.target)
             }
             ForeignTransportKind::Stdio { server } => write!(f, "stdio:{server}"),
+            ForeignTransportKind::Acp { server } => write!(f, "acp:{server}"),
         }
     }
 }

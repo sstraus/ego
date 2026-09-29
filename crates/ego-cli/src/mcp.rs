@@ -646,6 +646,9 @@ enum ConfigurationReport {
         auth: &'static str,
         allow_insecure_loopback: bool,
     },
+    Acp {
+        server_id: String,
+    },
 }
 
 impl ConfigurationReport {
@@ -667,6 +670,9 @@ impl ConfigurationReport {
                     McpHttpAuth::Oauth => "oauth",
                 },
                 allow_insecure_loopback: http.allow_insecure_loopback,
+            },
+            McpServerConfig::Acp { server_id } => Self::Acp {
+                server_id: server_id.clone(),
             },
         }
     }

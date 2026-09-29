@@ -150,7 +150,8 @@ pub(super) async fn drive_headless_turn(
         ports.resolver_handle(),
         ports.one_hop_handle(),
         ports.duplex_handle(),
-    );
+    )
+    .with_cancel(cancel.clone());
     let hook_policy = match recovered_policy.as_ref() {
         Some(policy) => Arc::clone(policy),
         None => policy_source

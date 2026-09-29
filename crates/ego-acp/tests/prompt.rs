@@ -294,6 +294,7 @@ impl McpSessionAdmitter for NoMcpAdmitter {
     fn admit(
         &self,
         _servers: Vec<v1::McpServer>,
+        _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
         Box::pin(future::ready(Ok(None)))
@@ -414,6 +415,7 @@ impl McpSessionAdmitter for RecordingMcpAdmitter {
     fn admit(
         &self,
         servers: Vec<v1::McpServer>,
+        _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
         self.requests
@@ -436,6 +438,7 @@ impl McpSessionAdmitter for FailingMcpAdmitter {
     fn admit(
         &self,
         _servers: Vec<v1::McpServer>,
+        _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
         Box::pin(future::ready(Err(McpSessionAdmissionError::new(
@@ -1714,6 +1717,45 @@ async fn a_session_accepts_another_prompt_once_its_turn_has_ended() {
 /// The server must not advertise capabilities that this request did not
 /// implement merely because the host supplied an MCP entry.
 #[tokio::test]
+async fn acp_mcp_server_is_advertised_and_admitted_from_session_new() {
+    let admitter = RecordingMcpAdmitter::default();
+    let mut connection = Connected::to_with_admitter(
+        PromptExecutor::publishing(),
+        Arc::new(admitter.clone()) as Arc<dyn McpSessionAdmitter>,
+    );
+    let (initialized, _) = connection
+        .request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": ProtocolVersion::V1.as_u16(),
+                "clientCapabilities": {},
+            }),
+        )
+        .await;
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["mcpCapabilities"]["acp"], true,
+        "the host needs the ACP MCP capability before sending its server"
+    );
+
+    let (opened, _) = connection
+        .request(
+            "session/new",
+            serde_json::json!({
+                "cwd": WORKSPACE,
+                "mcpServers": [{
+                    "type": "acp",
+                    "name": "tuicommander",
+                    "serverId": "tuicommander"
+                }]
+            }),
+        )
+        .await;
+    assert!(opened["result"]["sessionId"].is_string(), "{opened}");
+    assert_eq!(admitter.requests().len(), 1);
+    connection.finish().await;
+}
+
+#[tokio::test]
 async fn session_new_accepts_mcp_servers_without_advertising_unsupported_capabilities() {
     let mut connection = Connected::to_with_admitter(
         PromptExecutor::publishing(),
@@ -1758,10 +1800,7 @@ async fn session_new_accepts_mcp_servers_without_advertising_unsupported_capabil
         .expect("MCP capabilities object");
     assert_eq!(mcp.get("http"), Some(&serde_json::json!(true)));
     assert_eq!(mcp.get("sse"), Some(&serde_json::json!(false)));
-    assert!(
-        !mcp.contains_key("acp"),
-        "ACP-over-MCP capability is unsupported"
-    );
+    assert_eq!(mcp.get("acp"), Some(&serde_json::json!(true)));
     assert_eq!(
         capabilities.get("loadSession"),
         Some(&serde_json::json!(false))

@@ -787,7 +787,7 @@ pub(super) fn admit_mcp_transports(
                     "MCP stdio server `{name}` is unavailable under --offline"
                 )));
             }
-            McpServerConfig::Http(_) | McpServerConfig::Stdio(_) => {}
+            McpServerConfig::Http(_) | McpServerConfig::Stdio(_) | McpServerConfig::Acp { .. } => {}
         }
     }
     Ok(())

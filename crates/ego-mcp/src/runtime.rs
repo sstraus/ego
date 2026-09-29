@@ -6,14 +6,15 @@ use std::time::{Duration, Instant};
 use ego_core::config::McpServerConfig;
 use sha2::{Digest, Sha256};
 
+use crate::operation::McpAcpOperationFactory;
 use crate::operation::stdio_spawn_spec;
 use crate::registry::McpToolSchemaAdmission;
 use crate::{
-    McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
-    McpCandidateIdentity, McpCandidateInventory, McpCandidateRequest, McpCapabilities, McpClient,
-    McpClientOptions, McpCollapsedBootstrap, McpContinuationOwner, McpDuplexEffectsFactory,
-    McpFuture, McpHttpEffects, McpHttpOperationFactory, McpOperationFactory,
-    McpStdioOperationFactory,
+    McpAcpEffects, McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission,
+    McpCandidateError, McpCandidateIdentity, McpCandidateInventory, McpCandidateRequest,
+    McpCapabilities, McpClient, McpClientOptions, McpCollapsedBootstrap, McpContinuationOwner,
+    McpDuplexEffectsFactory, McpFuture, McpHttpEffects, McpHttpOperationFactory,
+    McpOperationFactory, McpStdioOperationFactory,
 };
 
 pub const MCP_DEFAULT_MAX_SSE_EVENT_SIZE: usize = 16 * 1024 * 1024;
@@ -22,6 +23,7 @@ pub const MCP_DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30 * 60)
 pub(crate) struct McpRuntimeCandidateAdmission {
     http_management: Arc<dyn McpHttpEffects>,
     stdio_management: Arc<dyn McpDuplexEffectsFactory>,
+    acp_management: Option<Arc<dyn McpAcpEffects>>,
     continuations: Arc<McpContinuationOwner>,
     schemas: Arc<dyn McpToolSchemaAdmission>,
     max_sse_event_size: usize,
@@ -36,10 +38,12 @@ impl McpRuntimeCandidateAdmission {
         schemas: Arc<dyn McpToolSchemaAdmission>,
         max_sse_event_size: usize,
         timeout: Duration,
+        acp_management: Option<Arc<dyn McpAcpEffects>>,
     ) -> Self {
         Self {
             http_management,
             stdio_management,
+            acp_management,
             continuations,
             schemas,
             max_sse_event_size,
@@ -79,6 +83,9 @@ impl McpRuntimeCandidateAdmission {
             )
             .map(|factory| Arc::new(factory) as Arc<dyn McpOperationFactory>)
             .map_err(|error| invalid_candidate(error.to_string())),
+            McpServerConfig::Acp { .. } => Err(invalid_candidate(
+                "ACP factory needs its retained connection",
+            )),
         }
     }
 }
@@ -90,6 +97,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
     ) -> McpFuture<'static, Result<McpAdmittedCandidate, McpCandidateError>> {
         let http_management = Arc::clone(&self.http_management);
         let stdio_management = Arc::clone(&self.stdio_management);
+        let acp_management = self.acp_management.clone();
         let continuations = Arc::clone(&self.continuations);
         let schemas = Arc::clone(&self.schemas);
         let max_sse_event_size = self.max_sse_event_size;
@@ -102,9 +110,12 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 schemas,
                 max_sse_event_size,
                 timeout,
+                acp_management,
             );
             let options = runtime.options()?;
             let server_admission = request.admission();
+            let retained_acp = matches!(request.config(), McpServerConfig::Acp { .. });
+            let mut acp_session = None;
             let mut client = match request.config() {
                 McpServerConfig::Http(config) => McpClient::connect_http(
                     request.name().clone(),
@@ -123,6 +134,18 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                             McpClient::connect_stdio(request.name().clone(), options, effects)
                         })
                 }
+                McpServerConfig::Acp { server_id } => {
+                    let effects = runtime
+                        .acp_management
+                        .clone()
+                        .ok_or_else(|| invalid_candidate("ACP MCP channel is unavailable"))?;
+                    let connection_id = effects
+                        .connect(server_id.clone())
+                        .await
+                        .map_err(|error| invalid_candidate(error.to_string()))?;
+                    acp_session = Some((connection_id.clone(), Arc::clone(&effects)));
+                    McpClient::connect_acp(request.name().clone(), options, connection_id, effects)
+                }
             }
             .map_err(|error| invalid_candidate(error.to_string()))?;
             let inventory = async {
@@ -130,12 +153,65 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 client.inventory().await
             }
             .await;
-            let settlement = client.settle().await;
             let inventory = inventory.map_err(|error| invalid_candidate(error.to_string()))?;
-            settlement.map_err(|error| invalid_candidate(error.to_string()))?;
+            if let Some((connection_id, effects)) = acp_session {
+                for uri in ["tuic://workspace", "tuic://inbox"] {
+                    if !inventory
+                        .resources
+                        .iter()
+                        .any(|resource| resource.uri == uri)
+                    {
+                        continue;
+                    }
+                    let params = serde_json::json!({"uri":uri}).as_object().cloned();
+                    effects
+                        .request(
+                            connection_id.clone(),
+                            "resources/subscribe".to_owned(),
+                            params.clone(),
+                        )
+                        .await
+                        .map_err(|error| invalid_candidate(error.to_string()))?;
+                    let read = effects
+                        .request(connection_id.clone(), "resources/read".to_owned(), params)
+                        .await
+                        .map_err(|error| invalid_candidate(error.to_string()))?;
+                    let text = read["contents"]
+                        .as_array()
+                        .and_then(|contents| contents.iter().find(|content| content["uri"] == uri))
+                        .and_then(|content| content["text"].as_str())
+                        .ok_or_else(|| {
+                            invalid_candidate(format!("ACP MCP resource {uri} has no text content"))
+                        })?;
+                    effects.publish_resource(uri, text.to_owned());
+                }
+            }
+            let acp_client = if retained_acp {
+                Some(Arc::new(tokio::sync::Mutex::new(client)))
+            } else {
+                client
+                    .settle()
+                    .await
+                    .map_err(|error| invalid_candidate(error.to_string()))?;
+                None
+            };
             let bootstrap = McpCollapsedBootstrap::detect(&inventory.tools)
                 .map_err(|error| invalid_candidate(error.to_string()))?;
-            let factory = runtime.operation_factory(request.config(), bootstrap)?;
+            let factory = if let Some(client) = acp_client {
+                Arc::new(
+                    McpAcpOperationFactory::runtime(
+                        Arc::clone(&runtime.continuations),
+                        runtime.max_sse_event_size,
+                        runtime.timeout,
+                        bootstrap,
+                        Arc::clone(&runtime.schemas),
+                        client,
+                    )
+                    .map_err(|error| invalid_candidate(error.to_string()))?,
+                ) as Arc<dyn McpOperationFactory>
+            } else {
+                runtime.operation_factory(request.config(), bootstrap)?
+            };
             let capabilities = McpCapabilities::new(
                 inventory.capabilities.tools.is_some(),
                 inventory.capabilities.resources.is_some(),

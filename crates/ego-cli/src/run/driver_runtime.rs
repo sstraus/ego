@@ -143,7 +143,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                 $ports.resolver_handle(),
                 $ports.one_hop_handle(),
                 $ports.duplex_handle(),
-            );
+            )
+            .with_cancel($cancel.clone());
             let tools = match admitted_tools.as_ref() {
                 Some(source) => Tools::from_registry_with_source(
                     &registry,
@@ -1307,7 +1308,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 ports.resolver_handle(),
                                                 ports.one_hop_handle(),
                                                 ports.duplex_handle(),
-                                            );
+                                            )
+                                            .with_cancel(compaction_cancel.clone());
                                             let compaction_tools = match admitted_tools.as_ref() {
                                                 Some(source) => Tools::from_registry_with_source(
                                                     &target_registry,

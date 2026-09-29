@@ -947,6 +947,11 @@ fn server_table(server: &McpServerConfig) -> Result<Table, UserConfigError> {
                 table.insert("allow_insecure_loopback", value(true));
             }
         }
+        McpServerConfig::Acp { .. } => {
+            return Err(UserConfigError::new(
+                "an ACP MCP server is supplied by the host, not stored in user config",
+            ));
+        }
     }
     Ok(table)
 }

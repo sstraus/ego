@@ -178,6 +178,25 @@ pub struct OsResumeKey<B = NativeKeyringBackend> {
     lock_path: PathBuf,
 }
 
+/// A resume key scoped to a session whose continuation journal is disposable.
+pub struct SessionResumeKey {
+    key: Zeroizing<[u8; 32]>,
+}
+
+impl SessionResumeKey {
+    pub fn generate() -> Result<Self, ContinuationError> {
+        let mut key = Zeroizing::new([0_u8; 32]);
+        getrandom::fill(&mut *key).map_err(|_| resume_key_unavailable())?;
+        Ok(Self { key })
+    }
+}
+
+impl ResumeKeySource for SessionResumeKey {
+    fn resume_key(&self) -> Result<Arc<[u8]>, ContinuationError> {
+        Ok(Arc::from(self.key.as_slice()))
+    }
+}
+
 impl OsResumeKey<NativeKeyringBackend> {
     pub fn open(root: impl AsRef<Path>) -> Self {
         Self::new(NativeKeyringBackend, root.as_ref().join(RESUME_LOCK))

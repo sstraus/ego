@@ -7,12 +7,12 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation", "unstable_protocol_v2", "unstable_session_fork"] }
+agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation", "unstable_mcp_over_acp", "unstable_protocol_v2", "unstable_session_fork"] }
 # The released HTTP/WebSocket adapter owns ACP's network framing and connection
 # registry. Exact because it is a foreign protocol implementation, not an
 # internal convenience dependency.
 agent-client-protocol-http = { version = "=2.0.0", features = ["server"] }
-agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation", "unstable_protocol_v2", "unstable_session_fork"] }
+agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation", "unstable_mcp_over_acp", "unstable_protocol_v2", "unstable_session_fork"] }
 # Named directly for admission middleware around the official router.
 axum = "0.8.9"
 # ACP sends image bytes base64-encoded inside the JSON frame, so the decode is

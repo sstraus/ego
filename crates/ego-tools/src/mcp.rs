@@ -44,6 +44,7 @@ pub fn materialize_admissions(
                     Err(McpFailure::Authority)
                 }
                 McpServerConfig::Http(_) => Ok(McpTransportMaterial::http(Vec::new())),
+                McpServerConfig::Acp { .. } => Err(McpFailure::Authority),
             };
             match material.and_then(|material| {
                 McpServerAdmission::new(name.clone(), server.clone(), material)

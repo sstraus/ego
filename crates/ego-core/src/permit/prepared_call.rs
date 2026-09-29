@@ -536,6 +536,53 @@ impl PreparedCall {
         })
     }
 
+    pub fn mcp_acp(
+        subject: McpSubject,
+        operation: McpOperationKind,
+        invocations: Vec<(ForeignToolId, InvocationDigest)>,
+        admission: McpAdmissionFingerprint,
+        transport_fingerprint: impl Into<String>,
+        server: &str,
+        parameters: &Value,
+    ) -> Result<Self, crate::mcp::McpProjectionError> {
+        subject.validate()?;
+        if !operation.matches(&subject) {
+            return Err(crate::mcp::McpProjectionError::InvalidIdentity);
+        }
+        let transport_fingerprint = transport_fingerprint.into();
+        if transport_fingerprint.trim().is_empty()
+            || transport_fingerprint.chars().any(char::is_control)
+        {
+            return Err(crate::mcp::McpProjectionError::InvalidFingerprint);
+        }
+        let transport = ForeignTransportTarget::acp(server)
+            .map_err(|_| crate::mcp::McpProjectionError::InvalidIdentity)?;
+        let parameters = serde_json::to_vec(parameters)
+            .map_err(|_| crate::mcp::McpProjectionError::InvalidContent)?;
+        let ops = invocations
+            .into_iter()
+            .map(|(tool, params_digest)| Op::Opaque {
+                tool,
+                params_digest,
+                transport: transport.clone(),
+            })
+            .collect();
+        Ok(Self {
+            tool: subject.operation_name().to_owned(),
+            ops,
+            mcp: Some(Box::new(McpPreparedEnvelope {
+                subject,
+                operation,
+                admission,
+                transport_fingerprint,
+                transport,
+                parameters,
+            })),
+            hook_http: None,
+            provenance: PreparedCallProvenance::CapturedForeign,
+        })
+    }
+
     pub fn mcp_envelope(&self) -> Option<&McpPreparedEnvelope> {
         self.mcp.as_deref()
     }
