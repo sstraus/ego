@@ -249,6 +249,15 @@ pub(crate) async fn execute(
             .is_some_and(|timeout| started.elapsed() >= timeout)
         {
             let timeout = spec.timeout().expect("checked as present");
+            tracing::warn!(
+                elapsed_ms = started.elapsed().as_millis(),
+                timeout_ms = timeout.as_millis(),
+                child_exited = status.is_some(),
+                descendants_cleaned,
+                stdout_drained = stdout_pending.is_some(),
+                stderr_drained = stderr_pending.is_some(),
+                "process deadline expired"
+            );
             request_abort(&mut stdout_task);
             request_abort(&mut stderr_task);
             child.terminate(limits.termination_grace()).await;
