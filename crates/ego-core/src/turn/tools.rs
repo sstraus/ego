@@ -626,11 +626,11 @@ impl<'a> Tools<'a> {
         context: Option<McpResumeContext<'session>>,
     ) -> Result<ToolExecution, ToolError> {
         let resume = if authorized.call().mcp_envelope().is_some() {
-            Some(GuardedMcpResume::new(
+            Some(GuardedMcpResume::deferred(
                 self.resume
                     .as_ref()
                     .ok_or(crate::suspension::ContinuationError::InvalidKey)?
-                    .prepare(&authorized, policy.resume_floor())?,
+                    .defer(&authorized, policy.resume_floor())?,
                 context,
             ))
         } else {

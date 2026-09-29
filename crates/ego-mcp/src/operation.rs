@@ -193,7 +193,7 @@ impl McpContinuationOwner {
         required: crate::McpMappedInput,
         guarded: GuardedMcpResume<'_>,
     ) -> Result<ForeignInputRequired, McpError> {
-        let (resume, context) = guarded.into_parts();
+        let (resume, context) = guarded.into_parts().map_err(continuation)?;
         let context =
             context.ok_or_else(|| authority("MCP input required has no session context"))?;
         if context.capture() != envelope.admission().capture() {
