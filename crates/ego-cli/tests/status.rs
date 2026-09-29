@@ -70,6 +70,19 @@ fn builtins_and_arbitrary_configured_segments_render_in_user_order() {
 }
 
 #[test]
+fn parked_draft_count_is_visible_in_the_native_status_row() {
+    let mut surface = snapshot();
+    surface.set_drafts(1);
+    let rendered = StatusLine::render(
+        &surface,
+        &[StatusSegmentName::Model, StatusSegmentName::Drafts],
+        80,
+    );
+
+    assert!(rendered.text().contains("drafts=1"), "{rendered:?}");
+}
+
+#[test]
 fn inactive_and_optional_segments_collapse_as_whole_segments() {
     let mut surface = snapshot();
     surface.set_queue(QueueStatus {

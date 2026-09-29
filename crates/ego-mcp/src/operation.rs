@@ -1520,10 +1520,21 @@ fn tool_schema_command(
             "collapsed schema lookup did not return a successful complete result",
         ));
     }
-    let structured_content = result
-        .structured_content
-        .clone()
-        .ok_or_else(|| protocol("collapsed schema lookup result has no structuredContent"))?;
+    let structured_content = match &result.structured_content {
+        Some(content) => content.clone(),
+        None => {
+            let [block] = result.content.as_slice() else {
+                return Err(protocol(
+                    "collapsed schema lookup requires exactly one JSON text content block",
+                ));
+            };
+            let text = block.as_text().ok_or_else(|| {
+                protocol("collapsed schema lookup content block is not JSON text")
+            })?;
+            serde_json::from_str(&text.text)
+                .map_err(|_| protocol("collapsed schema lookup text content is not valid JSON"))?
+        }
+    };
     let parameters: Value = serde_json::from_slice(envelope.parameters())?;
     let requested_name = collapsed.bootstrap.requested_name(&parameters)?;
     Ok(Some(McpToolSchemaCommand::new(
