@@ -38,7 +38,7 @@ use crate::{
 pub const MCP_PROTOCOL_REVISION: &str = "2026-07-28";
 const MAX_JSON_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
-fn current_client_capabilities() -> ClientCapabilities {
+pub(crate) fn current_client_capabilities() -> ClientCapabilities {
     ClientCapabilities::builder()
         .enable_elicitation_with(
             ElicitationCapability::new()
