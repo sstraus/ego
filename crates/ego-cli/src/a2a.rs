@@ -56,10 +56,16 @@ pub async fn serve(args: &A2aArgs) -> RunTermination {
     )
     .expect("the resolved A2A process root is absolute");
     let reporter = Reporter::new(Arc::new(Stderr));
-    reporter.report(
-        RunEffectPorts::diagnostic_capabilities(&policy, CancelToken::new(), ExecLimits::default())
+    tokio::spawn(async move {
+        reporter.report(
+            RunEffectPorts::diagnostic_capabilities(
+                &policy,
+                CancelToken::new(),
+                ExecLimits::default(),
+            )
             .await,
-    );
+        );
+    });
 
     // Never resolves: the listener runs until the process is signalled, which
     // is the same lifetime `ego acp` has when its host keeps the pipe open.
