@@ -41,11 +41,18 @@ const SKILL_FILE: &str = "SKILL.md";
 /// `~/Gits/.tmp` stay isolated from the human's instruction hierarchy.
 pub(crate) fn instruction_discovery_root(root: &Path, home: &Path) -> std::io::Result<PathBuf> {
     let root = fs::canonicalize(root)?;
-    let Ok(home) = fs::canonicalize(home) else {
-        return Ok(root);
-    };
-    let Ok(shared) = fs::canonicalize(home.join("Gits")) else {
-        return Ok(root);
+    let home = fs::canonicalize(home)?;
+    let shared_path = home.join("Gits");
+    let shared = match fs::canonicalize(&shared_path) {
+        Ok(shared) => shared,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && fs::symlink_metadata(&shared_path)
+                    .is_err_and(|meta_error| meta_error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(root);
+        }
+        Err(error) => return Err(error),
     };
     let is_scratch = root
         .strip_prefix(&shared)
@@ -544,10 +551,16 @@ fn inventory(root: &Path) -> TrustInventory {
         .filter_map(|path| content(root, path))
         .collect();
 
-    let discovery_root = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .and_then(|home| instruction_discovery_root(root, &home).ok())
-        .unwrap_or_else(|| root.to_path_buf());
+    let discovery_root = match std::env::var_os("HOME") {
+        Some(home) => match instruction_discovery_root(root, &PathBuf::from(home)) {
+            Ok(discovery_root) => discovery_root,
+            Err(error) => {
+                tracing::warn!(%error, "the workspace instruction discovery root could not be resolved");
+                return TrustInventory::new(Vec::new());
+            }
+        },
+        None => root.to_path_buf(),
+    };
     if let Ok(instructions) = ego_core::config::load(
         &OsInstructionIo,
         &discovery_root,
@@ -1174,6 +1187,43 @@ mod tests {
             .collect();
         assert_eq!(texts, ["shared rules\n"]);
         assert_eq!(discovery_root, shared);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_workspace_root_cannot_fall_back_to_raw_path_and_grant_trust() {
+        let tree = tempfile::tempdir().expect("fixture root");
+        let missing = tree.path().join("missing");
+        let dangling = tree.path().join("dangling");
+        std::os::unix::fs::symlink(&missing, &dangling).expect("dangling workspace link");
+        for root in [&missing, &dangling] {
+            let asked = Cell::new(0);
+            assert_eq!(
+                resolve(root, Some(tree.path()), &Silent, |_| {
+                    asked.set(asked.get() + 1);
+                    Trust::Trusted
+                }),
+                Trust::Untrusted,
+                "{} must not grant trust after path resolution fails",
+                root.display()
+            );
+            assert_eq!(asked.get(), 0, "no question can grant an unresolved root");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_workspace_root_cannot_fall_back_to_raw_path_for_inventory() {
+        let tree = tempfile::tempdir().expect("fixture root");
+        let missing = tree.path().join("missing");
+        let dangling = tree.path().join("dangling");
+        std::os::unix::fs::symlink(&missing, &dangling).expect("dangling workspace link");
+        for root in [&missing, &dangling] {
+            assert!(inventory(root).is_empty(), "{}", root.display());
+            let surface = executable_surface(root);
+            assert!(surface.declarations.is_empty(), "{}", root.display());
+            assert!(surface.programs.is_empty(), "{}", root.display());
+        }
     }
 
     #[test]
