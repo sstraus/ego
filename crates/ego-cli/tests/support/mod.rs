@@ -33,6 +33,10 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{NativePtySystem, PtySize, PtySystem};
 
+// ACP measures every offered confinement twice before announcing options.
+// Under the parallel workspace suite, that work has exceeded 45 seconds.
+pub const ACP_MEASURED_OPTIONS_DEADLINE: Duration = Duration::from_secs(180);
+
 pub fn wait_pty_child(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     deadline: Duration,
