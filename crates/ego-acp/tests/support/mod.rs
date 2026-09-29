@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::{ConnectTo, Lines};
 use agent_client_protocol_schema::ProtocolVersion;
 use ego_acp::serve::{
-    AcpRunBindingsBuilder, ExecutionSpawner, McpSessionAdmissionError, McpSessionAdmitter,
-    RootResolver, SessionMcpAdmission,
+    AcpNotices, AcpRunBindingsBuilder, ExecutionSpawner, McpSessionAdmissionError,
+    McpSessionAdmitter, RootResolver, SessionMcpAdmission,
 };
 use ego_core::compact::{
     CompactionCommand, CompactionFuture, CompactionReceipt, CompactionTransitionError,
@@ -158,6 +158,23 @@ impl DurableAcpFixture {
         confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
         trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
     ) -> agent_client_protocol::AgentProtocolRouter {
+        self.router_with_trust_and_notices(controls, confinement, trust, AcpNotices::default())
+    }
+
+    pub fn router_with_notices(
+        &self,
+        notices: AcpNotices,
+    ) -> agent_client_protocol::AgentProtocolRouter {
+        self.router_with_trust_and_notices(None, None, None, notices)
+    }
+
+    fn router_with_trust_and_notices(
+        &self,
+        controls: Option<Arc<dyn ego_core::control::SessionControls>>,
+        confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+        trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
+        notices: AcpNotices,
+    ) -> agent_client_protocol::AgentProtocolRouter {
         let clock = Arc::new(TestClock);
         let controller = Arc::new(RunController::new(
             Arc::clone(&self.store),
@@ -182,6 +199,7 @@ impl DurableAcpFixture {
             controls,
             confinement,
             trust,
+            notices,
         )
     }
 

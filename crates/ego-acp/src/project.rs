@@ -193,6 +193,44 @@ use ego_core::public::{ItemKind, PublicEvent};
 use ego_core::run::{DeniedBy, RunTermination};
 use ego_core::session_lifecycle::ReplayFrame;
 use ego_core::state::SessionState;
+use serde::Serialize;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpNotice {
+    pub id: String,
+    pub text: String,
+    pub action: NoticeAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NoticeAction {
+    OpenResult { path: PathBuf },
+    Answer { question_id: String },
+    Approve { request_id: String },
+}
+
+pub fn project_notice_v1(notice: &AcpNotice) -> v1::SessionUpdate {
+    v1::SessionUpdate::AgentMessageChunk(
+        v1::ContentChunk::new(notice.text.clone().into())
+            .message_id(Some(v1::MessageId::new(notice.id.clone())))
+            .meta(serde_json::Map::from_iter([(
+                "ego".to_owned(),
+                serde_json::json!({
+                    "salience": "card",
+                    "action": &notice.action,
+                }),
+            )])),
+    )
+}
+
+fn activity_meta() -> v1::Meta {
+    serde_json::Map::from_iter([(
+        "ego".to_owned(),
+        serde_json::json!({"salience": "activity"}),
+    )])
+}
 
 /// The bare-string wire form ACP ids use (`MessageId`, `ToolCallId`, …).
 ///
@@ -547,7 +585,8 @@ fn project_v1_with_root(
                         .kind(kind)
                         .status(v1::ToolCallStatus::Pending)
                         .locations(locations)
-                        .raw_input(input),
+                        .raw_input(input)
+                        .meta(activity_meta()),
                 ))
             }
             // Permissions travel over `session/request_permission`, and
@@ -573,7 +612,8 @@ fn project_v1_with_root(
             )),
             ItemKind::Reasoning => Some(v1::SessionUpdate::AgentThoughtChunk(
                 v1::ContentChunk::new(text.clone().into())
-                    .message_id(Some(v1::MessageId::new(item_id_string(*item)))),
+                    .message_id(Some(v1::MessageId::new(item_id_string(*item))))
+                    .meta(activity_meta()),
             )),
             // `ToolCallUpdateFields.content` replaces the whole collection, it
             // does not append (see module doc comment) — a single increment
@@ -609,14 +649,17 @@ fn project_v1_with_root(
             // already rendered — see the module doc comment's "Known
             // limitation", and the test that pins this loss deliberately.
             ItemKind::AgentMessage => None,
-            ItemKind::Tool => Some(v1::SessionUpdate::ToolCallUpdate(v1::ToolCallUpdate::new(
-                item_id_string(*item),
-                v1::ToolCallUpdateFields::new()
-                    .status(tool_status_v1(*ok))
-                    .content(vec![v1::ToolCallContent::from(
-                        text.clone().unwrap_or_default(),
-                    )]),
-            ))),
+            ItemKind::Tool => Some(v1::SessionUpdate::ToolCallUpdate(
+                v1::ToolCallUpdate::new(
+                    item_id_string(*item),
+                    v1::ToolCallUpdateFields::new()
+                        .status(tool_status_v1(*ok))
+                        .content(vec![v1::ToolCallContent::from(
+                            text.clone().unwrap_or_default(),
+                        )]),
+                )
+                .meta(activity_meta()),
+            )),
             ItemKind::Reasoning
             | ItemKind::Permission
             | ItemKind::Subagent
@@ -645,10 +688,13 @@ pub fn project_updates_v1(event: &PublicEvent, root: &std::path::Path) -> Vec<v1
         return Vec::new();
     };
     let progress = if let v1::SessionUpdate::ToolCall(call) = &update {
-        Some(v1::SessionUpdate::ToolCallUpdate(v1::ToolCallUpdate::new(
-            call.tool_call_id.clone(),
-            v1::ToolCallUpdateFields::new().status(v1::ToolCallStatus::InProgress),
-        )))
+        Some(v1::SessionUpdate::ToolCallUpdate(
+            v1::ToolCallUpdate::new(
+                call.tool_call_id.clone(),
+                v1::ToolCallUpdateFields::new().status(v1::ToolCallStatus::InProgress),
+            )
+            .meta(activity_meta()),
+        ))
     } else {
         None
     };

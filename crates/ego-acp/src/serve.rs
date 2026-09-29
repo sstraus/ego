@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::negotiate::{SERVED, negotiate};
-use crate::project::{project_replay_v1, stop_reason_v1};
+use crate::project::{AcpNotice, project_notice_v1, project_replay_v1, stop_reason_v1};
 use crate::question::{AcpQuestionAdapter, CapabilityCapture};
 use agent_client_protocol::{
     Agent, AgentProtocolRouter, ByteStreams, Client, ConnectTo, ConnectionTo, Error, ErrorCode,
@@ -62,6 +62,111 @@ use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use serde::{Deserialize, Serialize};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+/// The live ACP delivery boundary for notices produced outside a model turn.
+#[derive(Clone, Default)]
+pub struct AcpNotices {
+    connections: Arc<Mutex<HashMap<v1::SessionId, NoticeConnection>>>,
+}
+
+struct NoticeConnection {
+    owner: Arc<()>,
+    connection: ConnectionTo<Client>,
+    closed_watcher: tokio::task::AbortHandle,
+}
+
+impl AcpNotices {
+    fn register(&self, session: v1::SessionId, connection: ConnectionTo<Client>) {
+        let owner = Arc::new(());
+        let notices = self.clone();
+        let watched_session = session.clone();
+        let watched_owner = Arc::clone(&owner);
+        let watched_connection = connection.clone();
+        let closed_watcher = tokio::spawn(async move {
+            watched_connection.incoming_closed().await;
+            notices.unregister_if_owner(&watched_session, &watched_owner);
+        })
+        .abort_handle();
+        let previous = self
+            .connections
+            .lock()
+            .expect("ACP notice connection lock poisoned")
+            .insert(
+                session.clone(),
+                NoticeConnection {
+                    owner: Arc::clone(&owner),
+                    connection: connection.clone(),
+                    closed_watcher,
+                },
+            );
+        if let Some(previous) = previous {
+            previous.closed_watcher.abort();
+        }
+        if connection.is_incoming_closed() {
+            self.unregister_if_owner(&session, &owner);
+        }
+    }
+
+    fn unregister(&self, session: &v1::SessionId) {
+        let removed = self
+            .connections
+            .lock()
+            .expect("ACP notice connection lock poisoned")
+            .remove(session);
+        if let Some(removed) = removed {
+            removed.closed_watcher.abort();
+        }
+    }
+
+    fn unregister_if_owner(&self, session: &v1::SessionId, owner: &Arc<()>) {
+        let removed = {
+            let mut connections = self
+                .connections
+                .lock()
+                .expect("ACP notice connection lock poisoned");
+            if connections
+                .get(session)
+                .is_some_and(|current| Arc::ptr_eq(&current.owner, owner))
+            {
+                connections.remove(session)
+            } else {
+                None
+            }
+        };
+        if let Some(removed) = removed {
+            removed.closed_watcher.abort();
+        }
+    }
+
+    /// Publish a normal ACP update even when no `session/prompt` is active.
+    pub fn publish(&self, session: &v1::SessionId, notice: &AcpNotice) -> Result<(), Error> {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("ACP notice connection lock poisoned");
+        let Some(registered) = connections.get(session) else {
+            return Err(Error::from(ErrorCode::ResourceNotFound));
+        };
+        if registered.connection.is_incoming_closed() {
+            if let Some(removed) = connections.remove(session) {
+                removed.closed_watcher.abort();
+            }
+            return Err(Error::from(ErrorCode::ResourceNotFound));
+        }
+        let sent = registered
+            .connection
+            .send_notification(v1::SessionNotification::new(
+                session.clone(),
+                project_notice_v1(notice),
+            ));
+        if sent.is_err() {
+            if let Some(removed) = connections.remove(session) {
+                removed.closed_watcher.abort();
+            }
+        }
+        sent
+    }
+}
 
 use crate::auth::{Credential, TOKEN_VAR};
 
@@ -1928,6 +2033,7 @@ where
         None,
         None,
         None,
+        AcpNotices::default(),
     ))
 }
 
@@ -1959,6 +2065,7 @@ where
         None,
         None,
         None,
+        AcpNotices::default(),
     ))
 }
 
@@ -1994,6 +2101,7 @@ where
         controls,
         confinement,
         trust,
+        AcpNotices::default(),
     ))
 }
 
@@ -2011,6 +2119,7 @@ pub fn durable_agent_with_compaction<S, E, C, I>(
     controls: Option<Arc<dyn SessionControls>>,
     confinement: Option<Arc<dyn SessionConfinementAdmission>>,
     trust: Option<Arc<dyn SessionTrustAdmission>>,
+    notices: AcpNotices,
 ) -> AgentProtocolRouter
 where
     S: SessionLifecycleStore + 'static,
@@ -2030,6 +2139,7 @@ where
         controls,
         confinement,
         trust,
+        notices,
     ))
 }
 
@@ -2046,6 +2156,7 @@ fn v1_agent<S, E, C, I>(
     controls: Option<Arc<dyn SessionControls>>,
     confinement: Option<Arc<dyn SessionConfinementAdmission>>,
     trust: Option<Arc<dyn SessionTrustAdmission>>,
+    notices: AcpNotices,
 ) -> impl agent_client_protocol::ConnectTo<Client>
 where
     S: SessionStore + 'static,
@@ -2100,6 +2211,7 @@ where
                 let lifecycle = lifecycle.clone();
                 let controls = controls.clone();
                 let confinement = confinement.clone();
+                let notices = notices.clone();
                 async move |request: v1::NewSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let sessions = sessions.clone();
                     let roots = Arc::clone(&roots);
@@ -2108,6 +2220,7 @@ where
                     let lifecycle = lifecycle.clone();
                     let controls = controls.clone();
                     let confinement = confinement.clone();
+                    let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
@@ -2175,6 +2288,7 @@ where
                                     .flatten(),
                             ),
                     )?;
+                    notices.register(id.clone(), cx.clone());
                     if let Some(meta) = announcement {
                         emit_info(&cx, &id, &meta)?;
                     }
@@ -2253,6 +2367,7 @@ where
                 let client_capabilities = Arc::clone(&client_capabilities);
                 let controls = controls.clone();
                 let confinement = confinement.clone();
+                let notices = notices.clone();
                 async move |request: v1::LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
@@ -2265,6 +2380,7 @@ where
                     let client_capabilities = Arc::clone(&client_capabilities);
                     let controls = controls.clone();
                     let confinement = confinement.clone();
+                    let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
@@ -2366,6 +2482,7 @@ where
                             .config_options(config_options(controls.as_ref(), id))
                             .meta(session_meta(hold, attachment.meta.summary.as_deref())),
                     )?;
+                    notices.register(request.session_id.clone(), cx.clone());
                     emit_attachment(&cx, &request.session_id, &attachment)
                     })
                 }
@@ -2385,6 +2502,7 @@ where
                 let client_capabilities = Arc::clone(&client_capabilities);
                 let controls = controls.clone();
                 let confinement = confinement.clone();
+                let notices = notices.clone();
                 async move |request: v1::ResumeSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
@@ -2397,6 +2515,7 @@ where
                     let client_capabilities = Arc::clone(&client_capabilities);
                     let controls = controls.clone();
                     let confinement = confinement.clone();
+                    let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
@@ -2488,6 +2607,7 @@ where
                         v1::ResumeSessionResponse::new()
                             .config_options(config_options(controls.as_ref(), id)),
                     )?;
+                    notices.register(request.session_id.clone(), cx.clone());
                     emit_attachment(&cx, &request.session_id, &attachment)
                     })
                 }
@@ -2503,6 +2623,7 @@ where
                 let mcp_admitter = Arc::clone(&mcp_admitter);
                 let controls = controls.clone();
                 let confinement = confinement.clone();
+                let notices = notices.clone();
                 async move |request: v1::ForkSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
@@ -2511,6 +2632,7 @@ where
                     let mcp_admitter = Arc::clone(&mcp_admitter);
                     let controls = controls.clone();
                     let confinement = confinement.clone();
+                    let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
@@ -2573,6 +2695,7 @@ where
                         v1::ForkSessionResponse::new(child_id.clone())
                             .config_options(config_options(controls.as_ref(), child)),
                     )?;
+                    notices.register(child_id.clone(), cx.clone());
                     emit_info(&cx, &child_id, &attachment.meta)
                     })
                 }
@@ -2583,9 +2706,11 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
+                let notices = notices.clone();
                 async move |request: v1::DeleteSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
+                    let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     let Some(lifecycle) = &lifecycle else {
@@ -2600,6 +2725,7 @@ where
                             if let Some(mcp) = sessions.close(&request.session_id) {
                                 mcp.close().await;
                             }
+                            notices.unregister(&request.session_id);
                             responder.respond(v1::DeleteSessionResponse::new())
                         }
                         Err(error) => responder.respond_with_error(lifecycle_error(&error)),
@@ -2613,9 +2739,11 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
+                let notices = notices.clone();
                 async move |request: v1::CloseSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
+                    let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     let Some(lifecycle) = &lifecycle else {
@@ -2630,6 +2758,7 @@ where
                             if let Some(mcp) = sessions.close(&request.session_id) {
                                 mcp.close().await;
                             }
+                            notices.unregister(&request.session_id);
                             responder.respond(v1::CloseSessionResponse::new())
                         }
                         Err(error) => responder.respond_with_error(lifecycle_error(&error)),
