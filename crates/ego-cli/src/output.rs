@@ -186,8 +186,7 @@ impl TextOutput for InteractiveOutput {
 
     fn answer(&self, text: &str) {
         let mut output = self.inner.lock().expect("surface output lock");
-        output.mark_reply_started();
-        let _ = output.write(text);
+        let _ = output.write_answer(text);
     }
 
     fn line(&self, text: &str) {

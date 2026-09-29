@@ -948,8 +948,10 @@ fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {
     drain(&reader, &mut output);
     let progress = normalized(&output[progress_start..]);
 
+    let finish_start = output.len();
     std::fs::write(&release, b"go").expect("release tool");
     until(&reader, &mut output, b"SLOW-TOOL-DONE");
+    until_normalized(&reader, &mut output, finish_start, "model=");
     let clear_start = output.len();
     input.write_all(b"\x03").expect("clear draft");
     input.flush().expect("clear draft flush");
@@ -1528,6 +1530,93 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
     assert!(
         !visible.contains("Esc cancels"),
         "thinking must disappear when reply arrives: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+}
+
+#[test]
+fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Paced {
+            head: String::new(),
+            tail: text("WRAPPED-ANSWER"),
+            pause: Duration::from_secs(2),
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((24, 40)),
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input
+        .write_all(b"a very long prompt that spans terminal rows and ends in tailmarker\r")
+        .expect("wrapped turn");
+    input.flush().expect("wrapped turn flush");
+    until_normalized(&reader, &mut output, 0, "Esc cancels");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 40, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let tail = lines
+        .iter()
+        .position(|line| line.contains("tailmarker"))
+        .unwrap_or_else(|| panic!("wrapped prompt tail absent: {visible:?}"));
+    assert!(
+        lines[tail + 1].contains("thinking for") && !lines[tail + 1].contains('>'),
+        "thinking must follow the final wrapped prompt row: {visible:?}"
+    );
+
+    until_normalized(&reader, &mut output, 0, "WRAPPED-ANSWER");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 40, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let tail = lines
+        .iter()
+        .position(|line| line.contains("tailmarker"))
+        .expect("wrapped prompt tail");
+    assert!(
+        lines[tail + 1].contains("WRAPPED-ANSWER"),
+        "answer must replace thinking after wrapped prompt: {visible:?}"
     );
 
     input.write_all(b"/quit\r").expect("quit");

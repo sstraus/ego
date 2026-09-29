@@ -384,6 +384,16 @@ struct SurfaceStatus {
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
 }
 
+impl SurfaceStatus {
+    fn begin_activity(&mut self) {
+        if !self.activity {
+            self.activity_since = Some(Instant::now());
+            self.reply_started.store(false, Ordering::Release);
+        }
+        self.activity = true;
+    }
+}
+
 impl Default for SurfaceStatus {
     fn default() -> Self {
         Self {
@@ -603,6 +613,7 @@ enum SurfaceMessage {
 pub struct SurfaceOutput {
     sender: SurfaceSender,
     pending: String,
+    pending_answer: bool,
     cancel: CancelToken,
     reply_started: Arc<AtomicBool>,
 }
@@ -612,6 +623,7 @@ impl SurfaceOutput {
         Self {
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
+            pending_answer: false,
             cancel,
             reply_started: Arc::new(AtomicBool::new(false)),
         }
@@ -650,6 +662,7 @@ impl SurfaceOutput {
             Self {
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
+                pending_answer: false,
                 cancel,
                 reply_started,
             },
@@ -658,10 +671,26 @@ impl SurfaceOutput {
     }
 
     pub fn write(&mut self, text: &str) -> Result<(), SendError<String>> {
+        self.write_with_kind(text, false)
+    }
+
+    pub(crate) fn write_answer(&mut self, text: &str) -> Result<(), SendError<String>> {
+        self.write_with_kind(text, true)
+    }
+
+    fn write_with_kind(&mut self, text: &str, answer: bool) -> Result<(), SendError<String>> {
+        if text.is_empty() {
+            return Ok(());
+        }
         self.pending.push_str(text);
+        self.pending_answer |= answer;
         while let Some(end) = self.pending.find('\n').map(|index| index + 1) {
             let row: String = self.pending.drain(..end).collect();
             self.send(row)?;
+            if self.pending_answer {
+                self.mark_reply_started();
+                self.pending_answer = false;
+            }
         }
         Ok(())
     }
@@ -674,6 +703,10 @@ impl SurfaceOutput {
         if !self.pending.is_empty() {
             let row = std::mem::take(&mut self.pending);
             self.send(row)?;
+            if self.pending_answer {
+                self.mark_reply_started();
+                self.pending_answer = false;
+            }
         }
 
         match &self.sender {
@@ -943,9 +976,7 @@ impl Seat {
                 if matches!(line, Line::Submitted(_)) {
                     live.phase.set(EditPhase::Busy);
                     let mut status = live.status.lock().expect("surface status lock");
-                    status.activity = true;
-                    status.activity_since.get_or_insert_with(Instant::now);
-                    status.reply_started.store(false, Ordering::Release);
+                    status.begin_activity();
                     drop(status);
                     repaint_status(&live.status);
                 }
@@ -1415,9 +1446,7 @@ impl crate::run::InteractiveSeat for Seat {
         if let SeatKind::Live(live) = &self.kind {
             live.phase.set(EditPhase::Busy);
             let mut status = live.status.lock().expect("surface status lock");
-            status.activity = true;
-            status.activity_since.get_or_insert_with(Instant::now);
-            status.reply_started.store(false, Ordering::Release);
+            status.begin_activity();
             drop(status);
             repaint_status(&live.status);
         }
@@ -1435,7 +1464,6 @@ impl crate::run::InteractiveSeat for Seat {
             let mut status = live.status.lock().expect("surface status lock");
             status.activity = false;
             status.activity_since = None;
-            status.reply_started.store(false, Ordering::Release);
             drop(status);
             repaint_status(&live.status);
         }

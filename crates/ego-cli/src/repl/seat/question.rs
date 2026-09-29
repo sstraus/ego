@@ -1172,8 +1172,7 @@ impl Waiting {
     }
 }
 
-fn status_prefix(status: &SharedStatus) -> String {
-    let status = status.lock().expect("surface status lock");
+fn status_prefix(status: &SurfaceStatus) -> String {
     let mut rows = Vec::new();
     if !status.native_status {
         if status.queue.pending_steers > 0 {
@@ -1203,28 +1202,25 @@ fn status_right(status: &SharedStatus) -> String {
         .unwrap_or_default()
 }
 
-fn status_row(status: &SharedStatus) -> String {
-    let activity = {
-        let status = status.lock().expect("surface status lock");
-        if !status.activity {
-            None
-        } else if status.reply_started.load(Ordering::Acquire) {
-            Some(String::new())
-        } else {
-            let elapsed = status
-                .activity_since
-                .map(|started| started.elapsed().as_secs())
-                .unwrap_or(0);
-            Some(format!(
-                "{} thinking for {elapsed}s — Esc cancels\n",
-                ACTIVITY_FRAMES[(elapsed as usize) % ACTIVITY_FRAMES.len()]
-            ))
+fn status_row(status: &SurfaceStatus, reply_started: bool) -> String {
+    if status.activity {
+        if reply_started {
+            return String::new();
         }
-    };
-    if let Some(activity) = activity {
-        return activity;
+        let elapsed = status
+            .activity_since
+            .map(|started| started.elapsed().as_secs())
+            .unwrap_or(0);
+        return format!(
+            "{} thinking for {elapsed}s — Esc cancels\n",
+            ACTIVITY_FRAMES[(elapsed as usize) % ACTIVITY_FRAMES.len()]
+        );
     }
-    let text = status_right(status);
+    let text = status
+        .painter
+        .current_status()
+        .map(|line| line.text().to_string())
+        .unwrap_or_default();
     if text.is_empty() {
         String::new()
     } else {
@@ -1234,7 +1230,7 @@ fn status_row(status: &SharedStatus) -> String {
 
 impl Prompt for Waiting {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        Cow::Owned(status_row(&self.status))
+        Cow::Borrowed("")
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
@@ -1242,12 +1238,11 @@ impl Prompt for Waiting {
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
-        let streaming = {
-            let status = self.status.lock().expect("surface status lock");
-            status.activity && status.reply_started.load(Ordering::Acquire)
-        };
+        let status = self.status.lock().expect("surface status lock");
+        let streaming = status.activity && status.reply_started.load(Ordering::Acquire);
+        let row = status_row(&status, streaming);
         let cancel = if streaming { "Esc cancels | " } else { "" };
-        Cow::Owned(format!("{}{cancel}> ", status_prefix(&self.status)))
+        Cow::Owned(format!("{row}{}{cancel}> ", status_prefix(&status)))
     }
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,

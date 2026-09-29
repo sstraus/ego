@@ -1,5 +1,6 @@
 use super::*;
 use crate::repl::policy_controls::PolicyControlRequest;
+use crate::run::InteractiveSeat;
 use crossterm::event::KeyEvent;
 use std::io::{self, BufReader, Cursor, Read};
 
@@ -165,16 +166,51 @@ fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
     }));
     let waiting = Waiting::new(status);
 
+    assert_eq!(waiting.render_prompt_left().as_ref(), "");
+    let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+    assert!(indicator.contains("thinking for 0s — Esc cancels\n"));
+    assert!(indicator.ends_with("\n> "));
+}
+
+#[test]
+fn failed_answer_output_does_not_claim_a_visible_reply() {
+    use crate::output::{InteractiveOutput, TextOutput};
+
+    let (sender, receiver) = bounded::<String>(1);
+    drop(receiver);
+    let output = SurfaceOutput::new(sender, CancelToken::new());
+    let reply_started = Arc::clone(&output.reply_started);
+
+    InteractiveOutput::new(output).answer("answer that cannot reach the terminal\n");
+
+    assert!(!reply_started.load(Ordering::Acquire));
+}
+
+#[test]
+fn prompt_redraw_uses_one_reply_phase_for_left_row_and_indicator() {
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        activity: true,
+        ..SurfaceStatus::default()
+    }));
+    let waiting = Waiting::new(Arc::clone(&status));
+
+    assert_eq!(waiting.render_prompt_left().as_ref(), "");
     assert!(
         waiting
-            .render_prompt_left()
-            .contains("thinking for 0s — Esc cancels\n")
+            .render_prompt_indicator(PromptEditMode::Emacs)
+            .contains("thinking for")
     );
+    status
+        .lock()
+        .expect("surface status lock")
+        .reply_started
+        .store(true, Ordering::Release);
+    assert_eq!(waiting.render_prompt_left().as_ref(), "");
     assert_eq!(
         waiting
             .render_prompt_indicator(PromptEditMode::Emacs)
             .as_ref(),
-        "> "
+        "Esc cancels | > "
     );
 }
 
@@ -448,6 +484,18 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
 
     assert_eq!(seat.read(), Line::Submitted("initial".to_string()));
     assert_eq!(phase.get(), EditPhase::Busy);
+    if let SeatKind::Live(live) = &seat.kind {
+        let status = live.status.lock().expect("surface status lock");
+        status.reply_started.store(true, Ordering::Release);
+    }
+    seat.busy();
+    if let SeatKind::Live(live) = &seat.kind {
+        let status = live.status.lock().expect("surface status lock");
+        assert!(
+            status.reply_started.load(Ordering::Acquire),
+            "re-entering busy during one turn must retain visible answer state"
+        );
+    }
 }
 
 #[test]
