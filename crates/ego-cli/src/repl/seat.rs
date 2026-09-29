@@ -69,7 +69,7 @@ pub(super) const PERMISSION_DECISION_COMMAND: &str = "ego:permission-decision:";
 pub(super) const MODAL_ESCAPE_COMMAND: &str = "ego:modal-escape";
 const QUEUE_LABEL: &str =
     "Messages to be submitted after next tool call (press esc to interrupt and send immediately)";
-const ACTIVITY_LABEL: &str = "working — Esc cancels";
+const ACTIVITY_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const DOUBLE_CTRL_C_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Clone)]
@@ -363,6 +363,7 @@ struct SurfaceStatus {
     drafts: usize,
     activity: bool,
     activity_since: Option<Instant>,
+    reply_started: Arc<AtomicBool>,
     notice: Option<String>,
     origin: InputOrigin,
     native_status: bool,
@@ -383,6 +384,16 @@ struct SurfaceStatus {
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
 }
 
+impl SurfaceStatus {
+    fn begin_activity(&mut self) {
+        if !self.activity {
+            self.activity_since = Some(Instant::now());
+            self.reply_started.store(false, Ordering::Release);
+        }
+        self.activity = true;
+    }
+}
+
 impl Default for SurfaceStatus {
     fn default() -> Self {
         Self {
@@ -390,6 +401,7 @@ impl Default for SurfaceStatus {
             drafts: 0,
             activity: false,
             activity_since: None,
+            reply_started: Arc::new(AtomicBool::new(false)),
             notice: None,
             origin: InputOrigin::Typed,
             native_status: false,
@@ -601,7 +613,9 @@ enum SurfaceMessage {
 pub struct SurfaceOutput {
     sender: SurfaceSender,
     pending: String,
+    pending_answer: bool,
     cancel: CancelToken,
+    reply_started: Arc<AtomicBool>,
 }
 
 impl SurfaceOutput {
@@ -609,13 +623,16 @@ impl SurfaceOutput {
         Self {
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
+            pending_answer: false,
             cancel,
+            reply_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(super) fn pumped(
         external: Sender<String>,
         cancel: CancelToken,
+        reply_started: Arc<AtomicBool>,
     ) -> (Self, std::thread::JoinHandle<()>) {
         let (sender, receiver) = crossbeam::channel::unbounded();
         let pump_cancel = cancel.clone();
@@ -645,25 +662,51 @@ impl SurfaceOutput {
             Self {
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
+                pending_answer: false,
                 cancel,
+                reply_started,
             },
             owner,
         )
     }
 
     pub fn write(&mut self, text: &str) -> Result<(), SendError<String>> {
+        self.write_with_kind(text, false)
+    }
+
+    pub(crate) fn write_answer(&mut self, text: &str) -> Result<(), SendError<String>> {
+        self.write_with_kind(text, true)
+    }
+
+    fn write_with_kind(&mut self, text: &str, answer: bool) -> Result<(), SendError<String>> {
+        if text.is_empty() {
+            return Ok(());
+        }
         self.pending.push_str(text);
+        self.pending_answer |= answer;
         while let Some(end) = self.pending.find('\n').map(|index| index + 1) {
             let row: String = self.pending.drain(..end).collect();
             self.send(row)?;
+            if self.pending_answer {
+                self.mark_reply_started();
+                self.pending_answer = false;
+            }
         }
         Ok(())
+    }
+
+    pub(crate) fn mark_reply_started(&self) {
+        self.reply_started.store(true, Ordering::Release);
     }
 
     pub fn finish(&mut self) -> Result<(), SendError<String>> {
         if !self.pending.is_empty() {
             let row = std::mem::take(&mut self.pending);
             self.send(row)?;
+            if self.pending_answer {
+                self.mark_reply_started();
+                self.pending_answer = false;
+            }
         }
 
         match &self.sender {
@@ -849,7 +892,9 @@ impl Seat {
             status.cursor_selectors = true;
         }
         let printer = ExternalPrinter::new(CHANNEL_CAPACITY);
-        let (output, output_owner) = SurfaceOutput::pumped(printer.sender(), cancel.clone());
+        let reply_started = Arc::clone(&status.lock().expect("surface status lock").reply_started);
+        let (output, output_owner) =
+            SurfaceOutput::pumped(printer.sender(), cancel.clone(), reply_started);
         let startup_output = printer.receiver().clone();
         let break_signal = Arc::new(AtomicBool::new(false));
         let (input_sender, input) = bounded(CHANNEL_CAPACITY);
@@ -931,8 +976,7 @@ impl Seat {
                 if matches!(line, Line::Submitted(_)) {
                     live.phase.set(EditPhase::Busy);
                     let mut status = live.status.lock().expect("surface status lock");
-                    status.activity = true;
-                    status.activity_since.get_or_insert_with(Instant::now);
+                    status.begin_activity();
                     drop(status);
                     repaint_status(&live.status);
                 }
@@ -1402,8 +1446,7 @@ impl crate::run::InteractiveSeat for Seat {
         if let SeatKind::Live(live) = &self.kind {
             live.phase.set(EditPhase::Busy);
             let mut status = live.status.lock().expect("surface status lock");
-            status.activity = true;
-            status.activity_since.get_or_insert_with(Instant::now);
+            status.begin_activity();
             drop(status);
             repaint_status(&live.status);
         }
