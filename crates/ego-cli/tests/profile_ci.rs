@@ -451,6 +451,11 @@ fn ego_profile_ci_activates_the_same_posture_without_ambient_ci() {
         .run();
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     assert_eq!(fixture.sanitized_bundles().len(), 1);
+    let manifest = fs::read_to_string(fixture.manifest()).expect("CI manifest");
+    assert!(
+        !manifest.contains(CI_PROMPT),
+        "CI prompt reached the manifest"
+    );
 }
 
 #[test]
@@ -463,6 +468,11 @@ fn ambient_ci_does_not_activate_the_profile() {
         .run();
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     assert!(fixture.sanitized_bundles().is_empty());
+    let manifest = fs::read_to_string(fixture.manifest()).expect("ordinary manifest");
+    assert!(
+        manifest.contains(CI_PROMPT),
+        "an ordinary session lost its configured synopsis"
+    );
 }
 
 #[test]
@@ -808,6 +818,30 @@ fn clean_runner_consumes_manifest_and_sanitized_records_without_transcript_acces
     for marker in [CI_PROMPT, CI_INSTRUCTIONS] {
         assert!(!manifest.contains(marker), "manifest leaked {marker}");
         assert!(!bundle.contains(marker), "sanitized bundle leaked {marker}");
+    }
+}
+
+#[test]
+fn rebuilding_a_ci_manifest_does_not_restore_prompt_or_instruction_prose() {
+    let fixture = Fixture::new();
+    let finished = fixture.run_ci("json");
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+
+    fs::remove_file(fixture.manifest()).expect("remove derived manifest");
+    let store = JsonlStore::new(&fixture.session_root, &fixture.workspace, Box::new(OsIo));
+    let session: SessionId = support::FIXTURE_SESSION_ID
+        .parse()
+        .expect("fixture session id");
+    let repaired = store.recover(&session).expect("rebuild from durable log");
+    assert!(repaired.manifest_rebuilt);
+
+    let manifest = fs::read_to_string(fixture.manifest()).expect("rebuilt manifest");
+    serde_json::from_str::<Value>(&manifest).expect("valid rebuilt manifest");
+    for marker in [CI_PROMPT, CI_INSTRUCTIONS] {
+        assert!(
+            !manifest.contains(marker),
+            "rebuilt manifest leaked {marker}"
+        );
     }
 }
 

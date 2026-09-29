@@ -20,8 +20,8 @@ use ego_core::event::hook::HookCatalogueEvidence;
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::evidence::{
-    EvidenceError, EvidenceKey, EvidenceLogSource, EvidenceRecord, EvidenceWrite, ManifestEvidence,
-    ManifestEvidenceError, RunInvocationId,
+    ConfigProvenance, EvidenceError, EvidenceKey, EvidenceLogSource, EvidenceRecord, EvidenceWrite,
+    ManifestEvidence, ManifestEvidenceError, RunInvocationId,
 };
 use ego_core::generator::attempt::AttemptRef;
 use ego_core::permit::ExecObservation;
@@ -63,6 +63,24 @@ struct RunManifest {
     evidence: ManifestEvidence,
     #[serde(default)]
     deleted: bool,
+}
+
+impl RunManifest {
+    fn omit_ci_prose(&mut self, log_evidence: Option<&ManifestEvidence>) {
+        fn contains_ci(evidence: &ManifestEvidence) -> bool {
+            evidence.run_contexts().iter().any(|context| {
+                matches!(
+                    context.config(),
+                    ConfigProvenance::Resolved { profile: Some(profile) } if profile.name == "ci"
+                )
+            })
+        }
+
+        if contains_ci(&self.evidence) || log_evidence.is_some_and(contains_ci) {
+            self.meta.title = None;
+            self.meta.summary = None;
+        }
+    }
 }
 
 struct LogManifestFacts {
@@ -1024,13 +1042,14 @@ impl JsonlStore {
             summary_failures: projected_meta.summary_failures,
             lineage: projected_meta.lineage,
         };
-        let manifest = RunManifest {
+        let mut manifest = RunManifest {
             meta,
             execution: facts.execution,
             hooks: facts.hooks,
             evidence: facts.evidence,
             deleted: facts.deleted,
         };
+        manifest.omit_ci_prose(None);
         if previous.as_ref() == Some(&manifest) {
             return Ok(false);
         }
@@ -1175,7 +1194,7 @@ impl JsonlStore {
             .map(|manifest| manifest.evidence.clone())
             .or_else(|| log_facts.as_ref().map(|facts| facts.evidence.clone()))
             .unwrap_or_default();
-        let manifest = RunManifest {
+        let mut manifest = RunManifest {
             meta,
             execution,
             hooks,
@@ -1184,6 +1203,7 @@ impl JsonlStore {
                 || previous.as_ref().is_some_and(|manifest| manifest.deleted)
                 || log_facts.as_ref().is_some_and(|facts| facts.deleted),
         };
+        manifest.omit_ci_prose(log_facts.as_ref().map(|facts| &facts.evidence));
         let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
         Ok(())
@@ -1497,6 +1517,7 @@ impl JsonlStore {
         {
             manifest.meta.model = Some(admission.target().canonical_model().0.clone());
         }
+        manifest.omit_ci_prose(None);
         let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
         Ok(())
