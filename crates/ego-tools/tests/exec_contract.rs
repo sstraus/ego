@@ -702,8 +702,7 @@ fn __ego_internal_network_probe_v1() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_libtest_host_runs_only_the_landlock_helper_for_its_envelope() {
-    use std::io::Read as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let mut child = Command::new(std::env::current_exe().expect("the test executable"))
         .args(["--ignored", "--exact", "__ego_internal_landlock_exec_v1"])
@@ -713,12 +712,12 @@ fn a_libtest_host_runs_only_the_landlock_helper_for_its_envelope() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("the helper child runs");
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(20);
     let status = loop {
         if let Some(status) = child.try_wait().expect("helper child status") {
             break status;
         }
-        if std::time::Instant::now() > deadline {
+        if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
             panic!("the helper child did not exit: libtest ran more than the helper");
@@ -1359,7 +1358,7 @@ fn missing_executable_is_a_launch_failure_not_a_capability_refusal() {
     assert!(matches!(err, ProcessError::Launch { .. }));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn linux_target_argv_must_name_an_exact_executable_file() {
     let workspace_dir = tempfile::tempdir().expect("workspace fixture directory");
@@ -2126,14 +2125,20 @@ fn linux_landlock_abi_status_and_workspace_rights_are_fail_closed() {
 
     // The helper path is an implementation detail, but the target remains a
     // public exact-argv contract: a confined launch must execute the same
-    // current-test executable and fixture arguments, not a helper substitute.
-    let out = block_on(run.ports.process().execute(&fixture_arg_spec(
-        "exec_contract_fixture_echoes_argument",
-        [OsString::from("linux exact target")],
+    // executable and arguments, not a helper substitute. The target is an
+    // installed utility because a confined child may execute only beneath the
+    // runtime roots and the workspace, and this test binary lives in the
+    // target directory, outside both (the same rule as the mutation matrix).
+    let echo = std::fs::canonicalize("/bin/echo").expect("an installed echo utility");
+    let spec = SpawnSpec::new(
+        vec![echo.into_os_string(), OsString::from("linux exact target")],
+        Some(cwd()),
         None,
-        cwd(),
-    )))
-    .expect("a complete Landlock probe must execute its exact target argv");
+        EnvPolicy::Inherited,
+    )
+    .expect("argv is valid before launch");
+    let out = block_on(run.ports.process().execute(&spec))
+        .expect("a complete Landlock probe must execute its exact target argv");
     assert!(format!("{out:?}").contains("linux exact target"));
 
     let missing = match open_run(Confinement::Off, true, cwd(), 1024 * 1024, 1024) {
@@ -2558,14 +2563,32 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
         // the independent network prerequisite changed during measurement.
         #[cfg(target_os = "macos")]
         let offline = open_offline_control_run(workspace, nonloopback);
-        #[cfg(not(target_os = "macos"))]
+        // Linux never demonstrates offline (ADR 2026-08-21 §5): Landlock's
+        // network rules are port-based, cannot tell loopback from anything
+        // else, and no second mechanism proves the no-IP contract. Offline
+        // must therefore be refused, naming exactly the guarantee asked for,
+        // while the paired control above shows the network was reachable.
+        #[cfg(target_os = "linux")]
+        let offline: Option<Run> =
+            match open_run(Confinement::Off, true, workspace, 1024 * 1024, 1024) {
+                Err(ProcessError::MissingCapabilities(missing)) => {
+                    assert_eq!(missing.required(), required_caps(Confinement::Off, true));
+                    assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+                    None
+                }
+                Err(error) => {
+                    panic!("offline failed without a precise capability refusal: {error}")
+                }
+                Ok(_) => panic!("Linux offline proceeded without a mechanism that proves it"),
+            };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let offline = open_confined_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
         if let Some(offline) = offline {
             assert!(
                 execute(&offline, network_spec).is_err(),
                 "offline child reached an IP endpoint"
             );
-        } else {
+        } else if cfg!(not(target_os = "linux")) {
             return;
         }
         match control {

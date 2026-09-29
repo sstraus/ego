@@ -35,6 +35,12 @@ const HELPER_TOKEN: &str = "__ego_internal_landlock_exec_v1";
 /// the same dispatcher. Without them a libtest host read the protocol as
 /// test-name filters, ran whichever real tests matched `workspace` or a path,
 /// and every Landlock probe child timed out instead of running its target.
+///
+/// Known limit of the libtest host only: every word after `--` is still an
+/// exact test-name filter there, so a target argv that contains the exact
+/// name of an `#[ignore]`d test makes libtest run that test too, unconfined,
+/// beside the helper. No test targets its own binary, which a confined child
+/// may not execute anyway; the shipped binary has no such names.
 const HELPER_ENVELOPE: [&str; 5] = ["--ignored", "--exact", HELPER_TOKEN, "--nocapture", "--"];
 
 const HELPER_FAILURE: u8 = 125;
