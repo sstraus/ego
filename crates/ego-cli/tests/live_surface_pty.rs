@@ -23,22 +23,11 @@ fn double_ctrl_c_exit(status: &ExitStatus) -> bool {
     status.success() || cfg!(windows) && status.exit_code() == 0xC000_013A // STATUS_CONTROL_C_EXIT
 }
 
-/// How long every wait below gives the child to make progress.
-///
-/// One name for what was ten copies of the same eight seconds. Each use is a
-/// liveness bailout and none is a pass condition: a wait that expires panics,
-/// and the one deadline that does not — the post-EOF exit wait — kills the
-/// child and then asserts on a status a killed child cannot have. So the value
-/// only decides how long a genuine hang takes to become legible, and raising
-/// it cannot turn a failing run green.
-///
-/// The gap it must clear is the child's, measured while the whole workspace's
-/// test binaries run at once rather than on an idle machine. Eight seconds was
-/// the idle figure: `live_surface_esc_expedites_sampling_once_and_reports_interrupt_state`
-/// passes alone and failed under `cargo test --workspace` having seen only the
-/// two idle prompt renders, on a startup gap rather than on anything it
-/// asserts.
+/// Ordinary PTY waits fail if no expected progress arrives within 60 seconds.
 const PROGRESS_DEADLINE: Duration = Duration::from_secs(60);
+/// The full slash catalogue previously exceeded 60 seconds under host load.
+/// Its first unresponsive step still fails after at most 180 seconds.
+const SLASH_ACTION_DEADLINE: Duration = Duration::from_secs(180);
 
 enum WriteRequest {
     Bytes(Vec<u8>),
@@ -225,13 +214,23 @@ fn rendered_prompt_count(output: &[u8]) -> usize {
 }
 
 fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
-    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    until_prompt_from_with_context(receiver, output, start, PROGRESS_DEADLINE, "PTY prompt");
+}
+
+fn until_prompt_from_with_context(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    budget: Duration,
+    context: &str,
+) {
+    let deadline = Instant::now() + budget;
     while rendered_prompt_count(&output[start..]) == 0 {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             drain(receiver, output);
             panic!(
-                "PTY prompt wait timed out; raw output: {:?}; normalized output: {:?}",
+                "{context} wait timed out; raw output: {:?}; normalized output: {:?}",
                 String::from_utf8_lossy(&output[start..]),
                 normalized(&output[start..]),
             );
@@ -239,7 +238,7 @@ fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, s
         let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
             drain(receiver, output);
             panic!(
-                "PTY prompt wait failed: {error}; raw output: {:?}; normalized output: {:?}",
+                "{context} wait failed: {error}; raw output: {:?}; normalized output: {:?}",
                 String::from_utf8_lossy(&output[start..]),
                 normalized(&output[start..]),
             )
@@ -385,25 +384,45 @@ fn until_normalized_without_new_generation(
     stub: &Stub,
     generation_count: usize,
 ) {
+    until_normalized_without_new_generation_with_context(
+        receiver,
+        output,
+        start,
+        needle,
+        stub,
+        generation_count,
+        PROGRESS_DEADLINE,
+        "PTY output",
+    );
+}
+
+fn until_normalized_without_new_generation_with_context(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+    stub: &Stub,
+    generation_count: usize,
+    budget: Duration,
+    context: &str,
+) {
     while !normalized(&output[start..]).contains(needle) {
         let generations = stub.generations();
         if generations.len() != generation_count {
             drain(receiver, output);
             panic!(
-                "PTY input changed provider generation count while waiting for {needle:?}; expected {generation_count}, generations: {generations:?}; output: {:?}",
+                "{context} changed provider generation count while waiting for {needle:?}; expected {generation_count}, generations: {generations:?}; output: {:?}",
                 normalized(&output[start..]),
             );
         }
-        let chunk = receiver
-            .recv_timeout(PROGRESS_DEADLINE)
-            .unwrap_or_else(|error| {
-                drain(receiver, output);
-                panic!(
-                    "PTY wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
-                    stub.generations(),
-                    normalized(&output[start..]),
-                )
-            });
+        let chunk = receiver.recv_timeout(budget).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "{context} wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
+                stub.generations(),
+                normalized(&output[start..]),
+            )
+        });
         output.extend(chunk);
     }
 }
@@ -428,14 +447,66 @@ fn submit_local_action(
         .flush()
         .unwrap_or_else(|error| panic!("flush /{command}: {error}"));
     if let Some(expected) = expected {
-        until_normalized_without_new_generation(receiver, output, start, expected, stub, 0);
+        until_normalized_without_new_generation_with_context(
+            receiver,
+            output,
+            start,
+            expected,
+            stub,
+            0,
+            SLASH_ACTION_DEADLINE,
+            &format!("/{command} action output"),
+        );
     }
-    until_prompt_from(receiver, output, start);
+    until_prompt_from_with_context(
+        receiver,
+        output,
+        start,
+        SLASH_ACTION_DEADLINE,
+        &format!("/{command} terminal prompt"),
+    );
     drain_until_quiet(receiver, output);
     assert!(
         stub.generations().is_empty(),
         "/{command} leaked into a provider generation"
     );
+}
+
+#[test]
+fn slash_action_stall_reports_command_and_waiting_step() {
+    let stub = Stub::start(Plan::default());
+    for (command, expected, delivered, step) in [
+        ("help", Some("εgo commands"), None, "action output"),
+        (
+            "version",
+            Some("ego 0.1.0"),
+            Some(b"ego 0.1.0".as_slice()),
+            "terminal prompt",
+        ),
+        ("plan", None, None, "terminal prompt"),
+    ] {
+        let (sender, receiver) = mpsc::channel();
+        if let Some(bytes) = delivered {
+            sender.send(bytes.to_vec()).expect("deliver action output");
+        }
+        drop(sender);
+        let mut output = Vec::new();
+        let mut input = Vec::new();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            submit_local_action(&receiver, &mut output, &mut input, &stub, command, expected);
+        }))
+        .expect_err("a closed PTY output channel must stop the slash-action wait");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .expect("panic with a diagnostic message");
+        assert!(
+            message.contains(&format!("/{command}")),
+            "action missing: {message}"
+        );
+        assert!(message.contains(step), "waiting step missing: {message}");
+    }
 }
 
 fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, previous: usize) {
