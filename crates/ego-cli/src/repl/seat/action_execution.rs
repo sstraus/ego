@@ -329,8 +329,7 @@ pub(super) fn surface_line(
                         repaint_status(status);
                         continue;
                     }
-                    Dispatch::Prompt => {}
-                    Dispatch::Immediate | Dispatch::InteractiveIngress => continue,
+                    Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
                 }
                 match futures::executor::block_on(ingress.submit(buffer)) {
                     Ok(queue) => {
