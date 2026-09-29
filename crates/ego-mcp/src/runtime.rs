@@ -116,128 +116,153 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
             let server_admission = request.admission();
             let retained_acp = matches!(request.config(), McpServerConfig::Acp { .. });
             let mut acp_session = None;
-            let mut client = match request.config() {
-                McpServerConfig::Http(config) => McpClient::connect_http(
-                    request.name().clone(),
-                    config.clone(),
-                    options,
-                    Arc::clone(&runtime.http_management),
-                ),
-                McpServerConfig::Stdio(config) => {
-                    stdio_spawn_spec(server_admission.as_ref(), config, runtime.timeout)
-                        .and_then(|spec| {
-                            runtime
-                                .stdio_management
-                                .create(request.name().clone(), spec)
-                        })
-                        .and_then(|effects| {
-                            McpClient::connect_stdio(request.name().clone(), options, effects)
-                        })
+            let result = async {
+                let mut client = match request.config() {
+                    McpServerConfig::Http(config) => McpClient::connect_http(
+                        request.name().clone(),
+                        config.clone(),
+                        options,
+                        Arc::clone(&runtime.http_management),
+                    ),
+                    McpServerConfig::Stdio(config) => {
+                        stdio_spawn_spec(server_admission.as_ref(), config, runtime.timeout)
+                            .and_then(|spec| {
+                                runtime
+                                    .stdio_management
+                                    .create(request.name().clone(), spec)
+                            })
+                            .and_then(|effects| {
+                                McpClient::connect_stdio(request.name().clone(), options, effects)
+                            })
+                    }
+                    McpServerConfig::Acp { server_id } => {
+                        let effects = runtime
+                            .acp_management
+                            .clone()
+                            .ok_or_else(|| invalid_candidate("ACP MCP channel is unavailable"))?;
+                        let connection_id = effects
+                            .connect(server_id.clone())
+                            .await
+                            .map_err(|error| invalid_candidate(error.to_string()))?;
+                        acp_session = Some((connection_id.clone(), Arc::clone(&effects)));
+                        McpClient::connect_acp(
+                            request.name().clone(),
+                            options,
+                            connection_id,
+                            effects,
+                        )
+                    }
                 }
-                McpServerConfig::Acp { server_id } => {
-                    let effects = runtime
-                        .acp_management
-                        .clone()
-                        .ok_or_else(|| invalid_candidate("ACP MCP channel is unavailable"))?;
-                    let connection_id = effects
-                        .connect(server_id.clone())
+                .map_err(|error| invalid_candidate(error.to_string()))?;
+                let inventory = async {
+                    client.discover().await?;
+                    client.inventory().await
+                }
+                .await;
+                let inventory = inventory.map_err(|error| invalid_candidate(error.to_string()))?;
+                if let Some((connection_id, effects)) = &acp_session {
+                    for uri in ["tuic://workspace", "tuic://inbox"] {
+                        if !inventory
+                            .resources
+                            .iter()
+                            .any(|resource| resource.uri == uri)
+                        {
+                            continue;
+                        }
+                        let params = serde_json::json!({"uri":uri}).as_object().cloned();
+                        effects
+                            .request(
+                                connection_id.clone(),
+                                "resources/subscribe".to_owned(),
+                                params.clone(),
+                            )
+                            .await
+                            .map_err(|error| invalid_candidate(error.to_string()))?;
+                        let read = effects
+                            .request(connection_id.clone(), "resources/read".to_owned(), params)
+                            .await
+                            .map_err(|error| invalid_candidate(error.to_string()))?;
+                        let text = read["contents"]
+                            .as_array()
+                            .and_then(|contents| {
+                                contents.iter().find(|content| content["uri"] == uri)
+                            })
+                            .and_then(|content| content["text"].as_str())
+                            .ok_or_else(|| {
+                                invalid_candidate(format!(
+                                    "ACP MCP resource {uri} has no text content"
+                                ))
+                            })?;
+                        effects.publish_resource(uri, text.to_owned());
+                    }
+                }
+                let acp_client = if retained_acp {
+                    Some(Arc::new(tokio::sync::Mutex::new(client)))
+                } else {
+                    client
+                        .settle()
                         .await
                         .map_err(|error| invalid_candidate(error.to_string()))?;
-                    acp_session = Some((connection_id.clone(), Arc::clone(&effects)));
-                    McpClient::connect_acp(request.name().clone(), options, connection_id, effects)
-                }
-            }
-            .map_err(|error| invalid_candidate(error.to_string()))?;
-            let inventory = async {
-                client.discover().await?;
-                client.inventory().await
+                    None
+                };
+                let bootstrap = McpCollapsedBootstrap::detect(&inventory.tools)
+                    .map_err(|error| invalid_candidate(error.to_string()))?;
+                let factory = if let Some(client) = acp_client {
+                    Arc::new(
+                        McpAcpOperationFactory::runtime(
+                            Arc::clone(&runtime.continuations),
+                            runtime.max_sse_event_size,
+                            runtime.timeout,
+                            bootstrap,
+                            Arc::clone(&runtime.schemas),
+                            client,
+                        )
+                        .map_err(|error| invalid_candidate(error.to_string()))?,
+                    ) as Arc<dyn McpOperationFactory>
+                } else {
+                    runtime.operation_factory(request.config(), bootstrap)?
+                };
+                let capabilities = McpCapabilities::new(
+                    inventory.capabilities.tools.is_some(),
+                    inventory.capabilities.resources.is_some(),
+                    inventory.capabilities.prompts.is_some(),
+                );
+                let cache = cache_metadata(
+                    &inventory.tools,
+                    &inventory.resources,
+                    &inventory.prompts,
+                    inventory.expires_at,
+                )?;
+                McpAdmittedCandidate::new(
+                    server_admission,
+                    McpCandidateIdentity::validated(request.name().as_str()),
+                    McpCandidateInventory::new(
+                        capabilities,
+                        inventory.instructions,
+                        inventory.tools,
+                        inventory.resources,
+                        inventory.prompts,
+                        cache,
+                        None,
+                    ),
+                    factory,
+                )
+                .map_err(|error| invalid_candidate(error.to_string()))
             }
             .await;
-            let inventory = inventory.map_err(|error| invalid_candidate(error.to_string()))?;
-            if let Some((connection_id, effects)) = acp_session {
-                for uri in ["tuic://workspace", "tuic://inbox"] {
-                    if !inventory
-                        .resources
-                        .iter()
-                        .any(|resource| resource.uri == uri)
-                    {
-                        continue;
+            match result {
+                Err(error) => {
+                    if let Some((connection_id, effects)) = acp_session {
+                        if effects.disconnect(connection_id).await.is_err() {
+                            return Err(invalid_candidate(
+                                "ACP MCP candidate failed and its host connection could not be closed",
+                            ));
+                        }
                     }
-                    let params = serde_json::json!({"uri":uri}).as_object().cloned();
-                    effects
-                        .request(
-                            connection_id.clone(),
-                            "resources/subscribe".to_owned(),
-                            params.clone(),
-                        )
-                        .await
-                        .map_err(|error| invalid_candidate(error.to_string()))?;
-                    let read = effects
-                        .request(connection_id.clone(), "resources/read".to_owned(), params)
-                        .await
-                        .map_err(|error| invalid_candidate(error.to_string()))?;
-                    let text = read["contents"]
-                        .as_array()
-                        .and_then(|contents| contents.iter().find(|content| content["uri"] == uri))
-                        .and_then(|content| content["text"].as_str())
-                        .ok_or_else(|| {
-                            invalid_candidate(format!("ACP MCP resource {uri} has no text content"))
-                        })?;
-                    effects.publish_resource(uri, text.to_owned());
+                    Err(error)
                 }
+                admitted => admitted,
             }
-            let acp_client = if retained_acp {
-                Some(Arc::new(tokio::sync::Mutex::new(client)))
-            } else {
-                client
-                    .settle()
-                    .await
-                    .map_err(|error| invalid_candidate(error.to_string()))?;
-                None
-            };
-            let bootstrap = McpCollapsedBootstrap::detect(&inventory.tools)
-                .map_err(|error| invalid_candidate(error.to_string()))?;
-            let factory = if let Some(client) = acp_client {
-                Arc::new(
-                    McpAcpOperationFactory::runtime(
-                        Arc::clone(&runtime.continuations),
-                        runtime.max_sse_event_size,
-                        runtime.timeout,
-                        bootstrap,
-                        Arc::clone(&runtime.schemas),
-                        client,
-                    )
-                    .map_err(|error| invalid_candidate(error.to_string()))?,
-                ) as Arc<dyn McpOperationFactory>
-            } else {
-                runtime.operation_factory(request.config(), bootstrap)?
-            };
-            let capabilities = McpCapabilities::new(
-                inventory.capabilities.tools.is_some(),
-                inventory.capabilities.resources.is_some(),
-                inventory.capabilities.prompts.is_some(),
-            );
-            let cache = cache_metadata(
-                &inventory.tools,
-                &inventory.resources,
-                &inventory.prompts,
-                inventory.expires_at,
-            )?;
-            McpAdmittedCandidate::new(
-                server_admission,
-                McpCandidateIdentity::validated(request.name().as_str()),
-                McpCandidateInventory::new(
-                    capabilities,
-                    inventory.instructions,
-                    inventory.tools,
-                    inventory.resources,
-                    inventory.prompts,
-                    cache,
-                    None,
-                ),
-                factory,
-            )
-            .map_err(|error| invalid_candidate(error.to_string()))
         })
     }
 }

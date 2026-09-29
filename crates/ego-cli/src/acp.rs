@@ -147,9 +147,69 @@ struct CliAcpMcpEffects {
     inbox: Mutex<Option<String>>,
     self_ref: Weak<CliAcpMcpEffects>,
     connections: Arc<Mutex<HashMap<String, Weak<CliAcpMcpEffects>>>>,
+    refreshes: Mutex<HashMap<String, RefreshSlot>>,
+}
+
+#[derive(Default)]
+struct RefreshSlot {
+    in_flight: bool,
+    pending: bool,
+}
+
+fn drain_active_connections(active: &Mutex<Vec<String>>) -> Vec<String> {
+    match active.lock() {
+        Ok(mut active) => std::mem::take(&mut *active),
+        Err(poisoned) => {
+            tracing::warn!(
+                "ACP MCP connection state was poisoned; recovering active IDs for disconnect"
+            );
+            std::mem::take(&mut *poisoned.into_inner())
+        }
+    }
 }
 
 impl CliAcpMcpEffects {
+    fn schedule_refresh(&self, uri: &str) -> bool {
+        let mut refreshes = self
+            .refreshes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = refreshes.entry(uri.to_owned()).or_default();
+        if slot.in_flight {
+            slot.pending = true;
+            false
+        } else {
+            slot.in_flight = true;
+            true
+        }
+    }
+
+    async fn refresh_until_quiet(&self, connection_id: String, uri: String) {
+        loop {
+            self.refresh_resource(connection_id.clone(), uri.clone())
+                .await;
+            let pending = {
+                let mut refreshes = self
+                    .refreshes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let Some(slot) = refreshes.get_mut(&uri) else {
+                    break;
+                };
+                if slot.pending {
+                    slot.pending = false;
+                    true
+                } else {
+                    refreshes.remove(&uri);
+                    false
+                }
+            };
+            if !pending {
+                break;
+            }
+        }
+    }
+
     async fn refresh_resource(&self, connection_id: String, uri: String) {
         let params = serde_json::json!({"uri":uri}).as_object().cloned();
         let result = self
@@ -194,10 +254,7 @@ impl CliAcpMcpEffects {
     }
 
     async fn close_all(&self) {
-        let connections = match self.active.lock() {
-            Ok(mut active) => std::mem::take(&mut *active),
-            Err(_) => return,
-        };
+        let connections = drain_active_connections(&self.active);
         for connection_id in connections {
             if let Err(error) = self.disconnect(connection_id).await {
                 tracing::warn!(%error, "ACP MCP disconnect failed on session close");
@@ -236,18 +293,26 @@ impl McpAcpEffects for CliAcpMcpEffects {
                 .map_err(|error| {
                     ego_mcp::McpError::new(ego_mcp::McpFailure::Transport, error.to_string())
                 })?;
-            active
-                .lock()
-                .map_err(|_| {
-                    ego_mcp::McpError::new(
-                        ego_mcp::McpFailure::Transport,
-                        "ACP MCP connection state is unavailable",
-                    )
-                })?
-                .push(connection_id.clone());
-            if let Ok(mut routes) = connections.lock() {
-                routes.insert(connection_id.clone(), self_ref);
+            let mut active = active.lock().map_err(|_| {
+                ego_mcp::McpError::new(
+                    ego_mcp::McpFailure::Transport,
+                    "ACP MCP connection state is unavailable",
+                )
+            })?;
+            let mut routes = connections.lock().map_err(|_| {
+                ego_mcp::McpError::new(
+                    ego_mcp::McpFailure::Transport,
+                    "ACP MCP connection routes are unavailable",
+                )
+            })?;
+            if routes.get(&connection_id).and_then(Weak::upgrade).is_some() {
+                return Err(ego_mcp::McpError::new(
+                    ego_mcp::McpFailure::Transport,
+                    "ACP MCP host reused an active connection ID",
+                ));
             }
+            routes.insert(connection_id.clone(), self_ref);
+            active.push(connection_id.clone());
             Ok(connection_id)
         })
     }
@@ -296,11 +361,16 @@ impl McpAcpEffects for CliAcpMcpEffects {
         let connection = self.connection.clone();
         let active = Arc::clone(&self.active);
         let connections = Arc::clone(&self.connections);
+        let self_ref = self.self_ref.clone();
         Box::pin(async move {
             if let Ok(mut active) = active.lock() {
                 active.retain(|id| id != &connection_id);
             }
-            if let Ok(mut routes) = connections.lock() {
+            if let Ok(mut routes) = connections.lock()
+                && routes
+                    .get(&connection_id)
+                    .is_some_and(|owner| owner.ptr_eq(&self_ref))
+            {
                 routes.remove(&connection_id);
             }
             connection
@@ -460,22 +530,25 @@ impl AcpMcpSessionAdmitter {
 }
 
 impl McpSessionAdmitter for AcpMcpSessionAdmitter {
-    fn mcp_notification(&self, notification: v1::MessageMcpNotification) -> BoxFuture<'static, ()> {
+    fn mcp_notification(
+        &self,
+        notification: v1::MessageMcpNotification,
+    ) -> Option<BoxFuture<'static, ()>> {
         let value = match serde_json::to_value(notification) {
             Ok(value) => value,
-            Err(_) => return Box::pin(async {}),
+            Err(_) => return None,
         };
         let method = value["method"].as_str();
         let uri = value["params"]["uri"].as_str();
         let connection_id = value["connectionId"].as_str();
         if method != Some("notifications/resources/updated") {
-            return Box::pin(async {});
+            return None;
         }
         let Some(uri @ ("tuic://workspace" | "tuic://inbox")) = uri else {
-            return Box::pin(async {});
+            return None;
         };
         let Some(connection_id) = connection_id else {
-            return Box::pin(async {});
+            return None;
         };
         let effects = self
             .connections
@@ -484,11 +557,10 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
             .and_then(|routes| routes.get(connection_id).and_then(Weak::upgrade));
         let connection_id = connection_id.to_owned();
         let uri = uri.to_owned();
-        Box::pin(async move {
-            if let Some(effects) = effects {
-                effects.refresh_resource(connection_id, uri).await;
-            }
-        })
+        let effects = effects.filter(|effects| effects.schedule_refresh(&uri))?;
+        Some(Box::pin(async move {
+            effects.refresh_until_quiet(connection_id, uri).await;
+        }))
     }
 
     fn admit(
@@ -520,6 +592,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                     inbox: Mutex::new(None),
                     self_ref: self_ref.clone(),
                     connections: Arc::clone(&connections),
+                    refreshes: Mutex::new(HashMap::new()),
                 })
             });
             let acp_management = acp_effects
@@ -1054,6 +1127,26 @@ mod confinement_ceiling_tests {
             error.to_string(),
             "plaintext HTTP requires allow_insecure_loopback = true"
         );
+    }
+}
+
+#[cfg(test)]
+mod poisoned_active_connections_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::drain_active_connections;
+
+    #[test]
+    fn poisoned_active_lock_still_yields_every_connection_for_disconnect() {
+        let active = Arc::new(Mutex::new(vec!["first".to_owned(), "second".to_owned()]));
+        let poison = Arc::clone(&active);
+        let thread = std::thread::spawn(move || {
+            let _guard = poison.lock().expect("initial lock");
+            panic!("poison the lock after recording active connections");
+        });
+        assert!(thread.join().is_err());
+        assert_eq!(drain_active_connections(&active), ["first", "second"]);
+        assert!(active.lock().unwrap_err().into_inner().is_empty());
     }
 }
 

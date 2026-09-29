@@ -16,6 +16,7 @@ struct McpHost {
     workspace_text: Option<String>,
     inbox_text: Option<String>,
     fail_discovery: bool,
+    fail_subscribe: bool,
 }
 
 impl McpHost {
@@ -27,7 +28,10 @@ impl McpHost {
             }
             match frame["method"].as_str() {
                 Some("mcp/connect") => {
-                    assert_eq!(frame["params"]["serverId"], "tuicommander");
+                    assert!(matches!(
+                        frame["params"]["serverId"].as_str(),
+                        Some("tuicommander" | "tuicommander-second")
+                    ));
                     self.connects += 1;
                     host.write_frame(serde_json::json!({
                         "jsonrpc": "2.0", "id": frame["id"],
@@ -53,6 +57,13 @@ impl McpHost {
                         host.write_frame(serde_json::json!({
                             "jsonrpc":"2.0","id":frame["id"],
                             "error":{"code":-32603,"message":"host discovery failed"}
+                        }));
+                        continue;
+                    }
+                    if self.fail_subscribe && frame["params"]["method"] == "resources/subscribe" {
+                        host.write_frame(serde_json::json!({
+                            "jsonrpc":"2.0","id":frame["id"],
+                            "error":{"code":-32603,"message":"host subscription failed"}
                         }));
                         continue;
                     }
@@ -208,6 +219,229 @@ fn failed_acp_mcp_admission_disconnects_its_open_host_connection() {
         mcp.disconnects, 1,
         "failed admission leaked the ACP host connection"
     );
+}
+
+#[test]
+fn failed_resource_subscription_disconnects_before_session_new_answers() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    ).expect("isolated profile configuration");
+    let stub = Stub::start(Plan::default());
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let mut mcp = McpHost {
+        resources: true,
+        fail_subscribe: true,
+        ..McpHost::default()
+    };
+    let opened = host.send_request(
+        "session/new",
+        serde_json::json!({
+            "cwd":places.workspace_path(),
+            "mcpServers":[{"type":"acp","name":"tuicommander","serverId":"tuicommander"}]
+        }),
+    );
+    let answer = mcp.until(&mut host, opened);
+    assert!(
+        answer["error"].is_object(),
+        "subscription failure was accepted: {answer}"
+    );
+    assert_eq!(mcp.connects, 1, "{answer}");
+    assert_eq!(
+        mcp.disconnects, 1,
+        "subscription failure left a host connection open: {answer}"
+    );
+    mcp.fail_subscribe = false;
+    let second = host.send_request(
+        "session/new",
+        serde_json::json!({
+            "cwd":places.workspace_path(),
+            "mcpServers":[{"type":"acp","name":"tuicommander2","serverId":"tuicommander-second"}]
+        }),
+    );
+    let recovered = mcp.until(&mut host, second);
+    assert!(
+        recovered["result"].is_object(),
+        "a disconnected ID remained routed: {recovered}"
+    );
+    assert_eq!(mcp.connects, 2);
+    host.finish();
+}
+
+#[test]
+fn burst_resource_updates_start_at_most_one_follow_up_read() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    ).expect("isolated profile configuration");
+    let stub = Stub::start(Plan::default());
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let mut mcp = McpHost {
+        resources: true,
+        ..McpHost::default()
+    };
+    let opened = host.send_request(
+        "session/new",
+        serde_json::json!({
+            "cwd":places.workspace_path(),
+            "mcpServers":[{"type":"acp","name":"tuicommander","serverId":"tuicommander"}]
+        }),
+    );
+    let opened = mcp.until(&mut host, opened);
+    assert!(opened["result"].is_object(), "{opened}");
+    let update = serde_json::json!({
+        "jsonrpc":"2.0","method":"mcp/message","params":{
+            "connectionId":"host-connection","method":"notifications/resources/updated",
+            "params":{"uri":"tuic://workspace"}
+        }
+    });
+    host.write_frame(update.clone());
+    let first = loop {
+        let frame = host.read_frame();
+        if frame["method"] == "mcp/message" && frame["params"]["method"] == "resources/read" {
+            break frame;
+        }
+    };
+    for _ in 0..20 {
+        host.write_frame(update.clone());
+    }
+    let barrier = host.send_request(
+        "session/list",
+        serde_json::json!({"cwd":places.workspace_path()}),
+    );
+    let mut reads = 1;
+    loop {
+        let frame = host.read_frame();
+        if frame["id"].as_u64() == Some(barrier) {
+            assert!(frame["result"].is_object(), "{frame}");
+            break;
+        }
+        if frame["method"] == "mcp/message" && frame["params"]["method"] == "resources/read" {
+            reads += 1;
+            assert!(
+                reads <= 1,
+                "overlapping resource reads escaped while the first was held: {reads}"
+            );
+        }
+    }
+    host.write_frame(serde_json::json!({
+        "jsonrpc":"2.0","id":first["id"],"result":{
+            "resultType":"complete","contents":[{
+                "uri":"tuic://workspace","mimeType":"application/json","text":"{\"viewedRepo\":\"/workspace/first\"}"
+            }]
+        }
+    }));
+    let follow_up = loop {
+        let frame = host.read_frame();
+        if frame["method"] == "mcp/message" && frame["params"]["method"] == "resources/read" {
+            break frame;
+        }
+    };
+    reads += 1;
+    host.write_frame(serde_json::json!({
+        "jsonrpc":"2.0","id":follow_up["id"],"result":{
+            "resultType":"complete","contents":[{
+                "uri":"tuic://workspace","mimeType":"application/json","text":"{\"viewedRepo\":\"/workspace/latest\"}"
+            }]
+        }
+    }));
+    let settled = host.send_request(
+        "session/list",
+        serde_json::json!({"cwd":places.workspace_path()}),
+    );
+    loop {
+        let frame = host.read_frame();
+        if frame["id"].as_u64() == Some(settled) {
+            assert!(frame["result"].is_object(), "{frame}");
+            break;
+        }
+        assert_ne!(
+            frame["params"]["method"], "resources/read",
+            "burst caused a third read: {frame}"
+        );
+    }
+    assert_eq!(reads, 2);
+    host.finish();
+}
+
+#[test]
+fn duplicate_host_connection_id_cannot_redirect_a_live_sessions_updates() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    ).expect("isolated profile configuration");
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("first session remains live"))],
+        ..Plan::default()
+    });
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let mut mcp = McpHost {
+        resources: true,
+        ..McpHost::default()
+    };
+    let request = serde_json::json!({
+        "cwd":places.workspace_path(),
+        "mcpServers":[{"type":"acp","name":"tuicommander","serverId":"tuicommander"}]
+    });
+    let first = host.send_request("session/new", request.clone());
+    let first = mcp.until(&mut host, first);
+    let session = first["result"]["sessionId"]
+        .as_str()
+        .expect("first session");
+    let second = host.send_request("session/new", request);
+    let second = mcp.until(&mut host, second);
+    assert!(
+        second["error"].is_object(),
+        "duplicate host connection ID was admitted: {second}"
+    );
+    assert_eq!(
+        mcp.disconnects, 0,
+        "rejecting the duplicate disconnected the first session"
+    );
+    mcp.updated_workspace(
+        &mut host,
+        r#"{"repos":["/workspace/first"],"viewedRepo":"/workspace/first"}"#,
+    );
+    let prompt = host.send_request(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId":session,"prompt":[{"type":"text","text":"Which workspace is live?"}]
+        }),
+    );
+    let answer = mcp.until(&mut host, prompt);
+    assert!(answer["result"].is_object(), "{answer}");
+    host.finish();
+    assert!(stub.generations().iter().any(|generation| {
+        generation["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["role"] == "system"
+                    && message["content"]
+                        .as_str()
+                        .is_some_and(|content| content.contains("/workspace/first"))
+            })
+        })
+    }));
 }
 
 #[test]

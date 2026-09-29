@@ -322,8 +322,8 @@ pub trait McpSessionAdmitter: Send + Sync {
     fn mcp_notification(
         &self,
         _notification: v1::MessageMcpNotification,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async {})
+    ) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
+        None
     }
 }
 
@@ -2643,11 +2643,14 @@ where
             {
                 let mcp_admitter = Arc::clone(&mcp_admitter);
                 async move |notification: v1::MessageMcpNotification, cx: ConnectionTo<Client>| {
-                    let mcp_admitter = Arc::clone(&mcp_admitter);
-                    cx.spawn(async move {
-                        mcp_admitter.mcp_notification(notification).await;
+                    if let Some(refresh) = mcp_admitter.mcp_notification(notification) {
+                        cx.spawn(async move {
+                            refresh.await;
+                            Ok(())
+                        })
+                    } else {
                         Ok(())
-                    })
+                    }
                 }
             },
             on_receive_notification!(),
