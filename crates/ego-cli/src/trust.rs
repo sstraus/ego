@@ -39,17 +39,23 @@ const SKILL_FILE: &str = "SKILL.md";
 
 /// Shared project rules precede repository rules, but scratch fixtures under
 /// `~/Gits/.tmp` stay isolated from the human's instruction hierarchy.
-pub(crate) fn instruction_discovery_root(root: &Path, home: &Path) -> PathBuf {
-    let shared = home.join("Gits");
+pub(crate) fn instruction_discovery_root(root: &Path, home: &Path) -> std::io::Result<PathBuf> {
+    let root = fs::canonicalize(root)?;
+    let Ok(home) = fs::canonicalize(home) else {
+        return Ok(root);
+    };
+    let Ok(shared) = fs::canonicalize(home.join("Gits")) else {
+        return Ok(root);
+    };
     let is_scratch = root
         .strip_prefix(&shared)
         .ok()
         .and_then(|relative| relative.components().next())
         .is_some_and(|component| component.as_os_str() == ".tmp");
     if root.starts_with(&shared) && !is_scratch {
-        shared
+        Ok(shared)
     } else {
-        root.to_path_buf()
+        Ok(root)
     }
 }
 
@@ -63,6 +69,11 @@ pub(crate) fn resolve(
     diagnostics: &dyn Diagnostics,
     ask: impl FnOnce(&str) -> Trust,
 ) -> Trust {
+    let Ok(root) = fs::canonicalize(root) else {
+        diagnostics.note("the workspace path could not be resolved; trust was not granted");
+        return Trust::Untrusted;
+    };
+    let root = root.as_path();
     let Some(content) = trustable_content(root) else {
         // No project config, no instructions, no skills: `y` and `n` would
         // open the same session, and a question whose answers do not differ
@@ -130,6 +141,11 @@ pub(crate) fn resolve(
 /// Redacted executable declarations and the programs they run. Kept separate
 /// from the full inventory shown to a first-time reviewer.
 pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
+    let Ok(root) = fs::canonicalize(root) else {
+        tracing::warn!(path = %root.display(), "the workspace executable surface root could not be resolved");
+        return ExecutableSurface::default();
+    };
+    let root = root.as_path();
     let mut surface = ExecutableSurface::default();
     let configs = project_configs(root);
     let programs: Vec<_> = configs
@@ -300,6 +316,7 @@ pub(crate) fn remembered_decision(
     home: Option<&Path>,
     surface: &ExecutableSurface,
 ) -> Option<Trust> {
+    let root = fs::canonicalize(root).ok()?;
     let store = TrustStore::new(home?);
     let key = root.display().to_string();
     let ledger = match store.read() {
@@ -323,6 +340,7 @@ pub(crate) fn executable_changes(
     home: Option<&Path>,
     surface: &ExecutableSurface,
 ) -> Option<String> {
+    let root = fs::canonicalize(root).ok()?;
     let ledger = TrustStore::new(home?).read().ok()?;
     let changes = surface.changes_from(ledger.prior_surface(&root.display().to_string())?);
     (!changes.is_empty()).then_some(changes)
@@ -334,7 +352,10 @@ pub(crate) fn record_answer(
     fingerprint: &str,
     decision: Trust,
 ) -> bool {
-    let surface = executable_surface(root);
+    let Ok(root) = fs::canonicalize(root) else {
+        return false;
+    };
+    let surface = executable_surface(&root);
     if surface.fingerprint() != fingerprint {
         return false;
     }
@@ -507,6 +528,11 @@ pub(crate) fn trustable_content(root: &Path) -> Option<String> {
 
 /// Everything under `root` whose admission the trust answer governs.
 fn inventory(root: &Path) -> TrustInventory {
+    let Ok(root) = fs::canonicalize(root) else {
+        tracing::warn!(path = %root.display(), "the workspace trust inventory root could not be resolved");
+        return TrustInventory::new(Vec::new());
+    };
+    let root = root.as_path();
     let mut paths: Vec<PathBuf> = PROJECT_CONFIGS
         .iter()
         .map(|relative| root.join(relative))
@@ -520,7 +546,7 @@ fn inventory(root: &Path) -> TrustInventory {
 
     let discovery_root = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| instruction_discovery_root(root, &home))
+        .and_then(|home| instruction_discovery_root(root, &home).ok())
         .unwrap_or_else(|| root.to_path_buf());
     if let Ok(instructions) = ego_core::config::load(
         &OsInstructionIo,
@@ -1021,6 +1047,135 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_workspace_uses_one_canonical_trust_key_and_loads_its_instructions() {
+        let tree = tempfile::tempdir().expect("fixture root");
+        let workspace = tree.path().join("workspace");
+        let alias = tree.path().join("workspace-link");
+        let home = tree.path().join("ego-home");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::create_dir_all(&home).expect("ego home");
+        fs::write(workspace.join("AGENTS.md"), "project rules\n").expect("instructions");
+        std::os::unix::fs::symlink(&workspace, &alias).expect("workspace alias");
+
+        let asked = Cell::new(0);
+        assert_eq!(
+            resolve(&alias, Some(&home), &Silent, |_: &str| {
+                asked.set(asked.get() + 1);
+                Trust::Trusted
+            }),
+            Trust::Trusted
+        );
+        assert_eq!(asked.get(), 1, "the aliased instructions were offered");
+        assert_eq!(
+            resolve(&workspace, Some(&home), &Silent, |_: &str| {
+                asked.set(asked.get() + 1);
+                Trust::Trusted
+            }),
+            Trust::Trusted
+        );
+        assert_eq!(asked.get(), 1, "both paths share one remembered answer");
+
+        let ledger: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join("trust.json")).expect("trust ledger"))
+                .expect("JSON ledger");
+        let roots = ledger["workspaces"].as_object().expect("workspace entries");
+        assert_eq!(roots.len(), 1);
+        let canonical_workspace = fs::canonicalize(&workspace).expect("canonical workspace");
+        assert!(roots.contains_key(&canonical_workspace.display().to_string()));
+
+        fs::create_dir_all(workspace.join(".ego")).expect("project config directory");
+        fs::write(
+            workspace.join(".ego/config.toml"),
+            "[mcp.servers.new]\ntransport = 'stdio'\ncommand = '/usr/bin/env'\n",
+        )
+        .expect("new executable declaration");
+        assert_eq!(
+            resolve(&alias, Some(&home), &Silent, |_| {
+                asked.set(asked.get() + 1);
+                Trust::Untrusted
+            }),
+            Trust::Untrusted,
+            "new executable authority requires a fresh answer through the alias"
+        );
+        assert_eq!(asked.get(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_home_discovers_shared_instructions() {
+        let tree = tempfile::tempdir().expect("fixture root");
+        let home = tree.path().join("home-real");
+        let alias = tree.path().join("home-link");
+        let shared = home.join("Gits");
+        let workspace = shared.join("personal/ego");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::write(shared.join("AGENTS.md"), "shared rules\n").expect("shared instructions");
+        fs::write(workspace.join("AGENTS.md"), "project rules\n").expect("project instructions");
+        std::os::unix::fs::symlink(&home, &alias).expect("home alias");
+
+        let workspace = fs::canonicalize(&workspace).expect("canonical workspace");
+        let shared = fs::canonicalize(&shared).expect("canonical shared root");
+        let discovery_root =
+            instruction_discovery_root(&workspace, &alias).expect("canonical discovery root");
+        let loaded = ego_core::config::load(
+            &OsInstructionIo,
+            &discovery_root,
+            &workspace,
+            &ego_core::config::Selection::Ambient,
+            ego_core::config::Limits::default(),
+        )
+        .expect("workspace within discovery root");
+        let texts: Vec<_> = loaded
+            .loaded
+            .iter()
+            .map(|file| file.text.as_str())
+            .collect();
+        assert_eq!(texts, ["shared rules\n", "project rules\n"]);
+        assert_eq!(discovery_root, shared);
+
+        let outside = tree.path().join("outside");
+        fs::create_dir_all(&outside).expect("sibling workspace");
+        assert_eq!(
+            instruction_discovery_root(&outside, &alias).expect("canonical outside root"),
+            fs::canonicalize(outside).expect("canonical sibling root")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_shared_gits_root_discovers_its_canonical_tree() {
+        let tree = tempfile::tempdir().expect("fixture root");
+        let home = tree.path().join("home");
+        let shared = tree.path().join("shared-real");
+        let workspace = shared.join("personal/ego");
+        fs::create_dir_all(&home).expect("home");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::write(shared.join("AGENTS.md"), "shared rules\n").expect("shared instructions");
+        std::os::unix::fs::symlink(&shared, home.join("Gits")).expect("shared root alias");
+
+        let workspace = fs::canonicalize(&workspace).expect("canonical workspace");
+        let shared = fs::canonicalize(&shared).expect("canonical shared root");
+        let discovery_root =
+            instruction_discovery_root(&workspace, &home).expect("canonical discovery root");
+        let loaded = ego_core::config::load(
+            &OsInstructionIo,
+            &discovery_root,
+            &workspace,
+            &ego_core::config::Selection::Ambient,
+            ego_core::config::Limits::default(),
+        )
+        .expect("workspace inside shared root");
+        let texts: Vec<_> = loaded
+            .loaded
+            .iter()
+            .map(|file| file.text.as_str())
+            .collect();
+        assert_eq!(texts, ["shared rules\n"]);
+        assert_eq!(discovery_root, shared);
+    }
+
     #[test]
     fn editing_an_imported_instruction_keeps_the_trust_answer() {
         let fixture = Fixture::new();
@@ -1138,12 +1293,15 @@ mod tests {
     fn legacy_digest_only_approval_is_migrated_without_a_question() {
         let fixture = Fixture::new();
         fixture.write("AGENTS.md", "changed since approval\n");
-        let root = fixture.workspace.path().display().to_string();
+        let root = fs::canonicalize(fixture.workspace.path())
+            .expect("canonical workspace")
+            .display()
+            .to_string();
         fs::write(
             fixture.home.path().join("trust.json"),
             serde_json::json!({
                 "v": 1,
-                "workspaces": {root: {"decision": "trusted", "digest": "old-content-digest"}}
+                "workspaces": {root.clone(): {"decision": "trusted", "digest": "old-content-digest"}}
             })
             .to_string(),
         )
@@ -1155,7 +1313,7 @@ mod tests {
         )
         .expect("json");
         assert!(
-            stored["workspaces"][fixture.workspace.path().display().to_string()]
+            stored["workspaces"][root]
                 .get("executable_surface")
                 .is_some()
         );
