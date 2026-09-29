@@ -19,6 +19,7 @@ mod secret_child;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ego_core::event::id::DetachedExecId;
 use ego_core::permit::{
     CanonPath, DuplexSpawner, ExecCaps, ExecObservation, OneHop, PolicyDigest, Resolver,
     RunConfinement, SpawnSpec,
@@ -287,6 +288,13 @@ impl GuardedExec {
     }
 }
 
+impl Drop for GuardedExec {
+    fn drop(&mut self) {
+        self.context.cancel_all_background();
+        self.context.wait_background_shutdown();
+    }
+}
+
 impl ProcessExecutor for GuardedExec {
     fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
         identity::capture(spec)
@@ -300,6 +308,25 @@ impl ProcessExecutor for GuardedExec {
         spec: &'a SpawnSpec,
     ) -> BoxFuture<'a, Result<ego_core::permit::ToolResult, ProcessError>> {
         Box::pin(self.context.execute(spec))
+    }
+
+    fn start_background<'a>(
+        &'a self,
+        id: DetachedExecId,
+        spec: &'a SpawnSpec,
+    ) -> BoxFuture<'a, Result<(), ProcessError>> {
+        Box::pin(async move { self.context.start_background(id, spec) })
+    }
+
+    fn background_status(
+        &self,
+        id: DetachedExecId,
+    ) -> Result<ego_core::permit::DetachedExecSnapshot, ProcessError> {
+        self.context.background_status(id)
+    }
+
+    fn cancel_background(&self, id: DetachedExecId) -> Result<(), ProcessError> {
+        self.context.cancel_background(id)
     }
 
     fn execute_handler<'a>(

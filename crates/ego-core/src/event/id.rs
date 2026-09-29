@@ -9,6 +9,38 @@ use super::hook::HookId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionId(Uuid);
 
+/// Stable identity of one session-owned detached process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DetachedExecId(Uuid);
+
+impl DetachedExecId {
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for DetachedExecId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::str::FromStr for DetachedExecId {
+    type Err = MalformedId;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(text)
+            .map(Self)
+            .map_err(|_| MalformedId(text.to_owned()))
+    }
+}
+
+impl std::fmt::Display for DetachedExecId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 impl SessionId {
     /// Generate a new identity from the current time.
     pub fn new() -> Self {

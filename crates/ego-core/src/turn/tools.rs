@@ -104,6 +104,12 @@ pub struct ToolEffectPorts<'a> {
 }
 
 impl<'a> ToolEffectPorts<'a> {
+    pub(crate) fn detached_status(
+        &self,
+        id: crate::event::id::DetachedExecId,
+    ) -> Result<crate::permit::DetachedExecSnapshot, crate::permit::ProcessError> {
+        self.process.background_status(id)
+    }
     pub fn new(
         fs: &'a dyn Fs,
         process: &'a dyn ProcessExecutor,

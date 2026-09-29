@@ -346,7 +346,7 @@ impl RuleManagement {
                     OmittedDimension::Transport,
                 ],
             )),
-            Op::ReadEvidence { .. } | Op::SecretEgress { .. } => {
+            Op::ReadEvidence { .. } | Op::SessionProcess { .. } | Op::SecretEgress { .. } => {
                 Err(RuleManagementError::NonPersistible(op.name()))
             }
         }
@@ -440,6 +440,7 @@ fn operation_subject(op: &Op, workspace: &Path) -> String {
             .unwrap_or("<process>")
             .to_owned(),
         Op::ReadEvidence { .. } => "<session-evidence>".to_owned(),
+        Op::SessionProcess { id, .. } => format!("<session-process:{id}>"),
         Op::Opaque { tool, .. } => tool.to_string(),
         Op::Connect { target, .. } | Op::ProtocolConnect { target } => target.to_string(),
         Op::SecretEgress { .. } => "<secret-egress>".to_owned(),

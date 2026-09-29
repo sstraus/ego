@@ -230,6 +230,16 @@ pub enum ExportEvent {
     ToolCallCompleted {
         ok: bool,
     },
+    DetachedExecStarted {
+        id: crate::event::id::DetachedExecId,
+    },
+    DetachedExecSettled {
+        id: crate::event::id::DetachedExecId,
+        state: String,
+        exit_code: Option<i32>,
+        stdout_omitted: u64,
+        stderr_omitted: u64,
+    },
     QuestionRequested {
         target: QuestionTarget,
         mode: QuestionMode,
@@ -800,6 +810,51 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
         EventKind::ToolCallCompleted { ok, result: _ } => {
             redactions.tool_material += 1;
             ExportEvent::ToolCallCompleted { ok: *ok }
+        }
+        EventKind::DetachedExecStarted { id } => ExportEvent::DetachedExecStarted { id: *id },
+        EventKind::DetachedExecSettled { snapshot } => {
+            use crate::permit::DetachedExecOutcome;
+            let crate::permit::DetachedExecSnapshot {
+                id,
+                outcome,
+                stdout_tail,
+                stderr_tail,
+                stdout_omitted,
+                stderr_omitted,
+            } = snapshot;
+            let (state, exit_code) = match outcome {
+                Some(DetachedExecOutcome::Exited { code, result }) => {
+                    redactions.tool_material += 1;
+                    let _ = result;
+                    ("exited", Some(*code))
+                }
+                Some(DetachedExecOutcome::Signalled { signal, result }) => {
+                    redactions.tool_material += 1;
+                    let _ = (signal, result);
+                    ("signalled", None)
+                }
+                Some(DetachedExecOutcome::Cancelled) => ("cancelled", None),
+                Some(DetachedExecOutcome::TimedOut { timeout_ms }) => {
+                    let _ = timeout_ms;
+                    ("timed_out", None)
+                }
+                Some(DetachedExecOutcome::Interrupted) => ("interrupted", None),
+                Some(DetachedExecOutcome::Failed { reason }) => {
+                    redactions.raw_error += 1;
+                    let _ = reason;
+                    ("failed", None)
+                }
+                None => ("running", None),
+            };
+            redactions.tool_material +=
+                u64::from(!stdout_tail.is_empty()) + u64::from(!stderr_tail.is_empty());
+            ExportEvent::DetachedExecSettled {
+                id: *id,
+                state: state.to_owned(),
+                exit_code,
+                stdout_omitted: *stdout_omitted,
+                stderr_omitted: *stderr_omitted,
+            }
         }
         EventKind::QuestionRequested { request, target } => {
             redactions.opaque_prose += 1 + (request.options.len() as u64 * 2);

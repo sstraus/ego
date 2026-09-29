@@ -2946,6 +2946,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
     /// One generation: reserve, stream it into the log, settle.
     async fn generate(&mut self, turn: TurnId) -> Result<Generated, StoreError> {
+        self.refresh_detached_execs(turn)?;
         // A log this build wrote cannot fail here: the guard in `drain` refuses
         // a reused call id before it is ever appended. A log written before
         // that guard existed can, and there is nothing to do about it from
@@ -3398,6 +3399,33 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }),
             None => Ok(Generated::Ended(last_preflight_exit)),
         }
+    }
+
+    fn refresh_detached_execs(&mut self, turn: TurnId) -> Result<(), StoreError> {
+        for id in self.state().unsettled_detached_execs() {
+            let snapshot = match self.tools.effect_ports().detached_status(id) {
+                Ok(snapshot) if snapshot.outcome.is_some() => snapshot,
+                Ok(_) => continue,
+                Err(crate::permit::ProcessError::UnknownBackground { .. }) => {
+                    crate::permit::DetachedExecSnapshot {
+                        id,
+                        outcome: Some(crate::permit::DetachedExecOutcome::Interrupted),
+                        stdout_tail: Vec::new(),
+                        stderr_tail: Vec::new(),
+                        stdout_omitted: 0,
+                        stderr_omitted: 0,
+                    }
+                }
+                Err(error) => return Err(StoreError::Io(std::io::Error::other(error.to_string()))),
+            };
+            self.journal.append(
+                turn,
+                Some(ItemId::new()),
+                None,
+                EventKind::DetachedExecSettled { snapshot },
+            )?;
+        }
+        Ok(())
     }
 
     /// Write down why this loop stopped a generation, and end the turn on it.
@@ -4840,6 +4868,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
             break authorized;
         };
+        let detached = authorized.call().background();
+        if let Some(id) = detached {
+            self.journal.append(
+                turn,
+                None,
+                Some(call.started),
+                EventKind::DetachedExecStarted { id },
+            )?;
+        }
         let resume_context = call.capture_authority.resume_context(
             self.hook_runtime.as_ref(),
             HookCausality::item(call.item, turn, call.started),
@@ -4860,6 +4897,27 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Controlled::Interrupted => unreachable!("effect waits are never dropped"),
             Controlled::Failed(cause) => return Err(cause),
         };
+        if let Some(id) = detached
+            && let Err(failure) = &execution
+        {
+            self.journal.append(
+                turn,
+                Some(ItemId::new()),
+                Some(call.started),
+                EventKind::DetachedExecSettled {
+                    snapshot: crate::permit::DetachedExecSnapshot {
+                        id,
+                        outcome: Some(crate::permit::DetachedExecOutcome::Failed {
+                            reason: failure.to_string(),
+                        }),
+                        stdout_tail: Vec::new(),
+                        stderr_tail: Vec::new(),
+                        stdout_omitted: 0,
+                        stderr_omitted: 0,
+                    },
+                },
+            )?;
+        }
         Ok(match execution {
             Ok(crate::mcp::ToolExecution::Complete(result)) => ToolOutcome::Executed {
                 ok: true,

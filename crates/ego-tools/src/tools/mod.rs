@@ -28,6 +28,8 @@
 
 mod edit;
 mod exec;
+mod exec_cancel;
+mod exec_status;
 mod glob;
 mod grep;
 mod read;
@@ -36,6 +38,8 @@ mod write;
 
 pub use edit::{EditParams, EditTool};
 pub use exec::{ExecParams, ExecTool};
+pub use exec_cancel::{ExecCancelParams, ExecCancelTool};
+pub use exec_status::{ExecStatusParams, ExecStatusTool};
 pub use glob::{GlobParams, GlobTool};
 pub use grep::{GrepParams, GrepTool};
 pub use read::{ReadParams, ReadTool};
@@ -65,6 +69,8 @@ pub fn builtins() -> Vec<Arc<dyn Tool>> {
         Arc::new(Typed(WriteTool)),
         Arc::new(Typed(EditTool)),
         Arc::new(Typed(ExecTool)),
+        Arc::new(Typed(ExecCancelTool)),
+        Arc::new(Typed(ExecStatusTool)),
         Arc::new(Typed(ReadToolResult)),
     ]
 }

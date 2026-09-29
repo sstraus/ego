@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::CanonPath;
 use super::tool::{StreamProvenance, ToolContentBlock, ToolResult};
 use crate::credentials::SecretMaterial;
+use crate::event::id::DetachedExecId;
 use crate::hook::EffectScope;
 use crate::store::evidence::{EvidenceError, EvidenceRef};
 
@@ -972,6 +973,27 @@ pub trait ProcessExecutor: Send + Sync {
         spec: &'a SpawnSpec,
     ) -> BoxFuture<'a, Result<ToolResult, ProcessError>>;
 
+    /// Transfer one admitted process to the session owner and return its ID.
+    fn start_background<'a>(
+        &'a self,
+        _id: DetachedExecId,
+        _spec: &'a SpawnSpec,
+    ) -> BoxFuture<'a, Result<(), ProcessError>> {
+        Box::pin(futures::future::ready(Err(ProcessError::Invariant(
+            "process executor has no background lifecycle".to_owned(),
+        ))))
+    }
+
+    fn background_status(&self, _id: DetachedExecId) -> Result<DetachedExecSnapshot, ProcessError> {
+        Err(ProcessError::UnknownBackground { id: _id })
+    }
+
+    fn cancel_background(&self, _id: DetachedExecId) -> Result<(), ProcessError> {
+        Err(ProcessError::Invariant(
+            "process executor has no background lifecycle".to_owned(),
+        ))
+    }
+
     /// Execute one admitted hook handler with its strict request on stdin.
     /// Owners that do not provide this effect fail before spawning anything.
     fn execute_handler<'a>(
@@ -986,9 +1008,80 @@ pub trait ProcessExecutor: Send + Sync {
     }
 }
 
+/// A bounded observation of one process owned by this session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetachedExecSnapshot {
+    pub id: DetachedExecId,
+    pub outcome: Option<DetachedExecOutcome>,
+    pub stdout_tail: Vec<u8>,
+    pub stderr_tail: Vec<u8>,
+    pub stdout_omitted: u64,
+    pub stderr_omitted: u64,
+}
+
+impl DetachedExecSnapshot {
+    pub fn model_text(&self) -> String {
+        let state = match &self.outcome {
+            None => "running".to_owned(),
+            Some(DetachedExecOutcome::Exited { code, .. }) => format!("exited code {code}"),
+            Some(DetachedExecOutcome::Signalled { signal, .. }) => format!("signalled {signal:?}"),
+            Some(DetachedExecOutcome::Cancelled) => "cancelled".to_owned(),
+            Some(DetachedExecOutcome::TimedOut { timeout_ms }) => {
+                format!("timed out after {timeout_ms} ms")
+            }
+            Some(DetachedExecOutcome::Interrupted) => "interrupted".to_owned(),
+            Some(DetachedExecOutcome::Failed { reason }) => format!("failed: {reason}"),
+        };
+        let mut text = format!(
+            "background exec {}: {state}\nstdout tail ({} bytes omitted): {}\nstderr tail ({} bytes omitted): {}",
+            self.id,
+            self.stdout_omitted,
+            String::from_utf8_lossy(&self.stdout_tail),
+            self.stderr_omitted,
+            String::from_utf8_lossy(&self.stderr_tail),
+        );
+        if let Some(
+            DetachedExecOutcome::Exited { result, .. }
+            | DetachedExecOutcome::Signalled { result, .. },
+        ) = &self.outcome
+        {
+            for block in &result.content {
+                if let Some(reference) = &block.full_output {
+                    text.push_str(&format!("\n[read_tool_result {reference}]"));
+                }
+            }
+        }
+        text
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DetachedExecOutcome {
+    Exited {
+        code: i32,
+        result: ToolResult,
+    },
+    Signalled {
+        signal: Option<i32>,
+        result: ToolResult,
+    },
+    Cancelled,
+    TimedOut {
+        timeout_ms: u64,
+    },
+    Interrupted,
+    Failed {
+        reason: String,
+    },
+}
+
 /// Why an admitted process did not complete successfully.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessError {
+    UnknownBackground {
+        id: DetachedExecId,
+    },
     MissingCapabilities(MissingExecCaps),
     /// The reconstructed backend no longer matches the facts admitted for the run.
     /// No user effects have been constructed when this error is returned.
@@ -1024,6 +1117,7 @@ pub enum ProcessError {
 impl fmt::Display for ProcessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnknownBackground { id } => write!(f, "unknown background process ID {id}"),
             Self::MissingCapabilities(missing) => write!(f, "{missing}"),
             Self::ConfinementChanged { admitted, observed } => write!(
                 f,
