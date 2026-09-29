@@ -186,9 +186,12 @@ pub(super) fn surface_line(
                     repaint_status(status);
                     continue;
                 }
-                Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {
+                Dispatch::Prompt => {
+                    editor.run_edit_commands(&[EditCommand::Clear]);
+                    restore_latest_draft(editor, status, drafts);
                     return (line, failed);
                 }
+                Dispatch::Immediate | Dispatch::InteractiveIngress => return (line, failed),
             }
         }
         let Line::HostCommand(command) = line else {
@@ -238,15 +241,8 @@ pub(super) fn surface_line(
             HostCommand::Draft => {
                 let buffer = editor.current_buffer_contents().to_string();
                 if buffer.is_empty() {
-                    if let Some(saved) = drafts.pop_active() {
-                        editor.run_edit_commands(&[
-                            EditCommand::InsertString(saved.text),
-                            EditCommand::MoveToPosition {
-                                position: saved.cursor,
-                                select: false,
-                            },
-                        ]);
-                        status.lock().expect("surface status lock").origin = saved.origin;
+                    if restore_latest_draft(editor, status, drafts) {
+                        continue;
                     }
                 } else {
                     let origin = status.lock().expect("surface status lock").origin;
@@ -333,7 +329,8 @@ pub(super) fn surface_line(
                         repaint_status(status);
                         continue;
                     }
-                    Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
+                    Dispatch::Prompt => {}
+                    Dispatch::Immediate | Dispatch::InteractiveIngress => continue,
                 }
                 match futures::executor::block_on(ingress.submit(buffer)) {
                     Ok(queue) => {
@@ -346,7 +343,9 @@ pub(super) fn surface_line(
                         }
                         current.notice = None;
                         drop(current);
-                        repaint_status(status);
+                        if !restore_latest_draft(editor, status, drafts) {
+                            repaint_status(status);
+                        }
                     }
                     Err(error) => {
                         status.lock().expect("surface status lock").notice =
@@ -376,6 +375,38 @@ pub(super) fn surface_line(
         // A suspended read retains the exact buffer and cursor. Starting it
         // again repaints the state changed by the local action above.
     }
+}
+
+fn restore_latest_draft(
+    editor: &mut Reedline,
+    status: &SharedStatus,
+    drafts: &mut DraftStash,
+) -> bool {
+    if !editor.current_buffer_contents().is_empty() {
+        return false;
+    }
+    let Some(saved) = drafts.pop_active() else {
+        return false;
+    };
+    editor.run_edit_commands(&[
+        EditCommand::InsertString(saved.text),
+        EditCommand::MoveToPosition {
+            position: saved.cursor,
+            select: false,
+        },
+    ]);
+    {
+        let mut current = status.lock().expect("surface status lock");
+        current.origin = saved.origin;
+        current.drafts = drafts.active_count();
+        let draft_count = current.drafts;
+        if let Some(snapshot) = current.snapshot.as_mut() {
+            snapshot.set_drafts(draft_count);
+        }
+        current.notice = None;
+    }
+    repaint_status(status);
+    true
 }
 
 fn execute_action(

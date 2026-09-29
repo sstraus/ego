@@ -1020,9 +1020,11 @@ writing the same terminal.
 
 `Ctrl-S` with a non-empty composer pushes the exact multiline buffer onto a
 session-local LIFO draft stash and clears the composer. `Ctrl-S` with an empty
-composer restores the newest stash. Stashes are not submitted, do not enter
-model history, and are not silently overwritten; exiting with stashes reports
-their count.
+composer restores the newest stash immediately. After the next ordinary prompt
+is accepted, the newest parked draft returns to the composer automatically;
+actions and refused submissions leave it parked. Stashes are not submitted,
+do not enter model history, and are not silently overwritten; exiting with
+stashes reports their count.
 
 `Enter` on non-empty input during a busy regular turn immediately and durably
 accepts a FIFO **PendingSteer**, opens a clean composer, and shows exactly:

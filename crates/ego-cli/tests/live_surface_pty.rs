@@ -605,6 +605,26 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             pixel_height: 0,
         })
         .expect("pty");
+    #[cfg(unix)]
+    {
+        let tty = pair.master.tty_name().expect("slave PTY name");
+        let option = if cfg!(target_os = "macos") {
+            "-f"
+        } else {
+            "-F"
+        };
+        let setup = std::process::Command::new("stty")
+            .arg(option)
+            .arg(tty)
+            .arg("ixon")
+            .output()
+            .expect("enable XOFF on the real slave PTY");
+        assert!(
+            setup.status.success(),
+            "stty could not enable IXON: {}",
+            String::from_utf8_lossy(&setup.stderr)
+        );
+    }
     let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
@@ -642,16 +662,29 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"\x13").expect("stash newest draft");
     input.flush().expect("stash newest draft flush");
     let newest_stash_start = output.len();
+    // This next repaint follows XOFF without an XON byte. The real PTY must
+    // deliver Ctrl+S to ego rather than freeze terminal output.
     until_prompt_from(&reader, &mut output, newest_stash_start);
+    drain_until_quiet(&reader, &mut output);
+    let local_action_start = output.len();
+    input
+        .write_all(b"/version\r")
+        .expect("local version action");
+    input.flush().expect("local version action flush");
+    until_prompt_from(&reader, &mut output, local_action_start);
+    drain_until_quiet(&reader, &mut output);
+    assert!(
+        !output[local_action_start..]
+            .windows(b"newest_draft".len())
+            .any(|window| window == b"newest_draft"),
+        "a local action must leave parked input in the stash"
+    );
+    let newest_restore_start = output.len();
     input.write_all(b"initial\r").expect("initial prompt");
     input.flush().expect("initial prompt flush");
     until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
-    input
-        .write_all(b"\x13")
-        .expect("restore newest draft from LIFO stash during Busy");
-    let newest_restore_start = output.len();
-    input.flush().expect("restore newest draft flush");
     until_from(&reader, &mut output, newest_restore_start, b"newest_draft");
+    let older_restore_start = output.len();
     input.write_all(b"\r").expect("busy steer submit");
     input.flush().expect("busy steer flush");
     until_normalized(
@@ -660,6 +693,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
         0,
         "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
     );
+    until_from(&reader, &mut output, older_restore_start, b"older_draft");
     provider_gate.release();
     until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
     until_with_context(&reader, &mut output, b"[y] allow [n] deny [e] edit", || {
@@ -694,12 +728,6 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"y").expect("immediate permission answer");
     input.flush().expect("permission answer flush");
     until(&reader, &mut output, b"NEWEST-DRAFT-RECEIVED");
-    input
-        .write_all(b"\x13")
-        .expect("restore older draft from LIFO stash");
-    let older_restore_start = output.len();
-    input.flush().expect("restore older draft flush");
-    until_from(&reader, &mut output, older_restore_start, b"older_draft");
     input.write_all(b"\r").expect("submit restored older draft");
     input.flush().expect("older draft submit flush");
     until(&reader, &mut output, b"OLDER-DRAFT-RECEIVED");
@@ -718,6 +746,16 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"\x13").expect("stash unsent draft");
     input.flush().expect("stash unsent draft flush");
     until_post_trust_prompt(&reader, &mut output, unsent_stash_start);
+    let manual_restore_start = output.len();
+    input
+        .write_all(b"\x13")
+        .expect("restore from empty composer");
+    input.flush().expect("manual restore flush");
+    until_from(&reader, &mut output, manual_restore_start, b"unsent draft");
+    let manual_restash_start = output.len();
+    input.write_all(b"\x13").expect("park restored draft again");
+    input.flush().expect("manual restash flush");
+    until_post_trust_prompt(&reader, &mut output, manual_restash_start);
     pair.master
         .resize(PtySize {
             rows: 24,
