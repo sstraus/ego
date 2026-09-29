@@ -143,10 +143,17 @@ pub(super) fn instructions(
         None => None,
     };
     let selection = Selection::of(effective.posture, named);
-    let discovery_root = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| crate::trust::instruction_discovery_root(root, &home))
-        .unwrap_or_else(|| root.to_path_buf());
+    let discovery_root = if matches!(selection, Selection::Disabled) {
+        root.to_path_buf()
+    } else if let Some(home) = std::env::var_os("HOME") {
+        crate::trust::instruction_discovery_root(root, &PathBuf::from(home)).map_err(|error| {
+            UsageError(format!(
+                "instruction discovery root could not be resolved: {error}"
+            ))
+        })?
+    } else {
+        root.to_path_buf()
+    };
     let set = ego_core::config::load(
         &OsInstructionIo,
         &discovery_root,

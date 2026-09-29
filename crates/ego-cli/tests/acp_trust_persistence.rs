@@ -2,8 +2,51 @@ use std::fs;
 
 use ego_acp::serve::{SessionTrustAdmission, SessionTrustStatus};
 use ego_cli::acp_trust::CliSessionTrustAdmission;
+use ego_core::config::ExecutableSurface;
 use ego_core::config::Trust;
 use ego_core::run::RunRoot;
+
+#[cfg(unix)]
+#[test]
+fn acp_symlinked_workspace_shares_the_canonical_trust_answer() {
+    let tree = tempfile::tempdir().expect("fixture root");
+    let workspace = tree.path().join("workspace");
+    let alias = tree.path().join("workspace-link");
+    let home = tree.path().join("ego-home");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::create_dir_all(&home).expect("ego home");
+    fs::write(workspace.join("AGENTS.md"), "rules\n").expect("instruction");
+    std::os::unix::fs::symlink(&workspace, &alias).expect("workspace alias");
+
+    let alias = RunRoot::new(alias).expect("absolute alias");
+    let canonical = RunRoot::new(fs::canonicalize(workspace).expect("canonical workspace"))
+        .expect("absolute workspace");
+    let adapter = CliSessionTrustAdmission::new(Some(home));
+    let SessionTrustStatus::Question { fingerprint, .. } = adapter.status(&alias) else {
+        panic!("the aliased workspace offers its instructions")
+    };
+    assert!(adapter.record_answer(&alias, &fingerprint, Trust::Trusted));
+    assert!(matches!(
+        adapter.status(&canonical),
+        SessionTrustStatus::Remembered(Trust::Trusted)
+    ));
+}
+
+#[test]
+fn acp_missing_workspace_cannot_record_a_trust_answer() {
+    let tree = tempfile::tempdir().expect("fixture root");
+    let root = RunRoot::new(tree.path().join("missing-workspace")).expect("absolute root");
+    let home = tree.path().join("ego-home");
+    fs::create_dir_all(&home).expect("ego home");
+    let adapter = CliSessionTrustAdmission::new(Some(home.clone()));
+
+    assert!(!adapter.record_answer(
+        &root,
+        &ExecutableSurface::default().fingerprint(),
+        Trust::Trusted,
+    ));
+    assert!(!home.join("trust.json").exists());
+}
 
 #[test]
 fn acp_and_terminal_ledger_remember_both_answers_across_adapters() {
@@ -109,7 +152,7 @@ fn deleting_a_stored_workspace_entry_revokes_the_answer() {
     ledger["workspaces"]
         .as_object_mut()
         .expect("workspace map")
-        .remove(&root.as_path().display().to_string());
+        .clear();
     fs::write(&path, serde_json::to_vec(&ledger).expect("json")).expect("revoked ledger");
     assert!(matches!(
         adapter.status(&root),

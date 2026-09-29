@@ -34,7 +34,9 @@ fn trusted_project_instructions_begin_at_the_shared_gits_root() {
         std::fs::write(gits.join(relative), text).expect("fixture instruction");
     }
 
-    let root = crate::trust::instruction_discovery_root(&project, tree.path());
+    let root = crate::trust::instruction_discovery_root(&project, tree.path())
+        .expect("canonical instruction discovery root");
+    let cwd = std::fs::canonicalize(cwd).expect("canonical working directory");
     let loaded = ego_core::config::load(
         &ego_tools::instructions::OsInstructionIo,
         &root,
@@ -61,16 +63,20 @@ fn trusted_project_instructions_begin_at_the_shared_gits_root() {
     assert!(bare.loaded.is_empty());
 
     let lookalike = tree.path().join("Gits-elsewhere/project");
+    std::fs::create_dir_all(&lookalike).expect("lookalike workspace");
     assert_eq!(
-        crate::trust::instruction_discovery_root(&lookalike, tree.path()),
-        lookalike,
+        crate::trust::instruction_discovery_root(&lookalike, tree.path())
+            .expect("canonical lookalike root"),
+        std::fs::canonicalize(lookalike).expect("canonical lookalike"),
         "a similarly named directory does not inherit shared instructions"
     );
 
     let scratch = gits.join(".tmp/test-fixture");
+    std::fs::create_dir_all(&scratch).expect("scratch workspace");
     assert_eq!(
-        crate::trust::instruction_discovery_root(&scratch, tree.path()),
-        scratch,
+        crate::trust::instruction_discovery_root(&scratch, tree.path())
+            .expect("canonical scratch root"),
+        std::fs::canonicalize(scratch).expect("canonical scratch"),
         "scratch fixtures do not inherit the human's shared instructions"
     );
 }
