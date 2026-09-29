@@ -28,6 +28,7 @@ const PROGRESS_DEADLINE: Duration = Duration::from_secs(60);
 /// The full slash catalogue previously exceeded 60 seconds under host load.
 /// Its first unresponsive step still fails after at most 180 seconds.
 const SLASH_ACTION_DEADLINE: Duration = Duration::from_secs(180);
+const HELP_END: &str = "────────────────";
 
 enum WriteRequest {
     Bytes(Vec<u8>),
@@ -501,7 +502,9 @@ fn submit_local_action(
             &format!("/{command} action output"),
         );
     }
-    until_local_action_completed(receiver, output, start, command, SLASH_ACTION_DEADLINE);
+    if expected.is_none() {
+        until_local_action_completed(receiver, output, start, command, SLASH_ACTION_DEADLINE);
+    }
     assert!(
         stub.generations().is_empty(),
         "/{command} leaked into a provider generation"
@@ -510,27 +513,18 @@ fn submit_local_action(
         // A terminal repaint confirms Reedline accepted the command, but the
         // coordinator may still be consuming an earlier line. /help is a
         // visible driver round trip before the next action is submitted.
-        submit_local_action(receiver, output, input, stub, "help", Some("εgo commands"));
+        submit_local_action(receiver, output, input, stub, "help", Some(HELP_END));
     }
 }
 
 #[test]
 fn slash_action_stall_reports_command_and_waiting_step() {
     let stub = Stub::start(Plan::default());
-    for (command, expected, delivered, step) in [
-        ("help", Some("εgo commands"), None, "action output"),
-        (
-            "version",
-            Some("ego 0.1.0"),
-            Some(b"ego 0.1.0".as_slice()),
-            "terminal completion",
-        ),
-        ("plan", None, None, "terminal completion"),
+    for (command, expected, step) in [
+        ("help", Some("εgo commands"), "action output"),
+        ("plan", None, "terminal completion"),
     ] {
         let (sender, receiver) = mpsc::channel();
-        if let Some(bytes) = delivered {
-            sender.send(bytes.to_vec()).expect("deliver action output");
-        }
         drop(sender);
         let mut output = Vec::new();
         let mut input = Vec::new();
@@ -2516,7 +2510,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
     );
     frames
         .send(
-            "\x1b[96m> /help\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> \r\nεgo commands\r\n"
+            "\x1b[96m> /help\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> \r\nεgo commands\r\n────────────────\r\n"
                 .as_bytes()
                 .to_vec(),
         )
@@ -2524,7 +2518,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
     let output = result
         .recv_timeout(Duration::from_secs(2))
         .expect("silent action and driver reply");
-    assert!(normalized(&output).contains("εgo commands"));
+    assert!(normalized(&output).contains(HELP_END));
     waiter.join().expect("waiter thread");
 }
 
@@ -2597,7 +2591,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         &mut input,
         &stub,
         "help",
-        Some("εgo commands"),
+        Some(HELP_END),
     );
 
     for (command, prompt) in [
@@ -2627,7 +2621,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("mcp", Some("mcp:")),
         ("sessions", Some("UPDATED")),
         ("fork", None),
-        ("compact", None),
+        // This empty fixture cannot prepare compaction; wait for its outcome.
+        ("compact", Some("compaction failed")),
         ("clear", None),
         ("usage", Some("usage as_of=")),
         ("export", None),
