@@ -268,6 +268,7 @@ impl McpServerIdentity {
 pub enum McpTransportKind {
     Stdio,
     Http,
+    Acp,
 }
 
 /// One admitted MCP operation fingerprint without free-form operation text.

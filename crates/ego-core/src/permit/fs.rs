@@ -180,6 +180,14 @@ pub trait GuardedIo<'s>: Send + Sync {
     /// enforces exactly one rendered selected request.
     fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError>;
 
+    fn claim_mcp_acp(&self, _call: PreparedCall) -> Result<McpAcpClaim, TransportError> {
+        Err(authority_mismatch())
+    }
+
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
     fn take_mcp_resume(&self) -> Result<GuardedMcpResume<'s>, ContinuationError> {
         Err(ContinuationError::AuthorityMismatch)
     }
@@ -203,6 +211,17 @@ pub struct McpHttpClaim {
     envelope: super::prepared_call::McpPreparedEnvelope,
     route: super::foreign::HttpRoute,
     http: GuardedHttp,
+}
+
+/// A spent, non-clone authority for one selected call over an existing ACP channel.
+pub struct McpAcpClaim {
+    envelope: super::prepared_call::McpPreparedEnvelope,
+}
+
+impl McpAcpClaim {
+    pub fn envelope(&self) -> &super::prepared_call::McpPreparedEnvelope {
+        &self.envelope
+    }
 }
 
 impl McpHttpClaim {
@@ -280,6 +299,7 @@ pub struct GuardedEffects<'effects, R = GuardedMcpResume<'effects>> {
     duplex: Arc<dyn DuplexSpawner>,
     foreign_spent: AtomicBool,
     resume: Mutex<Option<R>>,
+    cancel: Option<crate::turn::CancelToken>,
 }
 
 impl<'effects> GuardedEffects<'effects> {
@@ -319,7 +339,13 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
             duplex,
             foreign_spent: AtomicBool::new(false),
             resume: Mutex::new(resume),
+            cancel: None,
         }
+    }
+
+    pub fn with_cancel(mut self, cancel: Option<crate::turn::CancelToken>) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     fn claim_foreign(
@@ -364,6 +390,13 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
                             .http_route()
                             .map(super::foreign::HttpRoute::target)
                     && claim.connect.is_none()
+                    && claim.spawn.is_none()
+                    && request.is_none() => {}
+            ForeignKind::Acp
+                if call.mcp_envelope().is_some()
+                    && claim.transport.is_acp()
+                    && claim.connect.is_none()
+                    && claim.protocol_target.is_none()
                     && claim.spawn.is_none()
                     && request.is_none() => {}
             ForeignKind::Duplex
@@ -502,6 +535,15 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
             route,
             http: self.http.clone(),
         })
+    }
+
+    pub fn claim_mcp_acp(&self, call: PreparedCall) -> Result<McpAcpClaim, TransportError> {
+        let envelope = call
+            .mcp_envelope()
+            .cloned()
+            .ok_or_else(authority_mismatch)?;
+        self.claim_foreign(&call, ForeignKind::Acp, None)?;
+        Ok(McpAcpClaim { envelope })
     }
 
     pub fn guarded_duplex(
@@ -705,6 +747,16 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
         GuardedEffects::claim_mcp_http(self, call)
     }
 
+    fn claim_mcp_acp(&self, call: PreparedCall) -> Result<McpAcpClaim, TransportError> {
+        GuardedEffects::claim_mcp_acp(self, call)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(crate::turn::CancelToken::is_cancelled)
+    }
+
     fn take_mcp_resume(&self) -> Result<GuardedMcpResume<'resume>, ContinuationError> {
         self.resume
             .lock()
@@ -733,6 +785,7 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
 enum ForeignKind {
     Http,
     SelectedMcp,
+    Acp,
     Duplex,
 }
 

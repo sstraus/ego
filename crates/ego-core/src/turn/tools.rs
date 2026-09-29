@@ -100,6 +100,7 @@ pub struct ToolEffectPorts<'a> {
     resolver: std::sync::Arc<dyn Resolver>,
     one_hop: std::sync::Arc<dyn OneHop>,
     duplex: std::sync::Arc<dyn DuplexSpawner>,
+    cancel: Option<super::CancelToken>,
 }
 
 impl<'a> ToolEffectPorts<'a> {
@@ -118,7 +119,13 @@ impl<'a> ToolEffectPorts<'a> {
             resolver,
             one_hop,
             duplex,
+            cancel: None,
         }
+    }
+
+    pub fn with_cancel(mut self, cancel: super::CancelToken) -> Self {
+        self.cancel = Some(cancel);
+        self
     }
 
     /// Bind one reopened MCP authority to the same guarded effect path used
@@ -139,7 +146,8 @@ impl<'a> ToolEffectPorts<'a> {
             self.one_hop,
             self.duplex,
             Some(GuardedMcpResume::new(resume, context)),
-        );
+        )
+        .with_cancel(self.cancel);
         (call, guarded)
     }
 
@@ -156,7 +164,8 @@ impl<'a> ToolEffectPorts<'a> {
             self.resolver,
             self.one_hop,
             self.duplex,
-        );
+        )
+        .with_cancel(self.cancel);
         (call, guarded)
     }
 
@@ -189,6 +198,10 @@ pub struct Tools<'a> {
 }
 
 impl<'a> Tools<'a> {
+    pub(crate) fn context_notes(&self) -> Vec<String> {
+        self.source.context_notes()
+    }
+
     pub fn new(
         registry: &[std::sync::Arc<dyn Tool>],
         effects: ToolEffectPorts<'a>,

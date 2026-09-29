@@ -825,6 +825,168 @@ impl McpOperationFactory for McpStdioOperationFactory {
     }
 }
 
+/// One retained MCP client for a server supplied on the owning ACP session.
+pub(crate) struct McpAcpOperationFactory {
+    continuations: Arc<McpContinuationOwner>,
+    limits: OperationLimits,
+    collapsed: Option<CollapsedSchemaAdmission>,
+    client: Arc<tokio::sync::Mutex<McpClient>>,
+}
+
+impl McpAcpOperationFactory {
+    pub(crate) fn runtime(
+        continuations: Arc<McpContinuationOwner>,
+        max_sse_event_size: usize,
+        timeout: Duration,
+        bootstrap: Option<McpCollapsedBootstrap>,
+        admission: Arc<dyn McpToolSchemaAdmission>,
+        client: Arc<tokio::sync::Mutex<McpClient>>,
+    ) -> Result<Self, McpError> {
+        Ok(Self {
+            continuations,
+            limits: OperationLimits::new(max_sse_event_size, timeout)?,
+            collapsed: bootstrap.map(|bootstrap| CollapsedSchemaAdmission {
+                bootstrap,
+                admission,
+            }),
+            client,
+        })
+    }
+}
+
+impl McpOperationFactory for McpAcpOperationFactory {
+    fn prepare(
+        &self,
+        admission: Arc<McpServerAdmission>,
+        operation: McpOperation,
+    ) -> Result<PreparedCall, ToolError> {
+        let McpServerConfig::Acp { server_id } = admission.config() else {
+            return Err(prepare_error("ACP MCP factory received another transport"));
+        };
+        let fingerprint = acp_transport_fingerprint(server_id, operation.admission());
+        PreparedCall::mcp_acp(
+            operation.subject().clone(),
+            operation.operation(),
+            operation.invocations().to_vec(),
+            operation.admission().clone(),
+            fingerprint,
+            operation.subject().server(),
+            operation.parameters(),
+        )
+        .map_err(|error| prepare_error(error.to_string()))
+    }
+
+    fn execute<'a, 'io>(
+        &'a self,
+        admission: Arc<McpServerAdmission>,
+        call: PreparedCall,
+        io: &'a dyn GuardedIo<'io>,
+        generation: Arc<str>,
+    ) -> future::BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
+        Box::pin(async move {
+            let McpServerConfig::Acp { server_id } = admission.config() else {
+                return Err(execution_error(
+                    "ACP MCP factory received another transport",
+                ));
+            };
+            let envelope = call.mcp_envelope().cloned().ok_or_else(|| {
+                mcp_execution_error(authority("selected ACP MCP call has no envelope"))
+            })?;
+            let transport = ForeignTransportTarget::acp(envelope.subject().server())
+                .map_err(|error| execution_error(error.to_string()))?;
+            if envelope.transport() != &transport
+                || envelope.transport_fingerprint()
+                    != acp_transport_fingerprint(server_id, envelope.admission())
+            {
+                return Err(mcp_execution_error(authority(
+                    "selected ACP MCP transport changed",
+                )));
+            }
+            let request = operation_request(&envelope).map_err(mcp_execution_error)?;
+            let claim = io
+                .claim_mcp_acp(call)
+                .map_err(|error| mcp_execution_error(error.into()))?;
+            if claim.envelope() != &envelope {
+                return Err(mcp_execution_error(authority(
+                    "guarded ACP claim changed its envelope",
+                )));
+            }
+            let mut client = self.client.lock().await;
+            client
+                .begin_acp_operation(self.limits.options().map_err(mcp_execution_error)?)
+                .map_err(mcp_execution_error)?;
+            let cancellation = client.cancellation();
+            let deadline = Instant::now()
+                .checked_add(self.limits.timeout)
+                .ok_or_else(|| execution_error("ACP MCP operation deadline overflowed"))?;
+            let mut invoke = Box::pin(request.invoke(&mut client));
+            let outcome = loop {
+                if io.is_cancelled() {
+                    cancellation.cancel();
+                    let _ = tokio::time::timeout(Duration::from_secs(2), &mut invoke).await;
+                    return Err(mcp_execution_error(McpError::new(
+                        McpFailure::Cancelled,
+                        "ACP MCP operation was cancelled",
+                    )));
+                }
+                tokio::select! {
+                    outcome = &mut invoke => break outcome,
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                        cancellation.cancel();
+                        let _ = tokio::time::timeout(Duration::from_secs(2), &mut invoke).await;
+                        return Err(mcp_execution_error(McpError::new(McpFailure::Transport, "ACP MCP operation timed out")));
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(2)) => {}
+                }
+            };
+            drop(invoke);
+            let outcome = outcome.map_err(mcp_execution_error)?;
+            let schema = tool_schema_command(
+                &outcome,
+                &envelope,
+                admission,
+                &generation,
+                self.collapsed.as_ref(),
+            )
+            .map_err(mcp_execution_error)?;
+            let execution = project_outcome(
+                outcome,
+                &envelope,
+                io,
+                self.continuations.as_ref(),
+                DeliveryCertainty::DefinitelySent,
+                CancellationClassification::Completed,
+            )
+            .await
+            .map_err(mcp_execution_error)?;
+            if let (Some(collapsed), Some(command)) = (self.collapsed.as_ref(), schema) {
+                collapsed
+                    .admission
+                    .reconcile(command)
+                    .await
+                    .map_err(mcp_execution_error)?;
+            }
+            Ok(execution)
+        })
+    }
+}
+
+fn acp_transport_fingerprint(server_id: &str, admission: &McpAdmissionFingerprint) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"ego:mcp:selected-acp:v1");
+    hash.update(server_id.as_bytes());
+    hash.update([0]);
+    hash.update(admission.capture().as_bytes());
+    hash.update([0]);
+    hash.update(admission.operation().as_bytes());
+    hash.update([0]);
+    hash.update(admission.schema().as_bytes());
+    format!("sha256:{:x}", hash.finalize())
+}
+
 fn prepare_http(config: &McpHttpConfig, operation: McpOperation) -> Result<PreparedCall, McpError> {
     let server = server_name(operation.subject().server())?;
     let profile = AdmittedMcpHttpProfile::initial(&server, config.url.as_url())?;

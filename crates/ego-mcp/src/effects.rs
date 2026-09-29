@@ -218,3 +218,26 @@ pub trait McpDuplexEffectsFactory: Send + Sync {
         spec: SpawnSpec,
     ) -> Result<Box<dyn McpDuplexEffects>, McpError>;
 }
+
+/// ACP-channel I/O supplied by the host for one session-owned MCP connection.
+pub trait McpAcpEffects: Send + Sync {
+    fn connect(&self, server_id: String) -> McpFuture<'static, Result<String, McpError>>;
+
+    fn request(
+        &self,
+        connection_id: String,
+        method: String,
+        params: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> McpFuture<'static, Result<serde_json::Value, McpError>>;
+
+    fn notify(
+        &self,
+        connection_id: String,
+        method: String,
+        params: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<(), McpError>;
+
+    fn disconnect(&self, connection_id: String) -> McpFuture<'static, Result<(), McpError>>;
+
+    fn publish_resource(&self, uri: &str, text: String);
+}

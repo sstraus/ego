@@ -274,6 +274,7 @@ pub enum McpLayerEntry {
 pub enum McpServerConfig {
     Stdio(McpStdioConfig),
     Http(McpHttpConfig),
+    Acp { server_id: String },
 }
 
 impl McpServerConfig {
@@ -298,6 +299,8 @@ impl McpServerConfig {
         match self {
             Self::Stdio(config) => config.validate(),
             Self::Http(config) => config.validate(),
+            Self::Acp { server_id } if !server_id.is_empty() => Ok(()),
+            Self::Acp { .. } => Err(McpValueError::new("ACP MCP server id must not be empty")),
         }
     }
 }

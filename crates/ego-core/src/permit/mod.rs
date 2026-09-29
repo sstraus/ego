@@ -32,7 +32,9 @@ pub use foreign::{
     NetworkTarget, OneHop, OneHopPayload, OneHopResponse, PreparedConnect, ResolvedConnect,
     Resolver, Subject, TransportError, TransportFailure,
 };
-pub use fs::{Fs, FsError, GuardedEffects, GuardedIo, IoDenied, McpHttpClaim, PathResolver};
+pub use fs::{
+    Fs, FsError, GuardedEffects, GuardedIo, IoDenied, McpAcpClaim, McpHttpClaim, PathResolver,
+};
 pub(crate) use grant::PermissionPresentationInput;
 pub use grant::{
     Authorized, Classification, Escalation, Pending, PermissionPresentation, PermissionRequest,

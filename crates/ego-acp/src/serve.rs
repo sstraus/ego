@@ -297,6 +297,10 @@ pub trait SessionMcpAdmission: Send + Sync {
     fn admitted_tools(&self) -> Arc<dyn AdmittedToolSource>;
     fn mcp_errors(&self) -> &[String];
     fn mcp_runtime(&self) -> Arc<dyn McpRuntimeBinding>;
+    fn cancel_active(&self) {}
+    fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
 }
 
 pub type McpSessionAdmissionFuture = Pin<
@@ -309,7 +313,18 @@ pub type McpSessionAdmissionFuture = Pin<
 
 /// Consumer-owned boundary that atomically admits one ACP session's servers.
 pub trait McpSessionAdmitter: Send + Sync {
-    fn admit(&self, servers: Vec<v1::McpServer>) -> McpSessionAdmissionFuture;
+    fn admit(
+        &self,
+        servers: Vec<v1::McpServer>,
+        connection: Option<ConnectionTo<Client>>,
+    ) -> McpSessionAdmissionFuture;
+
+    fn mcp_notification(
+        &self,
+        _notification: v1::MessageMcpNotification,
+    ) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
+        None
+    }
 }
 
 /// Completion of one session's confinement measurement and evidence write.
@@ -471,7 +486,7 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
                 .audio(false)
                 .embedded_context(false),
         )
-        .mcp_capabilities(v1::McpCapabilities::new().http(true).sse(false));
+        .mcp_capabilities(v1::McpCapabilities::new().http(true).sse(false).acp(true));
     let capabilities = if lifecycle {
         capabilities.session_capabilities(
             v1::SessionCapabilities::new()
@@ -662,7 +677,7 @@ struct Withdrawal {
 enum Cancellation {
     /// A run is admitted, so the controller owns the cancellation and the key
     /// names it.
-    Admitted(CancelKey),
+    Admitted(CancelKey, Option<Arc<dyn SessionMcpAdmission>>),
     /// A prompt is accepted and not yet admitted: the withdrawal is recorded
     /// against the registration and the prompt task answers it.
     Withdrawn,
@@ -913,7 +928,7 @@ impl Sessions {
         };
         if let Some(key) = session.active_cancel.clone() {
             session.cancel_requested = true;
-            return Cancellation::Admitted(key);
+            return Cancellation::Admitted(key, session.mcp.as_ref().map(Arc::clone));
         }
         let Some(withdrawal) = session.withdrawal.as_mut() else {
             return Cancellation::Nothing;
@@ -970,8 +985,11 @@ impl Sessions {
             .is_some_and(|session| session.busy)
     }
 
-    fn close(&self, id: &v1::SessionId) {
-        self.lock().sessions.remove(id);
+    fn close(&self, id: &v1::SessionId) -> Option<Arc<dyn SessionMcpAdmission>> {
+        self.lock()
+            .sessions
+            .remove(id)
+            .and_then(|session| session.mcp)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, SessionRegistrations> {
@@ -1054,6 +1072,14 @@ fn validate_mcp_servers(servers: &[v1::McpServer]) -> Result<(), McpSessionAdmis
                     "this build does not support MCP over SSE",
                 ));
             }
+            v1::McpServer::Acp(server) => {
+                if server.server_id.0.is_empty() {
+                    return Err(McpSessionAdmissionError::new(
+                        "an ACP MCP server id must not be empty",
+                    ));
+                }
+                &server.name
+            }
             _ => {
                 return Err(McpSessionAdmissionError::new(
                     "this build does not support the supplied MCP transport",
@@ -1074,10 +1100,11 @@ fn validate_mcp_servers(servers: &[v1::McpServer]) -> Result<(), McpSessionAdmis
 async fn admit_mcp(
     admitter: &dyn McpSessionAdmitter,
     servers: Vec<v1::McpServer>,
+    connection: Option<ConnectionTo<Client>>,
 ) -> Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError> {
     validate_mcp_servers(&servers)?;
     let supplied = !servers.is_empty();
-    match admitter.admit(servers).await {
+    match admitter.admit(servers, connection).await {
         Ok(Some(admission)) if supplied => Ok(Some(admission)),
         Ok(Some(_)) => Err(McpSessionAdmissionError::new(
             "an empty ACP MCP selection unexpectedly produced live authority",
@@ -2074,6 +2101,15 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 async move |request: v1::NewSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let sessions = sessions.clone();
+                    let roots = Arc::clone(&roots);
+                    let ids = Arc::clone(&ids);
+                    let mcp_admitter = Arc::clone(&mcp_admitter);
+                    let lifecycle = lifecycle.clone();
+                    let controls = controls.clone();
+                    let confinement = confinement.clone();
+                    let dispatcher = cx.clone();
+                    dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
                             "this agent does not support additionalDirectories",
@@ -2087,7 +2123,7 @@ where
                             );
                         }
                     };
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
+                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
                         Ok(mcp) => mcp,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
@@ -2165,6 +2201,7 @@ where
                         }
                     }
                     Ok(())
+                    })
                 }
             },
             on_receive_request!(),
@@ -2217,6 +2254,19 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 async move |request: v1::LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let lifecycle = lifecycle.clone();
+                    let sessions = sessions.clone();
+                    let controller = Arc::clone(&controller);
+                    let roots = Arc::clone(&roots);
+                    let ids = Arc::clone(&ids);
+                    let mcp_admitter = Arc::clone(&mcp_admitter);
+                    let spawner = Arc::clone(&spawner);
+                    let bindings_builder = Arc::clone(&bindings_builder);
+                    let client_capabilities = Arc::clone(&client_capabilities);
+                    let controls = controls.clone();
+                    let confinement = confinement.clone();
+                    let dispatcher = cx.clone();
+                    dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
                             "this agent does not support additionalDirectories",
@@ -2251,7 +2301,7 @@ where
                     {
                         return responder.respond_with_error(error);
                     }
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
+                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
                         Ok(mcp) => mcp,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
@@ -2317,6 +2367,7 @@ where
                             .meta(session_meta(hold, attachment.meta.summary.as_deref())),
                     )?;
                     emit_attachment(&cx, &request.session_id, &attachment)
+                    })
                 }
             },
             on_receive_request!(),
@@ -2335,6 +2386,19 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 async move |request: v1::ResumeSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let lifecycle = lifecycle.clone();
+                    let sessions = sessions.clone();
+                    let controller = Arc::clone(&controller);
+                    let roots = Arc::clone(&roots);
+                    let ids = Arc::clone(&ids);
+                    let mcp_admitter = Arc::clone(&mcp_admitter);
+                    let spawner = Arc::clone(&spawner);
+                    let bindings_builder = Arc::clone(&bindings_builder);
+                    let client_capabilities = Arc::clone(&client_capabilities);
+                    let controls = controls.clone();
+                    let confinement = confinement.clone();
+                    let dispatcher = cx.clone();
+                    dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
                             "this agent does not support additionalDirectories",
@@ -2365,7 +2429,7 @@ where
                     {
                         return responder.respond_with_error(error);
                     }
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
+                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
                         Ok(mcp) => mcp,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
@@ -2425,6 +2489,7 @@ where
                             .config_options(config_options(controls.as_ref(), id)),
                     )?;
                     emit_attachment(&cx, &request.session_id, &attachment)
+                    })
                 }
             },
             on_receive_request!(),
@@ -2439,6 +2504,15 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 async move |request: v1::ForkSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let lifecycle = lifecycle.clone();
+                    let sessions = sessions.clone();
+                    let roots = Arc::clone(&roots);
+                    let ids = Arc::clone(&ids);
+                    let mcp_admitter = Arc::clone(&mcp_admitter);
+                    let controls = controls.clone();
+                    let confinement = confinement.clone();
+                    let dispatcher = cx.clone();
+                    dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
                         return responder.respond_with_error(Error::invalid_params().data(
                             "this agent does not support additionalDirectories",
@@ -2462,7 +2536,7 @@ where
                     // refusal cannot leave an unexplained durable fork. If
                     // the later lifecycle transition refuses, this temporary
                     // connection authority is dropped without attachment.
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers).await {
+                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
                         Ok(mcp) => mcp,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
@@ -2500,6 +2574,7 @@ where
                             .config_options(config_options(controls.as_ref(), child)),
                     )?;
                     emit_info(&cx, &child_id, &attachment.meta)
+                    })
                 }
             },
             on_receive_request!(),
@@ -2508,7 +2583,11 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
-                async move |request: v1::DeleteSessionRequest, responder, _cx| {
+                async move |request: v1::DeleteSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let lifecycle = lifecycle.clone();
+                    let sessions = sessions.clone();
+                    let dispatcher = cx.clone();
+                    dispatcher.spawn(async move {
                     let Some(lifecycle) = &lifecycle else {
                         return responder.respond_with_error(Error::method_not_found());
                     };
@@ -2518,11 +2597,14 @@ where
                     };
                     match lifecycle.delete(id).await {
                         Ok(()) => {
-                            sessions.close(&request.session_id);
+                            if let Some(mcp) = sessions.close(&request.session_id) {
+                                mcp.close().await;
+                            }
                             responder.respond(v1::DeleteSessionResponse::new())
                         }
                         Err(error) => responder.respond_with_error(lifecycle_error(&error)),
                     }
+                    })
                 }
             },
             on_receive_request!(),
@@ -2531,7 +2613,11 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
-                async move |request: v1::CloseSessionRequest, responder, _cx| {
+                async move |request: v1::CloseSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let lifecycle = lifecycle.clone();
+                    let sessions = sessions.clone();
+                    let dispatcher = cx.clone();
+                    dispatcher.spawn(async move {
                     let Some(lifecycle) = &lifecycle else {
                         return responder.respond_with_error(Error::method_not_found());
                     };
@@ -2541,14 +2627,33 @@ where
                     };
                     match lifecycle.close(id).await {
                         Ok(()) => {
-                            sessions.close(&request.session_id);
+                            if let Some(mcp) = sessions.close(&request.session_id) {
+                                mcp.close().await;
+                            }
                             responder.respond(v1::CloseSessionResponse::new())
                         }
                         Err(error) => responder.respond_with_error(lifecycle_error(&error)),
                     }
+                    })
                 }
             },
             on_receive_request!(),
+        )
+        .on_receive_notification(
+            {
+                let mcp_admitter = Arc::clone(&mcp_admitter);
+                async move |notification: v1::MessageMcpNotification, cx: ConnectionTo<Client>| {
+                    if let Some(refresh) = mcp_admitter.mcp_notification(notification) {
+                        cx.spawn(async move {
+                            refresh.await;
+                            Ok(())
+                        })
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            on_receive_notification!(),
         )
         .on_receive_notification(
             {
@@ -2556,7 +2661,10 @@ where
                 let controller = Arc::clone(&controller);
                 async move |notification: v1::CancelNotification, _cx| {
                     match sessions.cancel(&notification.session_id) {
-                        Cancellation::Admitted(key) => {
+                        Cancellation::Admitted(key, mcp) => {
+                            if let Some(mcp) = mcp {
+                                mcp.cancel_active();
+                            }
                             if let Err(error) = controller.cancel_admitted(&key).await {
                                 tracing::warn!(%error, "ACP cancellation could not be applied");
                             }

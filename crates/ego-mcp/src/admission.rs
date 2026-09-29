@@ -144,6 +144,7 @@ pub struct McpTransportMaterial {
 enum TransportMaterial {
     Stdio(Vec<McpEnvironmentBinding>),
     Http(Vec<McpHeaderBinding>),
+    Acp,
 }
 
 impl McpTransportMaterial {
@@ -156,6 +157,12 @@ impl McpTransportMaterial {
     pub fn http(headers: Vec<McpHeaderBinding>) -> Self {
         Self {
             transport: TransportMaterial::Http(headers),
+        }
+    }
+
+    pub fn acp() -> Self {
+        Self {
+            transport: TransportMaterial::Acp,
         }
     }
 }
@@ -171,6 +178,7 @@ impl fmt::Debug for McpTransportMaterial {
                 .debug_tuple("McpTransportMaterial::Http")
                 .field(headers)
                 .finish(),
+            TransportMaterial::Acp => formatter.write_str("McpTransportMaterial::Acp"),
         }
     }
 }
@@ -239,8 +247,11 @@ impl McpServerAdmission {
                     ));
                 }
             }
+            (McpServerConfig::Acp { .. }, TransportMaterial::Acp) => {}
             (McpServerConfig::Stdio(_), TransportMaterial::Http(_))
-            | (McpServerConfig::Http(_), TransportMaterial::Stdio(_)) => {
+            | (McpServerConfig::Http(_), TransportMaterial::Stdio(_))
+            | (McpServerConfig::Acp { .. }, _)
+            | (_, TransportMaterial::Acp) => {
                 return Err(invalid(
                     "MCP transport material does not match server configuration",
                 ));
@@ -264,14 +275,14 @@ impl McpServerAdmission {
     pub(crate) fn stdio_environment(&self) -> Option<&[McpEnvironmentBinding]> {
         match &self.material.transport {
             TransportMaterial::Stdio(environment) => Some(environment),
-            TransportMaterial::Http(_) => None,
+            TransportMaterial::Http(_) | TransportMaterial::Acp => None,
         }
     }
 
     pub(crate) fn http_headers(&self) -> Option<&[McpHeaderBinding]> {
         match &self.material.transport {
             TransportMaterial::Http(headers) => Some(headers),
-            TransportMaterial::Stdio(_) => None,
+            TransportMaterial::Stdio(_) | TransportMaterial::Acp => None,
         }
     }
 }

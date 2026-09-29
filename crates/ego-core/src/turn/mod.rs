@@ -3019,6 +3019,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         // earlier would let a server describe a surface the generation does
         // not have.
         let conversation = Self::with_mcp_instructions(conversation, catalogue.instructions());
+        let conversation = Self::with_host_context(conversation, self.tools.context_notes());
 
         let source = Arc::clone(&self.source);
         let first = AttemptRef::first(GenerationId::new());
@@ -3534,6 +3535,24 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         messages.splice(after_system..after_system, blocks);
         Conversation::new(messages)
             .expect("a text message adds no call and answers none, so a valid history stays valid")
+    }
+
+    fn with_host_context(history: Conversation, notes: Vec<String>) -> Conversation {
+        if notes.is_empty() {
+            return history;
+        }
+        let mut messages: Vec<Message> = history.into();
+        let after_system = messages
+            .iter()
+            .take_while(|message| message.role == Role::System)
+            .count();
+        messages.splice(
+            after_system..after_system,
+            notes
+                .into_iter()
+                .map(|note| Message::text(Role::System, note)),
+        );
+        Conversation::new(messages).expect("host context adds no tool call or answer")
     }
 
     fn durable_skill_messages(&self) -> Result<Vec<Message>, StoreError> {

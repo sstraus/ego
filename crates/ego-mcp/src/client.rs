@@ -26,13 +26,14 @@ use rmcp::transport::streamable_http_client::{
 };
 use rmcp::{ClientLifecycleMode, RoleClient, serve_client_with_lifecycle};
 use sse_stream::SseStream;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::http::{AdmittedMcpHttpProfile, header, path_and_query};
 use crate::stdio::SharedDuplex;
 use crate::{
-    McpDuplexEffects, McpError, McpFailure, McpHttpEffects, McpHttpEnd, McpHttpPurpose,
-    McpHttpSettlement, McpManualOutcome, McpRequestId,
+    McpAcpEffects, McpDuplexEffects, McpError, McpFailure, McpHttpEffects, McpHttpEnd,
+    McpHttpPurpose, McpHttpSettlement, McpManualOutcome, McpRequestId,
 };
 
 pub const MCP_PROTOCOL_REVISION: &str = "2026-07-28";
@@ -606,6 +607,15 @@ enum PendingTransport {
     Stdio {
         effects: Box<dyn McpDuplexEffects>,
     },
+    Acp {
+        stream: tokio::io::DuplexStream,
+    },
+}
+
+struct AcpConnection {
+    id: String,
+    effects: Arc<dyn McpAcpEffects>,
+    bridge: tokio::task::JoinHandle<()>,
 }
 
 enum ClientState {
@@ -625,6 +635,7 @@ pub struct McpClient {
     options: McpClientOptions,
     control: Arc<ClientControl>,
     state: ClientState,
+    acp: Option<AcpConnection>,
 }
 
 pub(crate) struct McpClientInventory {
@@ -662,6 +673,7 @@ impl McpClient {
                 profile,
                 effects,
             }),
+            acp: None,
         })
     }
 
@@ -675,7 +687,52 @@ impl McpClient {
             options,
             control: Arc::new(ClientControl::default()),
             state: ClientState::Pending(PendingTransport::Stdio { effects }),
+            acp: None,
         })
+    }
+
+    pub fn connect_acp(
+        server: McpServerName,
+        options: McpClientOptions,
+        connection_id: String,
+        effects: Arc<dyn McpAcpEffects>,
+    ) -> Result<Self, McpError> {
+        if connection_id.is_empty() {
+            return Err(McpError::new(
+                McpFailure::InvalidValue,
+                "empty ACP MCP connection id",
+            ));
+        }
+        let (stream, host_stream) = tokio::io::duplex(64 * 1024);
+        let bridge = tokio::spawn(acp_bridge(
+            host_stream,
+            connection_id.clone(),
+            Arc::clone(&effects),
+        ));
+        Ok(Self {
+            server,
+            options,
+            control: Arc::new(ClientControl::default()),
+            state: ClientState::Pending(PendingTransport::Acp { stream }),
+            acp: Some(AcpConnection {
+                id: connection_id,
+                effects,
+                bridge,
+            }),
+        })
+    }
+
+    /// Give a retained ACP client fresh authority and a fresh deadline for one call.
+    pub fn begin_acp_operation(&mut self, options: McpClientOptions) -> Result<(), McpError> {
+        if self.acp.is_none() || !matches!(self.state, ClientState::Running { .. }) {
+            return Err(McpError::new(
+                McpFailure::Protocol,
+                "ACP MCP connection is not running",
+            ));
+        }
+        self.options = options;
+        self.control = Arc::new(ClientControl::default());
+        Ok(())
     }
 
     pub fn cancellation(&self) -> McpClientCancellation {
@@ -755,6 +812,26 @@ impl McpClient {
                         self.state = ClientState::Failed {
                             duplex: Some(shared),
                         };
+                        Err(McpError::new(McpFailure::Protocol, error.to_string()))
+                    }
+                }
+            }
+            ClientState::Pending(PendingTransport::Acp { stream }) => {
+                let (read, write) = tokio::io::split(stream);
+                let transport =
+                    rmcp::transport::async_rw::AsyncRwTransport::<RoleClient, _, _>::new_client(
+                        read, write,
+                    );
+                match serve_client_with_lifecycle(client_info, transport, lifecycle).await {
+                    Ok(service) => {
+                        self.state = ClientState::Running {
+                            service,
+                            duplex: None,
+                        };
+                        Ok(())
+                    }
+                    Err(error) => {
+                        self.state = ClientState::Failed { duplex: None };
                         Err(McpError::new(McpFailure::Protocol, error.to_string()))
                     }
                 }
@@ -1131,10 +1208,71 @@ impl McpClient {
                 ));
             }
         }
+        if let Some(acp) = self.acp.take() {
+            acp.bridge.abort();
+            acp.effects.disconnect(acp.id).await?;
+        }
         Ok(McpClientSettlement {
             http: self.control.settlements(),
             duplex: duplex_settlement,
         })
+    }
+}
+
+async fn acp_bridge(
+    stream: tokio::io::DuplexStream,
+    connection_id: String,
+    effects: Arc<dyn McpAcpEffects>,
+) {
+    let (read, write) = tokio::io::split(stream);
+    let write = Arc::new(tokio::sync::Mutex::new(write));
+    let active = Arc::new(tokio::sync::Mutex::<
+        HashMap<String, tokio::task::AbortHandle>,
+    >::new(HashMap::new()));
+    let mut lines = BufReader::new(read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line) else {
+            break;
+        };
+        let Some(method) = frame["method"].as_str() else {
+            continue;
+        };
+        let params = frame["params"].as_object().cloned();
+        let Some(id) = frame.get("id").cloned() else {
+            if method == "notifications/cancelled" {
+                if let Some(request_id) = params.as_ref().and_then(|params| params.get("requestId"))
+                {
+                    if let Some(request) = active.lock().await.remove(&request_id.to_string()) {
+                        request.abort();
+                    }
+                }
+                continue;
+            }
+            let _ = effects.notify(connection_id.clone(), method.to_owned(), params);
+            continue;
+        };
+        let effects = Arc::clone(&effects);
+        let connection_id = connection_id.clone();
+        let method = method.to_owned();
+        let write = Arc::clone(&write);
+        let key = id.to_string();
+        let mut active_requests = active.lock().await;
+        let active_for_request = Arc::clone(&active);
+        let request_key = key.clone();
+        let request = tokio::spawn(async move {
+            let frame = match effects.request(connection_id, method, params).await {
+                Ok(result) => serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(error) => serde_json::json!({
+                    "jsonrpc":"2.0","id":id,
+                    "error":{"code":-32603,"message":error.to_string()}
+                }),
+            };
+            let mut write = write.lock().await;
+            let _ = write.write_all(frame.to_string().as_bytes()).await;
+            let _ = write.write_all(b"\n").await;
+            active_for_request.lock().await.remove(&request_key);
+        });
+        active_requests.insert(key, request.abort_handle());
     }
 }
 

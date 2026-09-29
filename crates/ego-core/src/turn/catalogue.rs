@@ -132,6 +132,11 @@ impl CapturedToolCatalogue {
 /// Consumer-owned port for a complete admitted dynamic tool snapshot.
 pub trait AdmittedToolSource: Send + Sync {
     fn capture(&self) -> Result<CapturedToolCatalogue, ToolCatalogueError>;
+
+    /// Current host-supplied data to show at the next model generation.
+    fn context_notes(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 pub(crate) fn validate_distinct(tools: &[RegisteredTool]) -> Result<(), ToolCatalogueError> {

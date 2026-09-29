@@ -21,8 +21,8 @@ ego-core.workspace = true
 ego-listen.workspace = true
 ego-mcp = { path = "../ego-mcp" }
 ego-tools = { path = "../ego-tools" }
-agent-client-protocol = { version = "2.0.0", features = ["unstable_protocol_v2"] }
-agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_protocol_v2", "unstable_session_fork"] }
+agent-client-protocol = { version = "2.0.0", features = ["unstable_mcp_over_acp", "unstable_protocol_v2"] }
+agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_mcp_over_acp", "unstable_protocol_v2", "unstable_session_fork"] }
 clap = { version = "4.6.6", features = ["derive"] }
 # The reference and the completions are generated from the same clap
 # definitions argv is parsed with, so a documented flag that no longer parses

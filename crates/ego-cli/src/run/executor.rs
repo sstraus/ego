@@ -376,6 +376,7 @@ pub(super) fn complete_run_context(
             let transport = match &server {
                 McpServerConfig::Stdio(_) => McpTransportKind::Stdio,
                 McpServerConfig::Http(_) => McpTransportKind::Http,
+                McpServerConfig::Acp { .. } => McpTransportKind::Acp,
             };
             let provenance_digest = canonical_evidence_digest(&(
                 name.as_str(),
