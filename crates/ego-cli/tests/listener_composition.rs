@@ -305,11 +305,14 @@ impl ConnectTo<Agent> for SessionClient {
                     .block_task()
                     .await?;
                 let session_id = session.session_id.to_string();
-                tokio::time::timeout(Duration::from_secs(45), update_ready.notified())
-                    .await
-                    .map_err(|_| {
-                        Error::internal_error().data("measured ACP config update did not arrive")
-                    })?;
+                tokio::time::timeout(
+                    support::ACP_MEASURED_OPTIONS_DEADLINE,
+                    update_ready.notified(),
+                )
+                .await
+                .map_err(|_| {
+                    Error::internal_error().data("measured ACP config update did not arrive")
+                })?;
                 if update_session
                     .lock()
                     .expect("update session mutex")
@@ -526,9 +529,13 @@ async fn a_public_ceiling_is_carried_into_the_real_acp_session_controls() {
         options: Arc::clone(&options),
         ready: Arc::new(Notify::new()),
     };
-    initialize_websocket(&loopback.to_string(), client)
-        .await
-        .expect("the real CLI ACP WebSocket completes initialize and session/new");
+    if let Err(error) = initialize_websocket(&loopback.to_string(), client).await {
+        let finished = child.finish();
+        panic!(
+            "the real CLI ACP WebSocket did not complete initialize and session/new: {error}; child stderr: {}",
+            finished.stderr
+        );
+    }
     let options = options
         .lock()
         .expect("session options mutex")

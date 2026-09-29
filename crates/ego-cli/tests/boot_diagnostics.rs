@@ -157,11 +157,14 @@ impl ConnectTo<Agent> for SessionClient {
                     .await?;
                 let session_id = session.session_id.to_string();
                 *self.session_id.lock().expect("session id mutex") = Some(session_id.clone());
-                tokio::time::timeout(Duration::from_secs(45), update_ready.notified())
-                    .await
-                    .map_err(|_| {
-                        Error::internal_error().data("measured ACP config update did not arrive")
-                    })?;
+                tokio::time::timeout(
+                    support::ACP_MEASURED_OPTIONS_DEADLINE,
+                    update_ready.notified(),
+                )
+                .await
+                .map_err(|_| {
+                    Error::internal_error().data("measured ACP config update did not arrive")
+                })?;
                 if update_session
                     .lock()
                     .expect("update session mutex")
@@ -381,7 +384,7 @@ async fn listener_acp_boot_diagnostic_continues_into_durable_session_controls() 
 
     let session_id = Arc::new(Mutex::new(None));
     let options = Arc::new(Mutex::new(None));
-    initialize_websocket(
+    if let Err(error) = initialize_websocket(
         &address.to_string(),
         SessionClient {
             workspace: workspace.to_string_lossy().into_owned(),
@@ -391,7 +394,11 @@ async fn listener_acp_boot_diagnostic_continues_into_durable_session_controls() 
         },
     )
     .await
-    .expect("the official ACP WebSocket client completes session/new");
+    {
+        child.panic_with_output(&format!(
+            "the official ACP WebSocket client did not complete session/new: {error}"
+        ));
+    }
 
     let finished = child.finish();
     let session_id = session_id
@@ -474,7 +481,7 @@ async fn the_same_loopback_endpoint_kind_serves_acp_and_a2a() {
             .env("EGO_ACP_TOKEN", ACP_TOKEN),
     );
     wait_for_tcp(&mut acp, address).await;
-    initialize_websocket(
+    if let Err(error) = initialize_websocket(
         &listen,
         SessionClient {
             workspace,
@@ -484,7 +491,11 @@ async fn the_same_loopback_endpoint_kind_serves_acp_and_a2a() {
         },
     )
     .await
-    .expect("ACP serves over the admitted loopback endpoint kind");
+    {
+        acp.panic_with_output(&format!(
+            "ACP did not serve over the admitted loopback endpoint kind: {error}"
+        ));
+    }
     let _ = acp.finish();
 
     let a2a_ego = Ego::nowhere();
