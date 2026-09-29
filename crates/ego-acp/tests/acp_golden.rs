@@ -992,6 +992,13 @@ mod acp_golden {
     /// Unlike the message pair above there is no asymmetry here: reasoning
     /// is append-only in both versions (the domain has no final-reasoning
     /// counterpart to `AssistantMessage`), so both map to a thought chunk.
+    ///
+    /// The v1 chunk also carries `_meta.ego.salience = "activity"` — story
+    /// regression_case treats a reasoning trace as non-primary content, same as
+    /// tool activity, not the card-level content an out-of-turn notice is.
+    /// v2 gets no meta here: this story only wires salience into the v1
+    /// projection (see `project_notice_v1`, v1-only); v2 delivery is
+    /// out of scope.
     #[test]
     fn reasoning_delta_projects_to_a_thought_chunk_in_both_versions() {
         let item = ItemId::new();
@@ -1011,6 +1018,10 @@ mod acp_golden {
             Some(v1::SessionUpdate::AgentThoughtChunk(
                 v1::ContentChunk::new("weighing the options".into())
                     .message_id(Some(v1::MessageId::new(id)))
+                    .meta(serde_json::Map::from_iter([(
+                        "ego".to_owned(),
+                        serde_json::json!({"salience": "activity"}),
+                    )]))
             ))
         );
         assert_eq!(
