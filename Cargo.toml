@@ -50,3 +50,10 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+
+# Line tables keep file:line in panic backtraces and drop only the variable and
+# type data a debugger uses. Cold `cargo test --workspace --no-run` on the box:
+# full DWARF passed 36 GiB of target/ after 800 s with 117 of 274 test binaries
+# linked (a complete run reached 76 GiB); line tables finish in 487 s at 25 GiB.
+[profile.dev]
+debug = "line-tables-only"
