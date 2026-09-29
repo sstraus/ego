@@ -27,6 +27,16 @@ use landlock::{
 /// Private argv marker recognised before the ordinary CLI creates Tokio.
 const HELPER_TOKEN: &str = "__ego_internal_landlock_exec_v1";
 
+/// The words between the helper executable and the helper protocol.
+///
+/// They are shaped so that *both* executables that can host this library
+/// dispatch the helper: the shipped binary intercepts them before clap, and a
+/// libtest binary runs the `#[ignore]`d test named for the token, which calls
+/// the same dispatcher. Without them a libtest host read the protocol as
+/// test-name filters, ran whichever real tests matched `workspace` or a path,
+/// and every Landlock probe child timed out instead of running its target.
+const HELPER_ENVELOPE: [&str; 5] = ["--ignored", "--exact", HELPER_TOKEN, "--nocapture", "--"];
+
 const HELPER_FAILURE: u8 = 125;
 const MAX_RUNTIME_ROOTS: usize = 128;
 const BACKEND_REVISION: &str = "landlock-safe-reexec-v1-abi9";
@@ -120,8 +130,9 @@ impl LandlockBackend {
     }
 
     pub(crate) fn launch_prefix(&self) -> super::backend::LaunchPrefix {
-        let mut arguments = Vec::with_capacity(5 + self.runtime_roots.len());
-        arguments.push(OsString::from(HELPER_TOKEN));
+        let mut arguments =
+            Vec::with_capacity(HELPER_ENVELOPE.len() + 4 + self.runtime_roots.len());
+        arguments.extend(HELPER_ENVELOPE.map(OsString::from));
         arguments.push(OsString::from(self.level.marker()));
         arguments.push(self.workspace.as_os_str().to_owned());
         arguments.push(self.private_scratch.as_os_str().to_owned());
@@ -241,8 +252,10 @@ where
 {
     let mut arguments = arguments.into_iter();
     let _executable = arguments.next()?;
-    if arguments.next().as_deref() != Some(OsStr::new(HELPER_TOKEN)) {
-        return None;
+    for expected in HELPER_ENVELOPE {
+        if arguments.next().as_deref() != Some(OsStr::new(expected)) {
+            return None;
+        }
     }
 
     Some(match run_helper(arguments) {
