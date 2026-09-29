@@ -78,7 +78,20 @@ impl EditMode for SurfaceEditMode {
                             .iter()
                             .any(|image| extension.eq_ignore_ascii_case(image))
                     });
-                if image_extension && path.is_file() {
+                // A file this process cannot open (permissions, a race) is
+                // still staged: the model-capability refusal or the read
+                // error surfaces downstream, before or without any bytes
+                // being sent. Only a header this process *did* read and that
+                // fails to decode as a supported image falls back to text.
+                let sniffed_image = image_extension && path.is_file() && {
+                    use std::io::Read;
+                    let mut header = [0_u8; 12];
+                    match std::fs::File::open(path).and_then(|mut file| file.read(&mut header)) {
+                        Ok(read) => crate::attachment::media_type(&header[..read]).is_some(),
+                        Err(_) => true,
+                    }
+                };
+                if sniffed_image {
                     return ReedlineEvent::ExecuteHostCommand(format!(
                         "{PASTE_PATH_COMMAND}{text}"
                     ));

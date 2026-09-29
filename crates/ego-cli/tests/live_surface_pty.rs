@@ -293,6 +293,263 @@ fn image_paste_refuses_unsupported_model_before_reading_image() {
     );
 }
 
+#[cfg(not(windows))]
+#[test]
+fn image_paste_missing_or_non_image_path_stays_as_text() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("PATH-TEXT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    let notes_path = ego.file("notes.txt", "plain notes, not an image");
+    let missing_path = notes_path.with_file_name("does-not-exist.png");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", missing_path.display()).as_bytes())
+        .expect("paste missing path");
+    input.flush().expect("paste flush");
+    input
+        .write_all(format!(" {}\r", notes_path.display()).as_bytes())
+        .expect("paste non-image path and submit");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, paste_start, "PATH-TEXT-ANSWER");
+    let staged = normalized(&output[paste_start..]);
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        !staged.contains("[image:"),
+        "a missing or non-image path must never stage a chip: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    let body = generations[0].to_string();
+    assert!(
+        !body.contains(r#""media_type":"image/png""#),
+        "no image should have been sent: {body}"
+    );
+    assert!(
+        body.contains(&missing_path.display().to_string())
+            && body.contains(&notes_path.display().to_string()),
+        "both paths must reach the model as literal text: {body}"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn image_paste_disguised_extension_content_stays_as_text() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("DISGUISED-TEXT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    let disguised_path = ego.file("disguised.png", "");
+    std::fs::write(&disguised_path, b"not an image, just bytes named .png")
+        .expect("write disguised fixture");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", disguised_path.display()).as_bytes())
+        .expect("paste disguised path");
+    input.flush().expect("paste flush");
+    input.write_all(b"\r").expect("submit");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, paste_start, "DISGUISED-TEXT-ANSWER");
+    let staged = normalized(&output[paste_start..]);
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        !staged.contains("[image:"),
+        "content that fails to decode as an image must never stage a chip, whatever its \
+         extension: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    let body = generations[0].to_string();
+    assert!(
+        !body.contains(r#""media_type":"image/png""#),
+        "no image should have been sent: {body}"
+    );
+    assert!(
+        body.contains(&disguised_path.display().to_string()),
+        "the disguised path must reach the model as literal text: {body}"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn image_paste_oversize_path_is_refused_with_its_size() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    let image_path = ego.file("huge.png", "");
+    // The fixture model's cap is exactly 65536 bytes; one byte over it must
+    // be refused before the file is staged.
+    // The bracketed-paste handler sniffs the header before staging a path as
+    // an image, so the fixture must carry a real PNG signature; only the
+    // total size, not the rest of the content, needs to exceed the cap.
+    let mut oversize = support::PNG_1X1.to_vec();
+    oversize.resize(65536 + 1, 0_u8);
+    std::fs::write(&image_path, &oversize).expect("write oversize fixture");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", image_path.display()).as_bytes())
+        .expect("paste oversize path");
+    input.flush().expect("paste flush");
+    until_normalized(&reader, &mut output, paste_start, "65537");
+    let result = normalized(&output[paste_start..]);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        result.contains("65537") && result.contains("65536"),
+        "refusal must name the observed size and the limit: {result:?}"
+    );
+    assert!(
+        !result.contains("[image: huge.png]"),
+        "oversize image staged: {result:?}"
+    );
+    assert!(
+        stub.generations().is_empty(),
+        "refused paste must not submit a turn"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "uses the real general pasteboard only when it is empty"]
@@ -423,6 +680,273 @@ fn image_paste_clipboard_png_stages_and_reaches_next_turn() {
             .contains(r#""media_type":"image/png""#),
         "clipboard image missing: {}",
         generations[0]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "uses the real general pasteboard only when it is empty"]
+fn image_paste_clipboard_tiff_stages_and_reaches_next_turn() {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::{NSData, NSString};
+
+    struct RestorePasteboard(Option<String>);
+    impl Drop for RestorePasteboard {
+        fn drop(&mut self) {
+            let board = NSPasteboard::generalPasteboard();
+            board.clearContents();
+            if let Some(text) = &self.0 {
+                board.setString_forType(
+                    &NSString::from_str(text),
+                    &NSString::from_str("public.utf8-plain-text"),
+                );
+            }
+        }
+    }
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let original_types = pasteboard
+        .types()
+        .map(|types| {
+            types
+                .iter()
+                .map(|kind| kind.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        original_types
+            .iter()
+            .all(|kind| kind.contains("plain-text") || kind == "NSStringPboardType"),
+        "live clipboard canary requires empty or plain-text pasteboard; types: {original_types:?}"
+    );
+    let original_text = pasteboard
+        .stringForType(&NSString::from_str("public.utf8-plain-text"))
+        .map(|text| text.to_string());
+    pasteboard.clearContents();
+    let _restore = RestorePasteboard(original_text);
+    let mut tiff_bytes = Vec::new();
+    {
+        let mut cursor = std::io::Cursor::new(&mut tiff_bytes);
+        let mut encoder = tiff::encoder::TiffEncoder::new(&mut cursor).expect("tiff encoder");
+        encoder
+            .write_image::<tiff::encoder::colortype::RGB8>(1, 1, &[255_u8, 0, 0])
+            .expect("write 1x1 tiff");
+    }
+    let tiff = NSData::with_bytes(&tiff_bytes);
+    assert!(pasteboard.setData_forType(Some(&tiff), &NSString::from_str("public.tiff")));
+
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("CLIPBOARD-TIFF-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# clipboard tiff fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input.write_all(b"\x16").expect("Ctrl+V");
+    input.flush().expect("paste flush");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let rendered = normalized(&output[paste_start..]);
+        if rendered.contains("[image: clipboard]") || rendered.contains("non-text content block") {
+            break;
+        }
+        if let Ok(chunk) = reader.recv_timeout(Duration::from_millis(100)) {
+            output.extend(chunk);
+        }
+    }
+    let staged = normalized(&output[paste_start..]);
+    input
+        .write_all(b"describe this clipboard image\r")
+        .expect("next turn");
+    input.flush().expect("next turn flush");
+    until_normalized(&reader, &mut output, paste_start, "CLIPBOARD-TIFF-ANSWER");
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        staged.contains("[image: clipboard]"),
+        "no clipboard image chip: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    assert!(
+        generations[0]
+            .to_string()
+            .contains(r#""media_type":"image/png""#),
+        "clipboard TIFF must reach the model re-encoded as PNG: {}",
+        generations[0]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "uses the real general pasteboard only when it is empty"]
+fn image_paste_clipboard_text_only_leaves_ordinary_paste_unchanged() {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::NSString;
+
+    struct RestorePasteboard(Option<String>);
+    impl Drop for RestorePasteboard {
+        fn drop(&mut self) {
+            let board = NSPasteboard::generalPasteboard();
+            board.clearContents();
+            if let Some(text) = &self.0 {
+                board.setString_forType(
+                    &NSString::from_str(text),
+                    &NSString::from_str("public.utf8-plain-text"),
+                );
+            }
+        }
+    }
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let original_types = pasteboard
+        .types()
+        .map(|types| {
+            types
+                .iter()
+                .map(|kind| kind.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        original_types
+            .iter()
+            .all(|kind| kind.contains("plain-text") || kind == "NSStringPboardType"),
+        "live clipboard canary requires empty or plain-text pasteboard; types: {original_types:?}"
+    );
+    let original_text = pasteboard
+        .stringForType(&NSString::from_str("public.utf8-plain-text"))
+        .map(|text| text.to_string());
+    pasteboard.clearContents();
+    let _restore = RestorePasteboard(original_text);
+    pasteboard.setString_forType(
+        &NSString::from_str("CLIPBOARD-TEXT-PAYLOAD"),
+        &NSString::from_str("public.utf8-plain-text"),
+    );
+
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("CLIPBOARD-TEXT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# clipboard text fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input.write_all(b"\x16").expect("Ctrl+V");
+    input.flush().expect("paste flush");
+    until_normalized(&reader, &mut output, paste_start, "CLIPBOARD-TEXT-PAYLOAD");
+    let staged = normalized(&output[paste_start..]);
+    input.write_all(b"\r").expect("submit");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, paste_start, "CLIPBOARD-TEXT-ANSWER");
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        !staged.contains("[image:"),
+        "text-only pasteboard must never stage an image chip: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    let body = generations[0].to_string();
+    assert!(
+        !body.contains(r#""media_type":"image/png""#),
+        "no image should have been sent for a text-only pasteboard: {body}"
+    );
+    assert!(
+        body.contains("CLIPBOARD-TEXT-PAYLOAD"),
+        "the pasted text must reach the model as ordinary prompt text: {body}"
     );
 }
 

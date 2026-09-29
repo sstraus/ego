@@ -205,23 +205,6 @@ mod tests {
         );
     }
 
-    /// The refusal is a factual claim about this build, so it names the thing
-    /// that is actually missing rather than saying "unsupported". A reason
-    /// nothing checks decays into a confident falsehood the day the gap is
-    /// closed.
-    #[test]
-    fn the_refusal_names_the_missing_piece_and_the_flag_that_shares_it() {
-        assert!(
-            CLIPBOARD_IMAGE_WAITING_ON.contains("content block"),
-            "{CLIPBOARD_IMAGE_WAITING_ON}"
-        );
-        assert!(
-            CLIPBOARD_IMAGE_WAITING_ON.contains("--attach"),
-            "the same gap refuses `--attach`, and saying so is how a reader \
-             finds the one story that closes both: {CLIPBOARD_IMAGE_WAITING_ON}"
-        );
-    }
-
     #[test]
     fn ctrl_c_abandons_the_line_and_keeps_the_session() {
         assert_eq!(Line::of(Signal::CtrlC), Line::Interrupted);

@@ -1290,6 +1290,7 @@ dependencies = [
  "similar",
  "tempfile",
  "terminal_size",
+ "tiff",
  "tokio",
  "tokio-util",
  "toml",

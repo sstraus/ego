@@ -113,6 +113,11 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSString", "NSArray", "NSEnumerator"] }
 arboard = "3.6.1"
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# Encodes the TIFF pasteboard fixture only; production reads TIFF, it never
+# writes it.
+tiff = "0.11.3"
+
 [target.'cfg(windows)'.dependencies]
 arboard = "3.6.1"
 clipboard-win = { version = "5.4.1", features = ["std"] }
