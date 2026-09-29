@@ -247,6 +247,49 @@ fn until_prompt_from_with_context(
     }
 }
 
+fn until_local_action_completed(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    command: &str,
+    budget: Duration,
+) {
+    let marker = format!("/{command}");
+    // Reedline toggles bracketed paste around an accepted line; a redraw
+    // prompt before that cycle does not mean the command has completed.
+    let completed = |bytes: &[u8]| {
+        let find_after = |bytes: &[u8], marker: &[u8]| {
+            bytes
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .map(|position| position + marker.len())
+        };
+        let echoed = find_after(bytes, marker.as_bytes())?;
+        let stopped = echoed + find_after(&bytes[echoed..], b"\x1b[?2004l")?;
+        let resumed = stopped + find_after(&bytes[stopped..], b"\x1b[?2004h")?;
+        (rendered_prompt_count(&bytes[resumed..]) > 0).then_some(resumed)
+    };
+    let deadline = Instant::now() + budget;
+    while completed(&output[start..]).is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "/{command} terminal completion timed out; output: {:?}",
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "/{command} terminal completion wait failed: {error}; output: {:?}",
+                normalized(&output[start..]),
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
 fn until_with_context(
     receiver: &mpsc::Receiver<Vec<u8>>,
     output: &mut Vec<u8>,
@@ -458,18 +501,17 @@ fn submit_local_action(
             &format!("/{command} action output"),
         );
     }
-    until_prompt_from_with_context(
-        receiver,
-        output,
-        start,
-        SLASH_ACTION_DEADLINE,
-        &format!("/{command} terminal prompt"),
-    );
-    drain_until_quiet(receiver, output);
+    until_local_action_completed(receiver, output, start, command, SLASH_ACTION_DEADLINE);
     assert!(
         stub.generations().is_empty(),
         "/{command} leaked into a provider generation"
     );
+    if expected.is_none() {
+        // A terminal repaint confirms Reedline accepted the command, but the
+        // coordinator may still be consuming an earlier line. /help is a
+        // visible driver round trip before the next action is submitted.
+        submit_local_action(receiver, output, input, stub, "help", Some("εgo commands"));
+    }
 }
 
 #[test]
@@ -481,9 +523,9 @@ fn slash_action_stall_reports_command_and_waiting_step() {
             "version",
             Some("ego 0.1.0"),
             Some(b"ego 0.1.0".as_slice()),
-            "terminal prompt",
+            "terminal completion",
         ),
-        ("plan", None, None, "terminal prompt"),
+        ("plan", None, None, "terminal completion"),
     ] {
         let (sender, receiver) = mpsc::channel();
         if let Some(bytes) = delivered {
@@ -2412,6 +2454,78 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
     drop(pair);
     reader_join.join().expect("second reader thread panicked");
     writer_join.join().expect("second writer thread panicked");
+}
+
+#[test]
+fn slash_action_wait_ignores_a_redraw_prompt_before_command_completion() {
+    // These frames preserve the observed /clear ordering from the live PTY:
+    // the first prompt was painted before the command echo and Enter cycle.
+    let redraw = b"\x1b[6n\x1b[4;1H\x1b[J\x1b[96m> \x1b[0m";
+    let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[4;1H\x1b[J\x1b[96m> ";
+    let (sender, receiver) = mpsc::channel();
+    let (done, result) = mpsc::channel();
+    sender.send(redraw.to_vec()).expect("first PTY frame");
+    let waiter = thread::spawn(move || {
+        let mut output = Vec::new();
+        until_local_action_completed(&receiver, &mut output, 0, "clear", Duration::from_secs(2));
+        done.send(output).expect("completion result");
+    });
+    assert!(
+        result.recv_timeout(Duration::from_millis(100)).is_err(),
+        "a redraw prompt was mistaken for /clear completion"
+    );
+    sender
+        .send(completion.to_vec())
+        .expect("completion PTY frame");
+    let output = result
+        .recv_timeout(Duration::from_secs(2))
+        .expect("real command completion");
+    assert!(output.ends_with(completion));
+    waiter.join().expect("waiter thread");
+}
+
+#[test]
+fn silent_slash_action_waits_for_a_driver_reply() {
+    let (writes, requests) = mpsc::sync_channel(4);
+    let (frames, receiver) = mpsc::channel();
+    let (done, result) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let stub = Stub::start(Plan::default());
+        let mut input = PtyWriter { sender: writes };
+        let mut output = Vec::new();
+        submit_local_action(&receiver, &mut output, &mut input, &stub, "clear", None);
+        done.send(output).expect("completed action");
+    });
+    let next_write = || loop {
+        match requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("PTY write")
+        {
+            WriteRequest::Bytes(bytes) => break bytes,
+            WriteRequest::Flush => {}
+        }
+    };
+    assert_eq!(next_write(), b"/clear\r");
+    frames
+        .send(b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> ".to_vec())
+        .expect("clear terminal frame");
+    assert_eq!(next_write(), b"/help\r");
+    assert!(
+        result.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the terminal frame alone must not finish a silent action"
+    );
+    frames
+        .send(
+            "\x1b[96m> /help\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> \r\nεgo commands\r\n"
+                .as_bytes()
+                .to_vec(),
+        )
+        .expect("driver reply");
+    let output = result
+        .recv_timeout(Duration::from_secs(2))
+        .expect("silent action and driver reply");
+    assert!(normalized(&output).contains("εgo commands"));
+    waiter.join().expect("waiter thread");
 }
 
 #[test]
