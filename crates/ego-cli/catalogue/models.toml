@@ -49,13 +49,14 @@
 # test holds that. The revision is what a retirement error names, so a stale
 # constant would send an operator to the wrong catalogue.
 #
-# revision = 2026-09-26
+# revision = 2026-09-29
 
-# First-run policy refreshed on 2026-09-26; availability is still observed.
+# First-run policy refreshed on 2026-09-29 for gpt-6.1-sol, released that day;
+# availability is still observed.
 # See docs/decisions/2026-09-26-current-model-bootstrap.md.
 [default_model]
-openai = "openai/gpt-6-sol"
-openai-codex = "openai-codex/gpt-6-sol"
+openai = "openai/gpt-6.1-sol"
+openai-codex = "openai-codex/gpt-6.1-sol"
 anthropic = "anthropic/claude-opus-5-5"
 gemini = "gemini/gemini-3.8-flash"
 
@@ -121,6 +122,27 @@ kind = "supported"
 accepted_media_types = ["png", "jpeg", "webp", "gif"]
 max_images = 100
 
+[model."openai/gpt-6.1-sol".capabilities]
+# Read 2026-09-29 from https://developers.openai.com/api/docs/models/gpt-6.1-sol:
+# "1,050,000 context window", "128,000 max output tokens", reasoning "low,
+# medium (default), high, xhigh, and max", input "text, image". Unlike
+# gpt-6-sol it lists no `none`, so `off` is absent.
+schema_version = 5
+max_context_tokens = 1050000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "medium"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[model."openai/gpt-6.1-sol".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
 # ---------------------------------------------------------------------------
 # openai-codex — read by `ego models` after `ego auth login openai-codex`.
 #
@@ -140,6 +162,23 @@ supports_parallel_tool_calls = false
 reasoning_carryover = "unsupported"
 reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
 default_reasoning_effort = "medium"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+
+# Read 2026-09-29 from the authenticated Codex models cache
+# (~/.codex/models_cache.json, slug `gpt-6.1-sol`): `context_window` 272000,
+# `default_reasoning_level` "low", supported levels low, medium, high, xhigh,
+# max and `ultra` (Codex's delegation mode, which this build has no level
+# for). Max output from the API model page, as for gpt-6-sol above.
+[model."openai-codex/gpt-6.1-sol".capabilities]
+schema_version = 5
+max_context_tokens = 272000
+max_output_tokens = 128000
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "low"
 cancel = "cooperative"
 cache = "none"
 transport = "sse"

@@ -2928,8 +2928,10 @@ fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
         .collect();
     for current in [
         "openai/gpt-6-astra",
+        "openai/gpt-6.1-sol",
         "openai/gpt-6-sol",
         "openai/gpt-6-luna",
+        "openai-codex/gpt-6.1-sol",
         "openai-codex/gpt-6-sol",
         "anthropic/claude-fable-5-1",
         "anthropic/claude-opus-5-5",

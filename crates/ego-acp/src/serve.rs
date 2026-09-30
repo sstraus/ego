@@ -53,7 +53,7 @@ use ego_core::session_lifecycle::{
 };
 use ego_core::sink::EventSink;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
-use ego_core::turn::AdmittedToolSource;
+use ego_core::turn::{AdmittedToolSource, HostClient};
 use ego_listen::{Bound, ConnectionGate, GuardedAccepted, Peer, serve_connections};
 use futures::channel::oneshot;
 use futures::future::Either;
@@ -1222,16 +1222,34 @@ async fn admit_mcp(
     }
 }
 
+/// What the client said about itself in `initialize`, kept for every run the
+/// connection starts.
+#[derive(Debug, Clone, Default)]
+struct ClientInit {
+    capabilities: CapabilityCapture,
+    host: Option<HostClient>,
+}
+
 fn session_bindings(
     builder: &dyn RunBindingsBuilder,
     connection: ConnectionTo<Client>,
     session: v1::SessionId,
-    capabilities: CapabilityCapture,
+    client: &ClientInit,
     root: &RunRoot,
     mcp: Option<&Arc<dyn SessionMcpAdmission>>,
     session_approval: Arc<AtomicBool>,
 ) -> RunExecutionBindings {
-    let bindings = builder.build(connection, session, capabilities, root, session_approval);
+    let bindings = builder.build(
+        connection,
+        session,
+        client.capabilities,
+        root,
+        session_approval,
+    );
+    let bindings = match &client.host {
+        Some(host) => bindings.with_host(host.clone()),
+        None => bindings,
+    };
     match mcp {
         Some(mcp) => bindings.with_mcp(
             mcp.admitted_tools(),
@@ -2165,7 +2183,7 @@ where
     I: IdSource + 'static,
 {
     let sessions = Sessions::new(controller.retention().completed_receipts());
-    let client_capabilities = Arc::new(Mutex::new(CapabilityCapture::default()));
+    let client_capabilities = Arc::new(Mutex::new(ClientInit::default()));
     let advertises_compaction = compaction.is_some();
     let advertises_lifecycle = lifecycle.is_some();
     Agent
@@ -2183,10 +2201,18 @@ where
                             ),
                         ));
                     };
-                    client_capabilities
-                        .lock()
-                        .expect("initialize capability lock poisoned")
-                        .capture_initialize(&request.client_capabilities);
+                    {
+                        let mut client = client_capabilities
+                            .lock()
+                            .expect("initialize capability lock poisoned");
+                        client
+                            .capabilities
+                            .capture_initialize(&request.client_capabilities);
+                        client.host = request.client_info.as_ref().map(|info| HostClient {
+                            name: info.name.clone(),
+                            version: info.version.clone(),
+                        });
+                    }
                     responder.respond(
                         v1::InitializeResponse::new(answer)
                             .agent_capabilities(capabilities(
@@ -2421,15 +2447,16 @@ where
                         Ok(mcp) => mcp,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
-                    let capabilities = *client_capabilities
+                    let client = client_capabilities
                         .lock()
-                        .expect("initialize capability lock poisoned");
+                        .expect("initialize capability lock poisoned")
+                        .clone();
                     let session_approval = Arc::new(AtomicBool::new(false));
                     let bindings = session_bindings(
                         bindings_builder.as_ref(),
                         cx.clone(),
                         request.session_id.clone(),
-                        capabilities,
+                        &client,
                         &root,
                         mcp.as_ref(),
                         Arc::clone(&session_approval),
@@ -2552,15 +2579,16 @@ where
                         Ok(mcp) => mcp,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
-                    let capabilities = *client_capabilities
+                    let client = client_capabilities
                         .lock()
-                        .expect("initialize capability lock poisoned");
+                        .expect("initialize capability lock poisoned")
+                        .clone();
                     let session_approval = Arc::new(AtomicBool::new(false));
                     let bindings = session_bindings(
                         bindings_builder.as_ref(),
                         cx.clone(),
                         request.session_id.clone(),
-                        capabilities,
+                        &client,
                         &root,
                         mcp.as_ref(),
                         Arc::clone(&session_approval),
@@ -2890,24 +2918,20 @@ where
                             );
                         }
                     };
-                    let capabilities = *client_capabilities
+                    let client = client_capabilities
                         .lock()
-                        .expect("initialize capability lock poisoned");
-                    let bindings = bindings_builder.build(
+                        .expect("initialize capability lock poisoned")
+                        .clone();
+                    let capabilities = client.capabilities;
+                    let bindings = session_bindings(
+                        bindings_builder.as_ref(),
                         cx.clone(),
                         id.clone(),
-                        capabilities,
+                        &client,
                         &correlation.root,
+                        correlation.mcp.as_ref(),
                         Arc::clone(&correlation.session_approval),
                     );
-                    let bindings = match correlation.mcp.as_ref() {
-                        Some(mcp) => bindings.with_mcp(
-                            mcp.admitted_tools(),
-                            mcp.mcp_errors().to_vec(),
-                            mcp.mcp_runtime(),
-                        ),
-                        None => bindings,
-                    };
                     // Everything below runs off the event loop. `selected_trust`
                     // awaits the host, and an ACP handler that awaits a client
                     // round-trip stops the connection from processing messages

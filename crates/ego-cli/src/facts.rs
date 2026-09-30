@@ -93,7 +93,7 @@ const BUILTIN: &str = include_str!("../catalogue/models.toml");
 /// refusal names, so a test holds it equal to the `revision =` line in the
 /// file itself — a constant that had drifted would send an operator to the
 /// wrong catalogue.
-pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-26";
+pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-29";
 
 /// One `models.toml`.
 #[derive(Debug, Default, Deserialize)]
@@ -407,6 +407,7 @@ fn project_defaults(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ego_core::generator::capabilities::{ImageInputSupport, ReasoningEffortSupport};
     use ego_core::generator::types::ThinkingLevel;
 
     /// A transport no row can speak must be refused *by the decoder the file
@@ -616,9 +617,38 @@ transport = "sse"
     #[test]
     fn builtin_startup_defaults_name_current_models() {
         let defaults = builtin().default_model;
-        assert_eq!(defaults["openai"], "openai/gpt-6-sol");
-        assert_eq!(defaults["openai-codex"], "openai-codex/gpt-6-sol");
+        assert_eq!(defaults["openai"], "openai/gpt-6.1-sol");
+        assert_eq!(defaults["openai-codex"], "openai-codex/gpt-6.1-sol");
         assert_eq!(defaults["anthropic"], "anthropic/claude-opus-5-5");
+    }
+
+    /// gpt-6.1-sol as published on 2026-09-29: the API model page for the
+    /// `openai` row, the authenticated Codex models cache for the subscription
+    /// row. gpt-6-sol stays selectable beside it.
+    #[test]
+    fn gpt_6_1_sol_rows_carry_their_published_facts() {
+        use ThinkingLevel::{High, Low, Max, Medium, XHigh};
+        let rows = builtin().model;
+        let efforts = ReasoningEffortSupport::Only([Low, Medium, High, XHigh, Max].into());
+
+        let api = &rows["openai/gpt-6.1-sol"].capabilities;
+        assert_eq!(api.max_context_tokens, Some(1_050_000));
+        assert_eq!(api.max_output_tokens, Some(128_000));
+        assert_eq!(api.reasoning_efforts, efforts);
+        assert_eq!(api.default_reasoning_effort, Some(Medium));
+        assert!(
+            matches!(api.image_input, ImageInputSupport::Supported(_)),
+            "the API row reads images"
+        );
+
+        let codex = &rows["openai-codex/gpt-6.1-sol"].capabilities;
+        assert_eq!(codex.max_context_tokens, Some(272_000));
+        assert_eq!(codex.max_output_tokens, Some(128_000));
+        assert_eq!(codex.reasoning_efforts, efforts);
+        assert_eq!(codex.default_reasoning_effort, Some(Low));
+
+        assert!(rows.contains_key("openai/gpt-6-sol"));
+        assert!(rows.contains_key("openai-codex/gpt-6-sol"));
     }
 
     #[test]

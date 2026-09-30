@@ -988,6 +988,14 @@ impl McpCapturePin for McpRegistryCapture {
     fn instructions(&self) -> &[McpServerInstructions] {
         &self.inner.instructions
     }
+
+    fn server_names(&self) -> Vec<String> {
+        self.inner
+            .servers
+            .iter()
+            .map(|server| server.identity.as_str().to_owned())
+            .collect()
+    }
 }
 
 /// Bound and order what the captured servers said about themselves.

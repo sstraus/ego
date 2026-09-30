@@ -432,6 +432,7 @@ async fn one_turn(
             gate,
             config: TurnConfig {
                 system: None,
+                identity: None,
                 token_ceiling: None,
                 retry: 0,
                 fallbacks: Vec::new(),

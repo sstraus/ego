@@ -544,6 +544,7 @@ impl CliCompactionCommand {
         ));
         let config = TurnConfig {
             system: system.clone(),
+            identity: None,
             token_ceiling: effective.ceilings.tokens,
             retry: 0,
             fallbacks: Vec::new(),
