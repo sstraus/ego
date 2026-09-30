@@ -91,6 +91,8 @@ pub struct Effective {
     /// CI profile roots retain the layer that won per-field precedence.
     pub session_dir: Option<Sourced<PathBuf>>,
     pub artifact_dir: Option<Sourced<PathBuf>>,
+    /// Extra roots the active profile opens, before resolution.
+    pub roots: Vec<crate::permit::RootCfg>,
     /// What this run may spend, after precedence and the system clamp.
     ///
     /// `2026-08-21-a-run-with-no-ceiling.md` §4: both fields are `None`
@@ -328,6 +330,7 @@ fn resolve_inner(
     let mut mcp = ResolvedMcpConfig::default();
     let mut session_dir = None;
     let mut artifact_dir = None;
+    let mut roots = Vec::new();
 
     for sourced in &eligible {
         let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
@@ -400,6 +403,9 @@ fn resolve_inner(
                 source: sourced.source,
                 value: path,
             });
+        }
+        if let Some(profile) = profile.filter(|profile| !profile.roots.is_empty()) {
+            roots = profile.roots.clone();
         }
         if let Some(path) = profile.and_then(|profile| profile.artifact_dir.clone()) {
             artifact_dir = Some(Sourced {
@@ -524,6 +530,7 @@ fn resolve_inner(
         active_profile: resolved_active_profile,
         session_dir,
         artifact_dir,
+        roots,
         ceilings,
         clamped,
         auth,

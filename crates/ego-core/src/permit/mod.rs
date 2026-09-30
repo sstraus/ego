@@ -14,6 +14,7 @@ mod grant;
 pub mod judge;
 mod path;
 mod prepared_call;
+mod roots;
 pub mod rule;
 mod scan;
 mod scope;
@@ -41,6 +42,7 @@ pub use grant::{
     Permit, PermitDenied, PolicyDenied, PolicyEngine, Resolution,
 };
 pub use path::CanonPath;
+pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots};
 pub use prepared_call::{
     Change, HookHttpPreparedEnvelope, McpPreparedEnvelope, Op, OpName, PreparedCall,
     SecretEgressAuthority,

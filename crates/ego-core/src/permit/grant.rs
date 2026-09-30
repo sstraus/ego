@@ -24,6 +24,7 @@ use super::foreign::{
 };
 use super::path::CanonPath;
 use super::prepared_call::{Change, Op, OpName, PreparedCall};
+use super::roots::{ProfileRoot, RootAccess};
 use super::rule::RuleId;
 use super::scope::Scope;
 use super::spawn::SpawnSpec;
@@ -410,6 +411,13 @@ pub enum PolicyDenied {
         op: OpName,
         path: CanonPath,
     },
+    /// The path is inside a read-only profile root, and the operation
+    /// changes something. No mode lifts it, like the workspace boundary.
+    ReadOnlyRoot {
+        tool: String,
+        op: OpName,
+        path: CanonPath,
+    },
     /// A party that was asked said no. Distinct from `Denied` because nobody
     /// wrote a rule: there is nothing to grep for and nothing to revoke, and
     /// telling an operator to look for a rule that does not exist is worse
@@ -469,7 +477,9 @@ impl PolicyDenied {
             },
             PolicyDenied::ModeForbids { mode, .. }
             | PolicyDenied::ModeForbidsSubject { mode, .. } => Authority::Mode { mode: *mode },
-            PolicyDenied::OutsideWorkspace { .. } => Authority::Boundary,
+            PolicyDenied::OutsideWorkspace { .. } | PolicyDenied::ReadOnlyRoot { .. } => {
+                Authority::Boundary
+            }
             PolicyDenied::Refused { by, .. } | PolicyDenied::RefusedSubject { by, .. } => {
                 by.clone()
             }
@@ -540,6 +550,12 @@ impl fmt::Display for PolicyDenied {
             ),
             PolicyDenied::OutsideWorkspace { tool, op, path } => {
                 write!(f, "{tool} may not {op} {path}: it is outside the workspace")
+            }
+            PolicyDenied::ReadOnlyRoot { tool, op, path } => {
+                write!(
+                    f,
+                    "{tool} may not {op} {path}: it is inside a read-only root"
+                )
             }
             PolicyDenied::Refused { tool, op, path, .. } => {
                 write!(f, "{tool} may not {op} {path}: permission was refused")
@@ -989,6 +1005,9 @@ pub struct PolicyEngine {
     /// The boundary ego draws for itself. Not a rule: nobody wrote it, and no
     /// rule lifts it.
     workspace: CanonPath,
+    /// Extra roots a profile opened, beyond the workspace. Empty for a run
+    /// with no profile roots, which keeps the single-boundary behaviour.
+    roots: Vec<ProfileRoot>,
     mode: Mode,
     /// Both lists intact, matched per call. `resolve` no longer subtracts one
     /// from the other — that comparison was string equality between two lists
@@ -1023,11 +1042,43 @@ impl PolicyEngine {
         Self {
             approver: Box::new(ModeApprover::new(mode, workspace.clone())),
             workspace,
+            roots: Vec::new(),
             mode,
             allow: permissions.allow,
             deny: permissions.deny,
             human: None,
         }
+    }
+
+    /// The same engine with the profile's admitted roots.
+    ///
+    /// A path is judged by the most specific of the workspace and the roots
+    /// that contains it, so a read-write root may sit inside a read root and
+    /// a read root inside a read-write one. The workspace is always
+    /// read-write.
+    pub fn with_profile_roots(self, roots: Vec<ProfileRoot>) -> Self {
+        Self { roots, ..self }
+    }
+
+    /// What this engine lets a run do at `path`: the most specific containing
+    /// boundary decides. A path with a `..` component is not canonical and is
+    /// never inside anything.
+    fn reach(&self, path: &CanonPath) -> Option<RootAccess> {
+        if path
+            .as_path()
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        let depth = |base: &CanonPath| base.as_path().components().count();
+        self.roots
+            .iter()
+            .map(|root| (root.path(), root.access()))
+            .chain(std::iter::once((&self.workspace, RootAccess::ReadWrite)))
+            .filter(|(base, _)| path.is_or_under(base))
+            .max_by_key(|(base, _)| depth(base))
+            .map(|(_, access)| access)
     }
 
     /// Classify an effect call while retaining only the display facts needed
@@ -1067,6 +1118,7 @@ impl PolicyEngine {
     pub fn resume_floor(&self) -> crate::suspension::ResumeFloor {
         crate::suspension::ResumeFloor::from_policy(
             self.workspace.to_string(),
+            self.roots.clone(),
             self.mode,
             self.deny
                 .iter()
@@ -1374,13 +1426,24 @@ impl PolicyEngine {
         //    or narrows where ego may reach, and it is a separate control.
         if let Some(path) = path
             && !matches!(op, Op::Spawn { .. })
-            && !path.is_or_under(&self.workspace)
         {
-            return Err(Box::new(PolicyDenied::OutsideWorkspace {
-                tool: call.tool().to_owned(),
-                op: op.name(),
-                path: path.clone(),
-            }));
+            match self.reach(path) {
+                None => {
+                    return Err(Box::new(PolicyDenied::OutsideWorkspace {
+                        tool: call.tool().to_owned(),
+                        op: op.name(),
+                        path: path.clone(),
+                    }));
+                }
+                Some(RootAccess::Read) if op.mutates() => {
+                    return Err(Box::new(PolicyDenied::ReadOnlyRoot {
+                        tool: call.tool().to_owned(),
+                        op: op.name(),
+                        path: path.clone(),
+                    }));
+                }
+                Some(_) => {}
+            }
         }
 
         // 1. Deny, before any allow at any scope.
