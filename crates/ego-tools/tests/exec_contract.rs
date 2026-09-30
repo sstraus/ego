@@ -2058,6 +2058,49 @@ fn sandbox_blocked(run: &Run, spec: SpawnSpec) -> (bool, String) {
     }
 }
 
+/// `mdkb stats` must exit 0 inside ego where it exits 0 outside, in a
+/// repository that has an index. Run by hand, like the test below.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "acceptance: needs mdkb and an indexed repository on this machine"]
+fn macos_mdkb_stats_exits_as_outside_ego_in_an_indexed_workspace() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let mdkb = std::fs::canonicalize(home.join(".local/bin/mdkb")).expect("mdkb");
+    // A worktree resolves its index outside its own directory, which a
+    // workspace run cannot reach; name the checkout that holds `.mdkb`.
+    let repository = std::fs::canonicalize(
+        std::env::var_os("EGO_ACCEPT_MDKB_REPOSITORY").expect("EGO_ACCEPT_MDKB_REPOSITORY"),
+    )
+    .expect("indexed repository");
+    let outside = Command::new(&mdkb)
+        .arg("stats")
+        .current_dir(&repository)
+        .output()
+        .expect("unsandboxed mdkb");
+    assert_eq!(
+        outside.status.code(),
+        Some(0),
+        "no usable index outside ego"
+    );
+
+    let policy = RunConfinement::new(Confinement::Workspace, true, CanonPath::new(&repository))
+        .expect("policy")
+        .with_exec_paths(vec![CanonPath::new(mdkb.clone())]);
+    let run = open_policy(policy, 1024 * 1024, 1024).expect("profiled run");
+    let spec = SpawnSpec::new(
+        vec![mdkb.into_os_string(), "stats".into()],
+        Some(CanonPath::new(&repository)),
+        Some(Duration::from_secs(30)),
+        EnvPolicy::Inherited,
+    )
+    .expect("spec");
+    let (blocked, note) = sandbox_blocked(&run, spec);
+    assert!(
+        !blocked && note == "exit 0",
+        "mdkb stats inside ego: {note}"
+    );
+}
+
 /// Acceptance on the coordinator machine: the tools maintainer named run under
 /// `workspace` with profile exec paths, offline so a script cannot reach the
 /// TUIC socket, from a scratch workspace so nothing real is written.
