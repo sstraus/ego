@@ -42,7 +42,12 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
         ),
         (
             "Surface",
-            &[ActionId::Statusline, ActionId::Clear, ActionId::Quit],
+            &[
+                ActionId::Statusline,
+                ActionId::Clear,
+                ActionId::Expand,
+                ActionId::Quit,
+            ],
         ),
     ];
     let render = |action: &crate::repl::actions::ActionRegistration| {
@@ -579,6 +584,9 @@ pub(super) fn apply_surface_effect(
                 crate::cli::SessionMetadataOperation::Goal(crate::cli::GoalOperation::Show),
                 busy,
             );
+        }
+        SurfaceActionEffect::Expand => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Expand)));
         }
         SurfaceActionEffect::Help => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Help)));
