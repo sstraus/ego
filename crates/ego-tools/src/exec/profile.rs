@@ -14,6 +14,9 @@ pub(super) struct ProfileInput<'a> {
     pub(super) workspace: &'a Path,
     pub(super) private_scratch: &'a Path,
     pub(super) runtime_roots: &'a [&'a Path],
+    /// Paths whose ancestors are made statable: a profile's exec paths, which
+    /// are already part of `runtime_roots`, and the workspace beside them.
+    pub(super) exec_paths: &'a [&'a Path],
 }
 
 #[derive(Debug)]
@@ -82,6 +85,26 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
                 profile.push_str(")\n");
             }
             profile.push_str(")\n");
+
+            // `realpath`, command lookup and `mkdir -p` lstat each ancestor of
+            // a path they use, so a program under an exec path needs them
+            // statable. Metadata only: no listing and no file contents.
+            let ancestors = input
+                .exec_paths
+                .iter()
+                .flat_map(|path| path.ancestors().skip(1))
+                .filter(|ancestor| *ancestor != Path::new("/"))
+                .map(path_literal)
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            if !ancestors.is_empty() {
+                profile.push_str("(allow file-read-metadata\n");
+                for ancestor in ancestors {
+                    profile.push_str("  (literal ");
+                    profile.push_str(&ancestor);
+                    profile.push_str(")\n");
+                }
+                profile.push_str(")\n");
+            }
 
             match input.level {
                 Confinement::Ro => profile.push_str("(deny file-write*)\n"),
@@ -165,6 +188,7 @@ mod tests {
             workspace: Path::new("/work"),
             private_scratch: Path::new("/scratch"),
             runtime_roots: RUNTIME,
+            exec_paths: RUNTIME,
         }
     }
 
@@ -195,6 +219,31 @@ mod tests {
                 ")\n",
                 "(allow network*)\n",
             )
+        );
+    }
+
+    #[test]
+    fn exec_path_ancestors_get_literal_metadata_grants_and_no_write() {
+        let exec = [Path::new("/opt/tools/bin"), Path::new("/opt/other")];
+        let profile = render(&ProfileInput {
+            runtime_roots: &exec,
+            exec_paths: &exec,
+            ..input(Confinement::Workspace)
+        })
+        .expect("profile");
+        assert!(
+            profile.contains(concat!(
+                "(allow file-read-metadata\n",
+                "  (literal \"/opt\")\n",
+                "  (literal \"/opt/tools\")\n",
+                ")\n"
+            )),
+            "{profile}"
+        );
+        assert!(!profile.contains("(subpath \"/opt\")"), "{profile}");
+        assert!(
+            profile.contains("(subpath \"/opt/tools/bin\")"),
+            "{profile}"
         );
     }
 

@@ -1140,6 +1140,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         diagnostics.note(&seat.action_help());
                                         continue;
                                     }
+                                    repl::Line::HostCommand(repl::HostCommand::Action(
+                                        repl::actions::ActionId::Expand,
+                                    )) => {
+                                        diagnostics.expand_last_tool();
+                                        continue;
+                                    }
                                     // The same snapshot `ego doctor` prints,
                                     // built by the same probes. Two renderings
                                     // of one value is the whole contract; two
@@ -1335,7 +1341,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             }
                                         };
                                         let target_state =
-                                            SessionState::replay([prepared.seed().event().clone()]);
+                                            SessionState::replay(prepared.seed().events().cloned());
                                         let mut target_owner = match ActiveSession::durable(
                                             target_opened,
                                             target_state,

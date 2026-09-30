@@ -21,6 +21,8 @@
 //! - [`line`] measures and wraps in *cells*. Everything below produces
 //!   `Line`s, never strings with escapes already in them.
 //! - [`table`], [`diff`], [`markdown`] are the three shapes.
+//! - [`tool_row`] is a fourth: one tool call as a compact row and, behind the
+//!   expand key, its detail.
 //! - [`stream`] applies [`markdown`] to text that is still arriving.
 //! - [`osc`] is the out-of-band half: what ego tells the host that is not
 //!   text on the screen.
@@ -33,6 +35,7 @@ pub mod osc;
 pub mod stream;
 pub mod style;
 pub mod table;
+pub mod tool_row;
 
 pub use caps::{Capabilities, Depth, OscProfile};
 pub use line::{Line, Span};

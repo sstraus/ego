@@ -20,6 +20,10 @@ use ego_core::export::Exporter;
 use ego_core::public::project_public;
 use ego_core::run::{RequestId, RunId, RunTermination};
 use ego_core::session::{ReplaySource, ReplaySourceError};
+use ego_core::session_lifecycle::{
+    ActivityFuture, CloseFuture, ClosedSession, HoldSignalFuture, LifecyclePublication,
+    SessionActivity, SessionLifecycle, SessionRunLifecycle,
+};
 use ego_core::state::SessionState;
 use ego_core::store::run_artifact::{ArtifactPublication, PublishedRunArtifact, RunArtifactStore};
 use ego_core::store::session_store::{SessionEntry, SessionMeta};
@@ -289,10 +293,31 @@ fn publish_export_file(
 }
 
 /// `ego fork ID`: publish one clean target at the source's latest idle event.
-pub fn fork(args: &ForkArgs, out: &Stdout) -> Ended {
-    match forked(args, out) {
+pub async fn fork(args: &ForkArgs, out: &Stdout) -> Ended {
+    match forked(args, out).await {
         Ok(ended) => ended,
         Err(termination) => Ended::refused(termination),
+    }
+}
+
+/// A one-shot command runs no session in this process; a source held by
+/// another process is refused by the store's lease, not by this seam.
+struct NoLiveRuns;
+
+impl SessionRunLifecycle for NoLiveRuns {
+    fn activity(&self, _session: SessionId) -> ActivityFuture<'_> {
+        Box::pin(std::future::ready(Ok(SessionActivity::Inactive)))
+    }
+
+    fn cancel_and_settle(&self, session: SessionId) -> CloseFuture<'_> {
+        Box::pin(std::future::ready(Ok(ClosedSession {
+            id: session,
+            cancelled: false,
+        })))
+    }
+
+    fn hold(&self, _session: SessionId, _request: RequestId) -> HoldSignalFuture<'_> {
+        Box::pin(std::future::ready(Ok(false)))
     }
 }
 
@@ -384,7 +409,7 @@ pub async fn compact(
     }
 }
 
-fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> {
+async fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> {
     let usage = |error: UsageError| RunTermination::UsageError {
         message: error.to_string(),
     };
@@ -393,71 +418,29 @@ fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> {
         &root,
         session::store_root(args.session_dir.as_ref()).map_err(usage)?,
     );
-    let store = session::jsonl(store_root, root.clone());
-    let source = crate::catalogue::resolve(&store, &root, Some(args.source)).map_err(usage)?;
-    let clock = SystemClock;
-    let opened =
-        session::open(&store, &source, &clock).map_err(|error| RunTermination::Failed {
-            message: format!("the fork source could not be opened: {error}"),
-        })?;
-    let opened = Opened::Durable(Box::new(opened));
-    if let Some(note_text) = opened.repair_note() {
-        out.note(&note_text);
-    }
-    let Opened::Durable(opened) = opened;
-    fork_opened(args, out, &store, source, *opened, &clock)
-}
-
-fn fork_opened(
-    args: &ForkArgs,
-    out: &Stdout,
-    store: &JsonlStore,
-    source: SessionId,
-    opened: ego_tools::store::OpenSession<'_>,
-    clock: &SystemClock,
-) -> Result<Ended, RunTermination> {
-    let source_state = opened.state.clone();
-    let prepared = ego_core::session::PreparedFork::new(source, &source_state, session::now(clock))
+    let store = Arc::new(session::jsonl(store_root, root.clone()));
+    let source =
+        crate::catalogue::resolve(store.as_ref(), &root, Some(args.source)).map_err(usage)?;
+    let lifecycle = SessionLifecycle::new(store, Arc::new(NoLiveRuns), Arc::new(SystemClock));
+    let created = lifecycle
+        .fork(source)
+        .await
         .map_err(|error| RunTermination::Failed {
-            message: format!("the fork source is not idle: {error}"),
+            message: format!("the fork failed: {error}"),
         })?;
-    let replayed = ego_core::session::ReplayContext::new(&opened.writer, &opened.writer)
-        .replay_lineage(prepared.seed().lineage())
-        .map_err(|error| RunTermination::Failed {
-            message: format!("the fork source context could not be replayed: {error}"),
-        })?;
-
-    let target = SessionId::new();
-    let target_opened =
-        session::open(store, &target, clock).map_err(|error| RunTermination::Failed {
-            message: format!("the fork target could not be opened: {error}"),
-        })?;
-    let publication = {
-        use ego_core::session::TargetStore;
-        target_opened.writer.publish_target(prepared.seed())
-    };
-    let diagnostic = publication.diagnostic().map(str::to_string);
-    if !publication.switch_target() {
-        return Err(RunTermination::Failed {
-            message: format!(
-                "the fork target was not published: {}",
-                diagnostic.as_deref().unwrap_or("publication was refused")
-            ),
-        });
-    }
-    drop(replayed);
-    if let Some(diagnostic) = diagnostic {
-        out.note(&format!(
-            "fork target {} is authoritative with a durability warning: {diagnostic}",
-            target
-        ));
+    let target = created.id;
+    match &created.publication {
+        LifecyclePublication::PublishedWithProjectionWarning { diagnostic }
+        | LifecyclePublication::PublishedDurabilityUncertain { diagnostic } => out.note(&format!(
+            "fork target {target} is authoritative with a durability warning: {diagnostic}"
+        )),
+        LifecyclePublication::Published | LifecyclePublication::NotPublished { .. } => {}
     }
 
-    let target_state = SessionState::replay([prepared.seed().event().clone()]);
     let mut ended = Ended {
         termination: RunTermination::Done,
         session: target,
-        state: target_state,
+        state: SessionState::default(),
         result: Value::String(target.to_string()),
         mcp_errors: Vec::new(),
     };

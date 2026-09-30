@@ -49,14 +49,15 @@ fn the_row_names_the_posture_it_is_rendered_from() {
     assert_eq!(untrusted.text(), "trust=untrusted");
 
     let trusted = StatusLine::render(&snapshot(Trust::Trusted), &[StatusSegmentName::Trust], 240);
-    assert_eq!(trusted.text(), "trust=trusted");
+    assert_eq!(trusted.text(), "", "a trusted posture is not worth a row");
 }
 
 #[test]
 fn a_trusted_posture_is_dropped_before_an_untrusted_one() {
-    // Trusted is the uninteresting answer, so it collapses with the other
-    // inactive segments; untrusted is the last optional segment width pressure
-    // reaches, because a posture nobody can see is a posture nobody checks.
+    // Trusted is the uninteresting answer and never takes a cell; untrusted
+    // outlives every optional segment except the context share (regression case,
+    // see `status_readable.rs`), because a posture nobody can see is a
+    // posture nobody checks.
     let names = [
         StatusSegmentName::Trust,
         StatusSegmentName::Model,
@@ -64,10 +65,10 @@ fn a_trusted_posture_is_dropped_before_an_untrusted_one() {
     ];
 
     let trusted = StatusLine::render(&snapshot(Trust::Trusted), &names, 40);
-    assert_eq!(trusted.text(), "model=openai/gpt-5.6 cwd=/workspace/ego");
+    assert_eq!(trusted.text(), "gpt-5.6 · cwd=/workspace/ego");
     assert!(trusted.omitted(StatusSegmentName::Trust));
 
     let untrusted = StatusLine::render(&snapshot(Trust::Untrusted), &names, 40);
-    assert_eq!(untrusted.text(), "trust=untrusted model=openai/gpt-5.6");
+    assert_eq!(untrusted.text(), "trust=untrusted · gpt-5.6");
     assert!(untrusted.omitted(StatusSegmentName::Cwd));
 }

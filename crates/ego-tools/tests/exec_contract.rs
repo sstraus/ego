@@ -142,6 +142,14 @@ fn config_fixture(
     hard_cap: u64,
     preview: usize,
 ) -> ConfigFixture {
+    config_fixture_for(
+        run_confinement(level, offline, workspace),
+        hard_cap,
+        preview,
+    )
+}
+
+fn config_fixture_for(policy: RunConfinement, hard_cap: u64, preview: usize) -> ConfigFixture {
     let evidence_root = tempfile::tempdir().expect("evidence root");
     let session = SessionId::new();
     let evidence = SessionEvidenceStore::open(evidence_root.path(), session, hard_cap)
@@ -151,7 +159,7 @@ fn config_fixture(
     let http_call_timeout =
         HttpCallTimeout::new(Duration::from_secs(1)).expect("HTTP call timeout");
     let config = ExecRunConfig::new(
-        run_confinement(level, offline, workspace),
+        policy,
         evidence.clone(),
         cancel.clone(),
         limits,
@@ -176,7 +184,15 @@ fn attempt_run(
     hard_cap: u64,
     preview: usize,
 ) -> Attempt {
-    let fixture = config_fixture(level, offline, workspace, hard_cap, preview);
+    attempt_policy(
+        run_confinement(level, offline, workspace),
+        hard_cap,
+        preview,
+    )
+}
+
+fn attempt_policy(policy: RunConfinement, hard_cap: u64, preview: usize) -> Attempt {
+    let fixture = config_fixture_for(policy, hard_cap, preview);
     let outcome = block_on(RunEffectPorts::for_run(fixture.config));
     Attempt {
         evidence_root: fixture.evidence_root,
@@ -193,7 +209,15 @@ fn open_run(
     hard_cap: u64,
     preview: usize,
 ) -> Result<Run, ProcessError> {
-    let attempt = attempt_run(level, offline, workspace, hard_cap, preview);
+    open_policy(
+        run_confinement(level, offline, workspace),
+        hard_cap,
+        preview,
+    )
+}
+
+fn open_policy(policy: RunConfinement, hard_cap: u64, preview: usize) -> Result<Run, ProcessError> {
+    let attempt = attempt_policy(policy, hard_cap, preview);
     if let Err(ProcessError::MissingCapabilities(missing)) = &attempt.outcome
         && let Some(reference) = missing.probe_evidence()
     {
@@ -1802,6 +1826,428 @@ fn macos_seatbelt_refuses_an_unrepresentable_profile_root() {
         Ok(_) => panic!("Seatbelt accepted a profile root it cannot represent safely"),
         Err(err) => panic!("unrepresentable profile root failed unclearly: {err:?}"),
     }
+}
+
+/// An executable `tool.sh` in `dir`.
+#[cfg(target_os = "macos")]
+fn write_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let script = dir.join("tool.sh");
+    std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    script
+}
+
+/// A directory outside every default exec root holding one executable script.
+#[cfg(target_os = "macos")]
+fn script_dir(body: &str) -> (tempfile::TempDir, CanonPath, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("script directory");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical script directory");
+    let script = write_script(&root, body);
+    (dir, CanonPath::new(root), script)
+}
+
+#[cfg(target_os = "macos")]
+fn workspace_policy(workspace: &std::path::Path, exec_paths: Vec<CanonPath>) -> RunConfinement {
+    let workspace = CanonPath::new(std::fs::canonicalize(workspace).expect("canonical workspace"));
+    run_confinement(Confinement::Workspace, false, workspace).with_exec_paths(exec_paths)
+}
+
+#[cfg(target_os = "macos")]
+fn script_spec(
+    script: &std::path::Path,
+    args: &[&std::path::Path],
+    workspace: &std::path::Path,
+) -> SpawnSpec {
+    let mut argv = vec![script.as_os_str().to_owned()];
+    argv.extend(args.iter().map(|arg| arg.as_os_str().to_owned()));
+    let workspace = CanonPath::new(std::fs::canonicalize(workspace).expect("canonical workspace"));
+    SpawnSpec::new(argv, Some(workspace), None, EnvPolicy::Inherited).expect("script spec")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_let_a_confined_child_run_a_program_outside_the_workspace() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (_keep, tools, script) = script_dir("echo ran");
+    let spec = script_spec(&script, &[], workspace.path());
+
+    // Standalone stays as it is today: no exec path, no exec.
+    let standalone = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("standalone workspace run");
+    assert!(
+        execute(&standalone, spec.clone()).is_err(),
+        "unlisted script ran"
+    );
+
+    let profiled = open_policy(
+        workspace_policy(workspace.path(), vec![tools]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("profiled workspace run");
+    execute(&profiled, spec).expect("a script under an exec path runs");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_do_not_widen_writes_for_the_programs_they_admit() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outside = tempfile::tempdir().expect("outside directory");
+    let (_keep, tools, script) = script_dir(r#": > "$1""#);
+    let run = open_policy(
+        workspace_policy(workspace.path(), vec![tools.clone()]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("profiled workspace run");
+
+    let inside = workspace.path().join("inside");
+    execute(&run, script_spec(&script, &[&inside], workspace.path()))
+        .expect("the admitted script writes inside the workspace");
+    assert!(inside.exists(), "control write never happened");
+
+    for target in [
+        outside.path().join("outside"),
+        tools.as_path().join("planted"),
+    ] {
+        assert!(
+            execute(&run, script_spec(&script, &[&target], workspace.path())).is_err(),
+            "write to {} was allowed",
+            target.display()
+        );
+        assert!(!target.exists(), "{} was created", target.display());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_admit_only_the_roots_they_name() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (_listed_keep, listed, listed_script) = script_dir("echo ran");
+    let (_other_keep, _other, other_script) = script_dir("echo ran");
+    let run = open_policy(
+        workspace_policy(workspace.path(), vec![listed]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("profiled workspace run");
+
+    execute(&run, script_spec(&listed_script, &[], workspace.path())).expect("listed root runs");
+    assert!(
+        execute(&run, script_spec(&other_script, &[], workspace.path())).is_err(),
+        "a sibling root outside the list ran"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_expose_the_metadata_of_their_ancestors_and_nothing_more() {
+    // Node's realpath, bash's command lookup and `mkdir -p` lstat every
+    // ancestor of a path they use; without that a tool under an exec path
+    // starts and then dies with `Operation not permitted` on `/Users`.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outer = tempfile::tempdir().expect("outer directory");
+    let outer_path = std::fs::canonicalize(outer.path()).expect("canonical outer");
+    let tools = outer_path.join("tools");
+    std::fs::create_dir(&tools).expect("tools directory");
+    let secret = outer_path.join("secret");
+    std::fs::write(&secret, b"secret").expect("secret");
+    let script = write_script(
+        &tools,
+        r#"case "$1" in stat) /usr/bin/stat "$2";; ls) /bin/ls "$2";; cat) /bin/cat "$2";; esac"#,
+    );
+    let run = open_policy(
+        workspace_policy(workspace.path(), vec![CanonPath::new(tools)]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("profiled workspace run");
+    let call = |verb: &str, target: &std::path::Path| {
+        execute(
+            &run,
+            script_spec(
+                &script,
+                &[std::path::Path::new(verb), target],
+                workspace.path(),
+            ),
+        )
+    };
+
+    call("stat", &outer_path).expect("an ancestor of an exec path can be stat'ed");
+    assert!(
+        call("ls", &outer_path).is_err(),
+        "ancestor contents were listable"
+    );
+    assert!(
+        call("cat", &secret).is_err(),
+        "a file beside the exec path was readable"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_a_profile_makes_the_workspace_ancestors_statable_and_standalone_does_not() {
+    // node's `realpathSync(cwd)` is how wiz-run finds its project: it lstats
+    // every ancestor of the workspace.
+    // The workspace sits in its own parent, which no exec path shares.
+    let outer = tempfile::tempdir().expect("outer directory");
+    let ancestor = std::fs::canonicalize(outer.path()).expect("canonical outer");
+    let workspace = ancestor.join("ws");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let (_keep, tools, script) = script_dir(r#"/usr/bin/stat "$1""#);
+    let spec = script_spec(&script, &[&ancestor], &workspace);
+
+    let profiled = open_policy(workspace_policy(&workspace, vec![tools]), 1024 * 1024, 1024)
+        .expect("profiled workspace run");
+    execute(&profiled, spec.clone()).expect("the workspace's parent can be stat'ed");
+
+    // The directory shares no ancestor chain with a script it cannot run, so a
+    // standalone run is checked with a system binary instead.
+    let standalone = open_policy(workspace_policy(&workspace, Vec::new()), 1024 * 1024, 1024)
+        .expect("standalone workspace run");
+    let bare = SpawnSpec::new(
+        vec!["/usr/bin/stat".into(), ancestor.clone().into_os_string()],
+        spec.cwd().cloned(),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("spec");
+    assert!(
+        execute(&standalone, bare).is_err(),
+        "standalone profile text changed"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_an_exec_path_the_backend_cannot_read_refuses_the_run_instead_of_being_dropped() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let missing = CanonPath::new(workspace.path().join("no-such-tools"));
+    match open_policy(
+        workspace_policy(workspace.path(), vec![missing]),
+        1024 * 1024,
+        1024,
+    ) {
+        Err(ProcessError::MissingCapabilities(_) | ProcessError::Backend(_)) => {}
+        Ok(_) => panic!("a run opened with an exec path it cannot honour"),
+        Err(error) => panic!("unclear refusal: {error:?}"),
+    }
+}
+
+/// Whether the sandbox kept a child from starting, and what it reported.
+///
+/// `sandbox-exec` reports a refused exec of the target as EX_OSERR (71). A
+/// timeout means the program started and kept running, so it was not blocked.
+#[cfg(target_os = "macos")]
+fn sandbox_blocked(run: &Run, spec: SpawnSpec) -> (bool, String) {
+    const SANDBOX_EXEC_REFUSED: i32 = 71;
+    match block_on(run.ports.process().execute(&spec)) {
+        Ok(_) => (false, "exit 0".into()),
+        Err(ProcessError::Exit { code, result }) => (
+            code == Some(SANDBOX_EXEC_REFUSED),
+            format!("exit {code:?}: {:?}", result.content),
+        ),
+        Err(ProcessError::Timeout { .. }) => (false, "timed out after starting".into()),
+        Err(error) => (true, error.to_string()),
+    }
+}
+
+/// `mdkb stats` must exit 0 inside ego where it exits 0 outside, in a
+/// repository that has an index. Run by hand, like the test below.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "acceptance: needs mdkb and an indexed repository on this machine"]
+fn macos_mdkb_stats_exits_as_outside_ego_in_an_indexed_workspace() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let mdkb = std::fs::canonicalize(home.join(".local/bin/mdkb")).expect("mdkb");
+    // A worktree resolves its index outside its own directory, which a
+    // workspace run cannot reach; name the checkout that holds `.mdkb`.
+    let repository = std::fs::canonicalize(
+        std::env::var_os("EGO_ACCEPT_MDKB_REPOSITORY").expect("EGO_ACCEPT_MDKB_REPOSITORY"),
+    )
+    .expect("indexed repository");
+    let outside = Command::new(&mdkb)
+        .arg("stats")
+        .current_dir(&repository)
+        .output()
+        .expect("unsandboxed mdkb");
+    assert_eq!(
+        outside.status.code(),
+        Some(0),
+        "no usable index outside ego"
+    );
+
+    let policy = RunConfinement::new(Confinement::Workspace, true, CanonPath::new(&repository))
+        .expect("policy")
+        .with_exec_paths(vec![CanonPath::new(mdkb.clone())]);
+    let run = open_policy(policy, 1024 * 1024, 1024).expect("profiled run");
+    let spec = SpawnSpec::new(
+        vec![mdkb.into_os_string(), "stats".into()],
+        Some(CanonPath::new(&repository)),
+        Some(Duration::from_secs(30)),
+        EnvPolicy::Inherited,
+    )
+    .expect("spec");
+    let (blocked, note) = sandbox_blocked(&run, spec);
+    assert!(
+        !blocked && note == "exit 0",
+        "mdkb stats inside ego: {note}"
+    );
+}
+
+/// Acceptance on the coordinator machine: the tools maintainer named run under
+/// `workspace` with profile exec paths, offline so a script cannot reach the
+/// TUIC socket, from a scratch workspace so nothing real is written.
+/// Run by hand: `cargo nextest run -p ego-tools --test exec_contract --run-ignored only`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "acceptance: needs the coordinator toolchain installed on this machine"]
+fn macos_coordinator_tools_run_under_workspace_with_profile_exec_paths() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let canon = |path: &std::path::Path| {
+        std::fs::canonicalize(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    };
+    let tuic = canon(std::path::Path::new("/usr/local/bin/tuic"));
+    let mdkb = canon(&home.join(".local/bin/mdkb"));
+    let wiz_run = canon(&home.join(".local/bin/wiz-run"));
+    let wiz_root = wiz_run
+        .parent()
+        .and_then(|bin| bin.parent())
+        .expect("wiz plugin root");
+    let tools = canon(&home.join("workspace/example-project/tools"));
+    let exec_paths = [
+        canon(std::path::Path::new("/opt/homebrew")),
+        // The PATH directories themselves: bash finds `tuic` and `mdkb` there.
+        canon(std::path::Path::new("/usr/local/bin")),
+        canon(&home.join(".local/bin")),
+        // git, and so wiz-run, dies with `unable to access ~/.gitconfig` when
+        // the file is unreadable; an exec path is also a read root.
+        canon(&home.join(".gitconfig")),
+        tuic.clone(),
+        mdkb.clone(),
+        wiz_root.to_path_buf(),
+        tools.clone(),
+    ]
+    .into_iter()
+    .map(CanonPath::new)
+    .collect::<Vec<_>>();
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    // wiz-run wants a git root; the workspace is its own so the answer does not
+    // depend on a `.git` above it, which would be a read-root question.
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git init")
+            .success()
+    );
+    let canonical_workspace = CanonPath::new(canon(workspace.path()));
+    let policy = RunConfinement::new(Confinement::Workspace, true, canonical_workspace)
+        .expect("policy")
+        .with_exec_paths(exec_paths);
+    let run = open_policy(policy, 1024 * 1024, 1024).expect("profiled offline workspace run");
+
+    let mut cases: Vec<(String, Vec<OsString>)> = vec![
+        ("tuic --help".into(), vec![tuic.into(), "--help".into()]),
+        ("mdkb stats".into(), vec![mdkb.into(), "stats".into()]),
+        (
+            "wiz-run stories-cli.js list".into(),
+            vec![wiz_run.into(), "stories-cli.js".into(), "list".into()],
+        ),
+        (
+            "git rev-parse".into(),
+            vec![
+                "/opt/homebrew/bin/git".into(),
+                "rev-parse".into(),
+                "--show-toplevel".into(),
+            ],
+        ),
+        (
+            "jq --version".into(),
+            vec!["/opt/homebrew/bin/jq".into(), "--version".into()],
+        ),
+    ];
+    let mut pending = vec![tools.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("tools directory").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "sh")
+                && !path.to_string_lossy().contains("/tests/")
+                // Sourced libraries are not programs, outside ego either.
+                && path.metadata().is_ok_and(|meta| {
+                    std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0
+                })
+            {
+                let label = path.strip_prefix(&tools).unwrap().display().to_string();
+                cases.push((
+                    format!("{label} --help"),
+                    vec![path.into(), "--help".into()],
+                ));
+            }
+        }
+    }
+
+    // The named tools must also exit exactly as they do outside ego.
+    let mut diverged = Vec::new();
+    for (label, argv) in cases.iter().take(4) {
+        let outside = Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(workspace.path())
+            .output()
+            .expect("unsandboxed run")
+            .status
+            .code();
+        let spec = SpawnSpec::new(
+            argv.clone(),
+            Some(CanonPath::new(canon(workspace.path()))),
+            Some(Duration::from_secs(20)),
+            EnvPolicy::Inherited,
+        )
+        .expect("spec");
+        let (_, note) = sandbox_blocked(&run, spec);
+        let inside = note
+            .strip_prefix("exit ")
+            .map(|rest| rest.split(':').next().unwrap_or("").to_owned());
+        let expected = match outside {
+            Some(0) => "0".to_owned(),
+            other => format!("{other:?}"),
+        };
+        if inside.as_deref() != Some(expected.as_str()) {
+            eprintln!("DIVERGED {label}: {note}");
+            diverged.push(label.clone());
+        }
+    }
+    assert!(
+        diverged.is_empty(),
+        "differs from outside ego: {diverged:?}"
+    );
+
+    let blocked = cases
+        .into_iter()
+        .filter_map(|(label, argv)| {
+            let spec = SpawnSpec::new(
+                argv,
+                Some(CanonPath::new(canon(workspace.path()))),
+                Some(Duration::from_secs(20)),
+                EnvPolicy::Inherited,
+            )
+            .expect("spec");
+            let (blocked, note) = sandbox_blocked(&run, spec);
+            eprintln!("{label}: {note}");
+            blocked.then_some(label)
+        })
+        .collect::<Vec<_>>();
+    assert!(blocked.is_empty(), "blocked by the sandbox: {blocked:?}");
 }
 
 #[cfg(target_os = "macos")]

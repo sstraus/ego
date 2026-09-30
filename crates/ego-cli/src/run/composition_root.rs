@@ -379,12 +379,16 @@ impl CliPrepared {
         // permission stays exit 3; an ACP run hands in the connected host, so
         // an escalation becomes a question the operator can answer instead of
         // an internal error the host can only render as a failure.
-        let policy_source: Arc<dyn GenerationPolicySource> =
-            Arc::new(CliGenerationPolicySource::new(
+        let profile_roots =
+            super::profile_roots::admit(&self.effective).map_err(RunExecutorError::new)?;
+        let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
+            CliGenerationPolicySource::new(
                 policy_selection,
                 CanonPath::new(&self.root),
                 bindings.human(),
-            ));
+            )
+            .with_profile_roots(profile_roots),
+        );
         let config = TurnConfig {
             system: self.system,
             identity: Some(AgentIdentity {

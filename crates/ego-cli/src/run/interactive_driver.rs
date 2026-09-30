@@ -601,6 +601,10 @@ pub(super) async fn interactive_through(
             "inputs"
         },
     ));
+    // An empty session leaves nothing on disk for `ego resume` to open.
+    if !ended.state.turns.is_empty() {
+        output.note(&format!("To resume: ego resume {}", ended.session));
+    }
     announce.closing(&ended.termination);
     ended
 }

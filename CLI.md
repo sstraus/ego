@@ -885,7 +885,7 @@ a capability.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
 /sessions /fork /compact /clear /usage /statusline /export /doctor /quit /new
-/name /goal /tools /skills /hooks /version`. These 24 commands are the complete
+/name /goal /tools /expand /skills /hooks /version`. These 25 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
@@ -895,7 +895,7 @@ partial completion remains inert until explicitly submitted, and pasted slash
 text remains ordinary prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
-24-command action registry: a typed complete slash is classified as an action,
+25-command action registry: a typed complete slash is classified as an action,
 while bracketed paste and non-command text remain ordinary prompts. Completion,
 menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
@@ -962,6 +962,27 @@ records one blocker observation; only the third consecutive observation of the
 same condition makes the goal terminal, and progress or a changed condition
 resets that audit.
 
+**Tool rows.** Every tool call leaves one row in the transcript, committed
+through the same interactive owner as the answer and never through the
+ephemeral status row. The row is drawn when the call finishes, because it needs
+the outcome and the duration: `✓ read calc.py · 2 lines · 75ms`, `✓ edit
+calc.py +3 -1 · 12ms`, `✓ $ seq 1 20 · exit 0 · 0.4s`, `✗ $ make · exit 2 ·
+1.2s`, `✗ read gone.py · …No such file or directory · 3ms`. `✓` and `✗` are the
+outcome and a failed call never carries `✓`. An `exec` row is followed by the
+last three lines of its output, and a line saying how many earlier lines were
+left out. The duration runs from the call's start event, so it includes any
+wait for a permission answer. A row is cut to the terminal width at the moment
+it is drawn (a resize applies to later rows): the target gives way first, the
+mark, verb, outcome and duration last. Text from a tool result is shown with
+control characters replaced, never passed to the terminal.
+
+`/expand`, also `Alt-O`, prints the full result of the most recent tool call
+under its row: for `edit`, the line diff; for every other tool, the whole
+result text the model received, up to 256 KiB. Only the 16 most recent calls of
+the session are kept, and only the latest can be shown. It runs between turns,
+like `/help`. Headless runs write each row to stderr, prefixed `εgo:`, and have
+no expand key.
+
 `/doctor` renders the whole health snapshot §7 describes, not the MCP slice it
 once dispatched, and it is the same snapshot root `ego doctor` prints.
 
@@ -1006,7 +1027,7 @@ bounded channels.
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
-| Slash commands | **yes** | one shared 24-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
+| Slash commands | **yes** | one shared 25-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
 | Ctrl-S drafts, prompt queue, steering | **yes** | exact LIFO drafts, durable FIFO busy input, safe-boundary steering, expedited Esc delivery, replay, and exit accounting |
 | Model/question menus and status line | **yes** | the shared model picker, typed question path, and width-aware status projection are live |
@@ -1027,9 +1048,11 @@ writing the same terminal.
 
 `Ctrl-S` with a non-empty composer pushes the exact multiline buffer onto a
 session-local LIFO draft stash and clears the composer. `Ctrl-S` with an empty
-composer restores the newest stash. Stashes are not submitted, do not enter
-model history, and are not silently overwritten; exiting with stashes reports
-their count.
+composer restores the newest stash immediately. After the next ordinary prompt
+is accepted, the newest parked draft returns to the composer automatically;
+actions and refused submissions leave it parked. Stashes are not submitted,
+do not enter model history, and are not silently overwritten; exiting with
+stashes reports their count.
 
 `Enter` on non-empty input during a busy regular turn immediately and durably
 accepts a FIFO **PendingSteer**, opens a clean composer, and shows exactly:

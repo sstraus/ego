@@ -13,7 +13,7 @@ use crate::config::Mode;
 use crate::event::time::{Clock, Timestamp};
 use crate::hook::{HookCausality, SessionHookRuntime};
 use crate::mcp::McpServerInstructions;
-use crate::permit::{Authority, Authorized, PreparedCall};
+use crate::permit::{Authority, Authorized, PreparedCall, ProfileRoot};
 use crate::turn::{GenerationPolicyDigest, GenerationPolicySnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -406,6 +406,9 @@ impl ResumeFingerprints {
 #[serde(deny_unknown_fields)]
 pub struct ResumeFloor {
     workspace: String,
+    /// Absent when empty, so a floor without profile roots is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    roots: Vec<ProfileRoot>,
     mode: Mode,
     deny_rule_ids: Vec<String>,
 }
@@ -413,6 +416,7 @@ pub struct ResumeFloor {
 impl ResumeFloor {
     pub(crate) fn from_policy(
         workspace: String,
+        roots: Vec<ProfileRoot>,
         mode: Mode,
         mut deny_rule_ids: Vec<String>,
     ) -> Self {
@@ -420,6 +424,7 @@ impl ResumeFloor {
         deny_rule_ids.dedup();
         Self {
             workspace,
+            roots,
             mode,
             deny_rule_ids,
         }

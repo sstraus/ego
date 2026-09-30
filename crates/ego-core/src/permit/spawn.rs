@@ -886,6 +886,7 @@ pub struct RunConfinement {
     level: Confinement,
     offline: bool,
     workspace: CanonPath,
+    exec_paths: Vec<CanonPath>,
     requirements: ExecRequirements,
 }
 
@@ -908,8 +909,24 @@ impl RunConfinement {
             level,
             offline,
             workspace,
+            exec_paths: Vec::new(),
             requirements: ExecRequirements::new(required),
         })
+    }
+
+    /// Extra roots a confined child may read and execute from, never write.
+    ///
+    /// Owned by the user or system profile that selected this run. The caller
+    /// canonicalizes: Seatbelt matches the resolved path, so a symlink such as
+    /// `/opt/homebrew/bin/python3` needs the directory it resolves into.
+    #[must_use]
+    pub fn with_exec_paths(mut self, exec_paths: Vec<CanonPath>) -> Self {
+        self.exec_paths = exec_paths;
+        self
+    }
+
+    pub fn exec_paths(&self) -> &[CanonPath] {
+        &self.exec_paths
     }
 
     pub const fn level(&self) -> Confinement {
