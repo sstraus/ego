@@ -266,7 +266,13 @@ const MAX_DIAGNOSTIC_DETAIL_CHARS: usize = 256;
 fn bounded_detail(cause: &str) -> String {
     cause
         .chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .take(MAX_DIAGNOSTIC_DETAIL_CHARS)
         .collect()
 }
