@@ -569,7 +569,7 @@ async fn admit_run_phase<'store>(
                     .expect("the materialized run owns its opened session"),
                 materialized
                     .context
-                    .take()
+                    .clone()
                     .expect("the foreign run context is admitted after recovery"),
             )?;
             resume = Some(RuntimeResume::Foreign {
@@ -610,7 +610,7 @@ async fn admit_run_phase<'store>(
     {
         seat.busy();
     }
-    debug_assert!(materialized.context.is_none());
+    debug_assert!(materialized.context.is_some());
     let mcp_status = scoped.mcp_registry.status();
     Ok(AdmittedRun {
         opened: materialized

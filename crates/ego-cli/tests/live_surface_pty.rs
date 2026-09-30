@@ -13,6 +13,82 @@ use support::{
     Ego, Plan, ReleaseGate, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
 };
 
+// Catches: the replacement session has no evidence authority for its next turn.
+#[test]
+fn successor_fork_accepts_next_turn_and_resumes_without_picker() {
+    successor_accepts_next_turn("fork");
+}
+
+// Catches: compact activation skips admission and kills the next prompt.
+#[test]
+fn successor_compact_accepts_next_turn_and_resumes_without_picker() {
+    successor_accepts_next_turn("compact");
+}
+
+fn successor_accepts_next_turn(action: &str) {
+    let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
+    let mut replies = vec![Reply::Sse(text("REGRESSION-MARKER-ANSWER"))];
+    if action == "compact" {
+        replies.push(Reply::Sse(text(checkpoint)));
+    }
+    replies.extend([
+        Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
+        Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
+    ]);
+    let stub = Stub::start(Plan { completions: replies, ..Plan::default() });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# successor fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model", "ollama/qwen3", "--session-id", support::FIXTURE_SESSION_ID,
+        "--sandbox", "off",
+    ]);
+    let pair = NativePtySystem::default().openpty(PtySize {
+        rows: 24, cols: 100, pixel_width: 0, pixel_height: 0,
+    }).expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"first prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(format!("/{action}\r").as_bytes()).unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(b"second prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "successor process failed: {status:?}");
+    let listing = places.ego(&stub).subcommand("ls").args(["--output", "json"]).run().report();
+    let target = listing["sessions"].as_array().unwrap().iter()
+        .find(|row| row["id"] != support::FIXTURE_SESSION_ID).expect("successor catalogue row");
+    assert_eq!(target["model"], "ollama/qwen3");
+    let resumed = places.ego(&stub).subcommand("resume")
+        .args(["--sandbox", "off"]).run_pty("resume prompt");
+    assert_eq!(resumed.code, Some(0), "resume failed: {resumed:?}");
+    assert!(resumed.stdout.contains("REGRESSION-MARKER-ANSWER"), "resume lost model: {resumed:?}");
+}
+
 // portable-pty transports bytes but does not emulate a terminal. Keep the
 // reported cursor inside both 80x24 and 12x8; painter geometry is proven by
 // the vendor unit test, while this test needs only a live DSR response.

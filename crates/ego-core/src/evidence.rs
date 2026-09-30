@@ -499,6 +499,15 @@ impl RunContextEvidence {
         }
     }
 
+    /// The same run context re-bound to a successor session opened within this invocation.
+    pub fn for_session(&self, session: SessionId) -> Self {
+        Self {
+            session,
+            run_id: RunId::new(session, self.invocation.uuid()),
+            ..self.clone()
+        }
+    }
+
     pub const fn session(&self) -> SessionId {
         self.session
     }
