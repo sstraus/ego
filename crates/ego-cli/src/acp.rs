@@ -391,6 +391,7 @@ const MAX_ADMISSION_BACKOFF: Duration = Duration::from_secs(15 * 60);
 
 struct AdmissionRetry {
     failures: u32,
+    last_error: Option<String>,
     retry_after: Instant,
     active: Option<watch::Receiver<Option<Result<(), McpSessionAdmissionError>>>>,
 }
@@ -433,15 +434,20 @@ impl AdmissionAttempt {
                 let now = Instant::now();
                 let retry = retries.entry(key).or_insert_with(|| AdmissionRetry {
                     failures: 0,
+                    last_error: None,
                     retry_after: now,
                     active: None,
                 });
                 if let Some(active) = retry.active.clone() {
                     AdmissionReservation::Wait(active)
                 } else if now < retry.retry_after {
-                    return Err(safe_mcp_error(
-                        "the supplied MCP servers could not be admitted; retry later",
-                    ));
+                    return Err(safe_mcp_error(format!(
+                        "{}; retry later",
+                        retry
+                            .last_error
+                            .as_deref()
+                            .unwrap_or("the supplied MCP servers could not be admitted")
+                    )));
                 } else {
                     let (completion, active) = watch::channel(None);
                     retry.active = Some(active);
@@ -487,6 +493,7 @@ impl AdmissionAttempt {
         } else if let Some(retry) = retries.get_mut(&self.key) {
             retry.active = None;
             retry.failures = retry.failures.saturating_add(1);
+            retry.last_error = result.as_ref().err().map(ToString::to_string);
             let multiplier = 1_u64 << retry.failures.saturating_sub(1).min(4);
             let backoff = INITIAL_ADMISSION_BACKOFF
                 .saturating_mul(multiplier as u32)
@@ -635,13 +642,21 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                     )
                     .map_err(|_| safe_mcp_error("ACP MCP runtime could not be created"))?,
                 );
-                runtime.controller().reconcile(refresh).await.map_err(|_| {
-                    safe_mcp_error("the supplied MCP servers could not be admitted")
-                })?;
-                if !runtime.controller().status().mcp_errors().is_empty() {
-                    return Err(safe_mcp_error(
-                        "the supplied MCP servers could not be admitted",
-                    ));
+                runtime
+                    .controller()
+                    .reconcile(refresh)
+                    .await
+                    .map_err(|error| {
+                        safe_mcp_error(format!(
+                            "the supplied MCP servers could not be admitted: {error}"
+                        ))
+                    })?;
+                let mcp_errors = runtime.controller().status().mcp_errors();
+                if !mcp_errors.is_empty() {
+                    return Err(safe_mcp_error(format!(
+                        "the supplied MCP servers could not be admitted: {}",
+                        mcp_errors.join("; ")
+                    )));
                 }
                 Ok(Some(Arc::new(AcpSessionMcpAdmission::from_runtime(
                     runtime,

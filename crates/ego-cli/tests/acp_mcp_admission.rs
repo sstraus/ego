@@ -47,6 +47,14 @@ fn repeated_failed_acp_load_does_not_restart_the_same_stdio_server_immediately()
             .is_some_and(|message| message.contains("retry")),
         "the refused retry must be explained to the host: {second}"
     );
+    for refusal in [&first, &second] {
+        assert!(
+            refusal["error"]["data"]
+                .as_str()
+                .is_some_and(|message| message.contains("`failing`")),
+            "the refusal must name the server that failed: {refusal}"
+        );
+    }
     host.finish();
     let requests = std::fs::read_to_string(starts).expect("the fake server started");
     assert_eq!(
