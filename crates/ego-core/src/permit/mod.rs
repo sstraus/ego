@@ -42,11 +42,11 @@ pub use grant::{
     Permit, PermitDenied, PolicyDenied, PolicyEngine, Resolution,
 };
 pub use path::CanonPath;
-pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots};
 pub use prepared_call::{
     Change, HookHttpPreparedEnvelope, McpPreparedEnvelope, Op, OpName, PreparedCall,
     SecretEgressAuthority,
 };
+pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;
 pub use spawn::{
