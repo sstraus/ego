@@ -255,6 +255,20 @@ impl McpCandidateError {
 struct CandidateFailure {
     failure: McpFailure,
     authorization: Option<CandidateAuthorizationFailure>,
+    detail: Option<String>,
+}
+
+/// The longest candidate cause a status diagnostic carries.
+const MAX_DIAGNOSTIC_DETAIL_CHARS: usize = 256;
+
+/// One line of at most `MAX_DIAGNOSTIC_DETAIL_CHARS` characters, so a foreign
+/// server's error text cannot flood or reshape the diagnostic.
+fn bounded_detail(cause: &str) -> String {
+    cause
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .take(MAX_DIAGNOSTIC_DETAIL_CHARS)
+        .collect()
 }
 
 struct CandidateAuthorizationFailure {
@@ -268,12 +282,16 @@ impl CandidateFailure {
         Self {
             failure,
             authorization: None,
+            detail: None,
         }
     }
 
     fn admission(error: McpCandidateError) -> Self {
         match error {
-            McpCandidateError::Invalid { .. } => Self::materialization(McpFailure::InvalidValue),
+            McpCandidateError::Invalid { cause } => Self {
+                detail: Some(bounded_detail(&cause)),
+                ..Self::materialization(McpFailure::InvalidValue)
+            },
             McpCandidateError::AuthorizationRequired {
                 issuer,
                 protected_resource,
@@ -285,12 +303,22 @@ impl CandidateFailure {
                     protected_resource,
                     scopes,
                 }),
+                detail: None,
             },
         }
     }
 
     fn sanitized_cause(&self) -> &'static str {
         failure_message(self.failure)
+    }
+
+    /// What the host sees for this server: the fixed cause, then the bounded
+    /// detail the candidate reported. The journal keeps only the fixed cause.
+    fn diagnostic_message(&self) -> String {
+        match &self.detail {
+            Some(detail) => format!("{}: {detail}", self.sanitized_cause()),
+            None => self.sanitized_cause().to_owned(),
+        }
     }
 }
 
@@ -1300,7 +1328,7 @@ fn failed_server_status(
         authorization,
         diagnostic: Some(McpServerDiagnostic {
             failure: failure.failure,
-            message: Arc::from(failure.sanitized_cause()),
+            message: Arc::from(failure.diagnostic_message()),
         }),
     }
 }

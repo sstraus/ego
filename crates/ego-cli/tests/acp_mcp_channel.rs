@@ -17,6 +17,7 @@ struct McpHost {
     inbox_text: Option<String>,
     fail_discovery: bool,
     fail_subscribe: bool,
+    bare_resource_list: bool,
 }
 
 impl McpHost {
@@ -64,6 +65,18 @@ impl McpHost {
                         host.write_frame(serde_json::json!({
                             "jsonrpc":"2.0","id":frame["id"],
                             "error":{"code":-32603,"message":"host subscription failed"}
+                        }));
+                        continue;
+                    }
+                    if self.bare_resource_list && frame["params"]["method"] == "resources/list" {
+                        // What TUICommander's host answered on 2026-09-30: the
+                        // list without the 2026-07-28 result envelope.
+                        host.write_frame(serde_json::json!({
+                            "jsonrpc":"2.0","id":frame["id"],
+                            "result":{"resources":[
+                                {"uri":"tuic://workspace","name":"workspace"},
+                                {"uri":"tuic://inbox","name":"inbox"}
+                            ]}
                         }));
                         continue;
                     }
@@ -219,6 +232,43 @@ fn failed_acp_mcp_admission_disconnects_its_open_host_connection() {
         mcp.disconnects, 1,
         "failed admission leaked the ACP host connection"
     );
+}
+
+#[test]
+fn acp_admission_error_names_why_the_host_resource_list_was_refused() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    ).expect("isolated profile configuration");
+    let stub = Stub::start(Plan::default());
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let mut mcp = McpHost {
+        resources: true,
+        bare_resource_list: true,
+        ..McpHost::default()
+    };
+    let opened = host.send_request(
+        "session/new",
+        serde_json::json!({
+            "cwd":places.workspace_path(),
+            "mcpServers":[{"type":"acp","name":"tuicommander","serverId":"tuicommander"}]
+        }),
+    );
+    let answer = mcp.until(&mut host, opened);
+    let data = answer["error"]["data"].as_str().unwrap_or_default();
+    assert!(data.contains("`tuicommander`"), "{answer}");
+    assert!(
+        data.contains("resources/list"),
+        "the refusal hid which MCP request the host answered badly: {answer}"
+    );
+    host.finish();
 }
 
 #[test]
