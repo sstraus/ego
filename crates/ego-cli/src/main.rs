@@ -206,7 +206,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 result: serde_json::Value::String(String::new()),
                 mcp_errors: Vec::new(),
             },
-            Ok(Invocation::Fork(args)) => run::fork(&args, &out),
+            Ok(Invocation::Fork(args)) => run::fork(&args, &out).await,
             Ok(Invocation::Compact(args)) => {
                 run::compact(&args, &out, std::sync::Arc::clone(&evidence)).await
             }

@@ -913,18 +913,13 @@ where
 
     pub async fn fork(&self, source: SessionId) -> Result<CreatedSession, LifecycleError> {
         let _source_lease = self.require_inactive(source).await?;
-        let meta = self.metadata.meta(source)?;
+        self.metadata.meta(source)?;
         let (state, _) = self.metadata.replay(source)?;
         let prepared = PreparedFork::new(source, &state, self.metadata.clock.now())?;
         ReplayContext::new(&*self.metadata.store, &*self.metadata.store)
             .replay_lineage(prepared.seed().lineage())?;
-        let seed = prepared
-            .seed()
-            .clone()
-            .with_title(meta.title)
-            .with_goal(state.goal.as_ref());
         let target = SessionId::new();
-        let publication = self.metadata.store.publish_fork(target, &seed);
+        let publication = self.metadata.store.publish_fork(target, prepared.seed());
         if !publication.switch_target() {
             return Err(LifecycleError::NotPublished(
                 publication
