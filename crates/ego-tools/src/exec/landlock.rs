@@ -27,6 +27,22 @@ use landlock::{
 /// Private argv marker recognised before the ordinary CLI creates Tokio.
 const HELPER_TOKEN: &str = "__ego_internal_landlock_exec_v1";
 
+/// The words between the helper executable and the helper protocol.
+///
+/// They are shaped so that *both* executables that can host this library
+/// dispatch the helper: the shipped binary intercepts them before clap, and a
+/// libtest binary runs the `#[ignore]`d test named for the token, which calls
+/// the same dispatcher. Without them a libtest host read the protocol as
+/// test-name filters, ran whichever real tests matched `workspace` or a path,
+/// and every Landlock probe child timed out instead of running its target.
+///
+/// Known limit of the libtest host only: every word after `--` is still an
+/// exact test-name filter there, so a target argv that contains the exact
+/// name of an `#[ignore]`d test makes libtest run that test too, unconfined,
+/// beside the helper. No test targets its own binary, which a confined child
+/// may not execute anyway; the shipped binary has no such names.
+const HELPER_ENVELOPE: [&str; 5] = ["--ignored", "--exact", HELPER_TOKEN, "--nocapture", "--"];
+
 const HELPER_FAILURE: u8 = 125;
 const MAX_RUNTIME_ROOTS: usize = 128;
 const BACKEND_REVISION: &str = "landlock-safe-reexec-v1-abi9";
@@ -120,8 +136,9 @@ impl LandlockBackend {
     }
 
     pub(crate) fn launch_prefix(&self) -> super::backend::LaunchPrefix {
-        let mut arguments = Vec::with_capacity(5 + self.runtime_roots.len());
-        arguments.push(OsString::from(HELPER_TOKEN));
+        let mut arguments =
+            Vec::with_capacity(HELPER_ENVELOPE.len() + 4 + self.runtime_roots.len());
+        arguments.extend(HELPER_ENVELOPE.map(OsString::from));
         arguments.push(OsString::from(self.level.marker()));
         arguments.push(self.workspace.as_os_str().to_owned());
         arguments.push(self.private_scratch.as_os_str().to_owned());
@@ -241,8 +258,10 @@ where
 {
     let mut arguments = arguments.into_iter();
     let _executable = arguments.next()?;
-    if arguments.next().as_deref() != Some(OsStr::new(HELPER_TOKEN)) {
-        return None;
+    for expected in HELPER_ENVELOPE {
+        if arguments.next().as_deref() != Some(OsStr::new(expected)) {
+            return None;
+        }
     }
 
     Some(match run_helper(arguments) {
@@ -514,5 +533,62 @@ impl From<RulesetError> for HelperError {
 impl From<PathFdError> for HelperError {
     fn from(error: PathFdError) -> Self {
         Self::PathFd(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use ego_core::permit::ExecCaps;
+
+    use super::{LandlockBackend, Level, dispatch_helper};
+
+    /// The prefix the backend emits is the envelope the dispatcher accepts, and
+    /// every guard word is load-bearing: drop one and a libtest host either
+    /// skips the helper test or swallows the protocol as test-name filters.
+    #[test]
+    fn the_helper_envelope_is_the_one_both_hosts_dispatch() {
+        let backend = LandlockBackend {
+            helper: PathBuf::from("/ego"),
+            level: Level::Workspace,
+            workspace: PathBuf::from("/workspace"),
+            private_scratch: PathBuf::from("/scratch"),
+            runtime_roots: vec![PathBuf::from("/usr")],
+            maximum_caps: ExecCaps::empty(),
+        };
+        let prefix = backend.launch_prefix();
+        let expected = [
+            "--ignored",
+            "--exact",
+            "__ego_internal_landlock_exec_v1",
+            "--nocapture",
+            "--",
+            "workspace",
+            "/workspace",
+            "/scratch",
+            "1",
+            "/usr",
+        ]
+        .map(OsString::from);
+        assert_eq!(prefix.program, Some(OsString::from("/ego")));
+        assert_eq!(prefix.args_before_target, expected);
+
+        // A protocol the helper refuses before any effect: the dispatcher
+        // must still claim it, or the ordinary CLI would parse it.
+        let mut argv = vec![OsString::from("/ego")];
+        argv.extend(expected[..5].iter().cloned());
+        argv.push(OsString::from("not-a-level"));
+        assert!(dispatch_helper(argv.clone()).is_some());
+
+        for dropped in 1..=5 {
+            let mut partial = argv.clone();
+            partial.remove(dropped);
+            assert!(
+                dispatch_helper(partial).is_none(),
+                "dropping argv[{dropped}] must stop being the helper envelope"
+            );
+        }
     }
 }
