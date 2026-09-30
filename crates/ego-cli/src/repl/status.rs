@@ -5,13 +5,13 @@ use std::path::Path;
 use std::process::Command;
 
 use ego_core::config::{Mode, ModelRef, Trust};
-use ego_core::cost::CumulativeCost;
+use ego_core::cost::{CumulativeCost, Money};
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::state::{QueueStatus, SessionState};
 use unicode_width::UnicodeWidthStr;
 
-const SEPARATOR: &str = " ";
+const SEPARATOR: &str = " · ";
 
 /// Facts selected by the operator rather than reduced from the event log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +234,9 @@ pub struct SurfaceSnapshot {
     mode: String,
     context: String,
     cost: String,
+    used_tokens: Option<u64>,
+    window: Option<u64>,
+    money: Option<Money>,
     queue: QueueStatus,
     drafts: usize,
     cwd: String,
@@ -285,6 +288,9 @@ impl SurfaceSnapshot {
             mode: selection.mode.as_str().to_owned(),
             context,
             cost,
+            used_tokens: state.context.used_tokens,
+            window: state.context.window,
+            money: state.cost.known().copied(),
             queue: seat.queue,
             drafts: seat.drafts,
             cwd: seat.cwd,
@@ -392,30 +398,45 @@ impl SurfaceSnapshot {
         }
     }
 
+    fn context_display(&self) -> String {
+        match (self.used_tokens, self.window) {
+            (Some(used), Some(window)) if window > 0 => {
+                format!("ctx {:.1}%/{}", used as f64 * 100.0 / window as f64, compact_tokens(window))
+            }
+            (Some(used), _) => format!("ctx {}", compact_tokens(used)),
+            (None, Some(window)) => format!("ctx ?/{}", compact_tokens(window)),
+            (None, None) => "ctx ?".to_owned(),
+        }
+    }
+
     fn value(&self, name: &StatusSegmentName) -> Option<SegmentValue> {
         match name {
-            StatusSegmentName::Model => Some(SegmentValue::text(&self.model)),
+            StatusSegmentName::Model => Some(SegmentValue::text(
+                self.model.rsplit('/').next().unwrap_or(&self.model),
+            )),
             StatusSegmentName::Effort => Some(SegmentValue::text(&self.effort)),
             StatusSegmentName::Mode => Some(SegmentValue::text(&self.mode)),
-            StatusSegmentName::Context => Some(SegmentValue::text(&self.context)),
-            StatusSegmentName::Cost => Some(SegmentValue::text(&self.cost)),
-            StatusSegmentName::Queue => Some(SegmentValue::text(format!(
-                "{}/{}",
-                self.queue.pending_steers, self.queue.queued
-            ))),
-            StatusSegmentName::Drafts => Some(SegmentValue::text(self.drafts.to_string())),
-            StatusSegmentName::Interrupt => {
-                Some(SegmentValue::text(if self.queue.interrupt_pending {
-                    "yes"
-                } else {
-                    "no"
-                }))
-            }
+            StatusSegmentName::Context => Some(SegmentValue::text(self.context_display())),
+            // An unpriced or unstarted session has no figure to show; a
+            // `$0` here would claim the spend is known to be nothing.
+            StatusSegmentName::Cost => self.money.map(|money| SegmentValue::text(money_display(&money))),
+            // Idle counters carry no news, so they do not take a row cell.
+            StatusSegmentName::Queue => self.active(name).then(|| {
+                SegmentValue::text(format!(
+                    "{}/{}",
+                    self.queue.pending_steers, self.queue.queued
+                ))
+            }),
+            StatusSegmentName::Drafts => self
+                .active(name)
+                .then(|| SegmentValue::text(self.drafts.to_string())),
+            StatusSegmentName::Interrupt => self.active(name).then(|| SegmentValue::text("yes")),
             StatusSegmentName::Cwd => Some(SegmentValue::text(&self.cwd)),
-            StatusSegmentName::Trust => Some(SegmentValue::text(match self.trust {
-                Trust::Trusted => "trusted",
-                Trust::Untrusted => "untrusted",
-            })),
+            // Trusted is the uninteresting answer: the row speaks only when
+            // the session runs without ambient authority.
+            StatusSegmentName::Trust => {
+                (self.trust == Trust::Untrusted).then(|| SegmentValue::text("untrusted"))
+            }
             StatusSegmentName::Git => self
                 .git
                 .as_ref()
@@ -429,7 +450,6 @@ impl SurfaceSnapshot {
             StatusSegmentName::Queue => self.queue.pending_steers > 0 || self.queue.queued > 0,
             StatusSegmentName::Drafts => self.drafts > 0,
             StatusSegmentName::Interrupt => self.queue.interrupt_pending,
-            StatusSegmentName::Cost => self.cost != "unstarted",
             StatusSegmentName::Git => self.git.is_some(),
             StatusSegmentName::Trust => self.trust == Trust::Untrusted,
             _ => self.value(name).is_some(),
@@ -498,6 +518,14 @@ impl StatusSegmentName {
         }
     }
 
+    /// Whether the value reads on its own, without a `label=` prefix.
+    fn self_describing(&self) -> bool {
+        matches!(
+            self,
+            Self::Model | Self::Effort | Self::Mode | Self::Context | Self::Cost
+        )
+    }
+
     fn critical(&self) -> bool {
         matches!(self, Self::Queue | Self::Drafts | Self::Interrupt)
     }
@@ -505,8 +533,8 @@ impl StatusSegmentName {
     fn optional_priority(&self) -> usize {
         match self {
             Self::Git | Self::Custom(_) => 0,
-            Self::Cost => 1,
-            Self::Cwd => 2,
+            Self::Cwd => 1,
+            Self::Cost => 2,
             Self::Mode => 3,
             Self::Effort => 4,
             Self::Context => 5,
@@ -621,7 +649,11 @@ impl StatusLine {
             match value {
                 Some(value) => segments.push(RenderedSegment {
                     name: name.clone(),
-                    text: format!("{}={}", name.label(), value.0),
+                    text: if name.self_describing() {
+                        value.0
+                    } else {
+                        format!("{}={}", name.label(), value.0)
+                    },
                     active: snapshot.active(name) || matches!(name, StatusSegmentName::Custom(_)),
                 }),
                 None => omitted.push(name.clone()),
@@ -723,7 +755,33 @@ fn segments_width(segments: &[RenderedSegment]) -> usize {
         .iter()
         .map(|segment| UnicodeWidthStr::width(segment.text.as_str()))
         .sum::<usize>();
-    contents.saturating_add(segments.len().saturating_sub(1))
+    contents.saturating_add(
+        UnicodeWidthStr::width(SEPARATOR).saturating_mul(segments.len().saturating_sub(1)),
+    )
+}
+
+/// `1_000_000` → `1M`, `2_482` → `2.5k`: one decimal, trailing `.0` dropped.
+fn compact_tokens(tokens: u64) -> String {
+    let (scaled, suffix) = match tokens {
+        1_000_000.. => (tokens as f64 / 1_000_000.0, "M"),
+        1_000.. => (tokens as f64 / 1_000.0, "k"),
+        _ => return tokens.to_string(),
+    };
+    let text = format!("{scaled:.1}");
+    format!("{}{suffix}", text.strip_suffix(".0").unwrap_or(&text))
+}
+
+/// Display-only: the exact amount stays in the log.
+fn money_display(money: &Money) -> String {
+    let amount = money.amount.to_f64_lossy();
+    if amount > 0.0 && amount < 0.0005 && money.currency.as_str() == "USD" {
+        return "<$0.001".to_owned();
+    }
+    let places = if amount < 1.0 { 3 } else { 2 };
+    match money.currency.as_str() {
+        "USD" => format!("${amount:.places$}"),
+        code => format!("{amount:.places$} {code}"),
+    }
 }
 
 fn remove_inactive(

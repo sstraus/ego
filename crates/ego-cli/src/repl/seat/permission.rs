@@ -633,7 +633,7 @@ pub(super) const STATUSLINE_PRESETS: [(&str, &str, &[ego_core::config::StatusSeg
         ),
         (
             "default",
-            "Default — model, effort, mode, context, queue, drafts, interrupt, cwd, git, trust",
+            "Default — model, effort, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
             DEFAULT_STATUSLINE_SEGMENTS,
         ),
         (

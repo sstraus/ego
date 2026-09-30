@@ -49,7 +49,7 @@ fn the_row_names_the_posture_it_is_rendered_from() {
     assert_eq!(untrusted.text(), "trust=untrusted");
 
     let trusted = StatusLine::render(&snapshot(Trust::Trusted), &[StatusSegmentName::Trust], 240);
-    assert_eq!(trusted.text(), "trust=trusted");
+    assert_eq!(trusted.text(), "", "a trusted posture is not worth a row");
 }
 
 #[test]
@@ -64,10 +64,10 @@ fn a_trusted_posture_is_dropped_before_an_untrusted_one() {
     ];
 
     let trusted = StatusLine::render(&snapshot(Trust::Trusted), &names, 40);
-    assert_eq!(trusted.text(), "model=openai/gpt-5.6 cwd=/workspace/ego");
+    assert_eq!(trusted.text(), "gpt-5.6 · cwd=/workspace/ego");
     assert!(trusted.omitted(StatusSegmentName::Trust));
 
     let untrusted = StatusLine::render(&snapshot(Trust::Untrusted), &names, 40);
-    assert_eq!(untrusted.text(), "trust=untrusted model=openai/gpt-5.6");
+    assert_eq!(untrusted.text(), "trust=untrusted · gpt-5.6");
     assert!(untrusted.omitted(StatusSegmentName::Cwd));
 }
