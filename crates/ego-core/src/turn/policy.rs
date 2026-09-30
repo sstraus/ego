@@ -9,7 +9,7 @@ use crate::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
 use crate::credentials::SecretMaterial;
 use crate::digest::{is_lower_sha256, sha256_hex};
 use crate::permit::rule::Rule;
-use crate::permit::{CanonPath, HumanApprover, PolicyEngine};
+use crate::permit::{CanonPath, HumanApprover, PolicyEngine, ProfileRoot};
 
 const WIRE_VERSION: u32 = 1;
 const DIGEST_DOMAIN: &[u8] = b"ego:generation-policy-capture:v1\0";
@@ -41,6 +41,7 @@ impl From<GenerationPolicyDigest> for String {
 /// Confidential canonical policy semantics retained across a process boundary.
 pub struct GenerationPolicySnapshot {
     workspace: CanonPath,
+    roots: Vec<ProfileRoot>,
     mode: Mode,
     ruleset: Ruleset,
     canonical: SecretMaterial,
@@ -68,6 +69,7 @@ impl GenerationPolicySnapshot {
         let PolicyWire {
             version,
             workspace,
+            roots,
             mode,
             allow,
             deny,
@@ -81,7 +83,7 @@ impl GenerationPolicySnapshot {
             allow: decode_rules(allow)?,
             deny: decode_rules(deny)?,
         };
-        let snapshot = Self::from_semantics(workspace, mode, ruleset)?;
+        let snapshot = Self::from_semantics(workspace, roots, mode, ruleset)?;
         if snapshot.canonical.expose_secret_bytes() != encoded {
             return Err(GenerationPolicyCaptureError::NonCanonicalSnapshot);
         }
@@ -90,10 +92,11 @@ impl GenerationPolicySnapshot {
 
     fn from_semantics(
         workspace: CanonPath,
+        roots: Vec<ProfileRoot>,
         mode: Mode,
         ruleset: Ruleset,
     ) -> Result<Self, GenerationPolicyCaptureError> {
-        let wire = PolicyWire::from_semantics(&workspace, mode, &ruleset);
+        let wire = PolicyWire::from_semantics(&workspace, &roots, mode, &ruleset);
         let canonical =
             serde_json::to_vec(&wire).map_err(|_| GenerationPolicyCaptureError::EncodingFailed)?;
         if canonical.len() > MAX_GENERATION_POLICY_SNAPSHOT_BYTES {
@@ -102,6 +105,7 @@ impl GenerationPolicySnapshot {
         let digest = digest(&canonical)?;
         Ok(Self {
             workspace,
+            roots,
             mode,
             ruleset,
             canonical: SecretMaterial::new(canonical),
@@ -134,9 +138,20 @@ impl GenerationPolicyCapture {
         ruleset: Ruleset,
         human: Option<Arc<dyn HumanApprover>>,
     ) -> Result<Self, GenerationPolicyCaptureError> {
+        Self::with_profile_roots(workspace, Vec::new(), mode, ruleset, human)
+    }
+
+    /// A capture that also pins the profile's admitted roots.
+    pub fn with_profile_roots(
+        workspace: CanonPath,
+        roots: Vec<ProfileRoot>,
+        mode: Mode,
+        ruleset: Ruleset,
+        human: Option<Arc<dyn HumanApprover>>,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
         Self::restore(
             Arc::new(GenerationPolicySnapshot::from_semantics(
-                workspace, mode, ruleset,
+                workspace, roots, mode, ruleset,
             )?),
             human,
         )
@@ -158,7 +173,8 @@ impl GenerationPolicyCapture {
                 snapshot.mode,
                 snapshot.ruleset.clone(),
             ),
-        };
+        }
+        .with_profile_roots(snapshot.roots.clone());
         Ok(Self {
             policy: Arc::new(policy),
             snapshot,
@@ -332,16 +348,25 @@ impl std::error::Error for GenerationPolicyCaptureError {}
 struct PolicyWire {
     version: u32,
     workspace: CanonPath,
+    /// Absent when empty, so a policy without profile roots keeps its digest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    roots: Vec<ProfileRoot>,
     mode: Mode,
     allow: Vec<RuleWire>,
     deny: Vec<RuleWire>,
 }
 
 impl PolicyWire {
-    fn from_semantics(workspace: &CanonPath, mode: Mode, ruleset: &Ruleset) -> Self {
+    fn from_semantics(
+        workspace: &CanonPath,
+        roots: &[ProfileRoot],
+        mode: Mode,
+        ruleset: &Ruleset,
+    ) -> Self {
         Self {
             version: WIRE_VERSION,
             workspace: workspace.clone(),
+            roots: roots.to_vec(),
             mode,
             allow: encode_rules(&ruleset.allow),
             deny: encode_rules(&ruleset.deny),

@@ -225,11 +225,16 @@ fn prepare_resume_phase<'store>(
     };
     let policy_selection =
         GenerationPolicySelection::new(mode, settings.effective.permissions.clone());
-    let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(CliGenerationPolicySource::new(
-        policy_selection.clone(),
-        CanonPath::new(&settings.root),
-        human,
-    ));
+    let profile_roots = super::profile_roots::admit(&settings.effective)
+        .map_err(|message| RunTermination::Failed { message })?;
+    let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
+        CliGenerationPolicySource::new(
+            policy_selection.clone(),
+            CanonPath::new(&settings.root),
+            human,
+        )
+        .with_profile_roots(profile_roots),
+    );
     let invocation = RunInvocationId::new();
     let run_id = RunId::new(scoped.session_id, invocation.uuid());
     let finalize = |termination| {

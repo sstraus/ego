@@ -12,7 +12,7 @@ use ego_core::config::{
     ManagedRuleEffect, Mode, RuleMutation, RuleSnapshot, Ruleset, UserConfigStore, UserConfigTarget,
 };
 use ego_core::permit::rule::RuleId;
-use ego_core::permit::{CanonPath, HumanApprover, PolicyEngine, PreparedCall};
+use ego_core::permit::{CanonPath, HumanApprover, PolicyEngine, PreparedCall, ProfileRoot};
 use ego_core::turn::{
     GenerationPolicyCapture, GenerationPolicySnapshot as CapturedGenerationPolicySnapshot,
     GenerationPolicySource,
@@ -183,6 +183,7 @@ impl GenerationPolicySelection {
 pub(crate) struct CliGenerationPolicySource {
     selection: GenerationPolicySelection,
     workspace: CanonPath,
+    roots: Vec<ProfileRoot>,
     human: Option<Arc<dyn HumanApprover>>,
 }
 
@@ -195,20 +196,30 @@ impl CliGenerationPolicySource {
         Self {
             selection,
             workspace,
+            roots: Vec::new(),
             human,
         }
     }
 
+    /// The same source, reaching the profile's admitted roots too.
+    pub(crate) fn with_profile_roots(mut self, roots: Vec<ProfileRoot>) -> Self {
+        self.roots = roots;
+        self
+    }
+
     fn engine(&self, snapshot: GenerationPolicySnapshot) -> Arc<PolicyEngine> {
-        Arc::new(match self.human.as_ref() {
-            Some(human) => PolicyEngine::with_human(
-                self.workspace.clone(),
-                snapshot.mode,
-                snapshot.ruleset,
-                Arc::clone(human),
-            ),
-            None => PolicyEngine::new(self.workspace.clone(), snapshot.mode, snapshot.ruleset),
-        })
+        Arc::new(
+            match self.human.as_ref() {
+                Some(human) => PolicyEngine::with_human(
+                    self.workspace.clone(),
+                    snapshot.mode,
+                    snapshot.ruleset,
+                    Arc::clone(human),
+                ),
+                None => PolicyEngine::new(self.workspace.clone(), snapshot.mode, snapshot.ruleset),
+            }
+            .with_profile_roots(self.roots.clone()),
+        )
     }
 }
 
@@ -225,8 +236,9 @@ impl GenerationPolicySource for CliGenerationPolicySource {
             .selection
             .capture()
             .map_err(|error| error.to_string())?;
-        GenerationPolicyCapture::new(
+        GenerationPolicyCapture::with_profile_roots(
             self.workspace.clone(),
+            self.roots.clone(),
             snapshot.mode,
             snapshot.ruleset,
             self.human.clone(),
