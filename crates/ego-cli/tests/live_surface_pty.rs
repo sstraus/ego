@@ -3596,6 +3596,90 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     writer_join.join().expect("writer thread panicked");
 }
 
+/// Drive one interactive session, optionally through one answered turn, quit it
+/// with `/quit` and return everything printed from the quit onwards.
+fn output_after_quit(turn: Option<&str>) -> String {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("RESUME-HINT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# resume hint fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    if let Some(prompt) = turn {
+        let turn_start = output.len();
+        input
+            .write_all(format!("{prompt}\r").as_bytes())
+            .expect("turn");
+        input.flush().expect("turn flush");
+        until_normalized(&reader, &mut output, turn_start, "RESUME-HINT-ANSWER");
+        until_prompt_from(&reader, &mut output, turn_start);
+    }
+    let quit_start = output.len();
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drain(&reader, &mut output);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    normalized(&output[quit_start..])
+}
+
+#[test]
+fn quitting_after_a_turn_prints_the_resume_hint_for_that_session() {
+    let after_quit = output_after_quit(Some("hello"));
+    assert!(
+        after_quit.contains(&format!(
+            "To resume: ego resume {}",
+            support::FIXTURE_SESSION_ID
+        )),
+        "no resume hint at exit: {after_quit:?}"
+    );
+}
+
+#[test]
+fn quitting_without_any_turn_prints_no_resume_hint() {
+    let after_quit = output_after_quit(None);
+    assert!(
+        after_quit.contains("unsent drafts"),
+        "exit accounting missing, the run did not reach its exit: {after_quit:?}"
+    );
+    assert!(
+        !after_quit.contains("ego resume"),
+        "hint for a session that cannot be resumed: {after_quit:?}"
+    );
+}
+
 #[test]
 fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
     let stub = Stub::start(Plan::default());
