@@ -15,13 +15,13 @@ use support::{
 
 // Catches: the replacement session has no evidence authority for its next turn.
 #[test]
-fn successor_fork_accepts_next_turn_and_resumes_without_picker() {
+fn successor_fork_accepts_next_turn_and_resumes() {
     successor_accepts_next_turn("fork");
 }
 
 // Catches: compact activation skips admission and kills the next prompt.
 #[test]
-fn successor_compact_accepts_next_turn_and_resumes_without_picker() {
+fn successor_compact_accepts_next_turn_and_resumes() {
     successor_accepts_next_turn("compact");
 }
 
@@ -84,7 +84,7 @@ fn successor_accepts_next_turn(action: &str) {
         .find(|row| row["id"] != support::FIXTURE_SESSION_ID).expect("successor catalogue row");
     assert_eq!(target["model"], "ollama/qwen3");
     let resumed = places.ego(&stub).subcommand("resume")
-        .args(["--sandbox", "off"]).run_pty("resume prompt");
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"]).run_pty("resume prompt");
     assert_eq!(resumed.code, Some(0), "resume failed: {resumed:?}");
     assert!(resumed.stdout.contains("REGRESSION-MARKER-ANSWER"), "resume lost model: {resumed:?}");
 }
