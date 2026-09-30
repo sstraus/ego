@@ -1518,6 +1518,38 @@ fn drain(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
     }
 }
 
+/// Waits until an idle composer row (`>` alone) stands below the row showing
+/// `marker`. A screen that lacks the streaming prompt is not enough: while the
+/// reply prints, the prompt is briefly erased, so only the idle composer proves
+/// the turn-end redraw arrived. A screen that never settles is left for the
+/// caller's own assertion to report.
+fn until_idle_composer_below(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    rows: u16,
+    cols: u16,
+    marker: &str,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    loop {
+        let mut screen = vt100::Parser::new(rows, cols, 0);
+        screen.process(output);
+        let contents = screen.screen().contents();
+        let settled = contents
+            .lines()
+            .skip_while(|line| !line.contains(marker))
+            .any(|line| line.trim_end() == ">");
+        if settled {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok(chunk) => output.extend(chunk),
+            Err(_) => return,
+        }
+    }
+}
+
 /// A raw PTY read may have already received a complete redraw while its reader
 /// thread still holds the chunk. A key assertion begins only after that queue
 /// is quiet, so an old marker cannot satisfy a later-key expectation.
@@ -2600,6 +2632,10 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
     );
 
     until_normalized(&reader, &mut output, 0, "ANSWER-ON-REPLY-ROW");
+    // The turn-end redraw follows the reply text by more than the quiet window
+    // on a slow host; wait for the idle composer instead of sampling the
+    // streaming prompt.
+    until_idle_composer_below(&reader, &mut output, 24, 80, "ANSWER-ON-REPLY-ROW");
     drain_until_quiet(&reader, &mut output);
     let mut final_screen = vt100::Parser::new(24, 80, 0);
     final_screen.process(&output);
