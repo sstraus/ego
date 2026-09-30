@@ -2601,6 +2601,16 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
 
     until_normalized(&reader, &mut output, 0, "ANSWER-ON-REPLY-ROW");
     drain_until_quiet(&reader, &mut output);
+    {
+        let mut early = vt100::Parser::new(24, 80, 0);
+        early.process(&output);
+        eprintln!("DIAG early: {:?}", early.screen().contents());
+        std::thread::sleep(Duration::from_secs(2));
+        drain_until_quiet(&reader, &mut output);
+        let mut late = vt100::Parser::new(24, 80, 0);
+        late.process(&output);
+        eprintln!("DIAG late: {:?}", late.screen().contents());
+    }
     let mut final_screen = vt100::Parser::new(24, 80, 0);
     final_screen.process(&output);
     let visible = final_screen.screen().contents();
