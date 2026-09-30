@@ -35,16 +35,28 @@ fn successor_accepts_next_turn(action: &str) {
         Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
         Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
     ]);
-    let stub = Stub::start(Plan { completions: replies, ..Plan::default() });
+    let stub = Stub::start(Plan {
+        completions: replies,
+        ..Plan::default()
+    });
     let places = support::Places::new();
     places.file("AGENTS.md", "# successor fixture\n");
     let ego = places.ego(&stub).conversing().args([
-        "--model", "ollama/qwen3", "--session-id", support::FIXTURE_SESSION_ID,
-        "--sandbox", "off",
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
     ]);
-    let pair = NativePtySystem::default().openpty(PtySize {
-        rows: 24, cols: 100, pixel_width: 0, pixel_height: 0,
-    }).expect("pty");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
     let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
     let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
@@ -79,14 +91,29 @@ fn successor_accepts_next_turn(action: &str) {
     reader_join.join().unwrap();
     writer_join.join().unwrap();
     assert!(status.success(), "successor process failed: {status:?}");
-    let listing = places.ego(&stub).subcommand("ls").args(["--output", "json"]).run().report();
-    let target = listing["sessions"].as_array().unwrap().iter()
-        .find(|row| row["id"] != support::FIXTURE_SESSION_ID).expect("successor catalogue row");
+    let listing = places
+        .ego(&stub)
+        .subcommand("ls")
+        .args(["--output", "json"])
+        .run()
+        .report();
+    let target = listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] != support::FIXTURE_SESSION_ID)
+        .expect("successor catalogue row");
     assert_eq!(target["model"], "ollama/qwen3");
-    let resumed = places.ego(&stub).subcommand("resume")
-        .args(["--model", "ollama/qwen3", "--sandbox", "off"]).run_pty("resume prompt");
+    let resumed = places
+        .ego(&stub)
+        .subcommand("resume")
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .run_pty("resume prompt");
     assert_eq!(resumed.code, Some(0), "resume failed: {resumed:?}");
-    assert!(resumed.stdout.contains("REGRESSION-MARKER-ANSWER"), "resume lost model: {resumed:?}");
+    assert!(
+        resumed.stdout.contains("REGRESSION-MARKER-ANSWER"),
+        "resume lost model: {resumed:?}"
+    );
 }
 
 // portable-pty transports bytes but does not emulate a terminal. Keep the
