@@ -389,6 +389,7 @@ fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
             Segment::Effort,
             Segment::Mode,
             Segment::Context,
+            Segment::Cost,
             Segment::Queue,
             Segment::Drafts,
             Segment::Interrupt,

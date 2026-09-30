@@ -2037,7 +2037,7 @@ fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {
     let finish_start = output.len();
     std::fs::write(&release, b"go").expect("release tool");
     until(&reader, &mut output, b"SLOW-TOOL-DONE");
-    until_normalized(&reader, &mut output, finish_start, "model=");
+    until_normalized(&reader, &mut output, finish_start, "qwen3 · ");
     let clear_start = output.len();
     input.write_all(b"\x03").expect("clear draft");
     input.flush().expect("clear draft flush");
@@ -2246,7 +2246,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             .contains("the local action handler is not installed"),
         "activation must complete before the first live prompt"
     );
-    until(&reader, &mut output, b"model=ollama/qwen3");
+    until(&reader, &mut output, "qwen3 · ".as_bytes());
     drain_until_quiet(&reader, &mut output);
 
     let typing_start = output.len();
@@ -2275,7 +2275,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             pixel_height: 0,
         })
         .expect("narrow resize");
-    until_from(&reader, &mut output, resize_start, b"model=ollama/qwen3");
+    until_from(&reader, &mut output, resize_start, "qwen3 · ".as_bytes());
     drain_until_quiet(&reader, &mut output);
     let narrow_start = output.len();
     input.write_all(b"short").expect("type in narrow PTY");
@@ -2301,7 +2301,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             pixel_height: 0,
         })
         .expect("restore size");
-    until_from(&reader, &mut output, restore_start, b"model=ollama/qwen3");
+    until_from(&reader, &mut output, restore_start, "qwen3 · ".as_bytes());
     drain_until_quiet(&reader, &mut output);
     let slash_start = output.len();
     input.write_all(b"/model\r").expect("model slash action");
@@ -2594,7 +2594,7 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
         "working row must have no input prompt: {visible:?}"
     );
     assert_eq!(
-        visible.matches("model=").count(),
+        visible.matches("qwen3 · ").count(),
         1,
         "status must occur once before the user turn: {visible:?}"
     );
@@ -2842,7 +2842,7 @@ fn cancelling_before_reply_clears_the_thinking_row() {
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
-    until_normalized(&reader, &mut output, cancel_start, "model=");
+    until_normalized(&reader, &mut output, cancel_start, "qwen3 · ");
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(24, 80, 0);
     screen.process(&output);

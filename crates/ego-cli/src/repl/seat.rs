@@ -549,6 +549,7 @@ pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentN
     ego_core::config::StatusSegmentName::Effort,
     ego_core::config::StatusSegmentName::Mode,
     ego_core::config::StatusSegmentName::Context,
+    ego_core::config::StatusSegmentName::Cost,
     ego_core::config::StatusSegmentName::Queue,
     ego_core::config::StatusSegmentName::Drafts,
     ego_core::config::StatusSegmentName::Interrupt,
