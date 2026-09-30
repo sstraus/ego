@@ -32,6 +32,7 @@ pub enum ActionId {
     Name,
     Goal,
     Tools,
+    Expand,
     Skills,
     Hooks,
     Version,
@@ -447,6 +448,12 @@ impl ActionRegistry {
             enabled(Name, "name", "Set durable session display metadata"),
             enabled(Goal, "goal", "Manage the persistent goal lifecycle"),
             enabled(Tools, "tools", "Inspect available tools"),
+            enabled(
+                Expand,
+                "expand",
+                "Show the full output of the last tool call",
+            )
+            .shortcut('o'),
             enabled(Skills, "skills", "List or invoke admitted skills")
                 .unavailable("the skill catalogue"),
             enabled(Hooks, "hooks", "Inspect admitted hooks"),

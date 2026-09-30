@@ -1134,6 +1134,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         diagnostics.note(&seat.action_help());
                                         continue;
                                     }
+                                    repl::Line::HostCommand(repl::HostCommand::Action(
+                                        repl::actions::ActionId::Expand,
+                                    )) => {
+                                        diagnostics.expand_last_tool();
+                                        continue;
+                                    }
                                     // The same snapshot `ego doctor` prints,
                                     // built by the same probes. Two renderings
                                     // of one value is the whole contract; two

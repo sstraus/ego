@@ -6,12 +6,14 @@
 //! write to stdout at all — [`Stdout`] — and by the diagnostic path
 //! ([`note`]) not being able to reach it.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Write};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use ego_core::cost::{CumulativeCost, RateSource};
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
-use ego_core::event::id::SessionId;
+use ego_core::event::id::{ItemId, SessionId};
 use ego_core::permit::Authority;
 use ego_core::public::{CeilingEffect, ItemKind, MeteringKind, PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::{DeniedBy, RunTermination};
@@ -21,6 +23,7 @@ use ego_core::turn::CancelToken;
 use serde::Serialize;
 
 use crate::DISPLAY_NAME;
+use crate::render::tool_row::{self, Finished};
 use crate::render::{Answer, Capabilities};
 use crate::repl::SurfaceOutput;
 
@@ -29,6 +32,18 @@ use crate::repl::SurfaceOutput;
 /// frames both through Reedline's sole terminal writer.
 pub trait Diagnostics: Send + Sync {
     fn note(&self, message: &str);
+
+    /// A finished tool call: its rows, and the full detail the expand key
+    /// shows later. A headless run has no expand key, so the rows are a
+    /// diagnostic and the detail is dropped; a terminal surface commits the
+    /// rows to the transcript and keeps the detail.
+    fn tool_row(&self, rows: &str, _detail: String) {
+        self.note(rows);
+    }
+
+    /// Print the detail of the most recent tool call, if this surface kept
+    /// one.
+    fn expand_last_tool(&self) {}
 }
 
 pub trait TextOutput: Diagnostics {
@@ -160,15 +175,22 @@ impl TextOutput for Stdout {
     }
 }
 
+/// How many finished tool calls the expand key can reach back to.
+const EXPANDABLE_CALLS: usize = 16;
+
 /// Interactive text and diagnostics serialized into complete logical rows.
 pub struct InteractiveOutput {
     inner: Mutex<SurfaceOutput>,
+    /// Detail of the most recent tool calls, oldest first. Its own lock: the
+    /// rows are written through `inner` and the detail is only ever read back.
+    tools: Mutex<VecDeque<String>>,
 }
 
 impl InteractiveOutput {
     pub fn new(output: SurfaceOutput) -> Self {
         Self {
             inner: Mutex::new(output),
+            tools: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -176,6 +198,23 @@ impl InteractiveOutput {
 impl Diagnostics for InteractiveOutput {
     fn note(&self, message: &str) {
         self.line(&format!("{DISPLAY_NAME}: {message}"));
+    }
+
+    fn tool_row(&self, rows: &str, detail: String) {
+        self.line(rows);
+        let mut tools = self.tools.lock().expect("tool detail lock");
+        if tools.len() == EXPANDABLE_CALLS {
+            tools.pop_front();
+        }
+        tools.push_back(detail);
+    }
+
+    fn expand_last_tool(&self) {
+        let detail = self.tools.lock().expect("tool detail lock").back().cloned();
+        match detail {
+            Some(detail) => self.line(&detail),
+            None => self.note("no tool call to expand yet"),
+        }
     }
 }
 
@@ -277,6 +316,16 @@ pub struct TextSink<'a> {
     ///
     /// [`ceiling_note`]: TextSink::ceiling_note
     ceiling: Mutex<Option<(CeilingEffect, RateSource)>>,
+    /// Tool calls that have started and not finished: what the row needs from
+    /// the start event, kept until the completion event arrives.
+    calls: Mutex<HashMap<ItemId, StartedCall>>,
+    capabilities: Capabilities,
+}
+
+struct StartedCall {
+    name: String,
+    args: String,
+    at: Instant,
 }
 
 /// The state of the answer currently being written.
@@ -295,6 +344,8 @@ impl<'a> TextSink<'a> {
                 open: false,
             }),
             ceiling: Mutex::new(None),
+            calls: Mutex::new(HashMap::new()),
+            capabilities,
         }
     }
 
@@ -416,15 +467,53 @@ impl EventSink for TextSink<'_> {
                 text,
                 ..
             } => self.stream(text),
+            // One row per call, drawn when the call finishes: a row needs the
+            // outcome and the duration, and the start event has neither.
             PublicEvent::ItemStarted {
                 kind: ItemKind::Tool,
+                item,
                 name: Some(name),
                 text,
                 ..
             } if !self.quiet => {
-                self.finish();
-                let args = text.as_deref().unwrap_or("");
-                self.out.note(&format!("{name} {args}"));
+                self.calls
+                    .lock()
+                    .expect("a poisoned lock means a writer panicked mid-line")
+                    .insert(
+                        *item,
+                        StartedCall {
+                            name: name.clone(),
+                            args: text.clone().unwrap_or_default(),
+                            at: Instant::now(),
+                        },
+                    );
+            }
+            PublicEvent::ItemCompleted {
+                kind: ItemKind::Tool,
+                item,
+                ok,
+                text,
+                ..
+            } if !self.quiet => {
+                let started = self
+                    .calls
+                    .lock()
+                    .expect("a poisoned lock means a writer panicked mid-line")
+                    .remove(item);
+                if let Some(started) = started {
+                    let record = tool_row::record(
+                        &Finished {
+                            name: &started.name,
+                            args: &started.args,
+                            ok: *ok,
+                            result: text.as_deref().unwrap_or(""),
+                            elapsed: started.at.elapsed(),
+                        },
+                        self.capabilities,
+                    );
+                    self.finish();
+                    self.out.tool_row(&record.rows, record.detail);
+                }
             }
             // Deliberately **not** gated on `quiet`. `-q` is presentation —
             // CLI.md §1.3 pairs it with `--no-color` and calls it "quiet
@@ -632,5 +721,146 @@ mod tests {
         });
 
         assert_eq!(object["denied_by"], serde_json::json!({ "by": "boundary" }));
+    }
+
+    /// Everything a sink asked its output to draw.
+    #[derive(Default)]
+    struct Recorded {
+        notes: Mutex<Vec<String>>,
+        rows: Mutex<Vec<(String, String)>>,
+    }
+
+    impl Diagnostics for Recorded {
+        fn note(&self, message: &str) {
+            self.notes.lock().unwrap().push(message.to_owned());
+        }
+
+        fn tool_row(&self, rows: &str, detail: String) {
+            self.rows.lock().unwrap().push((rows.to_owned(), detail));
+        }
+    }
+
+    impl TextOutput for Recorded {
+        fn write(&self, _text: &str) {}
+        fn line(&self, _text: &str) {}
+    }
+
+    fn started(item: ItemId, name: &str, args: &str) -> PublicEvent {
+        PublicEvent::ItemStarted {
+            turn: ego_core::event::id::TurnId::new(),
+            item,
+            kind: ItemKind::Tool,
+            name: Some(name.to_owned()),
+            text: Some(args.to_owned()),
+        }
+    }
+
+    fn completed(item: ItemId, ok: bool, result: &str) -> PublicEvent {
+        PublicEvent::ItemCompleted {
+            turn: ego_core::event::id::TurnId::new(),
+            item,
+            kind: ItemKind::Tool,
+            ok,
+            text: Some(result.to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_tool_call_is_drawn_once_when_it_finishes_and_never_as_raw_json() {
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain());
+        let state = SessionState::default();
+        let item = ItemId::new();
+
+        sink.publish(&started(item, "read", r#"{"path":"a.rs"}"#), &state);
+        assert!(
+            out.rows.lock().unwrap().is_empty(),
+            "a row needs an outcome"
+        );
+        sink.publish(&completed(item, true, "one\ntwo\n"), &state);
+
+        let rows = out.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].0.starts_with("✓ read a.rs · 2 lines · "),
+            "{:?}",
+            rows[0].0
+        );
+        assert!(!rows[0].0.contains('{'), "{:?}", rows[0].0);
+        assert!(out.notes.lock().unwrap().is_empty());
+    }
+
+    /// Two calls in flight finish in the opposite order: each row carries its
+    /// own call's name, matched by item and not by arrival.
+    #[test]
+    fn overlapping_calls_are_matched_to_their_own_start() {
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain());
+        let state = SessionState::default();
+        let (first, second) = (ItemId::new(), ItemId::new());
+
+        sink.publish(&started(first, "read", r#"{"path":"first.rs"}"#), &state);
+        sink.publish(&started(second, "read", r#"{"path":"second.rs"}"#), &state);
+        sink.publish(&completed(second, true, "x"), &state);
+        sink.publish(&completed(first, false, "denied"), &state);
+
+        let rows = out.rows.lock().unwrap();
+        assert!(rows[0].0.starts_with("✓ read second.rs"), "{:?}", rows[0].0);
+        assert!(rows[1].0.starts_with("✗ read first.rs"), "{:?}", rows[1].0);
+    }
+
+    #[test]
+    fn quiet_draws_no_tool_rows_and_a_stray_completion_draws_none() {
+        let out = Recorded::default();
+        let quiet = TextSink::new(&out, true, Capabilities::plain());
+        let state = SessionState::default();
+        let item = ItemId::new();
+        quiet.publish(&started(item, "read", r#"{"path":"a.rs"}"#), &state);
+        quiet.publish(&completed(item, true, "x"), &state);
+
+        let loud = TextSink::new(&out, false, Capabilities::plain());
+        loud.publish(&completed(ItemId::new(), true, "x"), &state);
+        assert!(out.rows.lock().unwrap().is_empty());
+    }
+
+    fn interactive() -> (InteractiveOutput, crossbeam::channel::Receiver<String>) {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
+        (output, receiver)
+    }
+
+    #[test]
+    fn expand_shows_the_latest_call_and_not_an_earlier_one() {
+        let (output, rows) = interactive();
+        output.tool_row("row one", "detail one".to_owned());
+        output.tool_row("row two", "detail two".to_owned());
+        assert_eq!(
+            rows.try_iter().collect::<Vec<_>>(),
+            ["row one\n", "row two\n"]
+        );
+
+        output.expand_last_tool();
+        assert_eq!(rows.try_iter().collect::<Vec<_>>(), ["detail two\n"]);
+    }
+
+    #[test]
+    fn expand_with_nothing_kept_says_so_instead_of_printing_nothing() {
+        let (output, rows) = interactive();
+        output.expand_last_tool();
+        assert_eq!(
+            rows.try_iter().collect::<Vec<_>>(),
+            ["εgo: no tool call to expand yet\n"]
+        );
+    }
+
+    /// Detail is a bounded log: a long session does not grow it without limit.
+    #[test]
+    fn only_the_most_recent_calls_keep_their_detail() {
+        let (output, _rows) = interactive();
+        for call in 0..(EXPANDABLE_CALLS + 5) {
+            output.tool_row("row", format!("detail {call}"));
+        }
+        assert_eq!(output.tools.lock().unwrap().len(), EXPANDABLE_CALLS);
+        assert_eq!(output.tools.lock().unwrap().front().unwrap(), "detail 5");
     }
 }

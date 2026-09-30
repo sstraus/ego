@@ -1832,7 +1832,8 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
 
     let rendered = normalized(&output);
     for fact in [
-        "εgo: write",
+        "Call: \"write\"",
+        "✓ write notes.md",
         "Reason:",
         "Operations:",
         "Risk: Bounded",
@@ -3465,7 +3466,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 24] = [
+    const COMMANDS: [&str; 25] = [
         "help",
         "model",
         "thinking",
@@ -3487,6 +3488,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "name",
         "goal",
         "tools",
+        "expand",
         "skills",
         "hooks",
         "version",
@@ -3572,6 +3574,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("name", None),
         ("goal", None),
         ("tools", Some("tools:")),
+        ("expand", Some("no tool call to expand yet")),
         ("skills", None),
         ("hooks", Some("no hooks are admitted")),
         ("version", Some("ego 0.1.0")),
@@ -3844,4 +3847,294 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+}
+
+/// What one scripted tool turn left on a real terminal screen.
+struct ToolTurnScreens {
+    /// The screen once the turn has ended and the composer is back.
+    after_turn: Vec<String>,
+    /// The screen after the expand key, when one was pressed.
+    after_expand: Vec<String>,
+}
+
+const TOOL_TURN_DONE: &str = "TOOLS-DONE";
+
+/// Run one interactive turn whose model calls the given tools, on a screen
+/// `cols` wide, and read the terminal back through an emulator.
+///
+/// The oracle is the emulated screen and never the bytes ego wrote: a row that
+/// wrapped, overwrote the composer or arrived as raw JSON is visible there and
+/// nowhere else.
+fn tool_turn(
+    cols: u16,
+    files: &[(&str, &str)],
+    calls: &[(&str, &str)],
+    expand: bool,
+) -> ToolTurnScreens {
+    let mut completions: Vec<Reply> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (name, arguments))| {
+            Reply::Sse(tool_call(&format!("call-{index}"), name, arguments))
+        })
+        .collect();
+    completions.push(Reply::Sse(text(TOOL_TURN_DONE)));
+    let stub = Stub::start(Plan {
+        completions,
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "yolo",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# tool row fixture\n");
+    for (name, contents) in files {
+        ego.file(name, contents);
+    }
+    let rows = 70;
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((rows, cols)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+
+    let start = output.len();
+    input.write_all(b"use the tools\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(&reader, &mut output, start, TOOL_TURN_DONE);
+    let screen_lines = |output: &[u8]| {
+        let mut screen = vt100::Parser::new(rows, cols, 0);
+        screen.process(output);
+        screen
+            .screen()
+            .contents()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    // The answer arrives before the composer is idle again: the screen is
+    // read only once its last row is the idle composer.
+    let idle_by = Instant::now() + PROGRESS_DEADLINE;
+    let after_turn = loop {
+        drain_until_quiet(&reader, &mut output);
+        let lines = screen_lines(&output);
+        if lines.last().is_some_and(|line| line.starts_with('>')) {
+            break lines;
+        }
+        assert!(Instant::now() < idle_by, "composer never idle: {lines:?}");
+    };
+
+    let mut after_expand = Vec::new();
+    if expand {
+        let start = output.len();
+        input.write_all(b"\x1bo").expect("Meta-o");
+        input.flush().expect("expand flush");
+        // The last line of the whole result, indented under its row.
+        until_normalized(&reader, &mut output, start, "  20");
+        drain_until_quiet(&reader, &mut output);
+        after_expand = screen_lines(&output);
+    }
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    ToolTurnScreens {
+        after_turn,
+        after_expand,
+    }
+}
+
+/// A row is a tool row when its first cell is an outcome mark.
+fn tool_rows(screen: &[String]) -> Vec<&str> {
+    screen
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.starts_with('✓') || line.starts_with('✗'))
+        .collect()
+}
+
+/// The row ends with a duration such as `12ms`, `0.4s` or `1m05s`.
+fn ends_with_duration(row: &str) -> bool {
+    let last = row.split_whitespace().last().unwrap_or("");
+    last.starts_with(|c: char| c.is_ascii_digit())
+        && last.ends_with('s')
+        && last
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'm' | 's'))
+}
+
+const READ_CALL: (&str, &str) = ("read", r#"{"path":"calc.py"}"#);
+const EDIT_CALL: (&str, &str) = (
+    "edit",
+    r#"{"path":"calc.py","old_string":"a = 1","new_string":"a = 1\nc = 3\nd = 4"}"#,
+);
+const SEQ_CALL: (&str, &str) = ("exec", r#"{"argv":["seq","1","20"]}"#);
+
+#[test]
+fn read_edit_and_exec_each_leave_one_compact_row_and_no_raw_call_json() {
+    let screens = tool_turn(
+        120,
+        &[("calc.py", "a = 1\nb = 2\n")],
+        &[READ_CALL, EDIT_CALL, SEQ_CALL],
+        false,
+    );
+    let rows = tool_rows(&screens.after_turn);
+    let joined = screens.after_turn.join("\n");
+    assert_eq!(rows.len(), 3, "one row per call: {joined}");
+    assert!(
+        rows[0].starts_with("✓ read calc.py"),
+        "read row: {:?}",
+        rows[0]
+    );
+    assert!(
+        rows[1].starts_with("✓ edit calc.py +3 -1"),
+        "edit row: {:?}",
+        rows[1]
+    );
+    assert!(
+        rows[2].starts_with("✓ $ seq 1 20"),
+        "exec row: {:?}",
+        rows[2]
+    );
+    for row in &rows {
+        assert!(ends_with_duration(row), "no duration on {row:?}");
+    }
+    assert!(
+        !joined.contains(r#"{"path""#) && !joined.contains(r#""argv""#),
+        "raw call JSON reached the transcript: {joined}"
+    );
+}
+
+#[test]
+fn exec_row_shows_exit_status_and_a_bounded_tail_and_the_expand_key_shows_all() {
+    let screens = tool_turn(120, &[], &[SEQ_CALL], true);
+    let trimmed = |screen: &[String]| {
+        screen
+            .iter()
+            .map(|l| l.trim().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let before = trimmed(&screens.after_turn);
+    assert!(
+        tool_rows(&screens.after_turn)
+            .first()
+            .is_some_and(|row| row.contains("exit 0")),
+        "exit status missing: {before:?}"
+    );
+    for shown in ["18", "19", "20"] {
+        assert!(
+            before.iter().any(|l| l == shown),
+            "tail {shown} missing: {before:?}"
+        );
+    }
+    assert!(
+        !before.iter().any(|l| l == "10"),
+        "the tail is unbounded: {before:?}"
+    );
+    assert!(
+        before.iter().any(|l| l.contains("more lines")),
+        "no hint that lines were cut: {before:?}"
+    );
+    let after = trimmed(&screens.after_expand);
+    for line in 1..=20 {
+        assert!(
+            after.iter().any(|l| *l == line.to_string()),
+            "line {line} missing after expand: {after:?}"
+        );
+    }
+}
+
+#[test]
+fn a_failing_call_shows_the_failure_and_never_a_success_mark() {
+    let screens = tool_turn(
+        120,
+        &[],
+        &[
+            ("exec", r#"{"argv":["sh","-c","echo boom >&2; exit 3"]}"#),
+            ("read", r#"{"path":"missing.py"}"#),
+        ],
+        false,
+    );
+    let rows = tool_rows(&screens.after_turn);
+    let joined = screens.after_turn.join("\n");
+    assert_eq!(rows.len(), 2, "one row per call: {joined}");
+    assert!(
+        rows[0].starts_with('✗') && rows[0].contains("exit 3"),
+        "failed exec row: {:?}",
+        rows[0]
+    );
+    assert!(
+        rows[1].starts_with("✗ read missing.py"),
+        "failed read row: {:?}",
+        rows[1]
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains('✓')),
+        "a failed call carries a success mark: {rows:?}"
+    );
+    assert!(joined.contains("boom"), "stderr tail missing: {joined}");
+}
+
+#[test]
+fn rows_fit_the_terminal_at_120_80_60_and_40_columns() {
+    let long_arg = "a".repeat(130);
+    let exec = format!(r#"{{"argv":["echo","{long_arg}"]}}"#);
+    let long_missing = format!(r#"{{"path":"no-such-directory/{}.txt"}}"#, "b".repeat(90));
+    for cols in [120u16, 80, 60, 40] {
+        let screens = tool_turn(
+            cols,
+            &[("calc.py", "a = 1\n")],
+            &[READ_CALL, ("exec", &exec), ("read", &long_missing)],
+            false,
+        );
+        let joined = screens.after_turn.join("\n");
+        let rows = tool_rows(&screens.after_turn);
+        assert_eq!(rows.len(), 3, "{cols} cols, one row per call: {joined}");
+        for row in rows {
+            assert!(
+                ends_with_duration(row),
+                "{cols} cols: row lost its outcome to a soft wrap: {row:?}\n{joined}"
+            );
+        }
+        let done = screens
+            .after_turn
+            .iter()
+            .position(|line| line.contains(TOOL_TURN_DONE))
+            .unwrap_or_else(|| panic!("{cols} cols: answer missing: {joined}"));
+        assert!(
+            screens.after_turn[done + 1..]
+                .iter()
+                .any(|line| line.starts_with('>')),
+            "{cols} cols: the composer is not below the answer: {joined}"
+        );
+    }
 }
