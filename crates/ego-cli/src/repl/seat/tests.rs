@@ -270,6 +270,29 @@ fn help_routes_to_scrollback_instead_of_becoming_a_multiline_prompt() {
 }
 
 #[test]
+fn expand_reaches_the_host_and_leaves_no_status_notice() {
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::new(
+        ActionRegistry::final_surface(),
+    ))));
+
+    let line = apply_surface_effect(
+        &mut editor,
+        &phase,
+        &status,
+        SurfaceActionEffect::Expand,
+        false,
+    );
+
+    assert_eq!(
+        line,
+        Some(Line::HostCommand(HostCommand::Action(ActionId::Expand)))
+    );
+    assert_eq!(status.lock().unwrap().notice, None);
+}
+
+#[test]
 fn typing_dismisses_a_local_result_while_the_turn_phase_is_busy() {
     let phase = SurfacePhase::new(EditPhase::Busy);
     let status = Arc::new(Mutex::new(SurfaceStatus {
@@ -389,6 +412,7 @@ fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
             Segment::Effort,
             Segment::Mode,
             Segment::Context,
+            Segment::Cost,
             Segment::Queue,
             Segment::Drafts,
             Segment::Interrupt,

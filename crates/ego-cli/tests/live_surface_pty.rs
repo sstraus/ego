@@ -966,6 +966,10 @@ fn image_paste_clipboard_text_only_leaves_ordinary_paste_unchanged() {
 /// two idle prompt renders, on a startup gap rather than on anything it
 /// asserts.
 const PROGRESS_DEADLINE: Duration = Duration::from_secs(60);
+/// The full slash catalogue previously exceeded 60 seconds under host load.
+/// Its first unresponsive step still fails after at most 180 seconds.
+const SLASH_ACTION_DEADLINE: Duration = Duration::from_secs(180);
+const HELP_END: &str = "────────────────";
 
 enum WriteRequest {
     Bytes(Vec<u8>),
@@ -1152,13 +1156,23 @@ fn rendered_prompt_count(output: &[u8]) -> usize {
 }
 
 fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
-    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    until_prompt_from_with_context(receiver, output, start, PROGRESS_DEADLINE, "PTY prompt");
+}
+
+fn until_prompt_from_with_context(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    budget: Duration,
+    context: &str,
+) {
+    let deadline = Instant::now() + budget;
     while rendered_prompt_count(&output[start..]) == 0 {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             drain(receiver, output);
             panic!(
-                "PTY prompt wait timed out; raw output: {:?}; normalized output: {:?}",
+                "{context} wait timed out; raw output: {:?}; normalized output: {:?}",
                 String::from_utf8_lossy(&output[start..]),
                 normalized(&output[start..]),
             );
@@ -1166,8 +1180,51 @@ fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, s
         let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
             drain(receiver, output);
             panic!(
-                "PTY prompt wait failed: {error}; raw output: {:?}; normalized output: {:?}",
+                "{context} wait failed: {error}; raw output: {:?}; normalized output: {:?}",
                 String::from_utf8_lossy(&output[start..]),
+                normalized(&output[start..]),
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
+fn until_local_action_completed(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    command: &str,
+    budget: Duration,
+) {
+    let marker = format!("/{command}");
+    // Reedline toggles bracketed paste around an accepted line; a redraw
+    // prompt before that cycle does not mean the command has completed.
+    let completed = |bytes: &[u8]| {
+        let find_after = |bytes: &[u8], marker: &[u8]| {
+            bytes
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .map(|position| position + marker.len())
+        };
+        let echoed = find_after(bytes, marker.as_bytes())?;
+        let stopped = echoed + find_after(&bytes[echoed..], b"\x1b[?2004l")?;
+        let resumed = stopped + find_after(&bytes[stopped..], b"\x1b[?2004h")?;
+        (rendered_prompt_count(&bytes[resumed..]) > 0).then_some(resumed)
+    };
+    let deadline = Instant::now() + budget;
+    while completed(&output[start..]).is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "/{command} terminal completion timed out; output: {:?}",
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "/{command} terminal completion wait failed: {error}; output: {:?}",
                 normalized(&output[start..]),
             )
         });
@@ -1312,25 +1369,45 @@ fn until_normalized_without_new_generation(
     stub: &Stub,
     generation_count: usize,
 ) {
+    until_normalized_without_new_generation_with_context(
+        receiver,
+        output,
+        start,
+        needle,
+        stub,
+        generation_count,
+        PROGRESS_DEADLINE,
+        "PTY output",
+    );
+}
+
+fn until_normalized_without_new_generation_with_context(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+    stub: &Stub,
+    generation_count: usize,
+    budget: Duration,
+    context: &str,
+) {
     while !normalized(&output[start..]).contains(needle) {
         let generations = stub.generations();
         if generations.len() != generation_count {
             drain(receiver, output);
             panic!(
-                "PTY input changed provider generation count while waiting for {needle:?}; expected {generation_count}, generations: {generations:?}; output: {:?}",
+                "{context} changed provider generation count while waiting for {needle:?}; expected {generation_count}, generations: {generations:?}; output: {:?}",
                 normalized(&output[start..]),
             );
         }
-        let chunk = receiver
-            .recv_timeout(PROGRESS_DEADLINE)
-            .unwrap_or_else(|error| {
-                drain(receiver, output);
-                panic!(
-                    "PTY wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
-                    stub.generations(),
-                    normalized(&output[start..]),
-                )
-            });
+        let chunk = receiver.recv_timeout(budget).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "{context} wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
+                stub.generations(),
+                normalized(&output[start..]),
+            )
+        });
         output.extend(chunk);
     }
 }
@@ -1355,14 +1432,58 @@ fn submit_local_action(
         .flush()
         .unwrap_or_else(|error| panic!("flush /{command}: {error}"));
     if let Some(expected) = expected {
-        until_normalized_without_new_generation(receiver, output, start, expected, stub, 0);
+        until_normalized_without_new_generation_with_context(
+            receiver,
+            output,
+            start,
+            expected,
+            stub,
+            0,
+            SLASH_ACTION_DEADLINE,
+            &format!("/{command} action output"),
+        );
     }
-    until_prompt_from(receiver, output, start);
-    drain_until_quiet(receiver, output);
+    if expected.is_none() {
+        until_local_action_completed(receiver, output, start, command, SLASH_ACTION_DEADLINE);
+    }
     assert!(
         stub.generations().is_empty(),
         "/{command} leaked into a provider generation"
     );
+    if expected.is_none() {
+        // A terminal repaint confirms Reedline accepted the command, but the
+        // coordinator may still be consuming an earlier line. /help is a
+        // visible driver round trip before the next action is submitted.
+        submit_local_action(receiver, output, input, stub, "help", Some(HELP_END));
+    }
+}
+
+#[test]
+fn slash_action_stall_reports_command_and_waiting_step() {
+    let stub = Stub::start(Plan::default());
+    for (command, expected, step) in [
+        ("help", Some("εgo commands"), "action output"),
+        ("plan", None, "terminal completion"),
+    ] {
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let mut output = Vec::new();
+        let mut input = Vec::new();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            submit_local_action(&receiver, &mut output, &mut input, &stub, command, expected);
+        }))
+        .expect_err("a closed PTY output channel must stop the slash-action wait");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .expect("panic with a diagnostic message");
+        assert!(
+            message.contains(&format!("/{command}")),
+            "action missing: {message}"
+        );
+        assert!(message.contains(step), "waiting step missing: {message}");
+    }
 }
 
 fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, previous: usize) {
@@ -1393,6 +1514,38 @@ fn drain(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
         match receiver.try_recv() {
             Ok(chunk) => output.extend(chunk),
             Err(_) => break,
+        }
+    }
+}
+
+/// Waits until an idle composer row (`>` alone) stands below the row showing
+/// `marker`. A screen that lacks the streaming prompt is not enough: while the
+/// reply prints, the prompt is briefly erased, so only the idle composer proves
+/// the turn-end redraw arrived. A screen that never settles is left for the
+/// caller's own assertion to report.
+fn until_idle_composer_below(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    rows: u16,
+    cols: u16,
+    marker: &str,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    loop {
+        let mut screen = vt100::Parser::new(rows, cols, 0);
+        screen.process(output);
+        let contents = screen.screen().contents();
+        let settled = contents
+            .lines()
+            .skip_while(|line| !line.contains(marker))
+            .any(|line| line.trim_end() == ">");
+        if settled {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok(chunk) => output.extend(chunk),
+            Err(_) => return,
         }
     }
 }
@@ -1532,6 +1685,26 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             pixel_height: 0,
         })
         .expect("pty");
+    #[cfg(unix)]
+    {
+        let tty = pair.master.tty_name().expect("slave PTY name");
+        let option = if cfg!(target_os = "macos") {
+            "-f"
+        } else {
+            "-F"
+        };
+        let setup = std::process::Command::new("stty")
+            .arg(option)
+            .arg(tty)
+            .arg("ixon")
+            .output()
+            .expect("enable XOFF on the real slave PTY");
+        assert!(
+            setup.status.success(),
+            "stty could not enable IXON: {}",
+            String::from_utf8_lossy(&setup.stderr)
+        );
+    }
     let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
@@ -1569,16 +1742,29 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"\x13").expect("stash newest draft");
     input.flush().expect("stash newest draft flush");
     let newest_stash_start = output.len();
+    // This next repaint follows XOFF without an XON byte. The real PTY must
+    // deliver Ctrl+S to ego rather than freeze terminal output.
     until_prompt_from(&reader, &mut output, newest_stash_start);
+    drain_until_quiet(&reader, &mut output);
+    let local_action_start = output.len();
+    input
+        .write_all(b"/version\r")
+        .expect("local version action");
+    input.flush().expect("local version action flush");
+    until_prompt_from(&reader, &mut output, local_action_start);
+    drain_until_quiet(&reader, &mut output);
+    assert!(
+        !output[local_action_start..]
+            .windows(b"newest_draft".len())
+            .any(|window| window == b"newest_draft"),
+        "a local action must leave parked input in the stash"
+    );
+    let newest_restore_start = output.len();
     input.write_all(b"initial\r").expect("initial prompt");
     input.flush().expect("initial prompt flush");
     until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
-    input
-        .write_all(b"\x13")
-        .expect("restore newest draft from LIFO stash during Busy");
-    let newest_restore_start = output.len();
-    input.flush().expect("restore newest draft flush");
     until_from(&reader, &mut output, newest_restore_start, b"newest_draft");
+    let older_restore_start = output.len();
     input.write_all(b"\r").expect("busy steer submit");
     input.flush().expect("busy steer flush");
     until_normalized(
@@ -1587,6 +1773,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
         0,
         "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
     );
+    until_from(&reader, &mut output, older_restore_start, b"older_draft");
     provider_gate.release();
     until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
     until_with_context(&reader, &mut output, b"[y] allow [n] deny [e] edit", || {
@@ -1621,12 +1808,6 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"y").expect("immediate permission answer");
     input.flush().expect("permission answer flush");
     until(&reader, &mut output, b"NEWEST-DRAFT-RECEIVED");
-    input
-        .write_all(b"\x13")
-        .expect("restore older draft from LIFO stash");
-    let older_restore_start = output.len();
-    input.flush().expect("restore older draft flush");
-    until_from(&reader, &mut output, older_restore_start, b"older_draft");
     input.write_all(b"\r").expect("submit restored older draft");
     input.flush().expect("older draft submit flush");
     until(&reader, &mut output, b"OLDER-DRAFT-RECEIVED");
@@ -1645,6 +1826,16 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"\x13").expect("stash unsent draft");
     input.flush().expect("stash unsent draft flush");
     until_post_trust_prompt(&reader, &mut output, unsent_stash_start);
+    let manual_restore_start = output.len();
+    input
+        .write_all(b"\x13")
+        .expect("restore from empty composer");
+    input.flush().expect("manual restore flush");
+    until_from(&reader, &mut output, manual_restore_start, b"unsent draft");
+    let manual_restash_start = output.len();
+    input.write_all(b"\x13").expect("park restored draft again");
+    input.flush().expect("manual restash flush");
+    until_post_trust_prompt(&reader, &mut output, manual_restash_start);
     pair.master
         .resize(PtySize {
             rows: 24,
@@ -1673,7 +1864,8 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
 
     let rendered = normalized(&output);
     for fact in [
-        "εgo: write",
+        "Call: \"write\"",
+        "✓ write notes.md",
         "Reason:",
         "Operations:",
         "Risk: Bounded",
@@ -1878,7 +2070,7 @@ fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {
     let finish_start = output.len();
     std::fs::write(&release, b"go").expect("release tool");
     until(&reader, &mut output, b"SLOW-TOOL-DONE");
-    until_normalized(&reader, &mut output, finish_start, "model=");
+    until_normalized(&reader, &mut output, finish_start, "qwen3 · ");
     let clear_start = output.len();
     input.write_all(b"\x03").expect("clear draft");
     input.flush().expect("clear draft flush");
@@ -2087,7 +2279,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             .contains("the local action handler is not installed"),
         "activation must complete before the first live prompt"
     );
-    until(&reader, &mut output, b"model=ollama/qwen3");
+    until(&reader, &mut output, "qwen3 · ".as_bytes());
     drain_until_quiet(&reader, &mut output);
 
     let typing_start = output.len();
@@ -2116,7 +2308,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             pixel_height: 0,
         })
         .expect("narrow resize");
-    until_from(&reader, &mut output, resize_start, b"model=ollama/qwen3");
+    until_from(&reader, &mut output, resize_start, "qwen3 · ".as_bytes());
     drain_until_quiet(&reader, &mut output);
     let narrow_start = output.len();
     input.write_all(b"short").expect("type in narrow PTY");
@@ -2142,7 +2334,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             pixel_height: 0,
         })
         .expect("restore size");
-    until_from(&reader, &mut output, restore_start, b"model=ollama/qwen3");
+    until_from(&reader, &mut output, restore_start, "qwen3 · ".as_bytes());
     drain_until_quiet(&reader, &mut output);
     let slash_start = output.len();
     input.write_all(b"/model\r").expect("model slash action");
@@ -2435,12 +2627,16 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
         "working row must have no input prompt: {visible:?}"
     );
     assert_eq!(
-        visible.matches("model=").count(),
+        visible.matches("qwen3 · ").count(),
         1,
         "status must occur once before the user turn: {visible:?}"
     );
 
     until_normalized(&reader, &mut output, 0, "ANSWER-ON-REPLY-ROW");
+    // The turn-end redraw follows the reply text by more than the quiet window
+    // on a slow host; wait for the idle composer instead of sampling the
+    // streaming prompt.
+    until_idle_composer_below(&reader, &mut output, 24, 80, "ANSWER-ON-REPLY-ROW");
     drain_until_quiet(&reader, &mut output);
     let mut final_screen = vt100::Parser::new(24, 80, 0);
     final_screen.process(&output);
@@ -2683,7 +2879,7 @@ fn cancelling_before_reply_clears_the_thinking_row() {
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
-    until_normalized(&reader, &mut output, cancel_start, "model=");
+    until_normalized(&reader, &mut output, cancel_start, "qwen3 · ");
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(24, 80, 0);
     screen.process(&output);
@@ -3233,8 +3429,80 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
 }
 
 #[test]
+fn slash_action_wait_ignores_a_redraw_prompt_before_command_completion() {
+    // These frames preserve the observed /clear ordering from the live PTY:
+    // the first prompt was painted before the command echo and Enter cycle.
+    let redraw = b"\x1b[6n\x1b[4;1H\x1b[J\x1b[96m> \x1b[0m";
+    let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[4;1H\x1b[J\x1b[96m> ";
+    let (sender, receiver) = mpsc::channel();
+    let (done, result) = mpsc::channel();
+    sender.send(redraw.to_vec()).expect("first PTY frame");
+    let waiter = thread::spawn(move || {
+        let mut output = Vec::new();
+        until_local_action_completed(&receiver, &mut output, 0, "clear", Duration::from_secs(2));
+        done.send(output).expect("completion result");
+    });
+    assert!(
+        result.recv_timeout(Duration::from_millis(100)).is_err(),
+        "a redraw prompt was mistaken for /clear completion"
+    );
+    sender
+        .send(completion.to_vec())
+        .expect("completion PTY frame");
+    let output = result
+        .recv_timeout(Duration::from_secs(2))
+        .expect("real command completion");
+    assert!(output.ends_with(completion));
+    waiter.join().expect("waiter thread");
+}
+
+#[test]
+fn silent_slash_action_waits_for_a_driver_reply() {
+    let (writes, requests) = mpsc::sync_channel(4);
+    let (frames, receiver) = mpsc::channel();
+    let (done, result) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let stub = Stub::start(Plan::default());
+        let mut input = PtyWriter { sender: writes };
+        let mut output = Vec::new();
+        submit_local_action(&receiver, &mut output, &mut input, &stub, "clear", None);
+        done.send(output).expect("completed action");
+    });
+    let next_write = || loop {
+        match requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("PTY write")
+        {
+            WriteRequest::Bytes(bytes) => break bytes,
+            WriteRequest::Flush => {}
+        }
+    };
+    assert_eq!(next_write(), b"/clear\r");
+    frames
+        .send(b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> ".to_vec())
+        .expect("clear terminal frame");
+    assert_eq!(next_write(), b"/help\r");
+    assert!(
+        result.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the terminal frame alone must not finish a silent action"
+    );
+    frames
+        .send(
+            "\x1b[96m> /help\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> \r\nεgo commands\r\n────────────────\r\n"
+                .as_bytes()
+                .to_vec(),
+        )
+        .expect("driver reply");
+    let output = result
+        .recv_timeout(Duration::from_secs(2))
+        .expect("silent action and driver reply");
+    assert!(normalized(&output).contains(HELP_END));
+    waiter.join().expect("waiter thread");
+}
+
+#[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 24] = [
+    const COMMANDS: [&str; 25] = [
         "help",
         "model",
         "thinking",
@@ -3256,6 +3524,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "name",
         "goal",
         "tools",
+        "expand",
         "skills",
         "hooks",
         "version",
@@ -3301,7 +3570,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         &mut input,
         &stub,
         "help",
-        Some("εgo commands"),
+        Some(HELP_END),
     );
 
     for (command, prompt) in [
@@ -3331,7 +3600,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("mcp", Some("mcp:")),
         ("sessions", Some("UPDATED")),
         ("fork", None),
-        ("compact", None),
+        // This empty fixture cannot prepare compaction; wait for its outcome.
+        ("compact", Some("compaction failed")),
         ("clear", None),
         ("usage", Some("usage as_of=")),
         ("export", None),
@@ -3340,6 +3610,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("name", None),
         ("goal", None),
         ("tools", Some("tools:")),
+        ("expand", Some("no tool call to expand yet")),
         ("skills", None),
         ("hooks", Some("no hooks are admitted")),
         ("version", Some("ego 0.1.0")),
@@ -3362,6 +3633,90 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+}
+
+/// Drive one interactive session, optionally through one answered turn, quit it
+/// with `/quit` and return everything printed from the quit onwards.
+fn output_after_quit(turn: Option<&str>) -> String {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("RESUME-HINT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# resume hint fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    if let Some(prompt) = turn {
+        let turn_start = output.len();
+        input
+            .write_all(format!("{prompt}\r").as_bytes())
+            .expect("turn");
+        input.flush().expect("turn flush");
+        until_normalized(&reader, &mut output, turn_start, "RESUME-HINT-ANSWER");
+        until_prompt_from(&reader, &mut output, turn_start);
+    }
+    let quit_start = output.len();
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drain(&reader, &mut output);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    normalized(&output[quit_start..])
+}
+
+#[test]
+fn quitting_after_a_turn_prints_the_resume_hint_for_that_session() {
+    let after_quit = output_after_quit(Some("hello"));
+    assert!(
+        after_quit.contains(&format!(
+            "To resume: ego resume {}",
+            support::FIXTURE_SESSION_ID
+        )),
+        "no resume hint at exit: {after_quit:?}"
+    );
+}
+
+#[test]
+fn quitting_without_any_turn_prints_no_resume_hint() {
+    let after_quit = output_after_quit(None);
+    assert!(
+        after_quit.contains("unsent drafts"),
+        "exit accounting missing, the run did not reach its exit: {after_quit:?}"
+    );
+    assert!(
+        !after_quit.contains("ego resume"),
+        "hint for a session that cannot be resumed: {after_quit:?}"
+    );
 }
 
 #[test]
@@ -3612,4 +3967,294 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+}
+
+/// What one scripted tool turn left on a real terminal screen.
+struct ToolTurnScreens {
+    /// The screen once the turn has ended and the composer is back.
+    after_turn: Vec<String>,
+    /// The screen after the expand key, when one was pressed.
+    after_expand: Vec<String>,
+}
+
+const TOOL_TURN_DONE: &str = "TOOLS-DONE";
+
+/// Run one interactive turn whose model calls the given tools, on a screen
+/// `cols` wide, and read the terminal back through an emulator.
+///
+/// The oracle is the emulated screen and never the bytes ego wrote: a row that
+/// wrapped, overwrote the composer or arrived as raw JSON is visible there and
+/// nowhere else.
+fn tool_turn(
+    cols: u16,
+    files: &[(&str, &str)],
+    calls: &[(&str, &str)],
+    expand: bool,
+) -> ToolTurnScreens {
+    let mut completions: Vec<Reply> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (name, arguments))| {
+            Reply::Sse(tool_call(&format!("call-{index}"), name, arguments))
+        })
+        .collect();
+    completions.push(Reply::Sse(text(TOOL_TURN_DONE)));
+    let stub = Stub::start(Plan {
+        completions,
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "yolo",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# tool row fixture\n");
+    for (name, contents) in files {
+        ego.file(name, contents);
+    }
+    let rows = 70;
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((rows, cols)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+
+    let start = output.len();
+    input.write_all(b"use the tools\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(&reader, &mut output, start, TOOL_TURN_DONE);
+    let screen_lines = |output: &[u8]| {
+        let mut screen = vt100::Parser::new(rows, cols, 0);
+        screen.process(output);
+        screen
+            .screen()
+            .contents()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    // The answer arrives before the composer is idle again: the screen is
+    // read only once its last row is the idle composer.
+    let idle_by = Instant::now() + PROGRESS_DEADLINE;
+    let after_turn = loop {
+        drain_until_quiet(&reader, &mut output);
+        let lines = screen_lines(&output);
+        if lines.last().is_some_and(|line| line.starts_with('>')) {
+            break lines;
+        }
+        assert!(Instant::now() < idle_by, "composer never idle: {lines:?}");
+    };
+
+    let mut after_expand = Vec::new();
+    if expand {
+        let start = output.len();
+        input.write_all(b"\x1bo").expect("Meta-o");
+        input.flush().expect("expand flush");
+        // The last line of the whole result, indented under its row.
+        until_normalized(&reader, &mut output, start, "  20");
+        drain_until_quiet(&reader, &mut output);
+        after_expand = screen_lines(&output);
+    }
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    ToolTurnScreens {
+        after_turn,
+        after_expand,
+    }
+}
+
+/// A row is a tool row when its first cell is an outcome mark.
+fn tool_rows(screen: &[String]) -> Vec<&str> {
+    screen
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.starts_with('✓') || line.starts_with('✗'))
+        .collect()
+}
+
+/// The row ends with a duration such as `12ms`, `0.4s` or `1m05s`.
+fn ends_with_duration(row: &str) -> bool {
+    let last = row.split_whitespace().last().unwrap_or("");
+    last.starts_with(|c: char| c.is_ascii_digit())
+        && last.ends_with('s')
+        && last
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'm' | 's'))
+}
+
+const READ_CALL: (&str, &str) = ("read", r#"{"path":"calc.py"}"#);
+const EDIT_CALL: (&str, &str) = (
+    "edit",
+    r#"{"path":"calc.py","old_string":"a = 1","new_string":"a = 1\nc = 3\nd = 4"}"#,
+);
+const SEQ_CALL: (&str, &str) = ("exec", r#"{"argv":["seq","1","20"]}"#);
+
+#[test]
+fn read_edit_and_exec_each_leave_one_compact_row_and_no_raw_call_json() {
+    let screens = tool_turn(
+        120,
+        &[("calc.py", "a = 1\nb = 2\n")],
+        &[READ_CALL, EDIT_CALL, SEQ_CALL],
+        false,
+    );
+    let rows = tool_rows(&screens.after_turn);
+    let joined = screens.after_turn.join("\n");
+    assert_eq!(rows.len(), 3, "one row per call: {joined}");
+    assert!(
+        rows[0].starts_with("✓ read calc.py"),
+        "read row: {:?}",
+        rows[0]
+    );
+    assert!(
+        rows[1].starts_with("✓ edit calc.py +3 -1"),
+        "edit row: {:?}",
+        rows[1]
+    );
+    assert!(
+        rows[2].starts_with("✓ $ seq 1 20"),
+        "exec row: {:?}",
+        rows[2]
+    );
+    for row in &rows {
+        assert!(ends_with_duration(row), "no duration on {row:?}");
+    }
+    assert!(
+        !joined.contains(r#"{"path""#) && !joined.contains(r#""argv""#),
+        "raw call JSON reached the transcript: {joined}"
+    );
+}
+
+#[test]
+fn exec_row_shows_exit_status_and_a_bounded_tail_and_the_expand_key_shows_all() {
+    let screens = tool_turn(120, &[], &[SEQ_CALL], true);
+    let trimmed = |screen: &[String]| {
+        screen
+            .iter()
+            .map(|l| l.trim().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let before = trimmed(&screens.after_turn);
+    assert!(
+        tool_rows(&screens.after_turn)
+            .first()
+            .is_some_and(|row| row.contains("exit 0")),
+        "exit status missing: {before:?}"
+    );
+    for shown in ["18", "19", "20"] {
+        assert!(
+            before.iter().any(|l| l == shown),
+            "tail {shown} missing: {before:?}"
+        );
+    }
+    assert!(
+        !before.iter().any(|l| l == "10"),
+        "the tail is unbounded: {before:?}"
+    );
+    assert!(
+        before.iter().any(|l| l.contains("more lines")),
+        "no hint that lines were cut: {before:?}"
+    );
+    let after = trimmed(&screens.after_expand);
+    for line in 1..=20 {
+        assert!(
+            after.iter().any(|l| *l == line.to_string()),
+            "line {line} missing after expand: {after:?}"
+        );
+    }
+}
+
+#[test]
+fn a_failing_call_shows_the_failure_and_never_a_success_mark() {
+    let screens = tool_turn(
+        120,
+        &[],
+        &[
+            ("exec", r#"{"argv":["sh","-c","echo boom >&2; exit 3"]}"#),
+            ("read", r#"{"path":"missing.py"}"#),
+        ],
+        false,
+    );
+    let rows = tool_rows(&screens.after_turn);
+    let joined = screens.after_turn.join("\n");
+    assert_eq!(rows.len(), 2, "one row per call: {joined}");
+    assert!(
+        rows[0].starts_with('✗') && rows[0].contains("exit 3"),
+        "failed exec row: {:?}",
+        rows[0]
+    );
+    assert!(
+        rows[1].starts_with("✗ read missing.py"),
+        "failed read row: {:?}",
+        rows[1]
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains('✓')),
+        "a failed call carries a success mark: {rows:?}"
+    );
+    assert!(joined.contains("boom"), "stderr tail missing: {joined}");
+}
+
+#[test]
+fn rows_fit_the_terminal_at_120_80_60_and_40_columns() {
+    let long_arg = "a".repeat(130);
+    let exec = format!(r#"{{"argv":["echo","{long_arg}"]}}"#);
+    let long_missing = format!(r#"{{"path":"no-such-directory/{}.txt"}}"#, "b".repeat(90));
+    for cols in [120u16, 80, 60, 40] {
+        let screens = tool_turn(
+            cols,
+            &[("calc.py", "a = 1\n")],
+            &[READ_CALL, ("exec", &exec), ("read", &long_missing)],
+            false,
+        );
+        let joined = screens.after_turn.join("\n");
+        let rows = tool_rows(&screens.after_turn);
+        assert_eq!(rows.len(), 3, "{cols} cols, one row per call: {joined}");
+        for row in rows {
+            assert!(
+                ends_with_duration(row),
+                "{cols} cols: row lost its outcome to a soft wrap: {row:?}\n{joined}"
+            );
+        }
+        let done = screens
+            .after_turn
+            .iter()
+            .position(|line| line.contains(TOOL_TURN_DONE))
+            .unwrap_or_else(|| panic!("{cols} cols: answer missing: {joined}"));
+        assert!(
+            screens.after_turn[done + 1..]
+                .iter()
+                .any(|line| line.starts_with('>')),
+            "{cols} cols: the composer is not below the answer: {joined}"
+        );
+    }
 }

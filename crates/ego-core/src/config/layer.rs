@@ -131,6 +131,9 @@ pub struct ProfileLayer {
     pub session_dir: Option<std::path::PathBuf>,
     /// CI-only sanitized artifact root.
     pub artifact_dir: Option<std::path::PathBuf>,
+    /// Extra directories this profile opens to the run, beyond the workspace.
+    #[serde(default)]
+    pub roots: Vec<crate::permit::RootCfg>,
     /// Complete MCP entries contributed by this profile. Entries replace the
     /// same name from the layer's base table; their fields never merge.
     #[serde(default)]
@@ -850,6 +853,19 @@ impl ConfigLayer {
                 source,
                 message: format!(
                     "profile `{name}` cannot set `session_dir` or `artifact_dir`; those keys belong only to profile `ci`"
+                ),
+            });
+        }
+        if !matches!(source, Source::System | Source::User)
+            && let Some((name, _)) = value
+                .profile
+                .iter()
+                .find(|(_, profile)| !profile.roots.is_empty())
+        {
+            return Err(ConfigError::Invalid {
+                source,
+                message: format!(
+                    "profile `{name}` cannot declare `roots`; only the system and user layers may widen where a run can reach"
                 ),
             });
         }

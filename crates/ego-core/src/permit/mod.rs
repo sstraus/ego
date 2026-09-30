@@ -14,6 +14,7 @@ mod grant;
 pub mod judge;
 mod path;
 mod prepared_call;
+mod roots;
 pub mod rule;
 mod scan;
 mod scope;
@@ -45,6 +46,7 @@ pub use prepared_call::{
     Change, HookHttpPreparedEnvelope, McpPreparedEnvelope, Op, OpName, PreparedCall,
     SecretEgressAuthority, SessionProcessAction,
 };
+pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;
 pub use spawn::{

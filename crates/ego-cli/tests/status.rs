@@ -49,9 +49,16 @@ fn builtins_and_arbitrary_configured_segments_render_in_user_order() {
         StatusSegmentName::Cwd,
         StatusSegmentName::Git,
     ];
-    let line = StatusLine::render(&snapshot(), &names, 240);
+    let mut surface = snapshot();
+    surface.set_queue(QueueStatus {
+        pending_steers: 1,
+        queued: 0,
+        interrupt_pending: false,
+    });
+    surface.set_drafts(1);
+    let line = StatusLine::render(&surface, &names, 240);
     assert_eq!(line.diagnostics(), &[]);
-    assert!(line.text().find("model=").unwrap() < line.text().find("effort=").unwrap());
+    assert!(line.text().find("gpt-5.6").unwrap() < line.text().find("high").unwrap());
     assert!(line.text().find("queue=").unwrap() < line.text().find("drafts=").unwrap());
     assert!(line.text().find("cwd=").unwrap() < line.text().find("git=").unwrap());
 
@@ -66,7 +73,20 @@ fn builtins_and_arbitrary_configured_segments_render_in_user_order() {
         &[(custom, SegmentValue::text("17ms"))],
         120,
     );
-    assert!(custom_line.text().starts_with("latency=17ms"));
+    assert!(custom_line.text().starts_with("latency=17ms · "));
+}
+
+#[test]
+fn parked_draft_count_is_visible_in_the_native_status_row() {
+    let mut surface = snapshot();
+    surface.set_drafts(1);
+    let rendered = StatusLine::render(
+        &surface,
+        &[StatusSegmentName::Model, StatusSegmentName::Drafts],
+        80,
+    );
+
+    assert!(rendered.text().contains("drafts=1"), "{rendered:?}");
 }
 
 #[test]
@@ -86,9 +106,9 @@ fn inactive_and_optional_segments_collapse_as_whole_segments() {
         StatusSegmentName::Interrupt,
         StatusSegmentName::Git,
     ];
-    let rendered = StatusLine::render(&surface, &configured, 35);
-    assert!(rendered.text().contains("model="));
-    assert!(!rendered.text().contains("cost="));
+    let rendered = StatusLine::render(&surface, &configured, 30);
+    assert!(rendered.text().contains("gpt-5.6"));
+    assert!(!rendered.text().contains("cost"));
     assert!(!rendered.text().contains("gi"));
     assert!(!rendered.text().contains("queue=2"));
     assert!(!rendered.text().contains("drafts=3"));
@@ -99,7 +119,7 @@ fn inactive_and_optional_segments_collapse_as_whole_segments() {
             .split_whitespace()
             .all(|segment| { !segment.contains("dra") && !segment.contains("que") })
     );
-    assert!(rendered.width() <= 35);
+    assert!(rendered.width() <= 30);
 }
 
 #[test]
@@ -218,7 +238,7 @@ fn asynchronous_git_failure_omits_only_git_and_adds_one_diagnostic_without_block
         &[StatusSegmentName::Model, StatusSegmentName::Git],
         120,
     );
-    assert!(line.text().contains("model="));
+    assert!(line.text().contains("gpt-5.6"));
     assert!(!line.text().contains("git="));
     assert_eq!(line.diagnostics().len(), 1);
 }
