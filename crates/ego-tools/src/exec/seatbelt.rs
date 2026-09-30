@@ -42,12 +42,25 @@ impl SeatbeltBackend {
             .iter()
             .map(CanonPath::as_path)
             .collect::<Vec<_>>();
+        // The paths a program must be able to walk: its exec paths and, once a
+        // profile has any, the workspace it starts in (`realpath` of the cwd
+        // lstats every ancestor, and fails without them). Without a profile
+        // the profile text is what it always was.
+        let mut exec_paths = policy
+            .exec_paths()
+            .iter()
+            .map(CanonPath::as_path)
+            .collect::<Vec<_>>();
+        if !exec_paths.is_empty() {
+            exec_paths.push(policy.workspace().as_path());
+        }
         let rendered = profile::render(&ProfileInput {
             level: policy.level(),
             offline: policy.offline(),
             workspace: policy.workspace().as_path(),
             private_scratch: private_scratch.as_path(),
             runtime_roots: &runtime_roots,
+            exec_paths: &exec_paths,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
 
