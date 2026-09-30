@@ -543,7 +543,9 @@ pub trait TargetStore: SessionStore {
     fn publish_target(&self, seed: &TargetSeed) -> TargetPublication;
 }
 
-/// An idle source bound to one canonical fork seed.
+/// An idle source bound to one canonical fork seed. The seed carries the
+/// source's title and active goal, so no entry point can publish a fork
+/// without them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedFork {
     seed: TargetSeed,
@@ -580,7 +582,9 @@ impl PreparedFork {
             return Err(ForkError::LiveAttempt);
         }
         Ok(Self {
-            seed: TargetSeed::fork(source, state.last_seq, at),
+            seed: TargetSeed::fork(source, state.last_seq, at)
+                .with_title(state.title.clone())
+                .with_goal(state.goal.as_ref()),
         })
     }
 
