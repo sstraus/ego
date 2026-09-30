@@ -1518,9 +1518,6 @@ fn drain(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
     }
 }
 
-/// A raw PTY read may have already received a complete redraw while its reader
-/// thread still holds the chunk. A key assertion begins only after that queue
-/// is quiet, so an old marker cannot satisfy a later-key expectation.
 /// Waits until the emulated screen no longer shows `needle`. A screen that
 /// never clears is left for the caller's own assertion to report.
 fn until_screen_lacks(
@@ -1545,6 +1542,9 @@ fn until_screen_lacks(
     }
 }
 
+/// A raw PTY read may have already received a complete redraw while its reader
+/// thread still holds the chunk. A key assertion begins only after that queue
+/// is quiet, so an old marker cannot satisfy a later-key expectation.
 fn drain_until_quiet(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
     let deadline = Instant::now() + PROGRESS_DEADLINE;
     while let Ok(chunk) = receiver.recv_timeout(Duration::from_millis(100)) {
