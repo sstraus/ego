@@ -966,6 +966,10 @@ fn image_paste_clipboard_text_only_leaves_ordinary_paste_unchanged() {
 /// two idle prompt renders, on a startup gap rather than on anything it
 /// asserts.
 const PROGRESS_DEADLINE: Duration = Duration::from_secs(60);
+/// The full slash catalogue previously exceeded 60 seconds under host load.
+/// Its first unresponsive step still fails after at most 180 seconds.
+const SLASH_ACTION_DEADLINE: Duration = Duration::from_secs(180);
+const HELP_END: &str = "────────────────";
 
 enum WriteRequest {
     Bytes(Vec<u8>),
@@ -1152,13 +1156,23 @@ fn rendered_prompt_count(output: &[u8]) -> usize {
 }
 
 fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
-    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    until_prompt_from_with_context(receiver, output, start, PROGRESS_DEADLINE, "PTY prompt");
+}
+
+fn until_prompt_from_with_context(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    budget: Duration,
+    context: &str,
+) {
+    let deadline = Instant::now() + budget;
     while rendered_prompt_count(&output[start..]) == 0 {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             drain(receiver, output);
             panic!(
-                "PTY prompt wait timed out; raw output: {:?}; normalized output: {:?}",
+                "{context} wait timed out; raw output: {:?}; normalized output: {:?}",
                 String::from_utf8_lossy(&output[start..]),
                 normalized(&output[start..]),
             );
@@ -1166,8 +1180,51 @@ fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, s
         let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
             drain(receiver, output);
             panic!(
-                "PTY prompt wait failed: {error}; raw output: {:?}; normalized output: {:?}",
+                "{context} wait failed: {error}; raw output: {:?}; normalized output: {:?}",
                 String::from_utf8_lossy(&output[start..]),
+                normalized(&output[start..]),
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
+fn until_local_action_completed(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    command: &str,
+    budget: Duration,
+) {
+    let marker = format!("/{command}");
+    // Reedline toggles bracketed paste around an accepted line; a redraw
+    // prompt before that cycle does not mean the command has completed.
+    let completed = |bytes: &[u8]| {
+        let find_after = |bytes: &[u8], marker: &[u8]| {
+            bytes
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .map(|position| position + marker.len())
+        };
+        let echoed = find_after(bytes, marker.as_bytes())?;
+        let stopped = echoed + find_after(&bytes[echoed..], b"\x1b[?2004l")?;
+        let resumed = stopped + find_after(&bytes[stopped..], b"\x1b[?2004h")?;
+        (rendered_prompt_count(&bytes[resumed..]) > 0).then_some(resumed)
+    };
+    let deadline = Instant::now() + budget;
+    while completed(&output[start..]).is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "/{command} terminal completion timed out; output: {:?}",
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "/{command} terminal completion wait failed: {error}; output: {:?}",
                 normalized(&output[start..]),
             )
         });
@@ -1312,25 +1369,45 @@ fn until_normalized_without_new_generation(
     stub: &Stub,
     generation_count: usize,
 ) {
+    until_normalized_without_new_generation_with_context(
+        receiver,
+        output,
+        start,
+        needle,
+        stub,
+        generation_count,
+        PROGRESS_DEADLINE,
+        "PTY output",
+    );
+}
+
+fn until_normalized_without_new_generation_with_context(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+    stub: &Stub,
+    generation_count: usize,
+    budget: Duration,
+    context: &str,
+) {
     while !normalized(&output[start..]).contains(needle) {
         let generations = stub.generations();
         if generations.len() != generation_count {
             drain(receiver, output);
             panic!(
-                "PTY input changed provider generation count while waiting for {needle:?}; expected {generation_count}, generations: {generations:?}; output: {:?}",
+                "{context} changed provider generation count while waiting for {needle:?}; expected {generation_count}, generations: {generations:?}; output: {:?}",
                 normalized(&output[start..]),
             );
         }
-        let chunk = receiver
-            .recv_timeout(PROGRESS_DEADLINE)
-            .unwrap_or_else(|error| {
-                drain(receiver, output);
-                panic!(
-                    "PTY wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
-                    stub.generations(),
-                    normalized(&output[start..]),
-                )
-            });
+        let chunk = receiver.recv_timeout(budget).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "{context} wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
+                stub.generations(),
+                normalized(&output[start..]),
+            )
+        });
         output.extend(chunk);
     }
 }
@@ -1355,14 +1432,58 @@ fn submit_local_action(
         .flush()
         .unwrap_or_else(|error| panic!("flush /{command}: {error}"));
     if let Some(expected) = expected {
-        until_normalized_without_new_generation(receiver, output, start, expected, stub, 0);
+        until_normalized_without_new_generation_with_context(
+            receiver,
+            output,
+            start,
+            expected,
+            stub,
+            0,
+            SLASH_ACTION_DEADLINE,
+            &format!("/{command} action output"),
+        );
     }
-    until_prompt_from(receiver, output, start);
-    drain_until_quiet(receiver, output);
+    if expected.is_none() {
+        until_local_action_completed(receiver, output, start, command, SLASH_ACTION_DEADLINE);
+    }
     assert!(
         stub.generations().is_empty(),
         "/{command} leaked into a provider generation"
     );
+    if expected.is_none() {
+        // A terminal repaint confirms Reedline accepted the command, but the
+        // coordinator may still be consuming an earlier line. /help is a
+        // visible driver round trip before the next action is submitted.
+        submit_local_action(receiver, output, input, stub, "help", Some(HELP_END));
+    }
+}
+
+#[test]
+fn slash_action_stall_reports_command_and_waiting_step() {
+    let stub = Stub::start(Plan::default());
+    for (command, expected, step) in [
+        ("help", Some("εgo commands"), "action output"),
+        ("plan", None, "terminal completion"),
+    ] {
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let mut output = Vec::new();
+        let mut input = Vec::new();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            submit_local_action(&receiver, &mut output, &mut input, &stub, command, expected);
+        }))
+        .expect_err("a closed PTY output channel must stop the slash-action wait");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .expect("panic with a diagnostic message");
+        assert!(
+            message.contains(&format!("/{command}")),
+            "action missing: {message}"
+        );
+        assert!(message.contains(step), "waiting step missing: {message}");
+    }
 }
 
 fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, previous: usize) {
@@ -1532,6 +1653,26 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             pixel_height: 0,
         })
         .expect("pty");
+    #[cfg(unix)]
+    {
+        let tty = pair.master.tty_name().expect("slave PTY name");
+        let option = if cfg!(target_os = "macos") {
+            "-f"
+        } else {
+            "-F"
+        };
+        let setup = std::process::Command::new("stty")
+            .arg(option)
+            .arg(tty)
+            .arg("ixon")
+            .output()
+            .expect("enable XOFF on the real slave PTY");
+        assert!(
+            setup.status.success(),
+            "stty could not enable IXON: {}",
+            String::from_utf8_lossy(&setup.stderr)
+        );
+    }
     let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
@@ -1569,16 +1710,29 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"\x13").expect("stash newest draft");
     input.flush().expect("stash newest draft flush");
     let newest_stash_start = output.len();
+    // This next repaint follows XOFF without an XON byte. The real PTY must
+    // deliver Ctrl+S to ego rather than freeze terminal output.
     until_prompt_from(&reader, &mut output, newest_stash_start);
+    drain_until_quiet(&reader, &mut output);
+    let local_action_start = output.len();
+    input
+        .write_all(b"/version\r")
+        .expect("local version action");
+    input.flush().expect("local version action flush");
+    until_prompt_from(&reader, &mut output, local_action_start);
+    drain_until_quiet(&reader, &mut output);
+    assert!(
+        !output[local_action_start..]
+            .windows(b"newest_draft".len())
+            .any(|window| window == b"newest_draft"),
+        "a local action must leave parked input in the stash"
+    );
+    let newest_restore_start = output.len();
     input.write_all(b"initial\r").expect("initial prompt");
     input.flush().expect("initial prompt flush");
     until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
-    input
-        .write_all(b"\x13")
-        .expect("restore newest draft from LIFO stash during Busy");
-    let newest_restore_start = output.len();
-    input.flush().expect("restore newest draft flush");
     until_from(&reader, &mut output, newest_restore_start, b"newest_draft");
+    let older_restore_start = output.len();
     input.write_all(b"\r").expect("busy steer submit");
     input.flush().expect("busy steer flush");
     until_normalized(
@@ -1587,6 +1741,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
         0,
         "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
     );
+    until_from(&reader, &mut output, older_restore_start, b"older_draft");
     provider_gate.release();
     until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
     until_with_context(&reader, &mut output, b"[y] allow [n] deny [e] edit", || {
@@ -1621,12 +1776,6 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"y").expect("immediate permission answer");
     input.flush().expect("permission answer flush");
     until(&reader, &mut output, b"NEWEST-DRAFT-RECEIVED");
-    input
-        .write_all(b"\x13")
-        .expect("restore older draft from LIFO stash");
-    let older_restore_start = output.len();
-    input.flush().expect("restore older draft flush");
-    until_from(&reader, &mut output, older_restore_start, b"older_draft");
     input.write_all(b"\r").expect("submit restored older draft");
     input.flush().expect("older draft submit flush");
     until(&reader, &mut output, b"OLDER-DRAFT-RECEIVED");
@@ -1645,6 +1794,16 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"\x13").expect("stash unsent draft");
     input.flush().expect("stash unsent draft flush");
     until_post_trust_prompt(&reader, &mut output, unsent_stash_start);
+    let manual_restore_start = output.len();
+    input
+        .write_all(b"\x13")
+        .expect("restore from empty composer");
+    input.flush().expect("manual restore flush");
+    until_from(&reader, &mut output, manual_restore_start, b"unsent draft");
+    let manual_restash_start = output.len();
+    input.write_all(b"\x13").expect("park restored draft again");
+    input.flush().expect("manual restash flush");
+    until_post_trust_prompt(&reader, &mut output, manual_restash_start);
     pair.master
         .resize(PtySize {
             rows: 24,
@@ -3233,6 +3392,78 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
 }
 
 #[test]
+fn slash_action_wait_ignores_a_redraw_prompt_before_command_completion() {
+    // These frames preserve the observed /clear ordering from the live PTY:
+    // the first prompt was painted before the command echo and Enter cycle.
+    let redraw = b"\x1b[6n\x1b[4;1H\x1b[J\x1b[96m> \x1b[0m";
+    let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[4;1H\x1b[J\x1b[96m> ";
+    let (sender, receiver) = mpsc::channel();
+    let (done, result) = mpsc::channel();
+    sender.send(redraw.to_vec()).expect("first PTY frame");
+    let waiter = thread::spawn(move || {
+        let mut output = Vec::new();
+        until_local_action_completed(&receiver, &mut output, 0, "clear", Duration::from_secs(2));
+        done.send(output).expect("completion result");
+    });
+    assert!(
+        result.recv_timeout(Duration::from_millis(100)).is_err(),
+        "a redraw prompt was mistaken for /clear completion"
+    );
+    sender
+        .send(completion.to_vec())
+        .expect("completion PTY frame");
+    let output = result
+        .recv_timeout(Duration::from_secs(2))
+        .expect("real command completion");
+    assert!(output.ends_with(completion));
+    waiter.join().expect("waiter thread");
+}
+
+#[test]
+fn silent_slash_action_waits_for_a_driver_reply() {
+    let (writes, requests) = mpsc::sync_channel(4);
+    let (frames, receiver) = mpsc::channel();
+    let (done, result) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let stub = Stub::start(Plan::default());
+        let mut input = PtyWriter { sender: writes };
+        let mut output = Vec::new();
+        submit_local_action(&receiver, &mut output, &mut input, &stub, "clear", None);
+        done.send(output).expect("completed action");
+    });
+    let next_write = || loop {
+        match requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("PTY write")
+        {
+            WriteRequest::Bytes(bytes) => break bytes,
+            WriteRequest::Flush => {}
+        }
+    };
+    assert_eq!(next_write(), b"/clear\r");
+    frames
+        .send(b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> ".to_vec())
+        .expect("clear terminal frame");
+    assert_eq!(next_write(), b"/help\r");
+    assert!(
+        result.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the terminal frame alone must not finish a silent action"
+    );
+    frames
+        .send(
+            "\x1b[96m> /help\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> \r\nεgo commands\r\n────────────────\r\n"
+                .as_bytes()
+                .to_vec(),
+        )
+        .expect("driver reply");
+    let output = result
+        .recv_timeout(Duration::from_secs(2))
+        .expect("silent action and driver reply");
+    assert!(normalized(&output).contains(HELP_END));
+    waiter.join().expect("waiter thread");
+}
+
+#[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
     const COMMANDS: [&str; 24] = [
         "help",
@@ -3301,7 +3532,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         &mut input,
         &stub,
         "help",
-        Some("εgo commands"),
+        Some(HELP_END),
     );
 
     for (command, prompt) in [
@@ -3331,7 +3562,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("mcp", Some("mcp:")),
         ("sessions", Some("UPDATED")),
         ("fork", None),
-        ("compact", None),
+        // This empty fixture cannot prepare compaction; wait for its outcome.
+        ("compact", Some("compaction failed")),
         ("clear", None),
         ("usage", Some("usage as_of=")),
         ("export", None),
