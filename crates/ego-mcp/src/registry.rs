@@ -3101,3 +3101,79 @@ mod collapsed_mcp_red {
         assert!(removed.capture().tools().is_empty());
     }
 }
+
+#[cfg(test)]
+mod candidate_detail_critic {
+    use super::*;
+
+    fn message(cause: &str) -> String {
+        CandidateFailure::admission(McpCandidateError::Invalid {
+            cause: cause.to_owned(),
+        })
+        .diagnostic_message()
+    }
+
+    fn detail(cause: &str) -> String {
+        let fixed = failure_message(McpFailure::InvalidValue);
+        message(cause)
+            .strip_prefix(fixed)
+            .and_then(|rest| rest.strip_prefix(": "))
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[test]
+    fn multibyte_cause_is_cut_on_a_character_boundary_at_the_bound() {
+        // catches: a byte-based cut that splits a 4-byte scalar or keeps 256 bytes.
+        let cause = "😀".repeat(300);
+        let out = detail(&cause);
+        assert_eq!(out.chars().count(), MAX_DIAGNOSTIC_DETAIL_CHARS);
+        assert!(out.chars().all(|c| c == '😀'));
+    }
+
+    #[test]
+    fn cause_at_the_bound_is_kept_whole_and_one_past_it_loses_one_character() {
+        // catches: off-by-one in the bound.
+        let exact = "x".repeat(MAX_DIAGNOSTIC_DETAIL_CHARS);
+        assert_eq!(detail(&exact), exact);
+        let over = "x".repeat(MAX_DIAGNOSTIC_DETAIL_CHARS + 1);
+        assert_eq!(detail(&over), exact);
+    }
+
+    #[test]
+    fn ascii_control_characters_never_reach_the_diagnostic() {
+        // catches: newline / ESC / NUL from a foreign server reshaping the host's line.
+        let out = message("bad\nforged: line\r\u{1b}[31mred\u{0}\u{7f}\u{85}end");
+        assert!(out.chars().all(|c| !c.is_control()), "{out:?}");
+    }
+
+    #[test]
+    fn unicode_line_breaks_and_bidi_overrides_never_reach_the_diagnostic() {
+        // catches: `char::is_control` (Cc only) letting U+2028/U+2029 split the
+        // line and U+202E reorder the text the host displays.
+        let out = message("a\u{2028}b\u{2029}c\u{202e}d\u{2066}e\u{200b}f");
+        for forbidden in ['\u{2028}', '\u{2029}', '\u{202e}', '\u{2066}'] {
+            assert!(!out.contains(forbidden), "{forbidden:?} survived: {out:?}");
+        }
+    }
+
+    #[test]
+    fn empty_or_blank_cause_adds_no_dangling_separator() {
+        // catches: "<fixed cause>: " with nothing after the colon.
+        let fixed = failure_message(McpFailure::InvalidValue);
+        for cause in ["", "   ", "\n\n\n", "\t\r\n"] {
+            assert_eq!(message(cause), fixed, "cause {cause:?}");
+        }
+    }
+
+    #[test]
+    fn leading_control_flood_does_not_consume_the_bound() {
+        // catches: 300 leading newlines turning into 256 blanks and hiding the real cause.
+        let cause = format!("{}resources/list missing envelope", "\n".repeat(300));
+        assert!(
+            message(&cause).contains("resources/list"),
+            "{:?}",
+            message(&cause)
+        );
+    }
+}
