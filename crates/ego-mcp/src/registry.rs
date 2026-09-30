@@ -262,19 +262,37 @@ struct CandidateFailure {
 const MAX_DIAGNOSTIC_DETAIL_CHARS: usize = 256;
 
 /// One line of at most `MAX_DIAGNOSTIC_DETAIL_CHARS` characters, so a foreign
-/// server's error text cannot flood or reshape the diagnostic.
-fn bounded_detail(cause: &str) -> String {
-    cause
+/// server's error text cannot flood or reshape the diagnostic. Control, line
+/// separator and bidi formatting characters become blanks; whitespace runs
+/// collapse before the bound so leading blanks cannot hide the cause. `None`
+/// when nothing readable remains.
+fn bounded_detail(cause: &str) -> Option<String> {
+    let blanked: String = cause
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if character.is_control() || is_bidi_control(character) {
                 ' '
             } else {
                 character
             }
         })
+        .collect();
+    let detail: String = blanked
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
         .take(MAX_DIAGNOSTIC_DETAIL_CHARS)
-        .collect()
+        .collect();
+    let detail = detail.trim_end().to_owned();
+    (!detail.is_empty()).then_some(detail)
+}
+
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 struct CandidateAuthorizationFailure {
@@ -295,7 +313,7 @@ impl CandidateFailure {
     fn admission(error: McpCandidateError) -> Self {
         match error {
             McpCandidateError::Invalid { cause } => Self {
-                detail: Some(bounded_detail(&cause)),
+                detail: bounded_detail(&cause),
                 ..Self::materialization(McpFailure::InvalidValue)
             },
             McpCandidateError::AuthorizationRequired {
