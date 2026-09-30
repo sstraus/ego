@@ -547,7 +547,7 @@ async fn admit_run_phase<'store>(
                 .expect("the materialized run owns its opened session"),
             materialized
                 .context
-                .take()
+                .clone()
                 .expect("the run context is admitted exactly once"),
         )?,
         (
