@@ -616,6 +616,7 @@ impl PreparedCall {
         Ok(Self {
             tool: subject.operation_name().to_owned(),
             ops,
+            background: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
