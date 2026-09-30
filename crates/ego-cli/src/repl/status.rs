@@ -543,11 +543,12 @@ impl StatusSegmentName {
             Self::Cost => 2,
             Self::Mode => 3,
             Self::Effort => 4,
-            Self::Context => 5,
-            // Last of the optional segments to go: an active `trust` segment
-            // is the session saying it is running without ambient authority,
-            // which outranks every other convenience on the row.
-            Self::Trust => 6,
+            // An untrusted `trust` segment outranks every convenience but the
+            // context share: regression case rules that the context field is never
+            // the one width pressure removes while another optional field
+            // remains, so trust goes first once only the two are left.
+            Self::Trust => 5,
+            Self::Context => 6,
             Self::Model => usize::MAX,
             Self::Queue | Self::Drafts | Self::Interrupt => usize::MAX,
         }

@@ -259,3 +259,54 @@ fn idle_queue_drafts_and_interrupt_do_not_occupy_the_row() {
         "glm-5.3-flash · drafts=2"
     );
 }
+
+#[test]
+fn context_outlives_an_untrusted_posture_under_width_pressure() {
+    // model 13 + ctx 11 + trust=untrusted 15 + two separators 6 = 45 cells:
+    // at 40, one of the two optional fields has to go, and it is trust.
+    let names = [
+        StatusSegmentName::Model,
+        StatusSegmentName::Context,
+        StatusSegmentName::Trust,
+    ];
+    let facts = state(Some(3_000), Some(1_000_000), CumulativeCost::Unstarted);
+    let surface = snapshot_for(&facts, Trust::Untrusted);
+
+    let narrow = StatusLine::render(&surface, &names, 40);
+    assert_eq!(narrow.text(), "glm-5.3-flash · ctx 0.3%/1M");
+    assert!(narrow.omitted(StatusSegmentName::Trust));
+
+    let wide = StatusLine::render(&surface, &names, 60);
+    assert_eq!(wide.text(), "glm-5.3-flash · ctx 0.3%/1M · trust=untrusted");
+}
+
+#[test]
+fn a_zero_window_never_divides_and_falls_back_to_the_count() {
+    let names = [StatusSegmentName::Context];
+    let shown = row(
+        &state(Some(2_482), Some(0), CumulativeCost::Unstarted),
+        &names,
+        120,
+    );
+    assert_eq!(shown, "ctx 2.5k");
+}
+
+#[test]
+fn context_beyond_the_window_is_reported_as_over_one_hundred_percent() {
+    let names = [StatusSegmentName::Context];
+    let over = row(
+        &state(Some(150_000), Some(100_000), CumulativeCost::Unstarted),
+        &names,
+        120,
+    );
+    assert_eq!(over, "ctx 150.0%/100k");
+    let extreme = row(
+        &state(Some(u64::MAX), Some(1), CumulativeCost::Unstarted),
+        &names,
+        120,
+    );
+    assert!(
+        extreme.starts_with("ctx ") && extreme.ends_with("/1"),
+        "{extreme}"
+    );
+}
