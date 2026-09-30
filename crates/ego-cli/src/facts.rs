@@ -93,7 +93,7 @@ const BUILTIN: &str = include_str!("../catalogue/models.toml");
 /// refusal names, so a test holds it equal to the `revision =` line in the
 /// file itself — a constant that had drifted would send an operator to the
 /// wrong catalogue.
-pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-29";
+pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-30";
 
 /// One `models.toml`.
 #[derive(Debug, Default, Deserialize)]
