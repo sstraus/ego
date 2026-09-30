@@ -1335,7 +1335,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             }
                                         };
                                         let target_state =
-                                            SessionState::replay([prepared.seed().event().clone()]);
+                                            SessionState::replay(prepared.seed().events().cloned());
                                         let mut target_owner = match ActiveSession::durable(
                                             target_opened,
                                             target_state,
