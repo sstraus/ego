@@ -71,6 +71,31 @@ pub(super) fn capture(spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
     Ok(captured.with_execution_identity(env, identity))
 }
 
+/// Refuse, as a launch failure, a target `execvp` could not start: nothing
+/// executable at the named path, or on the spawn's own `PATH` for a bare name.
+///
+/// A wrapper backend spawns its own program first, so without this a missing
+/// or non-executable target surfaced as the wrapper's exit status, not as the
+/// launch failure a direct spawn reports for the same argv.
+pub(super) fn require_launchable(program: &OsStr, spec: &SpawnSpec) -> Result<(), ProcessError> {
+    let cwd = spec
+        .cwd()
+        .map(|cwd| cwd.as_path().to_path_buf())
+        .map(Ok)
+        .unwrap_or_else(std::env::current_dir)
+        .map_err(|_| {
+            ProcessError::Invariant("cannot resolve execution working directory".into())
+        })?;
+    let env = super::backend::environment(spec)?;
+    match resolve(program, &cwd, &env) {
+        Some(_) => Ok(()),
+        None => Err(ProcessError::Launch {
+            executable: program.to_owned(),
+            reason: "no executable file at the named path or on PATH".into(),
+        }),
+    }
+}
+
 fn resolve(program: &OsStr, cwd: &Path, env: &[(OsString, OsString)]) -> Option<PathBuf> {
     let path = Path::new(program);
     if program.is_empty() {
