@@ -89,7 +89,11 @@ pub(crate) async fn seatbelt(
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
     let scratch = private_scratch()?;
     let scratch_path = canonical_scratch(&scratch)?;
-    let runtime_roots = derived_runtime_roots()?;
+    // Profile exec paths are read and exec roots like the Apple runtime: one
+    // list feeds the profile, the read probe and the policy digest, and no
+    // write grant is ever derived from it.
+    let mut runtime_roots = derived_runtime_roots()?;
+    runtime_roots.extend(policy.exec_paths().iter().cloned());
     let backend = Arc::new(SeatbeltBackend::prepare(
         policy,
         &scratch_path,
