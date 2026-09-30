@@ -401,7 +401,11 @@ impl SurfaceSnapshot {
     fn context_display(&self) -> String {
         match (self.used_tokens, self.window) {
             (Some(used), Some(window)) if window > 0 => {
-                format!("ctx {:.1}%/{}", used as f64 * 100.0 / window as f64, compact_tokens(window))
+                format!(
+                    "ctx {:.1}%/{}",
+                    used as f64 * 100.0 / window as f64,
+                    compact_tokens(window)
+                )
             }
             (Some(used), _) => format!("ctx {}", compact_tokens(used)),
             (None, Some(window)) => format!("ctx ?/{}", compact_tokens(window)),
@@ -419,7 +423,9 @@ impl SurfaceSnapshot {
             StatusSegmentName::Context => Some(SegmentValue::text(self.context_display())),
             // An unpriced or unstarted session has no figure to show; a
             // `$0` here would claim the spend is known to be nothing.
-            StatusSegmentName::Cost => self.money.map(|money| SegmentValue::text(money_display(&money))),
+            StatusSegmentName::Cost => self
+                .money
+                .map(|money| SegmentValue::text(money_display(&money))),
             // Idle counters carry no news, so they do not take a row cell.
             StatusSegmentName::Queue => self.active(name).then(|| {
                 SegmentValue::text(format!(

@@ -67,7 +67,11 @@ fn context_reads_as_a_share_of_the_window_never_as_a_raw_count() {
         (500, 128_000, "ctx 0.4%/128k"),
         (1_000_000, 1_000_000, "ctx 100.0%/1M"),
     ] {
-        let shown = row(&state(Some(used), Some(window), CumulativeCost::Unstarted), &names, 120);
+        let shown = row(
+            &state(Some(used), Some(window), CumulativeCost::Unstarted),
+            &names,
+            120,
+        );
         assert_eq!(shown, expected, "used={used} window={window}");
         assert!(!shown.contains("context="), "{shown}");
     }
@@ -76,11 +80,19 @@ fn context_reads_as_a_share_of_the_window_never_as_a_raw_count() {
 #[test]
 fn context_without_a_stated_window_shows_the_count_and_never_a_percentage() {
     let names = [StatusSegmentName::Context];
-    let unbounded = row(&state(Some(2_482), None, CumulativeCost::Unstarted), &names, 120);
+    let unbounded = row(
+        &state(Some(2_482), None, CumulativeCost::Unstarted),
+        &names,
+        120,
+    );
     assert_eq!(unbounded, "ctx 2.5k");
     let nothing_yet = row(&state(None, None, CumulativeCost::Unstarted), &names, 120);
     assert_eq!(nothing_yet, "ctx ?");
-    let window_only = row(&state(None, Some(1_000_000), CumulativeCost::Unstarted), &names, 120);
+    let window_only = row(
+        &state(None, Some(1_000_000), CumulativeCost::Unstarted),
+        &names,
+        120,
+    );
     assert_eq!(window_only, "ctx ?/1M");
 }
 
