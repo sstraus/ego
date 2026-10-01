@@ -278,7 +278,13 @@ fn spawn_server(responses: Vec<Vec<u8>>) -> (u16, mpsc::Receiver<Vec<u8>>, JoinH
             sender.send(request).expect("request observation");
             stream.write_all(&response).expect("HTTP response");
             stream.flush().expect("HTTP flush");
-            stream.shutdown(Shutdown::Both).expect("HTTP close");
+            // A client that has already read its response and hung up makes
+            // macOS answer the close with NotConnected; that is a finished
+            // exchange, not a fixture failure.
+            match stream.shutdown(Shutdown::Both) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
+                closed => closed.expect("HTTP close"),
+            }
         }
     });
     (port, receiver, thread)

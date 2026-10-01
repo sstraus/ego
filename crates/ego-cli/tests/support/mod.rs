@@ -914,6 +914,12 @@ impl Ego {
         for (key, value) in windows_system_environment() {
             command.env(key, value);
         }
+        // `cargo llvm-cov` points the instrumented child at its own profile
+        // directory through this variable; without it the real binary's
+        // production paths show 0% coverage.
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }
