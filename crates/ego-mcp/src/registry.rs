@@ -3600,7 +3600,10 @@ mod secret_mask_critic_round_two {
     #[test]
     fn url_userinfo_without_password_is_hidden() {
         // catches: `https://<token>@host` (GitHub-style token-as-user) is kept because no colon is present.
-        assert_hidden("clone https://ghp_ABCDEF123456@github.com/x failed", "ghp_ABCDEF123456");
+        assert_hidden(
+            "clone https://ghp_ABCDEF123456@github.com/x failed",
+            "ghp_ABCDEF123456",
+        );
     }
 
     #[test]
@@ -3629,9 +3632,19 @@ mod secret_mask_critic_round_two {
     #[test]
     fn hostile_long_input_stays_bounded() {
         // catches: super-linear scans or an unbounded result on a hostile cause.
-        for unit in ["-----BEGIN ", "a://", "key:", "token=\"\\", "k=", "authorization: a "] {
+        for unit in [
+            "-----BEGIN ",
+            "a://",
+            "key:",
+            "token=\"\\",
+            "k=",
+            "authorization: a ",
+        ] {
             let out = detail(&unit.repeat(40_000));
-            assert!(out.chars().count() <= MAX_DIAGNOSTIC_DETAIL_CHARS, "{unit:?}");
+            assert!(
+                out.chars().count() <= MAX_DIAGNOSTIC_DETAIL_CHARS,
+                "{unit:?}"
+            );
         }
     }
 }
