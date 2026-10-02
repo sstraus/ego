@@ -166,7 +166,16 @@ fn sandbox_pick_after_stdio_admission_is_refused_but_free_without_servers() {
     };
 
     let bare = host.new_session(cwd(&places));
-    let free = pick(&mut host, &bare, "workspace");
+    // A server-less session measures after its response: a pick before the
+    // measurement lands is refused for that reason, not for the pin.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let free = loop {
+        let answer = pick(&mut host, &bare, "workspace");
+        if answer["result"].is_object() || Instant::now() > deadline {
+            break answer;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
     assert!(free["result"].is_object(), "control pick failed: {free}");
 
     let opened = host.request(
