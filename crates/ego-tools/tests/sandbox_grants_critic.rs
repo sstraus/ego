@@ -130,7 +130,9 @@ fn open(level: Confinement, seat: Arc<Seat>) -> Option<Fixture> {
             ports,
             seat,
         }),
-        Err(ProcessError::MissingCapabilities(_)) if std::env::var_os(BACKEND_ABSENT).is_some() => {
+        Err(ProcessError::MissingCapabilities(_))
+            if cfg!(not(target_os = "macos")) || std::env::var_os(BACKEND_ABSENT).is_some() =>
+        {
             None
         }
         Err(error) => panic!(
