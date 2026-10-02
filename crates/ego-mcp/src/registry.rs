@@ -3664,3 +3664,92 @@ mod secret_mask_critic_round_two {
         }
     }
 }
+
+#[cfg(test)]
+mod secret_mask_critic_round_three {
+    use super::*;
+
+    fn detail(cause: &str) -> String {
+        bounded_detail(cause).unwrap_or_default()
+    }
+
+    fn assert_hidden(cause: &str, secret: &str) {
+        let out = detail(cause);
+        assert!(
+            !out.contains(secret),
+            "{cause:?} leaked {secret:?}: {out:?}"
+        );
+    }
+
+    #[test]
+    fn json_encoded_inside_a_string_still_hides_the_value() {
+        // catches: a backslash before the closing quote of the name (`\"token\":`) ends the
+        // name scan empty, so a JSON body echoed inside a JSON string leaks.
+        assert_hidden(r#"body {\"token\":\"LEAKESC\"} rejected"#, "LEAKESC");
+        assert_hidden(r#"body {\"api_key\": \"LEAKESC\"}"#, "LEAKESC");
+    }
+
+    #[test]
+    fn digest_params_with_spaces_inside_quotes_do_not_leak_later_params() {
+        // catches: the parameter loop breaks on `realm"` (no `=`), so `response=` leaks.
+        assert_hidden(
+            r#"Authorization: Digest username="u", realm="my realm", response="LEAKRESP""#,
+            "LEAKRESP",
+        );
+    }
+
+    #[test]
+    fn invisible_marks_missing_from_the_drop_list_do_not_split_the_name() {
+        // catches: is_invisible lists only some format characters; a combining grapheme
+        // joiner, variation selector, tag character or Mongolian vowel separator splits
+        // `token` and the value is published.
+        for mark in ['\u{034f}', '\u{fe0f}', '\u{e0041}', '\u{180e}', '\u{3164}'] {
+            let cause = format!("to{mark}ken=LEAKINV done");
+            assert_hidden(&cause, "LEAKINV");
+        }
+    }
+
+    #[test]
+    fn bracketed_and_tuple_forms_are_hidden() {
+        // catches: only `name=`/`name:` separators are recognised; `headers[token]=x` and
+        // Rust Debug tuples `("x-api-key", "x")` leak.
+        assert_hidden("params[token]=LEAKBR&a=1", "LEAKBR");
+        assert_hidden(r#"header ("x-api-key", "LEAKTUP") rejected"#, "LEAKTUP");
+        assert_hidden(r#"Header("authorization", "Bearer LEAKTUP")"#, "LEAKTUP");
+    }
+
+    #[test]
+    fn quoted_bearer_credential_with_a_space_does_not_leak_its_tail() {
+        // catches: after a scheme the credential ends at the first blank, so a quoted
+        // credential with a space leaks the second word.
+        assert_hidden(r#"Authorization: Bearer "abc LEAKSP" rejected"#, "LEAKSP");
+    }
+
+    #[test]
+    fn unterminated_private_key_header_does_not_publish_the_body() {
+        // catches: a header cut before its closing dashes is not recognised and the key body is kept.
+        assert_hidden(
+            "-----BEGIN PRIVATE KEY MIIEvQIBADANBgkqLEAKBODY",
+            "LEAKBODY",
+        );
+    }
+
+    #[test]
+    fn empty_value_does_not_mask_the_next_pair() {
+        // catches: `key= mode=fast` skips the blank and masks the unrelated next word.
+        assert_eq!(detail("empty key= mode=fast"), "empty key= mode=fast");
+    }
+
+    #[test]
+    fn urls_without_userinfo_are_kept_verbatim() {
+        // catches: userinfo masking firing on `@` in a path/query or on a host port.
+        for cause in [
+            "GET http://localhost:8080/mcp failed",
+            "see https://example.com/a@b now",
+            "see https://example.com?x=a@b now",
+            "connect tcp://127.0.0.1:9 refused",
+        ] {
+            assert_eq!(detail(cause), cause);
+        }
+    }
+}
