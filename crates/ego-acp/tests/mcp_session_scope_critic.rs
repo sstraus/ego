@@ -733,3 +733,321 @@ async fn an_admission_without_a_pin_leaves_the_sandbox_pick_free() {
     assert!(picked["result"].is_object(), "{picked}");
     connection.abort().await;
 }
+
+// ---- round 2 ----------------------------------------------------------------
+
+/// Which request creates the hidden session.
+#[derive(Clone, Copy, Debug)]
+enum Origin {
+    New,
+    Fork,
+}
+
+/// Park a `session/new` or `session/fork` inside its admission, send `build`'s
+/// request against the hidden session, release the admission, and return the
+/// answer to the probe, the answer to the parked request and the listing taken
+/// afterwards.
+async fn probe_hidden(
+    origin: Origin,
+    build: impl Fn(&str) -> (&'static str, serde_json::Value),
+) -> (serde_json::Value, serde_json::Value, Vec<String>, String) {
+    let gate = Arc::new(Gate::default());
+    let world = World::new(|admitter| admitter.gate = Some(Arc::clone(&gate)));
+    let source = seeded(&world);
+    let mut connection = world.connect().await;
+    let (method, params) = match origin {
+        Origin::New => (
+            "session/new",
+            serde_json::json!({ "cwd": ROOT, "mcpServers": servers() }),
+        ),
+        Origin::Fork => (
+            "session/fork",
+            serde_json::json!({ "sessionId": source, "cwd": ROOT, "mcpServers": servers() }),
+        ),
+    };
+    let pending = connection.send_request(method, params).await;
+    tokio::time::timeout(WAIT, gate.entered.notified())
+        .await
+        .expect("admission started");
+    let hidden = world.admitter.last_session().to_string();
+    let (probe_method, probe_params) = build(&hidden);
+    let probe = tokio::time::timeout(WAIT, connection.request(probe_method, probe_params))
+        .await
+        .expect("the probe was answered while the admission was pending")
+        .0;
+    gate.release.notify_one();
+    let (parked, _) = connection.response(pending).await;
+    let after = listed(&mut connection).await;
+    connection.abort().await;
+    (probe, parked, after, hidden)
+}
+
+fn assert_hidden_untouched(
+    label: &str,
+    probe: &serde_json::Value,
+    parked: &serde_json::Value,
+    after: &[String],
+    hidden: &str,
+) {
+    assert!(
+        probe["error"].is_object(),
+        "{label}: a session still being admitted answered: {probe}"
+    );
+    assert!(
+        parked["result"].is_object(),
+        "{label}: the probe broke the parked request: {parked}"
+    );
+    assert!(
+        after.iter().any(|id| id == hidden),
+        "{label}: the probe removed the session the parked request opened: {after:?}"
+    );
+}
+
+/// Catches: a hidden session answering `session/load`, `session/resume`,
+/// `session/fork` (as source), `session/delete`, `session/close`,
+/// `session/prompt`, `session/set_config_option`, `_ego/pause` or `_ego/compact`
+/// because only some of those methods consult the hidden set.
+#[tokio::test]
+async fn a_hidden_session_is_unusable_through_every_method() {
+    type Build = fn(&str) -> (&'static str, serde_json::Value);
+    let methods: [(&str, Build); 9] = [
+        ("load", |id| {
+            (
+                "session/load",
+                serde_json::json!({ "sessionId": id, "cwd": ROOT, "mcpServers": [] }),
+            )
+        }),
+        ("resume", |id| {
+            (
+                "session/resume",
+                serde_json::json!({ "sessionId": id, "cwd": ROOT, "mcpServers": [] }),
+            )
+        }),
+        ("fork", |id| {
+            (
+                "session/fork",
+                serde_json::json!({ "sessionId": id, "cwd": ROOT, "mcpServers": [] }),
+            )
+        }),
+        ("delete", |id| {
+            ("session/delete", serde_json::json!({ "sessionId": id }))
+        }),
+        ("close", |id| {
+            ("session/close", serde_json::json!({ "sessionId": id }))
+        }),
+        ("prompt", |id| {
+            (
+                "session/prompt",
+                serde_json::json!({ "sessionId": id, "prompt": [{ "type": "text", "text": "hi" }] }),
+            )
+        }),
+        ("set_config_option", |id| {
+            (
+                "session/set_config_option",
+                serde_json::json!({ "sessionId": id, "configId": "sandbox", "value": "workspace" }),
+            )
+        }),
+        ("pause", |id| {
+            (
+                "_ego/pause",
+                serde_json::json!({ "v": 1, "sessionId": id, "requestId": RequestIdText::VALUE }),
+            )
+        }),
+        ("compact", |id| {
+            (
+                "_ego/compact",
+                serde_json::json!({ "v": 1, "sessionId": id, "requestId": RequestIdText::VALUE }),
+            )
+        }),
+    ];
+    let mut failures = Vec::new();
+    for origin in [Origin::New, Origin::Fork] {
+        for (name, build) in methods {
+            let (probe, parked, after, hidden) = probe_hidden(origin, build).await;
+            let outcome = std::panic::catch_unwind(|| {
+                assert_hidden_untouched(name, &probe, &parked, &after, &hidden);
+            });
+            if outcome.is_err() {
+                failures.push(format!("{origin:?}/{name}: probe={probe} parked={parked}"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "hidden session reachable:\n{}",
+        failures.join("\n")
+    );
+}
+
+struct RequestIdText;
+
+impl RequestIdText {
+    const VALUE: &'static str = "11111111-1111-4111-8111-111111111111";
+}
+
+/// Catches: the raw-versus-parsed count of `mcpServers` letting an entry the
+/// protocol library dropped (unknown transport, null, nested array) through
+/// as an empty selection on any of the four session methods, or refusing a
+/// well-formed selection.
+#[tokio::test]
+async fn a_dropped_mcp_entry_refuses_the_request_on_every_session_method() {
+    let valid = servers()[0].clone();
+    let cases = [
+        (
+            "unknown transport",
+            serde_json::json!([{ "type": "future", "name": "x" }]),
+        ),
+        ("null entry", serde_json::json!([null])),
+        ("nested array", serde_json::json!([[valid.clone()]])),
+        ("scalar entry", serde_json::json!([7])),
+        (
+            "valid then unknown",
+            serde_json::json!([valid.clone(), { "type": "future", "name": "x" }]),
+        ),
+        (
+            "unknown then valid",
+            serde_json::json!([{ "type": "future", "name": "x" }, valid.clone()]),
+        ),
+        ("valid then null", serde_json::json!([valid.clone(), null])),
+    ];
+    for (label, entries) in cases {
+        let world = World::new(|_| {});
+        let source = seeded(&world);
+        let mut connection = world.connect().await;
+        let before = listed(&mut connection).await;
+        for method in [
+            "session/new",
+            "session/load",
+            "session/resume",
+            "session/fork",
+        ] {
+            let params = match method {
+                "session/new" => serde_json::json!({ "cwd": ROOT, "mcpServers": entries }),
+                _ => serde_json::json!({ "sessionId": source, "cwd": ROOT, "mcpServers": entries }),
+            };
+            let (response, _) = connection.request(method, params).await;
+            assert!(
+                response["error"].is_object(),
+                "{label} on {method} was accepted: {response}"
+            );
+        }
+        assert!(
+            world.admitter.contexts.lock().expect("contexts").is_empty(),
+            "{label}: admission ran for a refused selection"
+        );
+        assert_eq!(
+            listed(&mut connection).await,
+            before,
+            "{label}: left a session"
+        );
+        connection.abort().await;
+    }
+}
+
+/// Catches: the count check refusing selections that were not dropped:
+/// duplicates the library keeps are the admitter's business, an absent or
+/// empty list is a session with no servers.
+#[tokio::test]
+async fn whole_selections_are_not_refused_by_the_dropped_entry_check() {
+    let valid = servers()[0].clone();
+    for (label, params) in [
+        ("absent", serde_json::json!({ "cwd": ROOT })),
+        (
+            "empty",
+            serde_json::json!({ "cwd": ROOT, "mcpServers": [] }),
+        ),
+        (
+            "one stdio",
+            serde_json::json!({ "cwd": ROOT, "mcpServers": [valid] }),
+        ),
+    ] {
+        let world = World::new(|_| {});
+        let mut connection = world.connect().await;
+        let (response, _) = connection.request("session/new", params).await;
+        assert!(response["result"].is_object(), "{label}: {response}");
+        connection.abort().await;
+    }
+}
+
+/// Catches: two concurrent `session/new` calls sharing one hidden slot, so the
+/// first to finish publishes (or hides) the other, and a list racing both
+/// seeing a session that is still being admitted.
+#[tokio::test]
+async fn two_concurrent_new_sessions_are_hidden_and_published_independently() {
+    let gate = Arc::new(Gate::default());
+    let world = World::new(|admitter| admitter.gate = Some(Arc::clone(&gate)));
+    let mut connection = world.connect().await;
+    let params = serde_json::json!({ "cwd": ROOT, "mcpServers": servers() });
+    let first = connection.send_request("session/new", params.clone()).await;
+    tokio::time::timeout(WAIT, gate.entered.notified())
+        .await
+        .expect("first admission started");
+    let first_id = world.admitter.last_session().to_string();
+    let second = connection.send_request("session/new", params).await;
+    tokio::time::timeout(WAIT, gate.entered.notified())
+        .await
+        .expect("second admission started");
+    let second_id = world.admitter.last_session().to_string();
+    assert_ne!(first_id, second_id);
+
+    let during = listed(&mut connection).await;
+    assert!(
+        !during.contains(&first_id) && !during.contains(&second_id),
+        "a pending session was listed: {during:?}"
+    );
+
+    // Let exactly one finish; the other must stay hidden.
+    gate.release.notify_one();
+    let (finished, _) = tokio::time::timeout(WAIT, connection.response(first))
+        .await
+        .expect("the first admission finished");
+    assert!(finished["result"].is_object(), "{finished}");
+    let midway = listed(&mut connection).await;
+    assert!(
+        midway.contains(&first_id),
+        "published session missing: {midway:?}"
+    );
+    assert!(
+        !midway.contains(&second_id),
+        "finishing one session published the other: {midway:?}"
+    );
+    gate.release.notify_one();
+    let (finished, _) = connection.response(second).await;
+    assert!(finished["result"].is_object(), "{finished}");
+    let after = listed(&mut connection).await;
+    assert!(
+        after.contains(&first_id) && after.contains(&second_id),
+        "{after:?}"
+    );
+    connection.abort().await;
+}
+
+/// Catches: a refused request whose id stays in the hidden set (or one whose
+/// drop republishes the deleted session), so a later session cannot reuse the
+/// slot or the refused one reappears.
+#[tokio::test]
+async fn a_refusal_while_another_session_is_pending_does_not_publish_either() {
+    let gate = Arc::new(Gate::default());
+    let world = World::new(|admitter| {
+        admitter.gate = Some(Arc::clone(&gate));
+        admitter.refuse = AtomicBool::new(true);
+    });
+    let mut connection = world.connect().await;
+    let params = serde_json::json!({ "cwd": ROOT, "mcpServers": servers() });
+    let first = connection.send_request("session/new", params.clone()).await;
+    tokio::time::timeout(WAIT, gate.entered.notified())
+        .await
+        .expect("first admission started");
+    let second = connection.send_request("session/new", params).await;
+    tokio::time::timeout(WAIT, gate.entered.notified())
+        .await
+        .expect("second admission started");
+    gate.release.notify_one();
+    gate.release.notify_one();
+    for id in [first, second] {
+        let (response, _) = connection.response(id).await;
+        assert!(response["error"].is_object(), "{response}");
+    }
+    assert_eq!(listed(&mut connection).await, Vec::<String>::new());
+    connection.abort().await;
+}
