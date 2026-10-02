@@ -104,7 +104,7 @@ fn request_for(
     // above it: without this a program could print any path it likes and have
     // the human asked about it. Names are compared by resolved path component,
     // never as substrings (`/a/Gits` is not named by `/a/Gits-evil/f`).
-    if !argv_anchors(argv).any(|anchor| path.is_or_under(&anchor)) {
+    if !argv_anchors(argv, workspace).any(|anchor| path.is_or_under(&anchor)) {
         return None;
     }
     if path.is_or_under(&CanonPath::new(workspace)) || too_broad(&path, workspace) {
@@ -134,8 +134,13 @@ fn request_for(
 }
 
 /// The absolute paths the command line spells, resolved: whole arguments and
-/// the value of `--flag=/path`.
-fn argv_anchors(argv: &[String]) -> impl Iterator<Item = CanonPath> + '_ {
+/// the value of `--flag=/path`. A place too broad to grant anchors nothing
+/// either: a command line that merely names `/`, or a workspace symlink to the
+/// home directory, does not name what lies below it.
+fn argv_anchors<'a>(
+    argv: &'a [String],
+    workspace: &'a Path,
+) -> impl Iterator<Item = CanonPath> + 'a {
     argv.iter().filter_map(|argument| {
         let spelled = match argument.split_once('=') {
             Some((_, value)) if value.starts_with('/') => value,
@@ -146,6 +151,7 @@ fn argv_anchors(argv: &[String]) -> impl Iterator<Item = CanonPath> + '_ {
             .then(|| canonical(Path::new(spelled)))
             .flatten()
             .map(|(path, _)| path)
+            .filter(|path| !too_broad(path, workspace))
     })
 }
 
@@ -161,13 +167,13 @@ fn too_broad(path: &CanonPath, workspace: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn renderable(path: &Path) -> bool {
+pub(super) fn renderable(path: &Path) -> bool {
     super::profile::renderable(path)
 }
 
 /// Landlock takes the path as a handle, so every path is expressible.
 #[cfg(not(target_os = "macos"))]
-fn renderable(_: &Path) -> bool {
+pub(super) fn renderable(_: &Path) -> bool {
     true
 }
 
@@ -189,29 +195,26 @@ fn exec_target(spec: &SpawnSpec) -> Option<PathBuf> {
     }
 }
 
-/// The command line as the person reads it: arguments with whitespace or quotes
-/// are single-quoted, and a very long one is cut.
+/// The command line as the person reads it, whole: the person approves the
+/// re-run on this text, so no part of it is cut. An argument with any
+/// character a shell would read as more than a word is single-quoted.
 pub(super) fn command_line(spec: &SpawnSpec) -> String {
-    const LIMIT: usize = 600;
-    let line = spec
-        .argv()
+    spec.argv()
         .iter()
         .map(|argument| {
             let argument = argument.to_string_lossy();
-            if argument.is_empty()
-                || argument.contains(|c: char| c.is_whitespace() || "'\"".contains(c))
-            {
-                format!("'{}'", argument.replace('\'', "'\\''"))
-            } else {
+            let plain = !argument.is_empty()
+                && argument
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
+            if plain {
                 argument.into_owned()
+            } else {
+                format!("'{}'", argument.replace('\'', "'\\''"))
             }
         })
         .collect::<Vec<_>>()
-        .join(" ");
-    match line.char_indices().nth(LIMIT) {
-        Some((end, _)) => format!("{}...", &line[..end]),
-        None => line,
-    }
+        .join(" ")
 }
 
 /// How a refused command ended, for the note appended to its output.

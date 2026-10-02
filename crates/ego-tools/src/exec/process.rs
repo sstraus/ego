@@ -201,6 +201,14 @@ impl RunProcessContext {
     /// The backend with `granted` added, or the admitted one when nothing is
     /// granted or the mechanism cannot express a per-path grant.
     fn backend_under(&self, granted: &[SandboxGrant]) -> Result<Arc<dyn Backend>, ProcessError> {
+        // A stored grant the profile cannot express (a hand-edited ledger) is
+        // left out, so it cannot make every command of the workspace fail.
+        let granted = granted
+            .iter()
+            .filter(|grant| denial::renderable(grant.path.as_path()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let granted = granted.as_slice();
         if granted.is_empty() {
             return Ok(Arc::clone(&self.backend));
         }
