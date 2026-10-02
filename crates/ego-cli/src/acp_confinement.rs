@@ -200,13 +200,12 @@ pub(crate) async fn warm_process_cache(
         .into_iter()
         .filter(|candidate| candidate.within(ceiling))
     {
-        let policy = RunConfinement::new(confinement, false, CanonPath::new(root)).map_err(
-            |error| {
+        let policy =
+            RunConfinement::new(confinement, false, CanonPath::new(root)).map_err(|error| {
                 ControlError::Internal(format!(
                     "the ACP confinement policy could not be constructed: {error}"
                 ))
-            },
-        )?;
+            })?;
         RunEffectPorts::diagnostic_capabilities(&policy, cancel.clone(), ExecLimits::default())
             .await
             .map_err(|error| {

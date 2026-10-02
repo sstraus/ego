@@ -1413,7 +1413,10 @@ mod tests {
         let again = cache_key(&policy(), &backend, &roots).unwrap();
         let full = cache_key_for_binary(&policy(), &backend, &roots, &image).unwrap();
         assert_eq!(once, again);
-        assert_eq!(once, full, "the memoized image hash must be the file's hash");
+        assert_eq!(
+            once, full,
+            "the memoized image hash must be the file's hash"
+        );
     }
 
     fn cached_fact(cell: &CachedCapabilities) -> Option<ExecCaps> {

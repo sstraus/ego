@@ -508,7 +508,10 @@ async fn a_hidden_session_never_shortens_a_list_page_or_loses_a_row() {
     all.sort();
     let mut expected = seeded;
     expected.sort();
-    assert_eq!(all, expected, "a visible row was lost or repeated across pages");
+    assert_eq!(
+        all, expected,
+        "a visible row was lost or repeated across pages"
+    );
     connection.abort().await;
 }
 

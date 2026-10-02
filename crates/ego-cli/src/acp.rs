@@ -30,10 +30,10 @@ use ego_core::session_lifecycle::{SessionLifecycle, SessionRunLifecycle};
 use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::{AdmittedToolSource, CancelToken, CapturedToolCatalogue, ToolCatalogueError};
 use ego_mcp::{
-    MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT, McpAcpEffects,
-    McpDuplexEffects, McpDuplexEffectsFactory, McpEnvironmentBinding, McpError, McpFailure, McpHeaderBinding, McpHttpEffects,
-    McpRegistryCandidate, McpRegistryRefresh, McpRegistryRuntime, McpServerAdmission,
-    McpTransportMaterial, RegistryScope, RegistryTrigger,
+    MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT, McpAcpEffects, McpDuplexEffects,
+    McpDuplexEffectsFactory, McpEnvironmentBinding, McpError, McpFailure, McpHeaderBinding,
+    McpHttpEffects, McpRegistryCandidate, McpRegistryRefresh, McpRegistryRuntime,
+    McpServerAdmission, McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::credentials::{OsGenerationPolicyCaptureStore, SessionResumeKey};
@@ -717,9 +717,10 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                 } else {
                     None
                 };
-                let stdio_management = scope
-                    .as_ref()
-                    .map_or_else(|| Arc::new(NoStdioEffects) as Arc<dyn McpDuplexEffectsFactory>, SessionMcpScope::stdio_management);
+                let stdio_management = scope.as_ref().map_or_else(
+                    || Arc::new(NoStdioEffects) as Arc<dyn McpDuplexEffectsFactory>,
+                    SessionMcpScope::stdio_management,
+                );
                 let runtime = Arc::new(
                     McpRegistryRuntime::new_with_acp(
                         registry_journal,

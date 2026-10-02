@@ -898,8 +898,14 @@ async fn a_session_with_no_process_server_is_admitted_without_waiting_for_measur
     {
         let seen = admitter.seen.lock().expect("seen admissions");
         assert_eq!(seen.len(), 1);
-        assert!(!seen[0].measured_first, "the ACP server waited for the probe");
-        assert!(seen[0].level.is_none(), "an ACP server was given a sandbox pick");
+        assert!(
+            !seen[0].measured_first,
+            "the ACP server waited for the probe"
+        );
+        assert!(
+            seen[0].level.is_none(),
+            "an ACP server was given a sandbox pick"
+        );
     }
     admission.release();
     connection.abort().await;
