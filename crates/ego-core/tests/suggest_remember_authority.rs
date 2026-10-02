@@ -46,9 +46,12 @@ fn suggested(call: &PreparedCall) -> Vec<Rule> {
 /// Does the rule stored for `remembered` cover `later`?
 fn covers(remembered: &[&str], later: &[&str]) -> bool {
     let later = spawn(later);
-    suggested(&spawn(remembered))
-        .iter()
-        .all(|rule| later.ops().iter().all(|op| rule.matches(op, Path::new(WORKSPACE))))
+    suggested(&spawn(remembered)).iter().all(|rule| {
+        later
+            .ops()
+            .iter()
+            .all(|op| rule.matches(op, Path::new(WORKSPACE)))
+    })
 }
 
 /// Catches `git -c k=v ...` being generalised to `exec(git *)`: `-c` is a
@@ -70,7 +73,12 @@ fn git_with_a_leading_option_never_becomes_the_all_git_rule() {
 fn cargo_options_and_toolchain_selectors_do_not_widen_to_every_subcommand() {
     assert!(!covers(
         &["cargo", "--config", "term.color=\"never\"", "build"],
-        &["cargo", "--config", "build.rustc-wrapper=\"/tmp/evil\"", "build"],
+        &[
+            "cargo",
+            "--config",
+            "build.rustc-wrapper=\"/tmp/evil\"",
+            "build"
+        ],
     ));
     assert!(!covers(
         &["cargo", "+nightly", "build"],
@@ -85,8 +93,26 @@ fn cargo_options_and_toolchain_selectors_do_not_widen_to_every_subcommand() {
 #[test]
 fn programs_that_execute_their_arguments_are_not_offered_as_a_prefix() {
     let offenders: Vec<&str> = [
-        "node", "deno", "bun", "perl", "ruby", "php", "lua", "awk", "gawk", "sed", "find", "make",
-        "npx", "uvx", "pnpx", "osascript", "tclsh", "rsync", "tar", "open",
+        "node",
+        "deno",
+        "bun",
+        "perl",
+        "ruby",
+        "php",
+        "lua",
+        "awk",
+        "gawk",
+        "sed",
+        "find",
+        "make",
+        "npx",
+        "uvx",
+        "pnpx",
+        "osascript",
+        "tclsh",
+        "rsync",
+        "tar",
+        "open",
     ]
     .into_iter()
     .filter(|program| covers(&[program, "a"], &[program, "-e", "evil"]))
@@ -110,7 +136,10 @@ fn subcommands_that_execute_arbitrary_code_keep_their_exact_form() {
         ),
         (&["kubectl", "exec", "pod"], &["kubectl", "exec", "other"]),
         (&["go", "run", "./a"], &["go", "run", "./evil"]),
-        (&["cargo", "run", "--bin"], &["cargo", "run", "--bin", "evil"]),
+        (
+            &["cargo", "run", "--bin"],
+            &["cargo", "run", "--bin", "evil"],
+        ),
     ];
     let offenders: Vec<&str> = cases
         .into_iter()
@@ -133,13 +162,22 @@ fn paths_env_assignments_and_launchers_stay_exact() {
             vec!["/usr/bin/python3", "-c", "evil"],
         ),
         (vec!["./tool", "a"], vec!["./tool", "evil"]),
-        (vec!["FOO=1", "git", "status"], vec!["FOO=1", "git", "status", "x"]),
-        (vec!["env", "git", "status"], vec!["env", "sh", "-c", "evil"]),
+        (
+            vec!["FOO=1", "git", "status"],
+            vec!["FOO=1", "git", "status", "x"],
+        ),
+        (
+            vec!["env", "git", "status"],
+            vec!["env", "sh", "-c", "evil"],
+        ),
         (vec!["sudo", "ls"], vec!["sudo", "sh"]),
         (vec!["bash", "-c", "ls"], vec!["bash", "-c", "evil"]),
         (vec!["a*", "x"], vec!["abc", "x"]),
     ] {
-        assert!(!covers(&remembered, &later), "{remembered:?} covers {later:?}");
+        assert!(
+            !covers(&remembered, &later),
+            "{remembered:?} covers {later:?}"
+        );
     }
 }
 
@@ -195,7 +233,10 @@ fn a_system_deny_still_wins_over_every_suggested_rule() {
     {
         Ruleset::merge(&mut rules.allow, rule, Source::User);
     }
-    for call in [write("/workspace/.git/hooks/x"), spawn(&["git", "push", "origin"])] {
+    for call in [
+        write("/workspace/.git/hooks/x"),
+        spawn(&["git", "push", "origin"]),
+    ] {
         let explanation = RuleManagement::explain(&call, &rules, Path::new(WORKSPACE));
         assert_eq!(explanation.outcome, RuleOutcome::Denied);
     }
