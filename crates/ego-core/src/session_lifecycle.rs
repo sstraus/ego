@@ -912,13 +912,22 @@ where
     }
 
     pub async fn fork(&self, source: SessionId) -> Result<CreatedSession, LifecycleError> {
+        self.fork_as(source, SessionId::new()).await
+    }
+
+    /// Fork under a target id the caller already holds, so it can keep the
+    /// child out of sight from the moment the fork is published.
+    pub async fn fork_as(
+        &self,
+        source: SessionId,
+        target: SessionId,
+    ) -> Result<CreatedSession, LifecycleError> {
         let _source_lease = self.require_inactive(source).await?;
         self.metadata.meta(source)?;
         let (state, _) = self.metadata.replay(source)?;
         let prepared = PreparedFork::new(source, &state, self.metadata.clock.now())?;
         ReplayContext::new(&*self.metadata.store, &*self.metadata.store)
             .replay_lineage(prepared.seed().lineage())?;
-        let target = SessionId::new();
         let publication = self.metadata.store.publish_fork(target, prepared.seed());
         if !publication.switch_target() {
             return Err(LifecycleError::NotPublished(

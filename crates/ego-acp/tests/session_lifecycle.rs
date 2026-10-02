@@ -1040,7 +1040,7 @@ async fn fork_uses_durable_lineage_and_attaches_only_the_child() {
 }
 
 #[tokio::test]
-async fn failed_mcp_admission_does_not_publish_a_fork_child() {
+async fn failed_mcp_admission_leaves_no_fork_child_listed() {
     let fixture = support::DurableAcpFixture::new();
     let source = fixture.seed_replay_session(ROOT, "Source title", 200_000);
     let before = fixture.effect_counts();
@@ -1073,9 +1073,8 @@ async fn failed_mcp_admission_does_not_publish_a_fork_child() {
         "fork did not resolve its source root"
     );
     assert_eq!(after.1, before.1 + 1, "fork did not attempt MCP admission");
-    // The child is published first so its confinement can be measured before
-    // any server starts; a refused admission must then take it back out.
-    assert_eq!(after.2, before.2 + 1, "fork did not publish its child once");
+    // Whether the child is hidden while admission runs is pinned by the
+    // window tests; this one pins what a refused admission leaves behind.
     let (listed, _) = connection
         .request("session/list", serde_json::json!({ "cwd": ROOT }))
         .await;

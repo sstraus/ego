@@ -182,6 +182,9 @@ for line in sys.stdin:
 
 /// Catches: stdio discovery that ignores the session's sandbox pick and so
 /// lets a supplied server write into the workspace of a read-only session.
+/// The server answers discovery, so the load only succeeds if it really ran
+/// under the sandbox; a server that never started fails the first assertion
+/// instead of passing the second vacuously.
 #[test]
 fn stdio_discovery_runs_under_the_session_sandbox() {
     let places = Places::new();
@@ -192,8 +195,18 @@ fn stdio_discovery_runs_under_the_session_sandbox() {
     .expect("isolated profile configuration");
     let marker = places.workspace_path().join("discovery-wrote-here.txt");
     let server = places.file(
-        "writing-mcp.sh",
-        "printf 'x' > \"$1\" 2>/dev/null\nexit 1\n",
+        "answering-mcp.sh",
+        r#"printf 'x' > "$1" 2>/dev/null
+while IFS= read -r line; do
+  case "$line" in *'"id"'*) ;; *) continue ;; esac
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *server/discover*) result='{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{},"ttlMs":0,"cacheScope":"private"}' ;;
+    *) result='{"resultType":"complete","tools":[],"resources":[],"prompts":[],"nextCursor":null,"ttlMs":0,"cacheScope":"private"}' ;;
+  esac
+  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done
+"#,
     );
     let mut host = AcpHost::adopt(
         Ego::at(places.home_path(), places.workspace_path(), None)
@@ -209,7 +222,7 @@ fn stdio_discovery_runs_under_the_session_sandbox() {
             "sessionId": session,
             "cwd": places.workspace_path(),
             "mcpServers": [{
-                "name": "writing",
+                "name": "answering",
                 "command": "/bin/sh",
                 "args": [server, marker],
                 "env": []
@@ -217,9 +230,44 @@ fn stdio_discovery_runs_under_the_session_sandbox() {
         }),
     );
     host.finish();
-    assert!(response["error"].is_object(), "{response}");
+    assert!(
+        response["result"].is_object(),
+        "the server never ran and answered discovery under the sandbox: {response}"
+    );
     assert!(
         !marker.exists(),
         "the server wrote into a read-only session's workspace during discovery"
     );
+}
+
+/// Catches: an unknown MCP transport dropped by the protocol library and
+/// admitted as an empty selection, so the real admitter opens a session the
+/// host believes carries a server.
+#[test]
+fn unknown_mcp_transport_is_refused_before_a_session_exists() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = 'ollama/qwen3'\nthinking = 'off'\nsandbox = 'off'\nmode = 'default'\n",
+    )
+    .expect("isolated profile configuration");
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), None)
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let cwd = places.workspace_path().to_str().expect("UTF-8 root");
+    let response = host.request(
+        "session/new",
+        serde_json::json!({
+            "cwd": cwd,
+            "mcpServers": [{"type": "future-transport", "name": "future", "url": "https://mcp.example.test/mcp"}]
+        }),
+    );
+    let listed = host.request("session/list", serde_json::json!({"cwd": cwd}));
+    host.finish();
+    assert!(response["error"].is_object(), "{response}");
+    assert_eq!(listed["result"]["sessions"], serde_json::json!([]));
 }
