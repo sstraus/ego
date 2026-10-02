@@ -1073,9 +1073,22 @@ async fn failed_mcp_admission_does_not_publish_a_fork_child() {
         "fork did not resolve its source root"
     );
     assert_eq!(after.1, before.1 + 1, "fork did not attempt MCP admission");
+    // The child is published first so its confinement can be measured before
+    // any server starts; a refused admission must then take it back out.
+    assert_eq!(after.2, before.2 + 1, "fork did not publish its child once");
+    let (listed, _) = connection
+        .request("session/list", serde_json::json!({ "cwd": ROOT }))
+        .await;
+    let ids: Vec<&str> = listed["result"]["sessions"]
+        .as_array()
+        .expect("session/list rows")
+        .iter()
+        .map(|row| row["sessionId"].as_str().expect("row id"))
+        .collect();
     assert_eq!(
-        after.2, before.2,
-        "failed MCP admission left an unexplained durable fork child"
+        ids,
+        vec![source.session_id.as_str()],
+        "failed MCP admission left a listed fork child"
     );
     connection.finish().await;
 }

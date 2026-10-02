@@ -402,6 +402,12 @@ pub trait SessionMcpAdmission: Send + Sync {
     fn admitted_tools(&self) -> Arc<dyn AdmittedToolSource>;
     fn mcp_errors(&self) -> &[String];
     fn mcp_runtime(&self) -> Arc<dyn McpRuntimeBinding>;
+    /// The confinement this session's MCP processes were started under, when
+    /// the admission owns any. A later pick of another sandbox is refused: a
+    /// server admitted under one confinement cannot be moved into another.
+    fn pinned_confinement(&self) -> Option<Confinement> {
+        None
+    }
     fn cancel_active(&self) {}
     fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
@@ -416,12 +422,33 @@ pub type McpSessionAdmissionFuture = Pin<
     >,
 >;
 
+/// The sandbox pick a session's MCP servers are admitted under, with the
+/// observation measured for it. The observation is absent only where the
+/// connection has no confinement admission to measure it.
+#[derive(Clone)]
+pub struct McpConfinement {
+    pub level: Confinement,
+    pub observation: Option<ExecObservation>,
+}
+
+/// What a session's MCP admission may rely on. Servers are admitted after the
+/// session exists and its confinement is measured, never before: admission
+/// starts their processes.
+#[derive(Clone)]
+pub struct McpAdmissionContext {
+    pub session: SessionId,
+    pub root: RunRoot,
+    /// Absent where the connection has no session controls.
+    pub confinement: Option<McpConfinement>,
+}
+
 /// Consumer-owned boundary that atomically admits one ACP session's servers.
 pub trait McpSessionAdmitter: Send + Sync {
     fn admit(
         &self,
         servers: Vec<v1::McpServer>,
         connection: Option<ConnectionTo<Client>>,
+        context: McpAdmissionContext,
     ) -> McpSessionAdmissionFuture;
 
     fn mcp_notification(
@@ -953,6 +980,19 @@ impl Sessions {
                  before the first prompt, or start a new session",
             ));
         }
+        if let (Some(pinned), SessionControlChange::Sandbox(pick)) = (
+            registered
+                .mcp
+                .as_ref()
+                .and_then(|mcp| mcp.pinned_confinement()),
+            &change,
+        ) && pinned != *pick
+        {
+            return Err(refused_params(format!(
+                "this session's MCP servers already run under the `{pinned}` sandbox: \
+                 pick the sandbox when the session is created, or start a new session"
+            )));
+        }
         // Keep the registration lock until the synchronous pick has landed.
         // `begin` cannot publish busy and read a different selection between
         // the eligibility check and this write.
@@ -1248,10 +1288,11 @@ async fn admit_mcp(
     admitter: &dyn McpSessionAdmitter,
     servers: Vec<v1::McpServer>,
     connection: Option<ConnectionTo<Client>>,
+    context: McpAdmissionContext,
 ) -> Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError> {
     validate_mcp_servers(&servers)?;
     let supplied = !servers.is_empty();
-    match admitter.admit(servers, connection).await {
+    match admitter.admit(servers, connection, context).await {
         Ok(Some(admission)) if supplied => Ok(Some(admission)),
         Ok(Some(_)) => Err(McpSessionAdmissionError::new(
             "an empty ACP MCP selection unexpectedly produced live authority",
@@ -1749,6 +1790,61 @@ fn selected_confinement(
         .observation(session, sandbox)
         .map_err(|error| control_error(&error))?;
     Ok(selections.with_sandbox_observation(sandbox, observation))
+}
+
+/// Take back a session this request published and cannot finish opening.
+async fn discard_session(lifecycle: Option<&dyn LifecycleOperations>, session: SessionId) {
+    let Some(lifecycle) = lifecycle else {
+        return;
+    };
+    if let Err(error) = lifecycle.delete(session).await {
+        tracing::warn!(%error, %session, "a refused session could not be deleted");
+    }
+}
+
+/// Admit the MCP servers a session request supplied.
+///
+/// The caller has already measured the session's confinement: admission starts
+/// the servers' processes, and they start under the pick this reads.
+async fn admit_session_mcp(
+    admitter: &dyn McpSessionAdmitter,
+    servers: Vec<v1::McpServer>,
+    connection: ConnectionTo<Client>,
+    controls: Option<&Arc<dyn SessionControls>>,
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
+    session: SessionId,
+    root: &RunRoot,
+) -> Result<Option<Arc<dyn SessionMcpAdmission>>, Error> {
+    validate_mcp_servers(&servers).map_err(refused_params)?;
+    if servers.is_empty() {
+        return Ok(None);
+    }
+    let confinement = match controls {
+        Some(controls) => {
+            let state = controls
+                .state(session)
+                .map_err(|error| control_error(&error))?;
+            let level = state.sandbox.current.ok_or_else(|| {
+                control_error(&ControlError::Internal(
+                    "the ACP sandbox control has no current confinement".to_owned(),
+                ))
+            })?;
+            let observation = admission
+                .map(|admission| admission.observation(session, level))
+                .transpose()
+                .map_err(|error| control_error(&error))?;
+            Some(McpConfinement { level, observation })
+        }
+        None => None,
+    };
+    let context = McpAdmissionContext {
+        session,
+        root: root.clone(),
+        confinement,
+    };
+    admit_mcp(admitter, servers, Some(connection), context)
+        .await
+        .map_err(refused_params)
 }
 
 /// The option ids the trust form offers. They are ego's, not the host's: the
@@ -2304,10 +2400,9 @@ where
                             );
                         }
                     };
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
-                        Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(refused_params(error)),
-                    };
+                    if let Err(error) = validate_mcp_servers(&request.mcp_servers) {
+                        return responder.respond_with_error(refused_params(error));
+                    }
                     let start_request = RequestId::from_uuid(ids.next_uuid());
                     let session = RequestId::session_id(start_request);
                     let id = v1::SessionId::new(session.to_string());
@@ -2317,9 +2412,42 @@ where
                     {
                         return responder.respond_with_error(lifecycle_error(&error));
                     }
-                    let pending_measurement = confinement
-                        .as_ref()
-                        .map(|admission| admission.initialize(session, root.clone()));
+                    // Supplied servers start processes, which start under the
+                    // session's measured confinement: measure first, admit
+                    // after, and take the session back if either refuses so a
+                    // refused request leaves no empty session behind.
+                    let admits_mcp = !request.mcp_servers.is_empty();
+                    let mcp = if admits_mcp {
+                        let admitted = match initialize_confinement(confinement.as_ref(), session, &root).await {
+                            Ok(()) => admit_session_mcp(
+                                mcp_admitter.as_ref(),
+                                request.mcp_servers,
+                                cx.clone(),
+                                controls.as_ref(),
+                                confinement.as_ref(),
+                                session,
+                                &root,
+                            )
+                            .await,
+                            Err(error) => Err(error),
+                        };
+                        match admitted {
+                            Ok(mcp) => mcp,
+                            Err(error) => {
+                                discard_session(lifecycle.as_deref(), session).await;
+                                return responder.respond_with_error(error);
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let pending_measurement = (!admits_mcp)
+                        .then(|| {
+                            confinement
+                                .as_ref()
+                                .map(|admission| admission.initialize(session, root.clone()))
+                        })
+                        .flatten();
                     let attachment_root = root.clone();
                     let _ = sessions.open(
                         id.clone(),
@@ -2485,9 +2613,19 @@ where
                     {
                         return responder.respond_with_error(error);
                     }
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
+                    let mcp = match admit_session_mcp(
+                        mcp_admitter.as_ref(),
+                        request.mcp_servers,
+                        cx.clone(),
+                        controls.as_ref(),
+                        confinement.as_ref(),
+                        id,
+                        &root,
+                    )
+                    .await
+                    {
                         Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(refused_params(error)),
+                        Err(error) => return responder.respond_with_error(error),
                     };
                     let client = client_capabilities
                         .lock()
@@ -2618,9 +2756,19 @@ where
                     {
                         return responder.respond_with_error(error);
                     }
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
+                    let mcp = match admit_session_mcp(
+                        mcp_admitter.as_ref(),
+                        request.mcp_servers,
+                        cx.clone(),
+                        controls.as_ref(),
+                        confinement.as_ref(),
+                        id,
+                        &root,
+                    )
+                    .await
+                    {
                         Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(refused_params(error)),
+                        Err(error) => return responder.respond_with_error(error),
                     };
                     let client = client_capabilities
                         .lock()
@@ -2726,14 +2874,9 @@ where
                     if let Err(error) = lifecycle.resume(source, root.as_path()).await {
                         return responder.respond_with_error(lifecycle_error(&error));
                     }
-                    // Admission precedes publication of the child so an MCP
-                    // refusal cannot leave an unexplained durable fork. If
-                    // the later lifecycle transition refuses, this temporary
-                    // connection authority is dropped without attachment.
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
-                        Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(refused_params(error)),
-                    };
+                    if let Err(error) = validate_mcp_servers(&request.mcp_servers) {
+                        return responder.respond_with_error(refused_params(error));
+                    }
                     let child = match lifecycle.fork(source).await {
                         Ok(child) => child.id,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
@@ -2742,11 +2885,29 @@ where
                         Ok(attachment) => attachment,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
-                    if let Err(error) =
-                        initialize_confinement(confinement.as_ref(), child, &root).await
-                    {
-                        return responder.respond_with_error(error);
-                    }
+                    // The child's processes start under the child's measured
+                    // confinement, so the child exists first. An MCP refusal
+                    // takes it back rather than leaving an unexplained fork.
+                    let admitted = match initialize_confinement(confinement.as_ref(), child, &root).await {
+                        Ok(()) => admit_session_mcp(
+                            mcp_admitter.as_ref(),
+                            request.mcp_servers,
+                            cx.clone(),
+                            controls.as_ref(),
+                            confinement.as_ref(),
+                            child,
+                            &root,
+                        )
+                        .await,
+                        Err(error) => Err(error),
+                    };
+                    let mcp = match admitted {
+                        Ok(mcp) => mcp,
+                        Err(error) => {
+                            discard_session(Some(lifecycle.as_ref()), child).await;
+                            return responder.respond_with_error(error);
+                        }
+                    };
                     let child_id = v1::SessionId::new(child.to_string());
                     let _ = sessions.open(
                         child_id.clone(),

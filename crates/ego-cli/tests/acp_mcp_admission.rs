@@ -179,3 +179,47 @@ for line in sys.stdin:
     let starts = std::fs::read_to_string(starts).expect("working server starts recorded");
     assert_eq!(starts.lines().count(), 2, "one child per session: {starts}");
 }
+
+/// Catches: stdio discovery that ignores the session's sandbox pick and so
+/// lets a supplied server write into the workspace of a read-only session.
+#[test]
+fn stdio_discovery_runs_under_the_session_sandbox() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = 'ollama/qwen3'\nthinking = 'off'\nsandbox = 'ro'\nmode = 'default'\n",
+    )
+    .expect("isolated profile configuration");
+    let marker = places.workspace_path().join("discovery-wrote-here.txt");
+    let server = places.file(
+        "writing-mcp.sh",
+        "printf 'x' > \"$1\" 2>/dev/null\nexit 1\n",
+    );
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), None)
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let session = host.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
+    let response = host.request(
+        "session/load",
+        serde_json::json!({
+            "sessionId": session,
+            "cwd": places.workspace_path(),
+            "mcpServers": [{
+                "name": "writing",
+                "command": "/bin/sh",
+                "args": [server, marker],
+                "env": []
+            }]
+        }),
+    );
+    host.finish();
+    assert!(response["error"].is_object(), "{response}");
+    assert!(
+        !marker.exists(),
+        "the server wrote into a read-only session's workspace during discovery"
+    );
+}

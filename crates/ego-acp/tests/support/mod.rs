@@ -175,6 +175,32 @@ impl DurableAcpFixture {
         trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
         notices: AcpNotices,
     ) -> agent_client_protocol::AgentProtocolRouter {
+        let admitter = Arc::new(RejectingMcpAdmitter::with_effects(Arc::clone(
+            &self.effects,
+        )));
+        self.router_with_admitter(admitter, controls, confinement, trust, notices)
+    }
+
+    /// The durable router with a caller-supplied MCP admitter in place of the
+    /// rejecting default.
+    #[allow(dead_code)]
+    pub fn router_with_mcp_admitter(
+        &self,
+        admitter: Arc<dyn McpSessionAdmitter>,
+        controls: Option<Arc<dyn ego_core::control::SessionControls>>,
+        confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+    ) -> agent_client_protocol::AgentProtocolRouter {
+        self.router_with_admitter(admitter, controls, confinement, None, AcpNotices::default())
+    }
+
+    fn router_with_admitter(
+        &self,
+        admitter: Arc<dyn McpSessionAdmitter>,
+        controls: Option<Arc<dyn ego_core::control::SessionControls>>,
+        confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+        trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
+        notices: AcpNotices,
+    ) -> agent_client_protocol::AgentProtocolRouter {
         let clock = Arc::new(TestClock);
         let controller = Arc::new(RunController::new(
             Arc::clone(&self.store),
@@ -192,9 +218,7 @@ impl DurableAcpFixture {
             self.spawner.clone(),
             self.ids.clone(),
             Arc::new(AcpRunBindingsBuilder::default()),
-            Arc::new(RejectingMcpAdmitter::with_effects(Arc::clone(
-                &self.effects,
-            ))),
+            admitter,
             Arc::new(CompactionCommandFixture),
             controls,
             confinement,
@@ -1392,6 +1416,7 @@ impl McpSessionAdmitter for RejectingMcpAdmitter {
         &self,
         _servers: Vec<agent_client_protocol_schema::v1::McpServer>,
         _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
+        _context: ego_acp::serve::McpAdmissionContext,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
         if let Some(effects) = &self.effects {
