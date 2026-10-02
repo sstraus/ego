@@ -88,8 +88,20 @@ pub(super) fn analyze(
 /// permitted` both name the path between the last separator and the errno.
 fn printed_path(line: &str) -> Option<&str> {
     let body = line.trim_end().strip_suffix(EPERM_SUFFIX)?;
+    if let Some(program) = refused_program(body) {
+        return Some(program);
+    }
     let path = body.rsplit_once(": ").map_or(body, |(_, path)| path);
     path.starts_with('/').then_some(path)
+}
+
+/// `sandbox-exec: execvp() of '/x/prog' failed` — what `sandbox-exec` prints
+/// when the profile does not open the program it was asked to run.
+fn refused_program(body: &str) -> Option<&str> {
+    let program = body
+        .strip_prefix("sandbox-exec: execvp() of '")?
+        .strip_suffix("' failed")?;
+    program.starts_with('/').then_some(program)
 }
 
 fn request_for(
@@ -255,24 +267,29 @@ pub(super) fn note(denial: &Denial, confinement: &RunConfinement, outcome: Outco
     match (&denial.request, outcome) {
         (Some(request), Outcome::Declined) => format!(
             "sandbox denied {request} (confinement {level}); the user declined to allow it, \
-             so the command did not complete"
+             so the command did not complete; to allow it, run the command again and answer allow"
         ),
         (Some(request), Outcome::NobodyToAsk) => format!(
             "sandbox denied {request} (confinement {level}); no one was available to allow it, \
-             so the command did not complete"
+             so the command did not complete; to allow it, use a session that can ask or a \
+             looser --sandbox level"
         ),
         (Some(request), Outcome::CannotWiden) => format!(
             "sandbox denied {request} (confinement {level}); this platform's sandbox cannot open \
-             extra paths after the run started, so the command did not complete"
+             extra paths after the run started, so the command did not complete; to allow it, \
+             use a looser --sandbox level"
         ),
         (Some(request), Outcome::QuestionLimit) => format!(
             "sandbox denied {request} (confinement {level}); this command already raised the \
-             most sandbox questions one command may ask, so it did not complete"
+             most sandbox questions one command may ask, so it did not complete; to allow it, \
+             run the command again"
         ),
         (None, _) => format!(
-            "{} was refused with 'Operation not permitted' under confinement {level}; exec can \
-             only reach the workspace, fixed system paths and paths a person allowed, and a \
-             refusal after an allowance may come from macOS privacy protection instead",
+            "{} was blocked by the sandbox (confinement {level}), not by a permission rule, so \
+             allowing the call does not lift it; exec can only reach the workspace, fixed system \
+             paths and paths a person allowed, and a refusal after an allowance may come from \
+             macOS privacy protection instead; to allow it, run in the workspace or use a \
+             looser --sandbox level",
             denial.printed
         ),
     }
@@ -298,6 +315,20 @@ mod tests {
         assert_eq!(
             printed_path("/bin/sh: /Users/u/o2: Operation not permitted"),
             Some("/Users/u/o2")
+        );
+    }
+
+    #[test]
+    fn a_refused_program_names_its_path() {
+        assert_eq!(
+            printed_path(
+                "sandbox-exec: execvp() of '/opt/homebrew/Cellar/p/3.14/bin/python3.14' failed: Operation not permitted"
+            ),
+            Some("/opt/homebrew/Cellar/p/3.14/bin/python3.14")
+        );
+        assert_eq!(
+            printed_path("sandbox-exec: execvp() of 'prog' failed: Operation not permitted"),
+            None
         );
     }
 
