@@ -446,33 +446,8 @@ async fn unadmitted_new_session_is_not_listed_while_its_servers_are_admitted() {
     connection.abort().await;
 }
 
-/// Catches: the hidden session being filtered out of its page after the page
-/// was cut, so a page that holds it comes back one row short (the fixed page
-/// size is 50) and a host that stops at a short page misses the tail.
-#[tokio::test]
-async fn a_hidden_session_never_shortens_a_list_page_or_loses_a_row() {
-    let gate = Arc::new(Gate::default());
-    let world = World::new(|admitter| admitter.gate = Some(Arc::clone(&gate)));
-    let seeded: Vec<String> = (0..60)
-        .map(|index| {
-            world
-                .fixture
-                .seed_replay_session(ROOT, &format!("Source {index}"), 200_000)
-                .session_id
-        })
-        .collect();
-    let mut connection = world.connect().await;
-    let pending = connection
-        .send_request(
-            "session/new",
-            serde_json::json!({ "cwd": ROOT, "mcpServers": servers() }),
-        )
-        .await;
-    tokio::time::timeout(WAIT, gate.entered.notified())
-        .await
-        .expect("admission started");
-    let hidden = world.admitter.last_session().to_string();
-
+/// Read `session/list` page by page until the cursor ends.
+async fn list_pages(connection: &mut support::Connected) -> Vec<Vec<String>> {
     let mut pages = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
@@ -483,34 +458,143 @@ async fn a_hidden_session_never_shortens_a_list_page_or_loses_a_row() {
         let (response, _) = tokio::time::timeout(WAIT, connection.request("session/list", params))
             .await
             .expect("session/list was answered while an admission was pending");
-        let rows: Vec<String> = response["result"]["sessions"]
-            .as_array()
-            .unwrap_or_else(|| panic!("no sessions array: {response}"))
-            .iter()
-            .map(|session| session["sessionId"].as_str().expect("id").to_owned())
-            .collect();
+        pages.push(
+            response["result"]["sessions"]
+                .as_array()
+                .unwrap_or_else(|| panic!("no sessions array: {response}"))
+                .iter()
+                .map(|session| session["sessionId"].as_str().expect("id").to_owned())
+                .collect(),
+        );
         cursor = response["result"]["nextCursor"].as_str().map(str::to_owned);
-        pages.push(rows);
         if cursor.is_none() {
-            break;
+            return pages;
         }
     }
-    gate.release.notify_one();
-    connection.response(pending).await;
+}
 
+/// The list page size the router uses.
+const PAGE: usize = 50;
+
+/// The session id `offset` places away from `from` in id order.
+fn shifted(from: SessionId, offset: i128) -> SessionId {
+    let bits = from.to_string().replace('-', "");
+    let value = u128::from_str_radix(&bits, 16).expect("a session id is 128 bits of hex");
+    let moved = value
+        .checked_add_signed(offset)
+        .expect("the offset stays inside the id space");
+    let hex = format!("{moved:032x}");
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+    .parse()
+    .expect("a shifted id is a UUID")
+}
+
+/// Catches: the hidden session being filtered out of its page after the page
+/// was cut, so a page that ends on it comes back one row short and a host that
+/// stops at a short page misses the tail.
+///
+/// Placement is by construction: equal timestamps list by session id, and
+/// the seeded ids are the parked id minus 1..=49 and plus 1..=11, so the
+/// hidden session is exactly the 50th row, the last slot of the first page.
+#[tokio::test]
+async fn a_hidden_session_on_the_page_boundary_does_not_shorten_the_page() {
+    let gate = Arc::new(Gate::default());
+    let world = World::new(|admitter| admitter.gate = Some(Arc::clone(&gate)));
+    let mut connection = world.connect().await;
+    let _parked = connection
+        .send_request(
+            "session/new",
+            serde_json::json!({ "cwd": ROOT, "mcpServers": servers() }),
+        )
+        .await;
+    tokio::time::timeout(WAIT, gate.entered.notified())
+        .await
+        .expect("admission started");
+    let parked = world.admitter.last_session();
+    let hidden = parked.to_string();
+    for offset in 1..PAGE as u128 {
+        world
+            .fixture
+            .seed_session_with_id(ROOT, shifted(parked, -(offset as i128)));
+    }
+    for offset in 1..=11 {
+        world
+            .fixture
+            .seed_session_with_id(ROOT, shifted(parked, offset));
+    }
+
+    let pages = list_pages(&mut connection).await;
     assert!(
-        pages[0].len() >= 50,
-        "the first page came back short: {} rows",
+        pages[0].len() >= PAGE,
+        "the page ending on the hidden session came back short: {}",
         pages[0].len()
     );
-    let mut all: Vec<String> = pages.concat();
+    let all: Vec<String> = pages.concat();
     assert!(!all.contains(&hidden), "the hidden session was listed");
-    all.sort();
-    let mut expected = seeded;
-    expected.sort();
+    assert_eq!(all.len(), 60, "a visible row was lost: {}", all.len());
+    let distinct: std::collections::HashSet<_> = all.iter().collect();
+    assert_eq!(distinct.len(), all.len(), "a row was repeated across pages");
+    connection.abort().await;
+}
+
+/// Catches: a page made only of hidden sessions coming back empty (with or
+/// without a cursor), so the visible rows behind it are never reached by a
+/// host that stops at an empty page.
+///
+/// 50 parked `session/new` calls fill the whole first page; 5 seeded
+/// sessions with ids just above the largest parked id are the only visible
+/// rows.
+#[tokio::test]
+async fn a_page_made_only_of_hidden_sessions_still_reaches_the_visible_rows() {
+    let gate = Arc::new(Gate::default());
+    let world = World::new(|admitter| admitter.gate = Some(Arc::clone(&gate)));
+    let mut connection = world.connect().await;
+    let mut hidden = Vec::new();
+    let mut newest = None;
+    for _ in 0..PAGE {
+        connection
+            .send_request(
+                "session/new",
+                serde_json::json!({ "cwd": ROOT, "mcpServers": servers() }),
+            )
+            .await;
+        tokio::time::timeout(WAIT, gate.entered.notified())
+            .await
+            .expect("admission started");
+        let parked = world.admitter.last_session();
+        newest = newest.max(Some(parked));
+        hidden.push(parked.to_string());
+    }
+    // Every id above the largest parked one, so the 50 hidden rows are the
+    // whole first page.
+    let newest = newest.expect("sessions were parked");
+    for offset in 1..=5 {
+        world
+            .fixture
+            .seed_session_with_id(ROOT, shifted(newest, offset));
+    }
+
+    let pages = list_pages(&mut connection).await;
+    let all: Vec<String> = pages.concat();
     assert_eq!(
-        all, expected,
-        "a visible row was lost or repeated across pages"
+        all.len(),
+        5,
+        "visible rows behind the hidden page: {pages:?}"
+    );
+    assert!(
+        pages[0].len() == 5,
+        "the first page came back short or empty: {pages:?}"
+    );
+    assert!(
+        all.iter().all(|id| !hidden.contains(id)),
+        "a hidden session was listed"
     );
     connection.abort().await;
 }

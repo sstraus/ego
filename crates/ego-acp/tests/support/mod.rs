@@ -235,6 +235,14 @@ impl DurableAcpFixture {
         }
     }
 
+    /// One session with a caller-chosen id, so a test can place it exactly
+    /// relative to another id in the list order.
+    pub fn seed_session_with_id(&self, root: &str, id: SessionId) {
+        let runs: Arc<dyn SessionRunLifecycle> = Arc::new(InactiveRuns);
+        let lifecycle = SessionLifecycle::new(Arc::clone(&self.store), runs, Arc::new(TestClock));
+        lifecycle.create_with_id(id, PathBuf::from(root)).unwrap();
+    }
+
     pub fn seed_replay_session(
         &self,
         root: &str,
