@@ -471,7 +471,10 @@ mod faults {
 
         let repair = fx.store.recover(&fx.id).unwrap();
 
-        assert!(repair.manifest_rebuilt);
+        assert!(
+            !repair.manifest_rebuilt,
+            "a manifest that only trails the log's last timestamp is the steady state, not a repair"
+        );
         assert_eq!(fx.manifest().updated, Timestamp::from_millis(9_000));
         assert_eq!(
             fx.manifest().created,

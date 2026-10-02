@@ -1054,13 +1054,24 @@ impl JsonlStore {
             return Ok(false);
         }
 
-        tracing::warn!(
-            session = %session_dir_name(id),
-            "rebuilding a session manifest from its authoritative log"
-        );
+        // `append` rewrites the manifest only at boundaries, so after any
+        // ordinary session the cached `updated` trails the last event. That
+        // is the steady state, not damage: refresh it, but do not report it
+        // as a repair.
+        let only_updated_trails = previous.as_ref().is_some_and(|previous| {
+            let mut current = manifest.clone();
+            current.meta.updated = previous.meta.updated;
+            current == *previous
+        });
+        if !only_updated_trails {
+            tracing::warn!(
+                session = %session_dir_name(id),
+                "rebuilding a session manifest from its authoritative log"
+            );
+        }
         let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
-        Ok(true)
+        Ok(!only_updated_trails)
     }
 
     /// Replace `id`'s manifest, carrying its `created`/`title` and projected

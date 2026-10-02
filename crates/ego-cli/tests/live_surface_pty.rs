@@ -3827,6 +3827,11 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
 /// Drive one interactive session, optionally through one answered turn, quit it
 /// with `/quit` and return everything printed from the quit onwards.
 fn output_after_quit(turn: Option<&str>) -> String {
+    quit_session(turn).0
+}
+
+/// [`output_after_quit`], keeping the quit session's home and workspace.
+fn quit_session(turn: Option<&str>) -> (String, Ego) {
     let stub = Stub::start(Plan {
         completions: vec![Reply::Sse(text("RESUME-HINT-ANSWER"))],
         ..Plan::default()
@@ -3880,7 +3885,26 @@ fn output_after_quit(turn: Option<&str>) -> String {
     reader_join.join().expect("reader thread");
     writer_join.join().expect("writer thread");
     assert!(status.success(), "interactive process failed: {status:?}");
-    normalized(&output[quit_start..])
+    (normalized(&output[quit_start..]), ego)
+}
+
+#[test]
+fn a_clean_quit_leaves_a_session_that_opens_without_a_repair() {
+    let (_, ego) = quit_session(Some("hello"));
+    let workspace = std::fs::canonicalize(ego.workspace_path()).expect("canonical workspace");
+    let store = ego_tools::store::JsonlStore::new(
+        ego.home_path().join("sessions"),
+        workspace,
+        Box::new(ego_tools::store::OsIo),
+    );
+    let id = support::FIXTURE_SESSION_ID
+        .parse()
+        .expect("the fixture id is a session id");
+    let repair = store.recover(&id).expect("recover");
+    assert!(
+        repair.is_clean(),
+        "a clean /quit must not leave anything for the next open to repair: {repair:?}"
+    );
 }
 
 #[test]
