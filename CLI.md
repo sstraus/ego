@@ -930,14 +930,31 @@ then edit its schema-derived fields with exact values prefilled; nested shapes
 remain in one prefilled JSON fallback instead of requiring a whole call to be
 typed as JSON.
 
-An unresolved permission modal separates the call, reason, canonical
-operations, risk, exact parameters, derived rule candidates, and every
-widening. `y`, `n`, `e`, and `r` act immediately. `e` edits the same prefilled
-schema-derived form and sends the result through full preparation and policy
-classification again. `r` applies the displayed allow-rule plan through the
-single atomic config owner and then allows the current call; it never asks for
-the tool, JSON, or a second confirmation. A write or staging failure is shown
-and denies the call.
+An unresolved permission modal is at most four rows: the call as a readable
+command, its risk in plain words, and the keys `[y] yes`, `[a] yes, do not ask
+again for <rules>`, `[n] no, say what to do instead`, `[e] edit`, `[d]
+details`. The risk row never shows an internal name; a limited risk (changes
+inside the workspace) and an unknown one (a program ego cannot inspect) read
+differently. `d` shows the rest: the reason, the canonical operations, the exact
+parameters, and what `a` would store with every widening. `y`, `a`, `n`, `e`,
+and `d` act at once. `e` edits the same prefilled schema-derived form and sends
+the result through full preparation and policy classification again. `a`
+applies the displayed allow-rule plan through the single atomic config owner and
+then allows the current call; it never asks for the tool, JSON, or a second
+confirmation. Its rules are the narrowest the grammar can express that still
+match the next call: an argv prefix for `exec` (`exec(python3 *)`, and
+`exec(git commit *)` for programs that take a subcommand), the workspace glob
+for writes (`write(<workspace>/**)`), and the exact form for everything else.
+A command whose prefix would authorise code the operator never saw keeps its
+exact form: a shell or launcher (`bash -c`, `env`, `sudo`, `xargs`, ...), a
+program given by path, or a name carrying shell metacharacters or `*`. Deny
+rules, including system ones, are still evaluated first. The receipt is one
+sentence naming each stored rule, committed to the transcript. A write or
+staging failure is shown there and denies the call. `n` asks `What should it do
+instead?`: words typed there answer the call as a failed tool result, so the
+model reads them and the run continues; an empty answer is a plain refusal,
+which ends the run as before. The plain non-terminal prompt (`allow`, `deny`,
+`amend`) is unchanged.
 
 A mode or rule change takes effect only at the next generation boundary,
 after the preceding provider attempt, complete sibling tool batch, permission

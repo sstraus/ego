@@ -456,6 +456,10 @@ pub enum PolicyDenied {
     },
     /// Session evidence authority is valid only as the call's sole operation.
     EvidenceMustStandAlone { tool: String },
+    /// The human declined the call and said what to do instead. The only
+    /// refusal the model is told about: the words are the answer, so the run
+    /// continues with them as the tool result.
+    Redirected { tool: String, instruction: String },
 }
 
 impl PolicyDenied {
@@ -484,6 +488,7 @@ impl PolicyDenied {
                 by.clone()
             }
             PolicyDenied::EvidenceMustStandAlone { .. } => Authority::SessionEvidence,
+            PolicyDenied::Redirected { .. } => Authority::Party,
         }
     }
 }
@@ -586,6 +591,10 @@ impl fmt::Display for PolicyDenied {
             PolicyDenied::EvidenceMustStandAlone { tool } => write!(
                 f,
                 "{tool} may not combine session evidence with another operation"
+            ),
+            PolicyDenied::Redirected { tool, instruction } => write!(
+                f,
+                "{tool} was not run: the user declined it and said: {instruction}"
             ),
         }
     }
@@ -712,6 +721,7 @@ pub struct PermissionPresentation {
     schema: Value,
     risk: super::analysis::RiskAssessment,
     remember: Result<RememberPlan, String>,
+    suggested: Result<RememberPlan, String>,
 }
 
 impl PermissionPresentation {
@@ -727,8 +737,15 @@ impl PermissionPresentation {
         &self.risk
     }
 
+    /// The exact rule for each operation of the call.
     pub fn remember_plan(&self) -> Result<&RememberPlan, &str> {
         self.remember.as_ref().map_err(String::as_str)
+    }
+
+    /// The rules offered to a human who asks not to be asked again; see
+    /// [`RuleManagement::suggest_remember`].
+    pub fn suggested_remember_plan(&self) -> Result<&RememberPlan, &str> {
+        self.suggested.as_ref().map_err(String::as_str)
     }
 }
 
@@ -1090,19 +1107,27 @@ impl PolicyEngine {
     ) -> Classification {
         match self.classify(call) {
             Classification::Ask(mut pending) => {
-                let remember = RuleManagement::remember(
+                let represent = |plan: Result<RememberPlan, _>| {
+                    plan.map_err(|error: crate::config::rule_management::RuleManagementError| {
+                        format!("this call cannot be represented by a persistent rule: {error}")
+                    })
+                };
+                let remember = represent(RuleManagement::remember(
                     &pending.call,
                     ManagedRuleEffect::Allow,
                     self.workspace.as_path(),
-                )
-                .map_err(|error| {
-                    format!("this call cannot be represented by a persistent rule: {error}")
-                });
+                ));
+                let suggested = represent(RuleManagement::suggest_remember(
+                    &pending.call,
+                    ManagedRuleEffect::Allow,
+                    self.workspace.as_path(),
+                ));
                 pending.ask.presentation = Some(Box::new(PermissionPresentation {
                     parameters: input.parameters,
                     schema: input.schema,
                     risk: super::analysis::assess(&pending.call),
                     remember,
+                    suggested,
                 }));
                 Classification::Ask(pending)
             }
@@ -1393,6 +1418,13 @@ impl PolicyEngine {
                     &pending.ask.why,
                     Authority::Party,
                 )),
+            },
+            PermissionDecision::DenyWithInstruction { instruction } => Resolution::HumanSettled {
+                request,
+                result: Err(PolicyDenied::Redirected {
+                    tool: pending.call.into_parts().0,
+                    instruction,
+                }),
             },
             PermissionDecision::Amend { params } => Resolution::Reclassify { request, params },
         }

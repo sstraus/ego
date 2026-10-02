@@ -92,6 +92,10 @@ pub trait Approver: fmt::Debug + Send + Sync {
 pub enum PermissionDecision {
     Allow,
     Deny,
+    /// A refusal that carries the human's words. Unlike [`Self::Deny`], which
+    /// ends the run, the call is answered with the instruction and the model
+    /// continues.
+    DenyWithInstruction { instruction: String },
     Amend { params: Value },
 }
 

@@ -394,6 +394,10 @@ struct SurfaceStatus {
     question_selector: Option<Arc<Mutex<Selector>>>,
     permission_modal: bool,
     permission_rules: Option<Arc<dyn PermissionRuleApplication>>,
+    /// Rows committed straight to the transcript by the terminal owner, for
+    /// receipts that have no run output to travel with. `None` without a live
+    /// terminal.
+    transcript: Option<Sender<String>>,
     /// What the host is told around a modal wait, and whether `-q` is on.
     signals: Option<(Osc, bool)>,
     cursor_selectors: bool,
@@ -439,6 +443,7 @@ impl Default for SurfaceStatus {
             question_selector: None,
             permission_modal: false,
             permission_rules: None,
+            transcript: None,
             signals: None,
             cursor_selectors: false,
             mcp_actions: None,
@@ -919,6 +924,7 @@ impl Seat {
             status.cursor_selectors = true;
         }
         let printer = ExternalPrinter::new(CHANNEL_CAPACITY);
+        status.lock().expect("surface status lock").transcript = Some(printer.sender());
         let reply_started = Arc::clone(&status.lock().expect("surface status lock").reply_started);
         let (output, output_owner) =
             SurfaceOutput::pumped(printer.sender(), cancel.clone(), reply_started);
@@ -1831,6 +1837,7 @@ fn own_terminal(
 mod action_execution;
 mod edit_mode;
 mod permission;
+mod permission_modal;
 mod picker_surface;
 mod question;
 

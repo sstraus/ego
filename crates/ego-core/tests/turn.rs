@@ -4027,6 +4027,45 @@ mod turn {
         ));
     }
 
+    /// Catches a refusal that carries the human's words but ends the run
+    /// anyway, so the model never reads what to do instead.
+    #[test]
+    fn a_human_refusal_with_words_answers_the_call_and_the_run_continues() {
+        let fx = Fixture::new(writing("/ws/out.txt", "declined"))
+            .with_write_tool()
+            .with_human([PermissionDecision::DenyWithInstruction {
+                instruction: "write to /ws/other.txt instead".into(),
+            }]);
+
+        let (reason, _, _) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        let events = fx.store.events();
+        let answer = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolCallCompleted { ok: false, result } => Some(format!("{result:?}")),
+                _ => None,
+            })
+            .expect("the declined call is answered as a failed tool result");
+        assert!(
+            answer.contains("declined it and said: write to /ws/other.txt instead"),
+            "{answer}"
+        );
+        assert!(matches!(
+            permission_events(&fx).as_slice(),
+            [
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionDecided {
+                    allowed: Some(false),
+                    by: Some(Authority::Party),
+                    ..
+                }
+            ]
+        ));
+    }
+
     #[test]
     fn an_amendment_restarts_at_prepare_and_cannot_cross_the_workspace_boundary() {
         let fx = Fixture::new(writing("/ws/out.txt", "original"))
