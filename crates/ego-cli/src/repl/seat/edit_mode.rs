@@ -106,6 +106,24 @@ impl EditMode for SurfaceEditMode {
             _ => {}
         }
 
+        if let Event::Key(key) = &raw
+            && suspend::is_suspend_key(key)
+        {
+            // A suspend leaves whatever is on screen unanswered: the modals
+            // re-render from their own state when the repaint arrives.
+            return match suspend::suspend_job() {
+                Ok((width, height)) => {
+                    self.status.lock().expect("surface status lock").width = usize::from(width);
+                    ReedlineEvent::Resize(width, height)
+                }
+                Err(reason) => {
+                    self.status.lock().expect("surface status lock").notice =
+                        Some(reason.to_owned());
+                    ReedlineEvent::Repaint
+                }
+            };
+        }
+
         if picker_open {
             return match &raw {
                 Event::Key(key) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
