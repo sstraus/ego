@@ -519,21 +519,40 @@ mod faults {
         assert_eq!(rebuilt.updated, Timestamp::from_millis(1_300));
     }
 
-    /// A manifest deleted outright is likewise rebuilt, so `list()` can see
-    /// the session again.
+    /// A manifest deleted outright is likewise rebuilt on recovery. Listing
+    /// does not wait for that: the log is the authority, so the session is
+    /// listed from it, and the manifest is left missing until recovery.
     #[test]
-    fn faults_missing_manifest_is_rebuilt_so_the_session_is_listed_again() {
+    fn faults_missing_manifest_is_rebuilt_and_the_session_stays_listed() {
         let fx = healthy_session();
+        let expected = fx.manifest();
         std::fs::remove_file(fx.manifest_path()).unwrap();
-        assert!(
-            fx.store.list().unwrap().is_empty(),
-            "precondition: without a manifest the session is invisible to list()"
+        assert_eq!(
+            fx.store.list().unwrap(),
+            vec![expected.clone()],
+            "list() must project the session from its log"
         );
+        assert!(!fx.manifest_path().exists(), "list() must not edit disk");
 
         let repair = fx.store.recover(&fx.id).unwrap();
 
         assert!(repair.manifest_rebuilt);
-        assert_eq!(fx.store.list().unwrap().len(), 1);
+        assert_eq!(fx.store.list().unwrap(), vec![expected]);
+    }
+
+    /// One session's unreadable manifest and log must not hide or fail
+    /// its siblings.
+    #[test]
+    fn faults_a_corrupt_manifest_is_listed_from_its_log_and_a_dead_sibling_is_skipped() {
+        let fx = healthy_session();
+        let expected = fx.manifest();
+        std::fs::write(fx.manifest_path(), b"not json at all").unwrap();
+        let dead = fx.manifest_path().parent().unwrap().with_file_name("dead");
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::write(dead.join("manifest.json"), b"{").unwrap();
+        std::fs::write(dead.join("events.jsonl"), b"garbage\n").unwrap();
+
+        assert_eq!(fx.store.list().unwrap(), vec![expected]);
     }
 
     /// **Kill point: orphan lease.** A lease file left by a killed writer

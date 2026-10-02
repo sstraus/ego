@@ -1057,11 +1057,12 @@ impl JsonlStore {
         // `append` rewrites the manifest only at boundaries, so after any
         // ordinary session the cached `updated` trails the last event. That
         // is the steady state, not damage: refresh it, but do not report it
-        // as a repair.
+        // as a repair. A manifest *ahead* of its log is not lag: the log
+        // lost events the manifest saw.
         let only_updated_trails = previous.as_ref().is_some_and(|previous| {
             let mut current = manifest.clone();
             current.meta.updated = previous.meta.updated;
-            current == *previous
+            current == *previous && previous.meta.updated < manifest.meta.updated
         });
         if !only_updated_trails {
             tracing::warn!(
@@ -1859,28 +1860,32 @@ impl SessionStore for JsonlStore {
             // error on its contents — both are per-session failures, so
             // both are skipped and warned about the same way, rather than
             // one killing the whole call and the other not.
-            let bytes = match self.io.read(&manifest_path) {
-                Ok(Some(bytes)) => bytes,
-                Ok(None) => continue, // session directory exists, but no append has landed yet
-                Err(error) => {
-                    tracing::warn!(
-                        dir = %dir.display(),
-                        error = %error,
-                        "skipping session with an unreadable manifest"
-                    );
-                    continue;
-                }
+            let cached = match self.io.read(&manifest_path) {
+                Ok(Some(bytes)) => serde_json::from_slice::<RunManifest>(&bytes)
+                    .map(|manifest| (manifest.meta, manifest.deleted))
+                    .map_err(|error| error.to_string()),
+                Ok(None) => Err("the manifest is missing".to_owned()),
+                Err(error) => Err(error.to_string()),
             };
-            let manifest = match serde_json::from_slice::<RunManifest>(&bytes) {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    tracing::warn!(
-                        dir = %dir.display(),
-                        error = %error,
-                        "skipping session with an unreadable manifest"
-                    );
-                    continue;
-                }
+            // The manifest is a derived cache and the log is the authority,
+            // so a session whose manifest is missing, unreadable or corrupt
+            // is still listed — from its log, without editing anything on
+            // disk. A directory with no readable log either is skipped.
+            let (meta, deleted) = match cached {
+                Ok(listed) => listed,
+                Err(reason) => match self.meta_from_log_prefix(&dir) {
+                    Some(listed) => listed,
+                    None => {
+                        if self.io.exists(&dir.join("events.jsonl")).unwrap_or(false) {
+                            tracing::warn!(
+                                dir = %dir.display(),
+                                reason = %reason,
+                                "skipping session with neither a usable manifest nor a usable log"
+                            );
+                        }
+                        continue;
+                    }
+                },
             };
             // The id in the manifest has to be the id in the path, because
             // every other method here goes the other way: `read`, `append`
@@ -1900,17 +1905,17 @@ impl SessionStore for JsonlStore {
             // here.
             if dir
                 .file_name()
-                .is_none_or(|name| name != &*session_dir_name(&manifest.meta.id))
+                .is_none_or(|name| name != &*session_dir_name(&meta.id))
             {
                 tracing::warn!(
                     dir = %dir.display(),
-                    manifest_id = %session_dir_name(&manifest.meta.id),
+                    manifest_id = %session_dir_name(&meta.id),
                     "skipping session whose manifest names a different id than its directory"
                 );
                 continue;
             }
-            if !manifest.deleted {
-                metas.push(manifest.meta);
+            if !deleted {
+                metas.push(meta);
             }
         }
         Ok(metas)
@@ -1918,6 +1923,20 @@ impl SessionStore for JsonlStore {
 }
 
 impl JsonlStore {
+    /// The listing facts of the session in `dir`, projected from the valid
+    /// prefix of its log. `None` when there is no readable log; a torn tail
+    /// is ignored rather than refused, because listing never edits a session.
+    fn meta_from_log_prefix(&self, dir: &std::path::Path) -> Option<(SessionMeta, bool)> {
+        let bytes = self.io.read(&dir.join("events.jsonl")).ok()??;
+        let (header, start) = decoded_header(&bytes).ok()??;
+        if header.v != CODEC_VERSION {
+            return None;
+        }
+        let (valid_len, _) = valid_prefix(&bytes, start);
+        let facts = log_manifest_facts(&bytes[..valid_len]).ok()??;
+        Some((meta_from_log_facts(header.session, &facts), facts.deleted))
+    }
+
     fn publish_empty_session_lifecycle(
         &self,
         id: SessionId,
