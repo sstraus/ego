@@ -3555,3 +3555,83 @@ mod secret_mask_critic {
         }
     }
 }
+
+#[cfg(test)]
+mod secret_mask_critic_round_two {
+    use super::*;
+
+    fn detail(cause: &str) -> String {
+        bounded_detail(cause).unwrap_or_default()
+    }
+
+    fn assert_hidden(cause: &str, secret: &str) {
+        let out = detail(cause);
+        assert!(
+            !out.contains(secret),
+            "{cause:?} leaked {secret:?}: {out:?}"
+        );
+    }
+
+    #[test]
+    fn delimiter_characters_inside_an_unquoted_secret_do_not_leak_the_tail() {
+        // catches: word_end stops at , & ) } ] so `token=ab,cdTAIL` publishes `cdTAIL`.
+        for cause in [
+            "token=ab,cdTAIL",
+            "token=ab&cdTAIL",
+            "token=ab)cdTAIL",
+            "token=ab}cdTAIL",
+            "token=ab]cdTAIL",
+            "Authorization: Bearer ab,cdTAIL",
+            "password=p@ss)cdTAIL",
+        ] {
+            assert_hidden(cause, "cdTAIL");
+        }
+    }
+
+    #[test]
+    fn pgp_private_key_block_is_hidden() {
+        // catches: the PEM rule requires the label to end in `PRIVATE KEY`, so `PRIVATE KEY BLOCK` leaks.
+        assert_hidden(
+            "bad -----BEGIN PGP PRIVATE KEY BLOCK----- lQOYBGBODYSECRET -----END PGP PRIVATE KEY BLOCK-----",
+            "lQOYBGBODYSECRET",
+        );
+    }
+
+    #[test]
+    fn url_userinfo_without_password_is_hidden() {
+        // catches: `https://<token>@host` (GitHub-style token-as-user) is kept because no colon is present.
+        assert_hidden("clone https://ghp_ABCDEF123456@github.com/x failed", "ghp_ABCDEF123456");
+    }
+
+    #[test]
+    fn bidi_mark_or_nul_inside_the_name_does_not_defeat_the_mask() {
+        // catches: bidi/control chars become blanks, splitting `token` into `to ken` so the suffix test fails.
+        assert_hidden("to\u{200e}ken=abc123XYZ", "abc123XYZ");
+        assert_hidden("tok\u{0}en=abc123XYZ", "abc123XYZ");
+        assert_hidden("to\u{2063}ken=abc123XYZ", "abc123XYZ");
+    }
+
+    #[test]
+    fn sigv4_authorization_header_is_hidden() {
+        // catches: a scheme containing digits is not an "alphabetic scheme", so only it is masked and the signature leaks.
+        assert_hidden(
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20260101/x, Signature=deadbeef0123",
+            "deadbeef0123",
+        );
+    }
+
+    #[test]
+    fn colon_after_a_key_word_in_prose_keeps_the_diagnosis() {
+        // catches: over-masking, `duplicate key: command` hides the very field the operator must fix.
+        assert_eq!(detail("duplicate key: command"), "duplicate key: command");
+    }
+
+    #[test]
+    fn hostile_long_input_stays_bounded() {
+        // catches: super-linear scans or an unbounded result on a hostile cause.
+        for unit in ["-----BEGIN ", "a://", "key:", "token=\"\\", "k=", "authorization: a "] {
+            let out = detail(&unit.repeat(40_000));
+            assert!(out.chars().count() <= MAX_DIAGNOSTIC_DETAIL_CHARS, "{unit:?}");
+        }
+    }
+}
