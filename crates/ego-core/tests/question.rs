@@ -397,3 +397,43 @@ fn question_outcomes_are_explicit_and_unavailable_never_infers_an_answer() {
         QuestionOutcome::Unavailable
     ));
 }
+
+#[test]
+fn the_tool_schema_documents_description_and_calls_without_it_still_parse() {
+    use ego_core::question::{AskQuestionTool, HumanInputTool};
+
+    let schema = ego_core::question::ask_question_descriptor().parameters;
+    let option = &schema["$defs"]["QuestionOption"];
+    assert!(
+        option["properties"]["description"]["description"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "the model is never told the field exists: {option}"
+    );
+    assert!(
+        !option["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|name| name == "description")),
+        "description must stay optional: {option}"
+    );
+
+    let parse = |option: serde_json::Value| {
+        AskQuestionTool.parse(serde_json::json!({
+            "prompt": "Choose",
+            "mode": "single",
+            "options": [option],
+            "free_text": false,
+        }))
+    };
+    let without = parse(serde_json::json!({"id": "a", "label": "A"})).expect("old call parses");
+    assert_eq!(without.options[0].description, None);
+    let with = parse(serde_json::json!({"id": "a", "label": "A", "description": "Why A"}))
+        .expect("described call parses");
+    assert_eq!(with.options[0].description.as_deref(), Some("Why A"));
+    assert!(
+        !serde_json::to_string(&without)
+            .unwrap()
+            .contains("description"),
+        "an absent description is not logged as null"
+    );
+}

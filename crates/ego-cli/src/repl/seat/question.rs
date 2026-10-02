@@ -420,7 +420,8 @@ fn answer_question_selector(
         request
             .options
             .iter()
-            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone())),
+            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone()))
+            .chain(offers_other(request).then(|| SelectorOption::new(OTHER_ID, OTHER_LABEL))),
     )));
     surface
         .status
@@ -439,23 +440,46 @@ fn answer_question_selector(
                 let Some(key) = question_selector_key(&command) else {
                     continue;
                 };
-                let mut selector = selector.lock().expect("question selector lock");
-                selector.key(key);
+                let mut guard = selector.lock().expect("question selector lock");
+                guard.key(key);
                 if key == SelectorKey::Escape {
                     break QuestionOutcome::Cancelled;
                 }
                 if key != SelectorKey::Enter {
-                    drop(selector);
+                    drop(guard);
                     surface.status.lock().expect("surface status lock").notice = None;
                     repaint_status(surface.status);
                     continue;
                 }
-                let answer = match selector.result() {
-                    Some(SelectorValue::Single(id)) => QuestionAnswer::single(id.clone()),
-                    Some(SelectorValue::Multiple(ids)) => QuestionAnswer::multiple(ids.clone()),
-                    Some(SelectorValue::FreeText(_)) | None => continue,
+                let result = guard.result().cloned();
+                drop(guard);
+                let wants_other = match &result {
+                    Some(SelectorValue::Single(id)) => id == OTHER_ID,
+                    Some(SelectorValue::Multiple(ids)) => ids.iter().any(|id| id == OTHER_ID),
+                    Some(SelectorValue::FreeText(_)) | None => false,
                 };
-                drop(selector);
+                let typed = if wants_other {
+                    match other_text(editor, surface, &selector) {
+                        OtherEntry::Text(text) => Some(text),
+                        OtherEntry::Back => continue,
+                        OtherEntry::Settled(outcome) => break outcome,
+                    }
+                } else {
+                    None
+                };
+                let answer = match (result, typed) {
+                    (Some(SelectorValue::Single(_)), Some(text)) => QuestionAnswer::single(text),
+                    (Some(SelectorValue::Single(id)), None) => QuestionAnswer::single(id),
+                    (Some(SelectorValue::Multiple(ids)), typed) => {
+                        QuestionAnswer::multiple(ids.into_iter().map(|id| {
+                            match (&typed, id == OTHER_ID) {
+                                (Some(text), true) => text.clone(),
+                                _ => id,
+                            }
+                        }))
+                    }
+                    _ => continue,
+                };
                 match answer.validate_for(request) {
                     Ok(()) => break QuestionOutcome::Answered(answer),
                     Err(error) => {
@@ -477,6 +501,62 @@ fn answer_question_selector(
         .question_selector = None;
     repaint_status(surface.status);
     outcome
+}
+
+/// An option id is never empty (`QuestionRequest::validate` refuses one), so
+/// the empty id names the `Other` row without colliding with a real option.
+const OTHER_ID: &str = "";
+const OTHER_LABEL: &str = "Other";
+const OTHER_DESCRIPTION: &str = "Type your own answer";
+
+/// The `Other` row exists only where the schema lets the model accept free
+/// text alongside the options.
+fn offers_other(request: &QuestionRequest) -> bool {
+    request.free_text && matches!(request.mode, QuestionMode::Single | QuestionMode::Multiple)
+}
+
+enum OtherEntry {
+    Text(String),
+    /// A blank line or Esc: the selector is still open.
+    Back,
+    Settled(QuestionOutcome),
+}
+
+/// Reads the free-text answer behind the `Other` row. The selector keys are
+/// released while the human types and taken back before returning to it.
+fn other_text(
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
+    selector: &Arc<Mutex<Selector>>,
+) -> OtherEntry {
+    surface
+        .status
+        .lock()
+        .expect("surface status lock")
+        .question_selector = None;
+    let prompt = Question::new(format!("{OTHER_LABEL}: "), Arc::clone(surface.status));
+    let entry = loop {
+        match modal_line(editor, surface, &prompt) {
+            Line::Submitted(text) if !text.trim().is_empty() => {
+                break OtherEntry::Text(text.trim().to_string());
+            }
+            Line::Submitted(_) | Line::Blank | Line::HostCommand(HostCommand::ModalEscape) => {
+                break OtherEntry::Back;
+            }
+            Line::Interrupted => break OtherEntry::Settled(QuestionOutcome::Declined),
+            Line::Ended | Line::ExternalBreak(_) => {
+                break OtherEntry::Settled(QuestionOutcome::Unavailable);
+            }
+            Line::Refused(_) | Line::HostCommand(_) => {}
+        }
+    };
+    surface
+        .status
+        .lock()
+        .expect("surface status lock")
+        .question_selector = Some(Arc::clone(selector));
+    repaint_status(surface.status);
+    entry
 }
 
 pub(super) fn question_selector_key(command: &str) -> Option<SelectorKey> {
@@ -501,24 +581,36 @@ pub(super) fn question_selector_prompt(
     let selector = selector.lock().expect("question selector lock");
     let current = selector.current_id();
     let selected = selector.selected_ids();
+    let multiple = request.mode == QuestionMode::Multiple;
+    let other = offers_other(request)
+        .then(|| QuestionOption::new(OTHER_ID, OTHER_LABEL).with_description(OTHER_DESCRIPTION));
     let mut rows = vec![request.prompt.clone()];
-    rows.extend(request.options.iter().enumerate().map(|(index, option)| {
+    for (index, option) in request.options.iter().chain(other.as_ref()).enumerate() {
         let marker = if current == Some(option.id.as_str()) {
             ">"
         } else {
             " "
         };
-        if request.mode == QuestionMode::Multiple {
-            let checked = if selected.contains(&option.id.as_str()) {
-                "x"
-            } else {
-                " "
-            };
-            format!("{marker} [{checked}] {}. {}", index + 1, option.label)
+        let checked = if selected.contains(&option.id.as_str()) {
+            "x"
         } else {
-            format!("{marker} {}. {}", index + 1, option.label)
+            " "
+        };
+        let lead = if multiple {
+            format!("{marker} [{checked}] {}. ", index + 1)
+        } else {
+            format!("{marker} {}. ", index + 1)
+        };
+        let indent = " ".repeat(lead.chars().count());
+        rows.push(format!("{lead}{}", option.label));
+        if let Some(description) = option
+            .description
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            rows.push(format!("{indent}{description}"));
         }
-    }));
+    }
     rows.push(if request.mode == QuestionMode::Multiple {
         "Up/Down moves; Space or number toggles; Enter answers; Esc cancels. ".to_string()
     } else {
