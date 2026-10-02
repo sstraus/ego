@@ -3907,3 +3907,162 @@ mod secret_mask_critic_round_three {
         }
     }
 }
+
+#[cfg(test)]
+mod secret_mask_critic_round_four {
+    use super::*;
+
+    fn detail(cause: &str) -> String {
+        bounded_detail(cause).unwrap_or_default()
+    }
+
+    fn assert_hidden(cause: &str, secret: &str) {
+        let out = detail(cause);
+        assert!(
+            !out.contains(secret),
+            "{cause:?} leaked {secret:?}: {out:?}"
+        );
+    }
+
+    #[test]
+    fn json_error_bodies_whose_message_ends_in_a_secret_word_are_kept() {
+        // catches: the tuple rule `"<name>", <next>` firing on any quoted string that ends in
+        // `token`/`key` and replacing the next JSON member name with `***`.
+        for cause in [
+            r#"{"error":"invalid token","code":401}"#,
+            r#"{"message":"missing api key","code":400}"#,
+            r#"{"field":"api_key","message":"required"}"#,
+        ] {
+            assert_eq!(detail(cause), cause);
+        }
+    }
+
+    #[test]
+    fn string_lists_that_name_a_secret_word_are_kept() {
+        // catches: `["key", "name"]` / `["authorization", "content-type"]` losing their second
+        // element to the comma-separated tuple rule.
+        for cause in [
+            r#"missing properties ["key", "name"]"#,
+            r#"allowed headers ["authorization", "content-type"]"#,
+        ] {
+            assert_eq!(detail(cause), cause);
+        }
+    }
+
+    #[test]
+    fn name_value_header_records_hide_the_value() {
+        // catches: the tuple rule masking the `"value"` member name instead of its value, so the
+        // secret itself stays in `{"name":"x-api-key","value":"..."}` / `Header { name, value }`.
+        assert_hidden(r#"{"name":"x-api-key","value":"LEAKREC"}"#, "LEAKREC");
+        assert_hidden(
+            r#"Header { name: "x-api-key", value: "LEAKREC" }"#,
+            "LEAKREC",
+        );
+    }
+
+    #[test]
+    fn json_escaped_twice_hides_the_value() {
+        // catches: `\\\"token\\\"` (JSON inside a JSON string inside a JSON string) not
+        // recognised as a name, because only one escaped quote is stripped.
+        assert_hidden(
+            r#"outer {\\\"token\\\":\\\"LEAKDEEP\\\"} rejected"#,
+            "LEAKDEEP",
+        );
+    }
+
+    #[test]
+    fn escaped_quote_inside_an_escaped_value_does_not_end_it() {
+        // catches: in `\"pa\\\"TAIL\"` the scan reads `\\` then `\"` as the closing quote and
+        // publishes everything after the embedded quote.
+        assert_hidden(
+            r#"body {\"password\":\"pa\\\"LEAKTAIL\"} rejected"#,
+            "LEAKTAIL",
+        );
+        assert_hidden(
+            r#"{\"authorization\":\"Digest username=\\\"u\\\", response=\\\"LEAKDIG\\\"\"}"#,
+            "LEAKDIG",
+        );
+    }
+
+    #[test]
+    fn pretty_printed_object_under_a_secret_name_is_hidden() {
+        // catches: whitespace collapse turns `"password": {\n "value": "x" }` into a value
+        // starting with `{`; only that brace is masked and the member below leaks.
+        assert_hidden(r#"{ "password": { "value": "LEAKNEST" } }"#, "LEAKNEST");
+    }
+
+    #[test]
+    fn invisible_table_range_boundaries_are_all_dropped() {
+        // catches: an off-by-one or typo at the edge of a range in the invisible table, which
+        // lets one mark split a secret name.
+        for mark in [
+            '\u{00ad}',
+            '\u{0605}',
+            '\u{06dd}',
+            '\u{070f}',
+            '\u{0891}',
+            '\u{08e2}',
+            '\u{1160}',
+            '\u{17b4}',
+            '\u{180b}',
+            '\u{180f}',
+            '\u{200b}',
+            '\u{200f}',
+            '\u{202a}',
+            '\u{202e}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{2066}',
+            '\u{206f}',
+            '\u{fe00}',
+            '\u{feff}',
+            '\u{ffa0}',
+            '\u{fff9}',
+            '\u{fffb}',
+            '\u{110bd}',
+            '\u{110cd}',
+            '\u{13430}',
+            '\u{1343f}',
+            '\u{1bca0}',
+            '\u{1bca3}',
+            '\u{1d173}',
+            '\u{1d17a}',
+            '\u{e0001}',
+            '\u{e0100}',
+            '\u{e01ef}',
+        ] {
+            let cause = format!("to{mark}ken=LEAKMARK done");
+            assert_hidden(&cause, "LEAKMARK");
+        }
+    }
+
+    #[test]
+    fn private_key_headers_cut_at_every_point_hide_the_body() {
+        // catches: the unterminated-header branch keeping text for a header cut mid-fence,
+        // right at its end, or followed directly by the body.
+        for cause in [
+            "-----BEGIN PRIVATE KEY",
+            "-----BEGIN PRIVATE KEY--",
+            "-----BEGIN PRIVATE KEY-----",
+            "-----BEGIN PRIVATE KEY----- LEAKPEM",
+            "x -----BEGIN OPENSSH PRIVATE KEY----- LEAKPEM -----END",
+        ] {
+            assert_hidden(cause, "LEAKPEM");
+            assert!(
+                detail(cause).ends_with("***"),
+                "{cause:?}: {:?}",
+                detail(cause)
+            );
+        }
+    }
+
+    #[test]
+    fn separator_followed_only_by_blanks_masks_nothing_and_does_not_panic() {
+        // catches: the pair look-ahead indexing past the end when `key=` is followed by blanks
+        // to the end of the text (mask_secrets gets collapsed text, but may end in a blank
+        // after an earlier mask).
+        assert_eq!(mask_secrets("key= "), "key= ");
+        assert_eq!(mask_secrets("token: "), "token: ");
+        assert_eq!(detail("key= "), "key=");
+    }
+}
