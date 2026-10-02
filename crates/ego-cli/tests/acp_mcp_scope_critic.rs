@@ -45,6 +45,21 @@ for line in sys.stdin:
     print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
 "#;
 
+/// A shell server for sessions confined below the workspace, where the
+/// `/usr/bin/python3` shim cannot start. It answers every request with the
+/// canned result of the Python server above.
+const SHELL_SERVER: &str = r#"echo $$ >> "$1"
+while IFS= read -r line; do
+  case "$line" in *'"id"'*) ;; *) continue ;; esac
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *server/discover*) result='{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{},"ttlMs":0,"cacheScope":"private"}' ;;
+    *) result='{"resultType":"complete","tools":[],"resources":[],"prompts":[],"nextCursor":null,"ttlMs":0,"cacheScope":"private"}' ;;
+  esac
+  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done
+"#;
+
 fn pid_alive(pid: &str) -> bool {
     std::process::Command::new("kill")
         .args(["-0", pid])
@@ -155,9 +170,9 @@ fn refused_stdio_admission_leaves_no_listed_session() {
 #[test]
 fn sandbox_pick_after_stdio_admission_is_refused_but_free_without_servers() {
     let places = Places::new();
-    let mut host = host_with_sandbox(&places, "ro");
+    let mut host = host_with_sandbox(&places, "workspace");
     let starts = places.workspace_path().join("starts.txt");
-    let server = places.file("working-mcp.py", WORKING_SERVER);
+    let server = places.file("working-mcp.sh", SHELL_SERVER);
     let pick = |host: &mut AcpHost, session: &str, value: &str| {
         host.request(
             "session/set_config_option",
@@ -168,9 +183,9 @@ fn sandbox_pick_after_stdio_admission_is_refused_but_free_without_servers() {
     let bare = host.new_session(cwd(&places));
     // A server-less session measures after its response: a pick before the
     // measurement lands is refused for that reason, not for the pin.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(150);
     let free = loop {
-        let answer = pick(&mut host, &bare, "workspace");
+        let answer = pick(&mut host, &bare, "ro");
         if answer["result"].is_object() || Instant::now() > deadline {
             break answer;
         }
@@ -181,7 +196,7 @@ fn sandbox_pick_after_stdio_admission_is_refused_but_free_without_servers() {
     let opened = host.request(
         "session/new",
         serde_json::json!({"cwd": cwd(&places), "mcpServers": [{
-            "name": "working", "command": "/usr/bin/python3",
+            "name": "working", "command": "/bin/sh",
             "args": [server, starts], "env": []
         }]}),
     );
@@ -189,8 +204,12 @@ fn sandbox_pick_after_stdio_admission_is_refused_but_free_without_servers() {
         .as_str()
         .unwrap_or_else(|| panic!("the working server was refused: {opened}"))
         .to_owned();
-    let refused = pick(&mut host, &session, "workspace");
+    let refused = pick(&mut host, &session, "ro");
     assert!(refused["error"].is_object(), "{refused}");
+    assert!(
+        refused.to_string().contains("MCP servers already run"),
+        "refused for another reason than the admitted pin: {refused}"
+    );
     host.finish();
 }
 
