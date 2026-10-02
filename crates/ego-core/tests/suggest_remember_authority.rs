@@ -102,20 +102,21 @@ fn programs_that_execute_their_arguments_are_not_offered_as_a_prefix() {
 /// `docker run --privileged -v /:/h`, `kubectl exec`, `go run`, `cargo run`.
 #[test]
 fn subcommands_that_execute_arbitrary_code_keep_their_exact_form() {
-    let offenders: Vec<&str> = [
-        (["npm", "exec", "left-pad"], ["npm", "exec", "evil"]),
+    let cases: Vec<(&[&str], &[&str])> = vec![
+        (&["npm", "exec", "left-pad"], &["npm", "exec", "evil"]),
         (
-            ["docker", "run", "alpine"],
-            ["docker", "run", "--privileged", "alpine"],
+            &["docker", "run", "alpine"],
+            &["docker", "run", "--privileged", "alpine"],
         ),
-        (["kubectl", "exec", "pod"], ["kubectl", "exec", "other"]),
-        (["go", "run", "./a"], ["go", "run", "./evil"]),
-        (["cargo", "run", "--bin"], ["cargo", "run", "--bin", "evil"]),
-    ]
-    .into_iter()
-    .filter(|(remembered, later)| covers(remembered, later))
-    .map(|(remembered, _)| remembered[0])
-    .collect();
+        (&["kubectl", "exec", "pod"], &["kubectl", "exec", "other"]),
+        (&["go", "run", "./a"], &["go", "run", "./evil"]),
+        (&["cargo", "run", "--bin"], &["cargo", "run", "--bin", "evil"]),
+    ];
+    let offenders: Vec<&str> = cases
+        .into_iter()
+        .filter(|(remembered, later)| covers(remembered, later))
+        .map(|(remembered, _)| remembered[0])
+        .collect();
     assert!(
         offenders.is_empty(),
         "these remember a code-execution subcommand for any arguments: {offenders:?}"
