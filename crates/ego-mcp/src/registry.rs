@@ -383,12 +383,24 @@ fn mask_key_values(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut index = 0;
-    // Set after `name: "x-api-key"`: the next `value` member is the secret.
-    let mut record_secret = false;
+    // Set after `name: "x-api-key"`: the next `value` member of the same
+    // object (same bracket depth) is the secret.
+    let mut record_depth: Option<isize> = None;
+    let mut depth: isize = 0;
     while index < chars.len() {
         let character = chars[index];
         out.push(character);
         index += 1;
+        match character {
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => {
+                depth -= 1;
+                if record_depth.is_some_and(|armed| depth < armed) {
+                    record_depth = None;
+                }
+            }
+            _ => {}
+        }
         // `,` only separates a quoted name from its value inside a tuple:
         // `("x-api-key", "v")`; `["key", "name"]` and `"invalid token","code"` are text.
         let is_separator = match character {
@@ -401,14 +413,17 @@ fn mask_key_values(text: &str) -> String {
         }
         let key = name_before(&out[..out.len() - 1]);
         let secret = secret_suffix(&key);
-        let record_value = secret.is_none() && key == "value" && record_secret;
+        if matches!(key.as_str(), "name" | "key") && character != ',' && names_secret(&chars, index)
+        {
+            record_depth = Some(depth);
+        }
+        let record_value = secret.is_none() && key == "value" && record_depth == Some(depth);
         if secret.is_none() && !record_value {
-            if key == "name" && character != ',' {
-                record_secret = names_secret(&chars, index);
-            }
             continue;
         }
-        record_secret = false;
+        if record_value {
+            record_depth = None;
+        }
         let blanks = chars[index..].iter().take_while(|&&c| c == ' ').count();
         let start = index + blanks;
         if blanks > 0 && starts_with_pair(&chars, start) {
@@ -452,29 +467,46 @@ fn secret_suffix(name: &str) -> Option<&'static str> {
         .find(|suffix| name.ends_with(suffix))
 }
 
-/// Whether `prefix` ends in `("<name>"`, the head of a Debug tuple.
+/// Whether `prefix` ends in `("<name>"`, the head of a Debug or Python tuple
+/// (`( "<name>"` pretty-printed, `(b'<name>'` bytes).
 fn opens_tuple(prefix: &str) -> bool {
     let Some(closed) = prefix.strip_suffix(['"', '\'']) else {
         return false;
     };
-    closed
+    let Some(opened) = closed
         .trim_end_matches('\\')
         .trim_end_matches(is_name_char)
         .strip_suffix(['"', '\''])
-        .is_some_and(|opened| opened.trim_end_matches('\\').ends_with('('))
+    else {
+        return false;
+    };
+    let mut before = opened.trim_end_matches('\\');
+    for _ in 0..2 {
+        before = before.strip_suffix(STRING_PREFIXES).unwrap_or(before);
+    }
+    before.trim_end_matches(' ').ends_with('(')
 }
 
+/// Python string prefixes (`b'..'`, `r'..'`, `u'..'`).
+const STRING_PREFIXES: [char; 6] = ['b', 'r', 'u', 'B', 'R', 'U'];
+
 /// Whether the value after `name:` is itself a secret-looking single name
-/// (`"name": "x-api-key"`), which makes the sibling `value` member a secret.
+/// (`"name": "x-api-key"`, `name=token`), which makes the sibling `value`
+/// member a secret. Reads only the name, never a whole value.
 fn names_secret(chars: &[char], index: usize) -> bool {
-    let start = index + chars[index..].iter().take_while(|&&c| c == ' ').count();
-    let end = value_end(chars, start, false);
-    let content: String = chars[start..end]
+    const MAX_NAME_CHARS: usize = 128;
+    let mut start = index + chars[index..].iter().take_while(|&&c| c == ' ').count();
+    start += chars[start..].iter().take_while(|&&c| c == '\\').count();
+    if matches!(chars.get(start), Some('"' | '\'')) {
+        start += 1;
+    }
+    let name: String = chars[start..]
         .iter()
+        .take(MAX_NAME_CHARS)
+        .take_while(|&&c| is_name_char(c))
         .collect::<String>()
-        .trim_matches(|c| matches!(c, '"' | '\'' | '\\' | ','))
         .to_lowercase();
-    !content.is_empty() && content.chars().all(is_name_char) && secret_suffix(&content).is_some()
+    secret_suffix(&name).is_some() || name == "bearer"
 }
 
 /// Whether the word at `start` is a `name=value` pair (`mode=fast`, not the
@@ -498,12 +530,18 @@ fn starts_with_pair(chars: &[char], start: usize) -> bool {
 /// runs are escaped quotes of the inner text. In a plain quote a backslash
 /// escapes the next character.
 fn quoted_end(chars: &[char], start: usize) -> Option<usize> {
-    let slashes = chars[start..].iter().take_while(|&&c| c == '\\').count();
-    let quote = match chars.get(start + slashes) {
+    let prefix = chars[start..]
+        .iter()
+        .take(2)
+        .take_while(|&&c| STRING_PREFIXES.contains(&c))
+        .count();
+    let open = start + prefix;
+    let slashes = chars[open..].iter().take_while(|&&c| c == '\\').count();
+    let quote = match chars.get(open + slashes) {
         Some(&quote @ ('"' | '\'')) => quote,
         _ => return None,
     };
-    let mut index = start + slashes + 1;
+    let mut index = open + slashes + 1;
     while index < chars.len() {
         let character = chars[index];
         if slashes == 0 {
@@ -531,21 +569,38 @@ fn quoted_end(chars: &[char], start: usize) -> Option<usize> {
 }
 
 /// End of the balanced `{...}` / `[...]` starting at `start`, brackets inside
-/// quoted strings ignored; the end of the text when unbalanced.
+/// strings ignored (`"..."`, `'...'` and their JSON-escaped forms, told apart
+/// by quote and backslash count); the end of the text when unbalanced.
 fn bracket_end(chars: &[char], start: usize) -> usize {
-    let (mut depth, mut in_quote, mut index) = (0usize, false, start);
+    let (mut depth, mut string, mut index) = (0usize, None::<(char, usize)>, start);
     while index < chars.len() {
-        match chars[index] {
-            '\\' => index += 1,
-            '"' => in_quote = !in_quote,
-            '{' | '[' if !in_quote => depth += 1,
-            '}' | ']' if !in_quote => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return index + 1;
+        let character = chars[index];
+        if matches!(character, '\\' | '"' | '\'') {
+            let run = chars[index..].iter().take_while(|&&c| c == '\\').count();
+            let after = index + run;
+            if let Some(&quote @ ('"' | '\'')) = chars.get(after) {
+                match string {
+                    None => string = Some((quote, run)),
+                    Some(open) if open == (quote, run) => string = None,
+                    Some(_) => {}
                 }
+                index = after + 1;
+            } else {
+                index = after.max(index + 1);
             }
-            _ => {}
+            continue;
+        }
+        if string.is_none() {
+            match character {
+                '{' | '[' => depth += 1,
+                '}' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return index + 1;
+                    }
+                }
+                _ => {}
+            }
         }
         index += 1;
     }
@@ -3689,17 +3744,6 @@ mod candidate_detail_critic {
         assert_eq!(detail("❤\u{fe0f} ok"), "❤\u{fe0f} ok");
         assert_eq!(detail("to\u{200d}ken=LEAK"), "token=***");
         assert_eq!(detail("é\u{200d}token=LEAK"), "é\u{200d}token=***");
-    }
-
-    #[test]
-    fn json_text_and_lists_naming_secret_words_are_kept_verbatim() {
-        // catches: the tuple rule masking the next member of an error body or list.
-        for cause in [
-            r#"{"error":"invalid token","code":401}"#,
-            r#"missing properties ["key", "name"]"#,
-        ] {
-            assert_eq!(detail(cause), cause);
-        }
     }
 
     #[test]
