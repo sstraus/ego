@@ -3279,6 +3279,109 @@ fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
     );
 }
 
+/// catches: the elapsed counter counting the time a person spent on the
+/// permission modal.
+#[cfg(unix)]
+#[test]
+fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "slow-exec",
+                "exec",
+                r#"{"argv":["slow-work"],"cwd":null,"timeout_ms":15000}"#,
+            )),
+            Reply::Sse(text("SLOW-TOOL-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let executable = ego.home_file(
+        ".local/bin/slow-work",
+        "#!/bin/sh\nprintf started > \"$EGO_HOME/tool-started\"\ni=0\nwhile [ ! -f \"$EGO_HOME/tool-release\" ]; do\n  /bin/sleep 0.05\n  i=$((i + 1))\n  if [ \"$i\" -ge 300 ]; then exit 124; fi\ndone\n",
+    );
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("slow tool metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("make slow tool executable");
+    let path = format!("{}:/usr/bin:/bin", executable.parent().unwrap().display());
+    let started = ego.home_path().join("tool-started");
+    let release = ego.home_path().join("tool-release");
+    let ego = ego.env("PATH", &path).env("TERM", "xterm-256color");
+
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"run slow tool\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    thread::sleep(Duration::from_secs(5));
+    let allowed = output.len();
+    input.write_all(b"y").expect("allow");
+    input.flush().expect("allow flush");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "tool did not start: {:?}",
+            normalized(&output)
+        );
+        drain(&reader, &mut output);
+        thread::sleep(Duration::from_millis(20));
+    }
+    thread::sleep(Duration::from_millis(2200));
+    drain(&reader, &mut output);
+    let after_allow = normalized(&output[allowed..]);
+    std::fs::write(&release, b"go").expect("release tool");
+    until(&reader, &mut output, b"SLOW-TOOL-DONE");
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+
+    let counted: Vec<u64> = after_allow
+        .split("thinking for ")
+        .skip(1)
+        .filter_map(|rest| rest.split('s').next()?.parse().ok())
+        .collect();
+    assert!(
+        !counted.is_empty() && counted.iter().all(|seconds| *seconds <= 4),
+        "the 5 s spent on the modal was counted: {counted:?} in {after_allow:?}"
+    );
+}
+
 #[test]
 fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
     let finished = Ego::nowhere()

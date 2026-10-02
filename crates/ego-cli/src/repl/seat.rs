@@ -369,6 +369,8 @@ struct SurfaceStatus {
     drafts: usize,
     activity: bool,
     activity_since: Option<Instant>,
+    /// When the open modal began; the wait is the person's, not the turn's.
+    modal_since: Option<Instant>,
     reply_started: Arc<AtomicBool>,
     notice: Option<String>,
     image_chips: Vec<String>,
@@ -414,6 +416,7 @@ impl Default for SurfaceStatus {
             drafts: 0,
             activity: false,
             activity_since: None,
+            modal_since: None,
             reply_started: Arc::new(AtomicBool::new(false)),
             notice: None,
             image_chips: Vec::new(),

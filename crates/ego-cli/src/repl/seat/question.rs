@@ -18,6 +18,7 @@ pub(super) fn enter_modal(
     {
         let mut status = status.lock().expect("surface status lock");
         status.notice = None;
+        status.modal_since = Some(Instant::now());
         if let Some(snapshot) = status.snapshot.as_mut() {
             snapshot.set_modal(true);
         }
@@ -47,6 +48,12 @@ pub(super) fn leave_modal(
         status.notice = None;
         // Keys of an unfinished burst belong to the modal that is closing.
         status.picker_keys.clear();
+        // The turn's elapsed time leaves out the wait for the person.
+        if let Some(since) = status.modal_since.take()
+            && let Some(started) = status.activity_since.as_mut()
+        {
+            *started += since.elapsed();
+        }
         if let Some(snapshot) = status.snapshot.as_mut() {
             snapshot.set_modal(false);
         }
