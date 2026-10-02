@@ -1937,3 +1937,160 @@ fn a_frozen_child_of_a_trusted_parent_prepares_the_layers_its_parent_admitted() 
         "the hook catalogue is admitted from these layers, and the project layer is missing"
     );
 }
+
+fn permission_started(tool: &str) -> PublicEvent {
+    PublicEvent::ItemStarted {
+        turn: TurnId::new(),
+        item: ItemId::new(),
+        kind: ego_core::public::ItemKind::Permission,
+        name: Some(tool.to_string()),
+        text: Some("write outside the workspace".to_string()),
+    }
+}
+
+fn permission_answered(allowed: bool) -> PublicEvent {
+    PublicEvent::ItemCompleted {
+        turn: TurnId::new(),
+        item: ItemId::new(),
+        kind: ego_core::public::ItemKind::Permission,
+        ok: allowed,
+        text: None,
+    }
+}
+
+fn prompt_submitted(text: &str) -> PublicEvent {
+    PublicEvent::ItemCompleted {
+        turn: TurnId::new(),
+        item: ItemId::new(),
+        kind: ego_core::public::ItemKind::UserMessage,
+        ok: true,
+        text: Some(text.to_string()),
+    }
+}
+
+/// catches: a permission wait that is invisible from another tab — the seat
+/// blocks on a modal and TUIC still shows the pane as running.
+#[test]
+fn a_permission_wait_is_announced_once_with_the_state_and_one_notification() {
+    let out = Stdout::new(CancelToken::new());
+    let state = SessionState::default();
+
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    assert_eq!(
+        inside.signal(&permission_started("bash"), &state),
+        "\x1b]7770;state=awaiting\x07\x1b]777;notify;εgo;permission needed for bash\x07"
+    );
+
+    // Other hosts get the one spelling the ADR's matrix gives them, and no
+    // private state.
+    let elsewhere = Announce::new(&out, capabilities(OscProfile::Standard), false);
+    assert_eq!(
+        elsewhere.signal(&permission_started("bash"), &state),
+        "\x1b]9;εgo: permission needed for bash\x07"
+    );
+}
+
+/// catches: the answer notifying a second time, or leaving the pane marked as
+/// waiting after the person has already decided.
+#[test]
+fn the_answer_returns_to_busy_and_never_notifies_again() {
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    let state = SessionState::default();
+
+    for allowed in [true, false] {
+        assert_eq!(
+            inside.signal(&permission_answered(allowed), &state),
+            "\x1b]7770;state=busy\x07"
+        );
+    }
+}
+
+/// catches: `-q` silencing the question badge along with the notification —
+/// quiet is presentation, and a pane that waits on a person must still say so.
+#[test]
+fn quiet_drops_the_notification_and_keeps_the_awaiting_state() {
+    let out = Stdout::new(CancelToken::new());
+    let quiet = Announce::new(&out, capabilities(OscProfile::Tuic), true);
+    assert_eq!(
+        quiet.signal(&permission_started("bash"), &SessionState::default()),
+        "\x1b]7770;state=awaiting\x07"
+    );
+}
+
+/// catches: a TUIC tab with no intent or title for a turn, and a first turn
+/// whose title is empty because the session has none yet.
+#[test]
+fn a_turn_starts_with_the_title_the_intent_and_busy() {
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+
+    assert_eq!(
+        inside.signal(
+            &prompt_submitted("explain the diff"),
+            &SessionState::default()
+        ),
+        "\x1b]0;ɛ । explain the diff\x07\
+         \x1b]7770;intent=explain the diff (εgo)\x07\
+         \x1b]7770;state=busy\x07"
+    );
+
+    // A session that already has a title shows it, not the latest prompt.
+    let mut titled = SessionState::default();
+    titled.title = Some("Refactor the store".to_string());
+    assert!(
+        inside
+            .signal(&prompt_submitted("and now the tests"), &titled)
+            .starts_with("\x1b]0;ɛ । Refactor the store\x07"),
+    );
+}
+
+/// catches: TUIC reading the tail of the prompt as the intent's title. It
+/// splits the payload at the last `(`, so a prompt ending in a call must be
+/// followed by the fixed title.
+#[test]
+fn a_prompt_ending_in_a_parenthesis_keeps_its_tail_out_of_the_title_field() {
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    assert!(
+        inside
+            .signal(
+                &prompt_submitted("why does foo(bar)"),
+                &SessionState::default()
+            )
+            .contains("\x1b]7770;intent=why does foo(bar) (εgo)\x07")
+    );
+}
+
+/// catches: a pane that stays marked busy after the turn ends, now that the
+/// seat announces busy per turn.
+#[test]
+fn a_finished_turn_returns_the_pane_to_idle() {
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    let done = PublicEvent::TurnCompleted {
+        turn: TurnId::new(),
+        ok: true,
+        exit_reason: ego_core::event::domain::ExitReason::Completed,
+    };
+    assert_eq!(
+        inside.signal(&done, &SessionState::default()),
+        "\x1b]7770;state=idle\x07"
+    );
+}
+
+/// catches: an escape sequence reaching a pipe or an unknown terminal through
+/// the per-event path, which the one-shot gate tests do not cover.
+#[test]
+fn a_plain_host_is_told_nothing_per_event() {
+    let out = Stdout::new(CancelToken::new());
+    let plain = Announce::new(&out, Capabilities::plain(), false);
+    let state = SessionState::default();
+    for event in [
+        permission_started("bash"),
+        permission_answered(true),
+        prompt_submitted("hello"),
+    ] {
+        assert_eq!(plain.signal(&event, &state), "");
+    }
+}
