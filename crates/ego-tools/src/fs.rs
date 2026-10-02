@@ -209,13 +209,10 @@ fn gitignore_in(dir: &Path) -> Option<Gitignore> {
 }
 
 /// The ignore files above `root`, outermost first, up to the repository that
-/// holds it. Outside a repository nothing above applies.
+/// holds it. Outside a repository, or when `root` is itself a repository,
+/// nothing above applies.
 fn repository_ignores(root: &Path) -> Vec<Gitignore> {
-    let Some(top) = root
-        .ancestors()
-        .skip(1)
-        .find(|dir| dir.join(".git").exists())
-    else {
+    let Some(top) = root.ancestors().find(|dir| dir.join(".git").exists()) else {
         return Vec::new();
     };
     let mut above: Vec<Gitignore> = root
@@ -243,12 +240,20 @@ impl Walk<'_> {
     /// failure is fatal, because there is no partial answer to give when the
     /// thing you were pointed at is not walkable at all.
     fn descend(&mut self, dir: &Path, relative: &Path, depth: usize) -> Result<(), FsError> {
+        // A repository nested below the root answers to its own rules only.
+        let outer = (self.req.respect_ignore
+            && !relative.as_os_str().is_empty()
+            && dir.join(".git").exists())
+        .then(|| std::mem::take(&mut self.ignores));
         let own = self.req.respect_ignore.then(|| gitignore_in(dir)).flatten();
         let scoped = own.is_some();
         self.ignores.extend(own);
         let walked = self.visit(dir, relative, depth);
         if scoped {
             self.ignores.pop();
+        }
+        if let Some(outer) = outer {
+            self.ignores = outer;
         }
         walked
     }

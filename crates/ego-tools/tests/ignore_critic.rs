@@ -78,7 +78,7 @@ fn a_nested_repository_below_the_root_keeps_files_the_outer_rules_would_hide() {
     t.file(".gitignore", "*.log\n");
     t.dir("vendor/dep/.git");
     t.file("vendor/dep/a.log", "x");
-    assert_eq!(t.files(""), vec!["vendor/dep/a.log"]);
+    assert_eq!(t.files(""), vec![".gitignore", "vendor/dep/a.log"]);
 }
 
 /// Catches: a deeper `!pattern` not overriding a shallower ignore.
@@ -90,7 +90,10 @@ fn a_deeper_negation_reincludes_a_file_the_root_ignores() {
     t.file("sub/.gitignore", "!keep.log\n");
     t.file("sub/keep.log", "x");
     t.file("sub/drop.log", "x");
-    assert_eq!(t.files(""), vec![".gitignore", "sub/.gitignore", "sub/keep.log"]);
+    assert_eq!(
+        t.files(""),
+        vec![".gitignore", "sub/.gitignore", "sub/keep.log"]
+    );
 }
 
 /// Catches: a negation resurrecting a file whose parent directory is ignored
