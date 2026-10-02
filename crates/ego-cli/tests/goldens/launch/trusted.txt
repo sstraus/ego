@@ -7,6 +7,7 @@ Trust project files in <workspace>? [y/N] yes
 hello
 a launch transcript
 εgo: 0 unsent drafts, 0 accepted inputs
+εgo: To resume: ego resume <session>
 
 # trusted: next launch
 εgo: ego 0.1.0 · ollama/qwen3
@@ -14,3 +15,4 @@ a launch transcript
 hello
 a launch transcript
 εgo: 0 unsent drafts, 0 accepted inputs
+εgo: To resume: ego resume <session>
