@@ -857,7 +857,9 @@ async fn status_servers_are_canonicalized_by_name_across_mixed_outcomes() {
         .reconcile(refresh(RegistryTrigger::Add))
         .await
         .expect("alpha publication");
-    admission.push(Outcome::Invalid("zeta-backend-secret=zeta-value".to_owned()));
+    admission.push(Outcome::Invalid(
+        "zeta-backend-secret=zeta-value".to_owned(),
+    ));
     let zeta_publication = registry
         .reconcile(refresh_zeta(RegistryTrigger::Reload))
         .await

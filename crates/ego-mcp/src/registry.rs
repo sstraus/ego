@@ -3275,7 +3275,10 @@ mod candidate_detail_critic {
             ("bad api_key=abc123 retry", "abc123"),
             ("TOKEN=Zz9 failed", "Zz9"),
             ("GET /x?client_secret=s3&mode=1", "s3"),
-            ("auth failed: Authorization: Bearer eyJhbGci.payload.sig", "eyJhbGci"),
+            (
+                "auth failed: Authorization: Bearer eyJhbGci.payload.sig",
+                "eyJhbGci",
+            ),
             ("authorization: BEARER abc", "abc"),
             ("key=\"two words\" end", "two words"),
         ] {
@@ -3283,11 +3286,11 @@ mod candidate_detail_critic {
             assert!(!out.contains(secret), "{cause:?} leaked: {out:?}");
             assert!(out.contains(SECRET_MASK), "{cause:?} not masked: {out:?}");
         }
-        assert_eq!(detail("backend-secret=do-not-publish"), "backend-secret=***");
         assert_eq!(
-            detail("x?a=1&api_key=k&b=2"),
-            "x?a=1&api_key=***&b=2"
+            detail("backend-secret=do-not-publish"),
+            "backend-secret=***"
         );
+        assert_eq!(detail("x?a=1&api_key=k&b=2"), "x?a=1&api_key=***&b=2");
     }
 
     #[test]
