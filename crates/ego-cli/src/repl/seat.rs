@@ -43,6 +43,7 @@ use crate::model::{GenerationSelection, GenerationSelectionSnapshot};
 use crate::model_picker::{
     ModelPicker, ModelPickerView, PickerFocus, PickerInput, PickerInputOutcome, PickerOutcome,
 };
+use crate::render::osc::Osc;
 use crate::rules::{RememberRequest, prepare_from_catalogue};
 use ego_core::config::{
     ManagedRuleEffect, Mode, RuleMutation, Trust, UserConfigMutation, UserConfigPublication,
@@ -385,6 +386,8 @@ struct SurfaceStatus {
     question_selector: Option<Arc<Mutex<Selector>>>,
     permission_modal: bool,
     permission_rules: Option<Arc<dyn PermissionRuleApplication>>,
+    /// What the host is told around a modal wait, and whether `-q` is on.
+    signals: Option<(Osc, bool)>,
     cursor_selectors: bool,
     mcp_actions: Option<McpSurfaceActions>,
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
@@ -424,6 +427,7 @@ impl Default for SurfaceStatus {
             question_selector: None,
             permission_modal: false,
             permission_rules: None,
+            signals: None,
             cursor_selectors: false,
             mcp_actions: None,
             surface_effect: Arc::new(Mutex::new(None)),
@@ -1186,6 +1190,13 @@ impl Seat {
             .set_availability(ActionId::Compact, availability);
         if let SeatKind::Live(live) = &self.kind {
             repaint_status(&live.status);
+        }
+    }
+
+    /// Let the terminal owner tell the host when it is waiting on a person.
+    pub fn announce_waits(&self, osc: Osc, quiet: bool) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status.lock().expect("surface status lock").signals = Some((osc, quiet));
         }
     }
 

@@ -1937,3 +1937,126 @@ fn a_frozen_child_of_a_trusted_parent_prepares_the_layers_its_parent_admitted() 
         "the hook catalogue is admitted from these layers, and the project layer is missing"
     );
 }
+
+fn permission_started(tool: &str) -> PublicEvent {
+    PublicEvent::ItemStarted {
+        turn: TurnId::new(),
+        item: ItemId::new(),
+        kind: ego_core::public::ItemKind::Permission,
+        name: Some(tool.to_string()),
+        text: Some("write outside the workspace".to_string()),
+    }
+}
+
+fn permission_answered(allowed: bool) -> PublicEvent {
+    PublicEvent::ItemCompleted {
+        turn: TurnId::new(),
+        item: ItemId::new(),
+        kind: ego_core::public::ItemKind::Permission,
+        ok: allowed,
+        text: None,
+    }
+}
+
+fn prompt_submitted(text: &str) -> PublicEvent {
+    PublicEvent::ItemCompleted {
+        turn: TurnId::new(),
+        item: ItemId::new(),
+        kind: ego_core::public::ItemKind::UserMessage,
+        ok: true,
+        text: Some(text.to_string()),
+    }
+}
+
+/// catches: maintainer being notified, and the tab badged as waiting, for a request
+/// that a judge or a stored rule settles by itself. The request event is raised
+/// before that decision, so it must announce nothing; the terminal owner
+/// announces the wait when it actually puts the question (`Osc::awaiting`).
+#[test]
+fn an_auto_decidable_permission_request_announces_nothing() {
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    let state = SessionState::default();
+
+    assert_eq!(inside.signal(&permission_started("bash"), &state), "");
+    // A judge's verdict completes the same item; with no wait announced there
+    // is nothing to take back, so no stray busy either.
+    assert_eq!(inside.signal(&permission_answered(true), &state), "");
+}
+
+/// catches: a TUIC tab with no intent or title for a turn, and a first turn
+/// whose title is empty because the session has none yet.
+#[test]
+fn a_turn_starts_with_the_title_the_intent_and_busy() {
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+
+    assert_eq!(
+        inside.signal(
+            &prompt_submitted("explain the diff"),
+            &SessionState::default()
+        ),
+        "\x1b]0;ɛ । explain the diff\x07\
+         \x1b]7770;intent=explain the diff (εgo)\x07\
+         \x1b]7770;state=busy\x07"
+    );
+
+    // A session that already has a title shows it, not the latest prompt.
+    let mut titled = SessionState::default();
+    titled.title = Some("Refactor the store".to_string());
+    assert!(
+        inside
+            .signal(&prompt_submitted("and now the tests"), &titled)
+            .starts_with("\x1b]0;ɛ । Refactor the store\x07"),
+    );
+}
+
+/// catches: TUIC reading the tail of the prompt as the intent's title. It
+/// splits the payload at the last `(`, so a prompt ending in a call must be
+/// followed by the fixed title.
+#[test]
+fn a_prompt_ending_in_a_parenthesis_keeps_its_tail_out_of_the_title_field() {
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    assert!(
+        inside
+            .signal(
+                &prompt_submitted("why does foo(bar)"),
+                &SessionState::default()
+            )
+            .contains("\x1b]7770;intent=why does foo(bar) (εgo)\x07")
+    );
+}
+
+/// catches: a pane that stays marked busy after the turn ends, now that the
+/// seat announces busy per turn.
+#[test]
+fn a_finished_turn_returns_the_pane_to_idle() {
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    let done = PublicEvent::TurnCompleted {
+        turn: TurnId::new(),
+        ok: true,
+        exit_reason: ego_core::event::domain::ExitReason::Completed,
+    };
+    assert_eq!(
+        inside.signal(&done, &SessionState::default()),
+        "\x1b]7770;state=idle\x07"
+    );
+}
+
+/// catches: an escape sequence reaching a pipe or an unknown terminal through
+/// the per-event path, which the one-shot gate tests do not cover.
+#[test]
+fn a_plain_host_is_told_nothing_per_event() {
+    let out = Stdout::new(CancelToken::new());
+    let plain = Announce::new(&out, Capabilities::plain(), false);
+    let state = SessionState::default();
+    for event in [
+        permission_started("bash"),
+        permission_answered(true),
+        prompt_submitted("hello"),
+    ] {
+        assert_eq!(plain.signal(&event, &state), "");
+    }
+}

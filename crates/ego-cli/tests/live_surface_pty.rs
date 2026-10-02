@@ -111,6 +111,88 @@ fn image_paste_path_stages_a_chip_and_sends_image_with_next_turn() {
     );
 }
 
+/// catches: the `Signalling` wrapper being dropped from `interactive_through`,
+/// which the `Announce::signal` unit tests cannot see — a real interactive
+/// turn in a TUIC pane must carry the title, intent, busy and idle signals.
+#[cfg(not(windows))]
+#[test]
+fn a_turn_in_a_tuic_pane_tells_tuic_its_title_intent_busy_and_idle() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("SIGNAL-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color")
+        .env("TUIC_SOCKET", "/nonexistent/tuic.sock");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# signal fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let turn_start = output.len();
+    input.write_all(b"say hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(&reader, &mut output, turn_start, "SIGNAL-ANSWER");
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    until_from(
+        &reader,
+        &mut output,
+        turn_start,
+        b"\x1b]7770;state=idle\x07",
+    );
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    let turn = String::from_utf8_lossy(&output[turn_start..]).into_owned();
+    for expected in [
+        "\x1b]0;ɛ । say hello\x07",
+        "\x1b]7770;intent=say hello (εgo)\x07",
+        "\x1b]7770;state=busy\x07",
+        "\x1b]7770;state=idle\x07",
+    ] {
+        assert!(turn.contains(expected), "missing {expected:?} in {turn:?}");
+    }
+}
+
 #[cfg(not(windows))]
 #[test]
 fn image_paste_chip_can_be_removed_before_submission() {

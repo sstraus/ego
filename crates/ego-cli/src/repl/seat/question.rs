@@ -1,4 +1,6 @@
 use super::*;
+use crate::render::osc::State;
+use std::io::Write as _;
 
 pub(super) fn enter_modal(
     editor: &mut Reedline,
@@ -235,6 +237,9 @@ pub(super) fn answer_control(
                 .expect("surface status lock")
                 .permission_modal = true;
             let prompt = Question::new(permission_prompt(&request), Arc::clone(surface.status));
+            tell_host(surface.status, |osc, quiet| {
+                osc.awaiting(request.tool(), !quiet)
+            });
             let mut notice = None;
             let decision = loop {
                 match modal_line(editor, surface, &prompt) {
@@ -299,6 +304,7 @@ pub(super) fn answer_control(
                     Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
                 }
             };
+            tell_host(surface.status, |osc, _| osc.state(State::Busy));
             (
                 Reply::Permission(reply, decision, notice),
                 EditPhase::Busy,
@@ -1110,6 +1116,25 @@ fn remember_permission(
     application
         .remember_allow(plan)
         .map_err(|error| error.to_string())
+}
+
+/// Write one out-of-band signal straight to the terminal.
+///
+/// Called only from the terminal owner, between reads, so nothing else is
+/// painting. It does not go through the row output: that holds text until a
+/// newline, and a wait has no more rows coming.
+fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
+    let signals = status.lock().expect("surface status lock").signals;
+    let Some((osc, quiet)) = signals else {
+        return;
+    };
+    let bytes = signal(osc, quiet);
+    if bytes.is_empty() {
+        return;
+    }
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(bytes.as_bytes());
+    let _ = stdout.flush();
 }
 
 fn permission_prompt(request: &PermissionRequest) -> String {

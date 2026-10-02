@@ -544,6 +544,11 @@ pub(super) async fn interactive_through(
 ) -> Ended {
     let text_sink = TextSink::new(output, quiet, capabilities);
     let announce = Announce::new(output, capabilities, quiet);
+    let signalling = Signalling {
+        inner: &text_sink,
+        announce: &announce,
+    };
+    seat.announce_waits(Osc::new(capabilities), quiet);
     let interactive_seat: Arc<dyn InteractiveSeat> = seat.clone();
     let elicitor: Arc<dyn Elicitor> = seat.clone();
     let human = interactive_seat.has_human();
@@ -564,7 +569,7 @@ pub(super) async fn interactive_through(
     };
     let ended = match execute(
         args,
-        |_| &text_sink as &dyn EventSink,
+        |_| &signalling as &dyn EventSink,
         cancel,
         None,
         RunHost {
@@ -691,6 +696,48 @@ impl<'a> Announce<'a> {
         .concat()
     }
 
+    /// What one published event means for the pane, for the interactive seat.
+    ///
+    /// The seat is a conversation, so `preamble` and `postamble` (one run, one
+    /// block) do not describe it: TUIC has to learn per turn that ego is busy and
+    /// idle again (waits on a person are announced by the terminal owner).
+    /// Each arm is silent unless [`Capabilities`] found a host that
+    /// reads it.
+    pub(super) fn signal(&self, event: &PublicEvent, state: &SessionState) -> String {
+        use ego_core::public::ItemKind as Kind;
+        match event {
+            PublicEvent::ItemCompleted {
+                kind: Kind::UserMessage,
+                text: Some(prompt),
+                ..
+            } => self.turn_started(prompt, state.title.as_deref()),
+            // A permission request is deliberately not a signal here: it is
+            // raised before a judge or a stored rule may settle it, and the
+            // terminal owner announces the wait when it puts the question.
+            PublicEvent::TurnCompleted { .. } => self.osc.state(State::Idle),
+            _ => String::new(),
+        }
+    }
+
+    /// Title, intent and busy, in the order TUIC's tab should learn them.
+    ///
+    /// The title is the session's own once it has one (a resumed session
+    /// does), and the prompt until then. The intent carries a fixed trailing
+    /// `(εgo)` because TUIC splits the payload at the *last* `(`: a prompt
+    /// that ends in a call such as `foo(bar)` would otherwise lose its tail to
+    /// the title field.
+    fn turn_started(&self, prompt: &str, session_title: Option<&str>) -> String {
+        let label = excerpt(session_title.or(Some(prompt)), TITLE_CELLS)
+            .unwrap_or_else(|| crate::DISPLAY_NAME.to_string());
+        let intent = match excerpt(Some(prompt), INTENT_CELLS) {
+            Some(text) => self
+                .osc
+                .intent(&format!("{text} ({})", crate::DISPLAY_NAME)),
+            None => String::new(),
+        };
+        [self.osc.title(&label), intent, self.osc.state(State::Busy)].concat()
+    }
+
     pub(super) fn postamble(&self, termination: &RunTermination, elapsed: Duration) -> String {
         let code = termination.exit_code();
         let notification = if self.quiet || elapsed < NOTIFY_AFTER {
@@ -734,18 +781,41 @@ impl<'a> Announce<'a> {
 /// terminal — a title cut mid-grapheme is how a tab ends up with a replacement
 /// character in it.
 pub(super) fn title(prompt: Option<&str>) -> String {
-    const CELLS: usize = 48;
-    let Some(prompt) = prompt.map(str::trim).filter(|text| !text.is_empty()) else {
-        return crate::DISPLAY_NAME.to_string();
-    };
     // `-` is the spelling for "read the prompt from stdin", so it is the one
     // prompt that says nothing about the run.
-    if prompt == "-" {
-        return crate::DISPLAY_NAME.to_string();
+    excerpt(prompt.filter(|text| text.trim() != "-"), TITLE_CELLS)
+        .unwrap_or_else(|| crate::DISPLAY_NAME.to_string())
+}
+
+const TITLE_CELLS: usize = 48;
+const INTENT_CELLS: usize = 80;
+
+/// The first line of `text`, cut to `cells`; `None` when there is nothing to
+/// show.
+fn excerpt(text: Option<&str>, cells: usize) -> Option<String> {
+    let first = text
+        .map(str::trim)
+        .filter(|text| !text.is_empty())?
+        .lines()
+        .next()
+        .unwrap_or_default();
+    let short = crate::render::Line::plain(first).truncate_to(cells);
+    Some(short.text().trim_end().to_string())
+}
+
+/// Publishes to the sink it wraps, then tells the host what the event means
+/// for the pane. The events are the same ones the sink already receives, so a
+/// permission wait and its answer are observed rather than re-detected.
+pub(super) struct Signalling<'a> {
+    pub(super) inner: &'a dyn EventSink,
+    pub(super) announce: &'a Announce<'a>,
+}
+
+impl EventSink for Signalling<'_> {
+    fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        self.inner.publish(event, state);
+        self.announce.emit(self.announce.signal(event, state));
     }
-    let first = prompt.lines().next().unwrap_or_default();
-    let short = crate::render::Line::plain(first).truncate_to(CELLS);
-    short.text().trim_end().to_string()
 }
 
 /// A duration a person reads, not one a machine parses.
