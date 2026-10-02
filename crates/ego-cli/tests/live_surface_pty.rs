@@ -3452,7 +3452,16 @@ fn startup_picker_escape_exits_without_saving_a_model() {
 }
 
 #[test]
-fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice_at_80x24() {
+    startup_picker_routes_raw_keys_and_persists_the_explicit_choice(24, 80);
+}
+
+#[test]
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice_at_120x40() {
+    startup_picker_routes_raw_keys_and_persists_the_explicit_choice(40, 120);
+}
+
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, cols: u16) {
     let stub = Stub::start(Plan::default());
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
@@ -3468,8 +3477,8 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -3568,8 +3577,8 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
