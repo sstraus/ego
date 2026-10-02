@@ -1713,30 +1713,45 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     },
                                 ))
                                 .collect::<Vec<_>>();
-                            let images =
-                                if matches!(asked.as_ref(), Some(InteractiveTurnInput::Prompt(_)))
-                                    && (!inline.is_empty() || !specs.is_empty())
+                            let images = if matches!(
+                                asked.as_ref(),
+                                Some(InteractiveTurnInput::Prompt(_))
+                            ) && (!inline.is_empty() || !specs.is_empty())
+                            {
+                                let images = match acquire_attachments(
+                                    Attachments {
+                                        inline: &inline,
+                                        specs: &specs,
+                                    },
+                                    &source,
+                                    &ports,
+                                    &turn_cancel,
+                                    run_deadline,
+                                    &cwd,
+                                    active.evidence().blob_store(),
+                                )
+                                .await
                                 {
-                                    let images = acquire_attachments(
-                                        Attachments {
-                                            inline: &inline,
-                                            specs: &specs,
-                                        },
-                                        &source,
-                                        &ports,
-                                        &turn_cancel,
-                                        run_deadline,
-                                        &cwd,
-                                        active.evidence().blob_store(),
-                                    )
-                                    .await?;
-                                    pending_attachments.clear();
-                                    staged_images.clear();
-                                    seat.set_image_chips(Vec::new());
-                                    images
-                                } else {
-                                    Vec::new()
+                                    Ok(images) => images,
+                                    // An admission refusal of this turn's
+                                    // attachments is not a bad command line:
+                                    // the staged images stay so the user can
+                                    // remove one (Ctrl+Backspace) and resubmit.
+                                    Err(RunTermination::UsageError { message }) => {
+                                        diagnostics.note(&format!(
+                                                "{message}; the turn was not sent, remove an attachment and submit it again"
+                                            ));
+                                        continue;
+                                    }
+                                    Err(other) => return Err(other),
                                 };
+                                pending_attachments.clear();
+                                staged_images.clear();
+                                seat.set_image_chips(Vec::new());
+                                images
+                            } else {
+                                Vec::new()
+                            };
                             let loop_ = build!(
                                 active,
                                 &turn_cancel,
