@@ -714,3 +714,141 @@ fn a_question_never_hides_the_end_of_the_command_it_re_runs() {
         );
     }
 }
+
+/// Catches: an argument carrying ESC, CR, newline or a bidi override is only
+/// wrapped in quotes, so the host terminal still obeys the control bytes and the
+/// person reads a command different from the one that is re-run (a line erased,
+/// a fake "allowed" line, text reordered).
+#[test]
+fn control_and_bidi_characters_in_arguments_never_reach_the_question_raw() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let target = write_file(&fixture.outside.join("f"), "x");
+    let _ = fixture.run(vec![
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("printf '%s: Operation not permitted\\n' \"$0\" >&2; exit 1"),
+        target.clone().into_os_string(),
+        OsString::from("\u{1b}[2K\rharmless"),
+        OsString::from("a\nAllow all? yes"),
+        OsString::from("\u{202e}txt.exe"),
+    ]);
+    let commands = fixture.seat.commands();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert!(
+        !commands[0]
+            .chars()
+            .any(|c| c.is_control() || ('\u{202a}'..='\u{202e}').contains(&c)),
+        "the question carries raw control characters: {:?}",
+        commands[0]
+    );
+}
+
+/// Catches: a command line that names a symlink chain ending at an ancestor of
+/// the workspace still anchors everything below that ancestor, because only the
+/// spelled path (not the resolved one) is compared with the workspace.
+#[test]
+fn a_symlink_chain_to_an_ancestor_of_the_workspace_anchors_nothing() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let target = write_file(&fixture.outside.join("f"), "x");
+    let ancestor = fixture
+        .workspace
+        .as_path()
+        .parent()
+        .expect("workspace parent")
+        .to_path_buf();
+    let second = fixture.outside.join("hop2");
+    let first = fixture.outside.join("hop1");
+    std::os::unix::fs::symlink(&ancestor, &second).expect("hop2");
+    std::os::unix::fs::symlink(&second, &first).expect("hop1");
+    let _ = fixture.run(vec![
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from(format!(
+            "printf '%s: Operation not permitted\\n' '{}' >&2; exit 1",
+            target.display()
+        )),
+        first.into_os_string(),
+    ]);
+    assert!(
+        fixture.seat.asked().is_empty(),
+        "a path under an ancestor of the workspace was asked: {:?}",
+        fixture.seat.asked()
+    );
+}
+
+/// Catches: a relative argument is resolved against the process cwd and anchors
+/// an absolute path the command line never spelled (`../outside`).
+#[test]
+fn a_relative_argument_does_not_anchor_an_absolute_refusal() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let target = write_file(&fixture.outside.join("f"), "x");
+    let relative = pathdiff_from(fixture.workspace.as_path(), &fixture.outside);
+    let _ = fixture.run(vec![
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from(format!(
+            "printf '%s: Operation not permitted\\n' '{}' >&2; exit 1",
+            target.display()
+        )),
+        relative.into_os_string(),
+    ]);
+    assert!(
+        fixture.seat.asked().is_empty(),
+        "a relative argument anchored a question: {:?}",
+        fixture.seat.asked()
+    );
+}
+
+fn pathdiff_from(workspace: &Path, target: &Path) -> PathBuf {
+    let mut relative = PathBuf::new();
+    for _ in workspace.components().skip(1) {
+        relative.push("..");
+    }
+    relative.join(target.strip_prefix("/").expect("absolute"))
+}
+
+/// Catches: the renderable filter drops the whole stored list when one entry is
+/// unrenderable (control character, non-UTF-8, relative), so a valid grant next
+/// to a hand-edited one stops working.
+#[test]
+fn a_valid_stored_grant_still_applies_beside_unrenderable_ones() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let seat = Seat::new(no);
+    let Some(fixture) = open(Confinement::Workspace, Arc::clone(&seat)) else {
+        return;
+    };
+    let target = write_file(&fixture.outside.join("f"), "stored");
+    {
+        let mut granted = seat.granted.lock().unwrap();
+        granted.push(SandboxGrant::new(
+            CanonPath::new("/opt/a\nb"),
+            SandboxAccess::Read,
+        ));
+        granted.push(SandboxGrant::new(
+            CanonPath::new(PathBuf::from(OsString::from_vec(b"/opt/\xff".to_vec()))),
+            SandboxAccess::Read,
+        ));
+        granted.push(SandboxGrant::new(
+            CanonPath::new("relative/x"),
+            SandboxAccess::Read,
+        ));
+        granted.push(SandboxGrant::new(
+            CanonPath::new(fixture.outside.clone()),
+            SandboxAccess::Read,
+        ));
+    }
+    let outcome = fixture.cat(&[&target]);
+    assert!(
+        outcome.is_ok(),
+        "valid grant ignored beside bad ones: {}",
+        note_of(&outcome)
+    );
+    assert!(seat.asked().is_empty());
+}
