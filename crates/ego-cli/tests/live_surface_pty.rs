@@ -4847,3 +4847,28 @@ fn choosing_a_model_writes_a_receipt_into_the_transcript() {
         assert!(stub.generations().is_empty());
     });
 }
+
+#[test]
+fn the_banner_lists_the_keys_at_120_80_60_and_40_columns() {
+    for cols in [120u16, 80, 60, 40] {
+        picker_session(cols, |term, _stub| {
+            let screen = term.screen();
+            let rows = screen.iter().map(|row| row.trim()).collect::<Vec<_>>();
+            // Catches: hints missing from the banner, or a key cut by a wrap.
+            for item in [
+                "Esc interrupts",
+                "Enter queues",
+                "Ctrl+S draft",
+                "Option+P models",
+                "/help",
+            ] {
+                assert!(
+                    rows.iter()
+                        .any(|row| row.split(" · ").any(|part| part == item)),
+                    "{cols} cols: {item:?} missing from the banner:\n{}",
+                    screen.join("\n")
+                );
+            }
+        });
+    }
+}

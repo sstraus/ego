@@ -17,7 +17,7 @@ pub mod surface;
 pub(crate) use policy_controls::PermissionRuleApplication;
 pub(crate) use seat::Confirmation;
 pub(crate) use seat::effective_statusline_segments;
-pub(crate) use seat::render_action_help;
+pub(crate) use seat::{render_action_help, render_key_hints};
 pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };

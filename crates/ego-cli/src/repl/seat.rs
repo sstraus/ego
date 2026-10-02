@@ -1500,6 +1500,10 @@ impl crate::run::InteractiveSeat for Seat {
         render_action_help(&self.registry, self.width().saturating_sub(4))
     }
 
+    fn key_hints(&self) -> String {
+        render_key_hints(&self.registry, self.width())
+    }
+
     fn read_startup_model(
         &self,
         picker: Arc<Mutex<ModelPicker>>,
@@ -1813,7 +1817,7 @@ mod question;
 
 #[cfg(test)]
 use action_execution::apply_surface_effect;
-pub(crate) use action_execution::render_action_help;
+pub(crate) use action_execution::{render_action_help, render_key_hints};
 use action_execution::surface_line;
 pub use edit_mode::SurfaceEditMode;
 pub(crate) use permission::Confirmation;
