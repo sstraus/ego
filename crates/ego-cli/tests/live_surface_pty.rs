@@ -3965,7 +3965,9 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
         .expect("question prompt");
     input.flush().expect("question prompt flush");
     until_normalized(&reader, &mut output, idle_start, "Single question");
-    let single_choice_start = output.len();
+    // The selector is the first frame that names the question, so its option
+    // rows may already be in `output` when the question text is matched.
+    let single_choice_start = idle_start;
     until_from(&reader, &mut output, single_choice_start, b"> 1. Yes");
     input.write_all(b"2").expect("single selection");
     input.flush().expect("single selection flush");
@@ -3979,7 +3981,7 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
         single_submit_start,
         b"Multiple question",
     );
-    let multiple_first_start = output.len();
+    let multiple_first_start = single_submit_start;
     until_from(&reader, &mut output, multiple_first_start, b"> [ ] 1. Red");
     input.write_all(b"1").expect("multiple first selection");
     input.flush().expect("multiple first selection flush");
@@ -4052,6 +4054,213 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+}
+
+/// The terminal rows, read back through an emulator `cols` wide.
+fn screen_rows(output: &[u8], rows: u16, cols: u16) -> Vec<String> {
+    let mut screen = vt100::Parser::new(rows, cols, 0);
+    screen.process(output);
+    screen
+        .screen()
+        .contents()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// One `ask_question` turn on a 120-column terminal. `drive` answers the
+/// question; the run returns what the model was sent and what the terminal
+/// showed once the turn was over.
+///
+/// The oracle is the emulated screen and never the bytes ego wrote: a stray
+/// fragment overwritten onto a wrapped row is visible there and nowhere else.
+fn question_session(
+    call: &str,
+    drive: impl FnOnce(&mut PtyWriter, &mpsc::Receiver<Vec<u8>>, &mut Vec<u8>),
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    const ROWS: u16 = 70;
+    const COLS: u16 = 120;
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("question", "ask_question", call)),
+            Reply::Sse(text("QUESTION-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# question fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: ROWS,
+            cols: COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((ROWS, COLS)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+
+    let asked = output.len();
+    input.write_all(b"ask\r").expect("turn");
+    input.flush().expect("turn flush");
+    drive(&mut input, &reader, &mut output);
+    until_normalized(&reader, &mut output, asked, "QUESTION-DONE");
+    until_prompt_from(&reader, &mut output, asked);
+    drain_until_quiet(&reader, &mut output);
+    let after_turn = screen_rows(&output, ROWS, COLS);
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    (stub.generations(), after_turn)
+}
+
+/// Waits for the selector to be fully drawn and returns the screen.
+fn selector_screen(reader: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) -> Vec<String> {
+    until_from(reader, output, 0, b"Up/Down or number selects");
+    drain_until_quiet(reader, output);
+    screen_rows(output, 70, 120)
+}
+
+#[test]
+fn a_question_whose_call_json_wraps_shows_its_prompt_and_options_once_and_no_raw_json() {
+    // The prompt alone is longer than a row, and so is the call JSON around it.
+    let prompt = format!(
+        "Which function would you like to add to calc.py? {}",
+        "Pick exactly one of the candidates below. ".repeat(3)
+    );
+    let call = serde_json::json!({
+        "prompt": prompt,
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract", "description": "Return the difference of two numbers"},
+            {"id": "divide", "label": "divide", "description": "Return the quotient of two numbers"},
+            {"id": "power", "label": "power"},
+        ],
+        "free_text": false,
+    })
+    .to_string();
+    assert!(call.len() > 120, "the call must exceed one row");
+    let (generations, after_turn) = question_session(&call, |input, reader, output| {
+        let screen = selector_screen(reader, output);
+        let joined = screen.join("\n");
+        // Catches: a selector origin computed without soft wrap, which left a
+        // fragment of the first option ("ubtract") after the wrapped call line.
+        assert!(
+            !joined.contains("ask_question") && !joined.contains(r#"{""#),
+            "the raw call reached the screen: {joined}"
+        );
+        let with_fragment: Vec<&String> = screen
+            .iter()
+            .filter(|row| row.contains("ubtract"))
+            .collect();
+        assert_eq!(with_fragment.len(), 1, "stray option text: {joined}");
+        assert_eq!(with_fragment[0].trim_end(), "> 1. subtract", "{joined}");
+        assert_eq!(
+            screen
+                .iter()
+                .filter(|row| row.contains("Which function would you like"))
+                .count(),
+            1,
+            "the question is shown once: {joined}"
+        );
+        // Catches: the description dropped from the rendering.
+        let option_row = |label: &str| {
+            screen
+                .iter()
+                .position(|row| row.trim_end().ends_with(label))
+                .unwrap_or_else(|| panic!("no {label:?} row: {joined}"))
+        };
+        assert_eq!(
+            screen[option_row("1. subtract") + 1].trim(),
+            "Return the difference of two numbers"
+        );
+        assert_eq!(
+            screen[option_row("2. divide") + 1].trim(),
+            "Return the quotient of two numbers"
+        );
+        assert!(
+            screen[option_row("3. power") + 1].starts_with("Up/Down"),
+            "an option without a description takes no extra row: {joined}"
+        );
+        // Catches: `Other` offered although the schema forbids free text.
+        assert!(!joined.contains("Other"), "{joined}");
+        input.write_all(b"\r").expect("answer");
+        input.flush().expect("answer flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "subtract") > 0,
+        "the highlighted option reaches the model: {}",
+        generations[1]
+    );
+    let joined = after_turn.join("\n");
+    assert!(
+        !joined.contains("ask_question") && !joined.contains(r#"{""#),
+        "a row repeated the raw call after the answer: {joined}"
+    );
+}
+
+#[test]
+fn the_other_row_opens_a_text_entry_and_its_text_is_the_answer() {
+    let call = serde_json::json!({
+        "prompt": "Which function would you like to add?",
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract"},
+            {"id": "divide", "label": "divide", "description": "Return the quotient of two numbers"},
+        ],
+        "free_text": true,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        let screen = selector_screen(reader, output);
+        let joined = screen.join("\n");
+        let other = screen
+            .iter()
+            .position(|row| row.trim_end().ends_with("3. Other"))
+            .unwrap_or_else(|| panic!("no Other row: {joined}"));
+        assert_eq!(screen[other + 1].trim(), "Type your own answer", "{joined}");
+        let from = output.len();
+        input.write_all(b"3").expect("select Other");
+        input.flush().expect("select flush");
+        until_from(reader, output, from, b"> 3. Other");
+        input.write_all(b"\r").expect("open entry");
+        input.flush().expect("open flush");
+        until_normalized(reader, output, from, "Other: ");
+        // Catches: free_text unreachable from the selector.
+        input.write_all(b"modulo\r").expect("typed answer");
+        input.flush().expect("typed flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "modulo") > 0,
+        "the typed text reaches the model as the answer: {}",
+        generations[1]
+    );
 }
 
 /// What one scripted tool turn left on a real terminal screen.
