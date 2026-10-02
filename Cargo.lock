@@ -1262,6 +1262,7 @@ dependencies = [
  "arboard",
  "async-tungstenite",
  "bytes",
+ "chrono",
  "clap",
  "clap_complete",
  "clipboard-win",
