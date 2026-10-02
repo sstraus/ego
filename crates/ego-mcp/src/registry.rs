@@ -270,6 +270,7 @@ const MAX_DIAGNOSTIC_DETAIL_CHARS: usize = 256;
 fn bounded_detail(cause: &str) -> Option<String> {
     let blanked: String = cause
         .chars()
+        .filter(|&character| !is_invisible_format(character))
         .map(|character| {
             if character.is_control() || is_bidi_control(character) {
                 ' '
@@ -289,26 +290,87 @@ fn bounded_detail(cause: &str) -> Option<String> {
 
 const SECRET_MASK: &str = "***";
 
-/// Replaces the value of `Authorization: Bearer <x>` and of every `name=value`
-/// whose name ends in `key`, `token` or `secret` (case-insensitive, so
-/// `api_key=` and `backend-secret=` match) with `***`. Expects whitespace
+/// Names whose value is a credential: the name ends with one of these
+/// (case-insensitive, so `api_key`, `x-api-key` and `backend-secret` match).
+const SECRET_NAME_SUFFIXES: [&str; 7] = [
+    "key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "authorization",
+];
+
+/// Authentication schemes that precede the credential proper, as in
+/// `token=Bearer <x>`; after an `authorization` name any alphabetic word is one.
+const AUTH_SCHEMES: [&str; 6] = ["bearer", "basic", "digest", "token", "negotiate", "ntlm"];
+
+/// Replaces credentials with `***`: PEM private-key blocks, the password of
+/// URL userinfo, and the value of every `name=value` / `name: value` (also
+/// `"name": "value"`) whose name ends in a secret suffix. Expects whitespace
 /// already collapsed to single blanks.
 fn mask_secrets(text: &str) -> String {
-    mask_key_values(&mask_bearer(text))
+    mask_key_values(&mask_url_userinfo(&mask_pem_blocks(text)))
 }
 
-fn mask_bearer(text: &str) -> String {
-    let mut words: Vec<&str> = text.split(' ').collect();
-    for index in 2..words.len() {
-        let previous = words[index - 2].to_ascii_lowercase();
-        if (previous.ends_with("authorization:") || previous.ends_with("authorization="))
-            && words[index - 1].eq_ignore_ascii_case("bearer")
-            && !words[index].is_empty()
-        {
-            words[index] = SECRET_MASK;
-        }
+fn mask_pem_blocks(text: &str) -> String {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "-----END ";
+    const FENCE: &str = "-----";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(BEGIN) {
+        let label = &rest[start + BEGIN.len()..];
+        let Some(label_end) = label
+            .find(FENCE)
+            .filter(|end| label[..*end].ends_with("PRIVATE KEY"))
+        else {
+            out.push_str(&rest[..start + BEGIN.len()]);
+            rest = label;
+            continue;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str(SECRET_MASK);
+        let body = &label[label_end + FENCE.len()..];
+        rest = match body.find(END) {
+            Some(end) => {
+                let footer = &body[end + END.len()..];
+                footer
+                    .find(FENCE)
+                    .map_or("", |close| &footer[close + FENCE.len()..])
+            }
+            None => "",
+        };
     }
-    words.join(" ")
+    out.push_str(rest);
+    out
+}
+
+fn mask_url_userinfo(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(scheme_end) = rest.find("://") {
+        let authority_start = scheme_end + 3;
+        out.push_str(&rest[..authority_start]);
+        rest = &rest[authority_start..];
+        let authority_end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#'))
+            .unwrap_or(rest.len());
+        let Some(at) = rest[..authority_end].rfind('@') else {
+            continue;
+        };
+        match rest[..at].find(':') {
+            Some(colon) => {
+                out.push_str(&rest[..=colon]);
+                out.push_str(SECRET_MASK);
+            }
+            None => out.push_str(&rest[..at]),
+        }
+        rest = &rest[at..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn mask_key_values(text: &str) -> String {
@@ -319,18 +381,29 @@ fn mask_key_values(text: &str) -> String {
         let character = chars[index];
         out.push(character);
         index += 1;
-        if character == '=' && has_secret_name(&out[..out.len() - 1]) {
-            let end = value_end(&chars, index);
-            if end > index {
-                out.push_str(SECRET_MASK);
-                index = end;
-            }
+        if !matches!(character, '=' | ':') {
+            continue;
+        }
+        let Some(name) = secret_name_before(&out[..out.len() - 1]) else {
+            continue;
+        };
+        let blanks = chars[index..].iter().take_while(|&&c| c == ' ').count();
+        let start = index + blanks;
+        let end = value_end(&chars, start, name == "authorization");
+        if end > start {
+            out.push_str(&" ".repeat(blanks));
+            out.push_str(SECRET_MASK);
+            index = end;
         }
     }
     out
 }
 
-fn has_secret_name(prefix: &str) -> bool {
+/// The lowercase secret suffix that ends the name right before a separator,
+/// looking past blanks and one closing quote.
+fn secret_name_before(prefix: &str) -> Option<&'static str> {
+    let prefix = prefix.trim_end_matches(' ');
+    let prefix = prefix.strip_suffix(['"', '\'']).unwrap_or(prefix);
     let name: String = prefix
         .chars()
         .rev()
@@ -340,24 +413,55 @@ fn has_secret_name(prefix: &str) -> bool {
         .rev()
         .collect::<String>()
         .to_lowercase();
-    ["key", "token", "secret"]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
+    SECRET_NAME_SUFFIXES
+        .into_iter()
+        .find(|suffix| name.ends_with(suffix))
 }
 
-/// End of the value starting at `start`: the closing quote of a quoted value,
-/// else the first blank or URL/list delimiter.
-fn value_end(chars: &[char], start: usize) -> usize {
-    match chars.get(start) {
-        Some(&quote @ ('"' | '\'')) => chars[start + 1..]
-            .iter()
-            .position(|&c| c == quote)
-            .map_or(chars.len(), |offset| start + 2 + offset),
-        _ => chars[start..]
-            .iter()
-            .position(|c| c.is_whitespace() || matches!(c, '&' | ';' | ',' | ')'))
-            .map_or(chars.len(), |offset| start + offset),
+/// End of the value starting at `start`: the closing quote of a quoted value
+/// (honouring backslash escapes), else the end of the word, extended over the
+/// credential that follows an authentication scheme.
+fn value_end(chars: &[char], start: usize, any_scheme: bool) -> usize {
+    if let Some(&quote @ ('"' | '\'')) = chars.get(start) {
+        let mut index = start + 1;
+        while index < chars.len() {
+            match chars[index] {
+                '\\' => index += 2,
+                c if c == quote => return index + 1,
+                _ => index += 1,
+            }
+        }
+        return chars.len();
     }
+    let first_end = word_end(chars, start);
+    let word: String = chars[start..first_end]
+        .iter()
+        .collect::<String>()
+        .to_lowercase();
+    let is_scheme = AUTH_SCHEMES.contains(&word.as_str())
+        || (any_scheme && !word.is_empty() && word.chars().all(char::is_alphabetic));
+    if !is_scheme {
+        return first_end;
+    }
+    let credential = first_end + chars[first_end..].iter().take_while(|&&c| c == ' ').count();
+    match word_end(chars, credential) {
+        end if credential > first_end && end > credential => end,
+        _ => first_end,
+    }
+}
+
+fn word_end(chars: &[char], start: usize) -> usize {
+    chars[start..]
+        .iter()
+        .position(|c| c.is_whitespace() || matches!(c, '&' | ',' | ')' | '}' | ']'))
+        .map_or(chars.len(), |offset| start + offset)
+}
+
+fn is_invisible_format(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00ad}' | '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}'
+    )
 }
 
 fn is_bidi_control(character: char) -> bool {
@@ -3300,7 +3404,8 @@ mod candidate_detail_critic {
             "duplicate tool identity",
             "mode=fast retries=3",
             "bearer token required",
-            "key= and token= empty",
+            "empty key=",
+            "token=&mode=fast",
         ] {
             assert_eq!(detail(cause), cause);
         }
