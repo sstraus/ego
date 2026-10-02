@@ -3315,3 +3315,138 @@ mod candidate_detail_critic {
         assert!(out.ends_with("api_key=***"), "{out:?}");
     }
 }
+
+#[cfg(test)]
+mod secret_mask_critic {
+    use super::*;
+
+    fn detail(cause: &str) -> String {
+        bounded_detail(cause).unwrap_or_default()
+    }
+
+    fn assert_hidden(cause: &str, secret: &str) {
+        let out = detail(cause);
+        assert!(
+            !out.contains(secret),
+            "{cause:?} leaked {secret:?}: {out:?}"
+        );
+    }
+
+    #[test]
+    fn json_quoted_token_value_is_hidden() {
+        // catches: masking only `name=value`, so a JSON body `{"token":"x"}` echoed by the backend leaks.
+        assert_hidden(r#"bad body {"token":"abc123XYZ"}"#, "abc123XYZ");
+        assert_hidden(r#"bad body {"api_key": "abc123XYZ"}"#, "abc123XYZ");
+    }
+
+    #[test]
+    fn colon_header_style_secret_is_hidden() {
+        // catches: only `=` is recognised; `x-api-key: v` / `token: v` leak.
+        assert_hidden("sent x-api-key: abc123XYZ failed", "abc123XYZ");
+        assert_hidden("token: abc123XYZ rejected", "abc123XYZ");
+    }
+
+    #[test]
+    fn password_values_are_hidden() {
+        // catches: name list lacks password/passwd/pwd, so `password=hunter2` leaks.
+        assert_hidden("login password=hunter2 failed", "hunter2");
+        assert_hidden("login passwd=hunter2 failed", "hunter2");
+    }
+
+    #[test]
+    fn url_userinfo_password_is_hidden() {
+        // catches: credentials embedded in a URL (`https://user:pw@host`) are published.
+        assert_hidden(
+            "cannot reach https://svc:hunter2@host.example/mcp",
+            "hunter2",
+        );
+    }
+
+    #[test]
+    fn blanks_around_equals_do_not_defeat_the_mask() {
+        // catches: `api_key = v` leaves the name empty before `=` and the value unmasked.
+        assert_hidden("bad api_key = abc123XYZ end", "abc123XYZ");
+    }
+
+    #[test]
+    fn non_bearer_authorization_schemes_are_hidden() {
+        // catches: only the Bearer scheme is masked; Basic/Token credentials leak.
+        assert_hidden("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz");
+        assert_hidden("Authorization: Token abc123XYZ", "abc123XYZ");
+    }
+
+    #[test]
+    fn authorization_without_blank_before_scheme_is_hidden() {
+        // catches: `Authorization:Bearer v` is one word, so the two-word lookup misses it.
+        assert_hidden("Authorization:Bearer abc123XYZ", "abc123XYZ");
+    }
+
+    #[test]
+    fn json_quoted_authorization_bearer_is_hidden() {
+        // catches: `"Authorization": "Bearer v"` keeps a quote on the scheme word and escapes the mask.
+        assert_hidden(
+            r#"headers {"Authorization": "Bearer abc123XYZ"}"#,
+            "abc123XYZ",
+        );
+    }
+
+    #[test]
+    fn escaped_quote_inside_quoted_value_does_not_end_the_mask() {
+        // catches: value ends at the first quote even when escaped, leaking the tail.
+        assert_hidden(r#"token="ab\"TAILSECRET" end"#, "TAILSECRET");
+    }
+
+    #[test]
+    fn scheme_word_after_equals_does_not_shield_the_credential() {
+        // catches: `token=Bearer v` masks only the word `Bearer` and leaks `v`.
+        assert_hidden("token=Bearer abc123XYZ", "abc123XYZ");
+    }
+
+    #[test]
+    fn zero_width_char_inside_the_name_does_not_defeat_the_mask() {
+        // catches: U+200B (format char, not blanked) splits `token` so the suffix test fails.
+        assert_hidden("to\u{200b}ken=abc123XYZ", "abc123XYZ");
+    }
+
+    #[test]
+    fn pem_private_key_body_is_hidden() {
+        // catches: no rule for -----BEGIN ... PRIVATE KEY----- blocks.
+        assert_hidden(
+            "bad -----BEGIN PRIVATE KEY----- MIIEvQIBADANBgkq -----END PRIVATE KEY-----",
+            "MIIEvQIBADANBgkq",
+        );
+    }
+
+    #[test]
+    fn semicolon_inside_secret_value_does_not_leak_the_tail() {
+        // catches: `;` ends the value, so `token=ab;cdTAIL` publishes the tail.
+        assert_hidden("token=ab;cdTAIL", "cdTAIL");
+    }
+
+    #[test]
+    fn bearer_secret_straddling_the_cut_never_leaks_a_prefix() {
+        // catches: truncation before masking for the Bearer path.
+        let cause = format!(
+            "{} Authorization: Bearer SUPERSECRETVALUE",
+            "a ".repeat(120)
+        );
+        let out = detail(&cause);
+        assert!(!out.contains("SUPER"), "{out:?}");
+    }
+
+    #[test]
+    fn base64_padding_in_value_is_fully_masked() {
+        // catches: inner `=` padding restarts parsing and leaves part of the value visible.
+        let out = detail("token=YWJjZA== done");
+        assert_eq!(out, "token=*** done");
+    }
+
+    #[test]
+    fn repeated_secrets_are_all_masked() {
+        // catches: only the first occurrence is masked.
+        let out = detail("a api_key=ONE b token=TWO c Authorization: Bearer THREE");
+        for s in ["ONE", "TWO", "THREE"] {
+            assert!(!out.contains(s), "{out:?}");
+        }
+    }
+}
