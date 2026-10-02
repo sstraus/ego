@@ -264,8 +264,9 @@ const MAX_DIAGNOSTIC_DETAIL_CHARS: usize = 256;
 /// One line of at most `MAX_DIAGNOSTIC_DETAIL_CHARS` characters, so a foreign
 /// server's error text cannot flood or reshape the diagnostic. Control, line
 /// separator and bidi formatting characters become blanks; whitespace runs
-/// collapse before the bound so leading blanks cannot hide the cause. `None`
-/// when nothing readable remains.
+/// collapse before the bound so leading blanks cannot hide the cause. Secret
+/// looking values are masked before the bound, so a secret straddling the cut
+/// never leaks a prefix. `None` when nothing readable remains.
 fn bounded_detail(cause: &str) -> Option<String> {
     let blanked: String = cause
         .chars()
@@ -277,15 +278,86 @@ fn bounded_detail(cause: &str) -> Option<String> {
             }
         })
         .collect();
-    let detail: String = blanked
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let collapsed = blanked.split_whitespace().collect::<Vec<_>>().join(" ");
+    let detail: String = mask_secrets(&collapsed)
         .chars()
         .take(MAX_DIAGNOSTIC_DETAIL_CHARS)
         .collect();
     let detail = detail.trim_end().to_owned();
     (!detail.is_empty()).then_some(detail)
+}
+
+const SECRET_MASK: &str = "***";
+
+/// Replaces the value of `Authorization: Bearer <x>` and of every `name=value`
+/// whose name ends in `key`, `token` or `secret` (case-insensitive, so
+/// `api_key=` and `backend-secret=` match) with `***`. Expects whitespace
+/// already collapsed to single blanks.
+fn mask_secrets(text: &str) -> String {
+    mask_key_values(&mask_bearer(text))
+}
+
+fn mask_bearer(text: &str) -> String {
+    let mut words: Vec<&str> = text.split(' ').collect();
+    for index in 2..words.len() {
+        let previous = words[index - 2].to_ascii_lowercase();
+        if (previous.ends_with("authorization:") || previous.ends_with("authorization="))
+            && words[index - 1].eq_ignore_ascii_case("bearer")
+            && !words[index].is_empty()
+        {
+            words[index] = SECRET_MASK;
+        }
+    }
+    words.join(" ")
+}
+
+fn mask_key_values(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        out.push(character);
+        index += 1;
+        if character == '=' && has_secret_name(&out[..out.len() - 1]) {
+            let end = value_end(&chars, index);
+            if end > index {
+                out.push_str(SECRET_MASK);
+                index = end;
+            }
+        }
+    }
+    out
+}
+
+fn has_secret_name(prefix: &str) -> bool {
+    let name: String = prefix
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>()
+        .to_lowercase();
+    ["key", "token", "secret"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
+/// End of the value starting at `start`: the closing quote of a quoted value,
+/// else the first blank or URL/list delimiter.
+fn value_end(chars: &[char], start: usize) -> usize {
+    match chars.get(start) {
+        Some(&quote @ ('"' | '\'')) => chars[start + 1..]
+            .iter()
+            .position(|&c| c == quote)
+            .map_or(chars.len(), |offset| start + 2 + offset),
+        _ => chars[start..]
+            .iter()
+            .position(|c| c.is_whitespace() || matches!(c, '&' | ';' | ',' | ')'))
+            .map_or(chars.len(), |offset| start + offset),
+    }
 }
 
 fn is_bidi_control(character: char) -> bool {
@@ -3193,5 +3265,50 @@ mod candidate_detail_critic {
             "{:?}",
             message(&cause)
         );
+    }
+
+    #[test]
+    fn secret_values_are_masked_in_every_form() {
+        // catches: a backend error echoing credentials into the published diagnostic.
+        for (cause, secret) in [
+            ("backend-secret=do-not-publish", "do-not-publish"),
+            ("bad api_key=abc123 retry", "abc123"),
+            ("TOKEN=Zz9 failed", "Zz9"),
+            ("GET /x?client_secret=s3&mode=1", "s3"),
+            ("auth failed: Authorization: Bearer eyJhbGci.payload.sig", "eyJhbGci"),
+            ("authorization: BEARER abc", "abc"),
+            ("key=\"two words\" end", "two words"),
+        ] {
+            let out = detail(cause);
+            assert!(!out.contains(secret), "{cause:?} leaked: {out:?}");
+            assert!(out.contains(SECRET_MASK), "{cause:?} not masked: {out:?}");
+        }
+        assert_eq!(detail("backend-secret=do-not-publish"), "backend-secret=***");
+        assert_eq!(
+            detail("x?a=1&api_key=k&b=2"),
+            "x?a=1&api_key=***&b=2"
+        );
+    }
+
+    #[test]
+    fn non_secret_detail_is_kept_verbatim() {
+        // catches: over-broad masking hiding the real cause (bearer/key words, other pairs).
+        for cause in [
+            "duplicate tool identity",
+            "mode=fast retries=3",
+            "bearer token required",
+            "key= and token= empty",
+        ] {
+            assert_eq!(detail(cause), cause);
+        }
+    }
+
+    #[test]
+    fn secret_straddling_the_cut_never_leaks_a_prefix() {
+        // catches: truncating before masking, leaving the head of a secret visible.
+        let cause = format!("{} api_key=SUPERSECRETVALUE", "a".repeat(240));
+        let out = detail(&cause);
+        assert!(!out.contains("SUPER"), "{out:?}");
+        assert!(out.ends_with("api_key=***"), "{out:?}");
     }
 }

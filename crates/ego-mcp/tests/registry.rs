@@ -661,11 +661,17 @@ async fn new_invalid_server_exposes_no_tool_and_typed_auth_is_sanitized() {
     let diagnostic = absent_server.diagnostic().expect("diagnostic");
     assert_eq!(diagnostic.failure(), McpFailure::InvalidValue);
     assert!(!diagnostic.message().is_empty());
+    let errors = absent.mcp_errors();
     assert!(
-        absent
-            .mcp_errors()
+        errors
             .iter()
-            .all(|error| !error.contains(raw_backend_error))
+            .all(|error| !error.contains("do-not-publish") && !error.contains(raw_backend_error))
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.ends_with("backend-secret=***")),
+        "{errors:?}"
     );
     admission.push(Outcome::AuthorizationRequired {
         issuer: "https://issuer.example".to_owned(),
@@ -851,7 +857,7 @@ async fn status_servers_are_canonicalized_by_name_across_mixed_outcomes() {
         .reconcile(refresh(RegistryTrigger::Add))
         .await
         .expect("alpha publication");
-    admission.push(Outcome::Invalid("zeta-backend-secret".to_owned()));
+    admission.push(Outcome::Invalid("zeta-backend-secret=zeta-value".to_owned()));
     let zeta_publication = registry
         .reconcile(refresh_zeta(RegistryTrigger::Reload))
         .await
@@ -886,11 +892,13 @@ async fn status_servers_are_canonicalized_by_name_across_mixed_outcomes() {
         .expect("zeta status");
     assert!(matches!(zeta.state(), ego_mcp::McpServerState::Absent));
     assert!(zeta.diagnostic().is_some());
+    let errors = status.mcp_errors();
+    assert!(errors.iter().all(|error| !error.contains("zeta-value")));
     assert!(
-        status
-            .mcp_errors()
+        errors
             .iter()
-            .all(|error| !error.contains("zeta-backend-secret"))
+            .any(|error| error.ends_with("zeta-backend-secret=***")),
+        "{errors:?}"
     );
 }
 
