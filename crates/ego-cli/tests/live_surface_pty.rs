@@ -3452,7 +3452,16 @@ fn startup_picker_escape_exits_without_saving_a_model() {
 }
 
 #[test]
-fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice_at_80x24() {
+    startup_picker_routes_raw_keys_and_persists_the_explicit_choice(24, 80);
+}
+
+#[test]
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice_at_120x40() {
+    startup_picker_routes_raw_keys_and_persists_the_explicit_choice(40, 120);
+}
+
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, cols: u16) {
     let stub = Stub::start(Plan::default());
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
@@ -3468,8 +3477,8 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -3535,6 +3544,14 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
     input.flush().expect("startup reasoning accept flush");
     until_prompt_from(&reader, &mut output, reasoning_start);
     drain_until_quiet(&reader, &mut output);
+    let after_pickers = normalized(&output[reasoning_start..]);
+    let banner = after_pickers
+        .find("εgo: ego")
+        .unwrap_or_else(|| panic!("no banner after the pickers: {after_pickers:?}"));
+    assert!(
+        after_pickers[..banner].ends_with('\n') || banner == 0,
+        "the banner shares a row with the picker: {after_pickers:?}"
+    );
 
     let config = std::fs::read_to_string(home.path().join("config.toml"))
         .expect("startup selection persisted atomically");
@@ -3560,8 +3577,8 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -4312,6 +4329,36 @@ fn a_question_whose_call_json_wraps_shows_its_prompt_and_options_once_and_no_raw
     );
 }
 
+/// catches: the editor parsing a burst (`2` then Enter in one write) and running
+/// only its first command, so the selector moved to option 2 and the Enter was
+/// dropped, leaving the question unanswered.
+#[test]
+fn a_selector_applies_keys_typed_in_one_burst_in_order() {
+    let call = serde_json::json!({
+        "prompt": "Burst question",
+        "mode": "single",
+        "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}],
+        "free_text": false,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        selector_screen(reader, output);
+        input.write_all(b"2\r").expect("burst answer");
+        input.flush().expect("burst answer flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "no") > 0,
+        "option 2 chosen by the burst reaches the model: {}",
+        generations[1]
+    );
+    assert_eq!(
+        count_exact_strings(&generations[1], "yes"),
+        0,
+        "the burst must not answer with the default option: {}",
+        generations[1]
+    );
+}
+
 #[test]
 fn the_other_row_opens_a_text_entry_and_its_text_is_the_answer() {
     let call = serde_json::json!({
@@ -4346,6 +4393,79 @@ fn the_other_row_opens_a_text_entry_and_its_text_is_the_answer() {
     assert!(
         count_exact_strings(&generations[1], "modulo") > 0,
         "the typed text reaches the model as the answer: {}",
+        generations[1]
+    );
+}
+
+/// catches: typed-ahead keys of one burst being dropped when the `Other`
+/// entry opens, so the free text never reaches the entry.
+#[test]
+fn a_burst_that_opens_the_other_row_and_types_its_text_answers_with_it() {
+    let call = serde_json::json!({
+        "prompt": "Which function would you like to add?",
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract"},
+            {"id": "divide", "label": "divide"},
+        ],
+        "free_text": true,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        selector_screen(reader, output);
+        input.write_all(b"3\rhello\r").expect("one burst");
+        input.flush().expect("burst flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "hello") > 0,
+        "the typed-ahead text answers the Other row: {}",
+        generations[1]
+    );
+}
+
+/// catches: keys of a burst that follow the Enter opening the `Other` entry
+/// staying in the shared selector queue, so backing out of the entry replays
+/// them on the selector (a stale Enter reopens `Other` and swallows the next
+/// answer as free text instead of choosing the option typed).
+#[test]
+fn keys_queued_behind_the_other_row_are_not_replayed_after_backing_out() {
+    let call = serde_json::json!({
+        "prompt": "Which function would you like to add?",
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract"},
+            {"id": "divide", "label": "divide"},
+        ],
+        "free_text": true,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        selector_screen(reader, output);
+        let from = output.len();
+        input.write_all(b"3\r\r").expect("burst into Other");
+        input.flush().expect("burst flush");
+        until_normalized(reader, output, from, "Other: ");
+        drain_until_quiet(reader, output);
+        // The burst's second Enter is a blank submit when the entry has read
+        // it; otherwise this one is. Either way the selector is back, once.
+        let screen = normalized(&output[from..]);
+        let backed_out = screen
+            .rfind("Up/Down or number selects")
+            .zip(screen.rfind("Other: "))
+            .is_some_and(|(selector, entry)| selector > entry);
+        if !backed_out {
+            let backed = output.len();
+            input.write_all(b"\r").expect("blank line backs out");
+            input.flush().expect("back flush");
+            until_from(reader, output, backed, b"Up/Down or number selects");
+            drain_until_quiet(reader, output);
+        }
+        input.write_all(b"1\r").expect("answer on the selector");
+        input.flush().expect("answer flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "subtract") > 0,
+        "after backing out, `1` Enter chooses option 1: {}",
         generations[1]
     );
 }

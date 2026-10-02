@@ -145,24 +145,30 @@ impl EditMode for SurfaceEditMode {
         }
 
         if question_selector_open {
+            let queued = |command: &str| {
+                self.status
+                    .lock()
+                    .expect("surface status lock")
+                    .picker_keys
+                    .push(command.to_owned());
+                question_selector_command(PICKER_KEYS)
+            };
             return match &raw {
                 Event::Key(key) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                     match key.code {
-                        KeyCode::Up => question_selector_command("up"),
-                        KeyCode::Down => question_selector_command("down"),
-                        KeyCode::Enter => question_selector_command("enter"),
-                        KeyCode::Esc => question_selector_command("escape"),
-                        KeyCode::Char(' ') => question_selector_command("space"),
-                        KeyCode::Char(digit @ '1'..='9') => {
-                            question_selector_command(&format!("number:{digit}"))
-                        }
+                        KeyCode::Up => queued("up"),
+                        KeyCode::Down => queued("down"),
+                        KeyCode::Enter => queued("enter"),
+                        KeyCode::Esc => queued("escape"),
+                        KeyCode::Char(' ') => queued("space"),
+                        KeyCode::Char(digit @ '1'..='9') => queued(&format!("number:{digit}")),
                         _ => ReedlineEvent::None,
                     }
                 }
                 Event::Key(key)
                     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL =>
                 {
-                    question_selector_command("escape")
+                    queued("escape")
                 }
                 Event::Resize(_, _) => ReedlineEvent::None,
                 _ => ReedlineEvent::None,

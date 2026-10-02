@@ -1830,7 +1830,8 @@ use permission::{
 use picker_surface::run_model_picker;
 use question::{
     PermissionEditOutcome, Question, Waiting, answer_control, edit_permission_parameters,
-    enter_modal, leave_modal, parse_trust, question_selector_key, question_selector_prompt,
+    enter_modal, leave_modal, next_selector_key, parse_trust, question_selector_prompt,
+    queued_selector_line,
 };
 #[cfg(test)]
 use question::{PermissionWord, parse_permission};

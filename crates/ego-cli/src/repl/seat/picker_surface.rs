@@ -26,10 +26,10 @@ pub(super) fn run_model_picker(
     }
     let result = loop {
         let view = picker.lock().expect("model picker lock").view();
-        let width = status.lock().expect("surface status lock").width;
-        let height = crossterm::terminal::size()
-            .map(|(_, height)| usize::from(height))
-            .unwrap_or(24);
+        let status_width = status.lock().expect("surface status lock").width;
+        let terminal = crossterm::terminal::size().ok();
+        let width = picker_width(status_width, terminal.map(|(width, _)| usize::from(width)));
+        let height = terminal.map_or(24, |(_, height)| usize::from(height));
         let prompt = Question::new(
             model_picker_prompt(&view, width, height),
             Arc::clone(status),
@@ -79,6 +79,16 @@ pub(super) fn run_model_picker(
     leave_modal(editor, phase, status, saved, after);
     status.lock().expect("surface status lock").model_picker = previous_picker;
     result
+}
+
+/// The columns a picker draws in. The status width is only recorded once the
+/// session is set up, so a picker that opens before that (the first-run one)
+/// reads the terminal instead of drawing in the 40-column floor.
+fn picker_width(status_width: usize, terminal: Option<usize>) -> usize {
+    match status_width {
+        0 => terminal.unwrap_or(0),
+        width => width,
+    }
 }
 
 fn model_picker_input(command: &str) -> Option<PickerInput> {
@@ -299,6 +309,13 @@ mod tests {
             reasoning: Vec::new(),
             persistent_only: true,
         }
+    }
+
+    #[test]
+    fn a_picker_before_session_setup_draws_in_the_terminal_width() {
+        assert_eq!(picker_width(0, Some(120)), 120);
+        assert_eq!(picker_width(100, Some(120)), 100);
+        assert_eq!(picker_width(0, None), 0);
     }
 
     #[test]
