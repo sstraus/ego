@@ -477,6 +477,74 @@ fn help_uses_registry_rows_and_preserves_them_at_narrow_widths() {
 }
 
 #[test]
+fn help_lists_a_keys_section_with_every_registry_key_at_every_width() {
+    // Catches: a hand-written key list that drifts from the registry.
+    let registry = ActionRegistry::final_surface().with_binding(
+        crate::repl::actions::KeyBinding::new("Ctrl+Q", "quits", "Leave without asking"),
+    );
+    let keys = registry.keys();
+    assert!(keys.len() >= 5, "Esc, Enter, Ctrl+S, Ctrl+C and Option+P");
+    for width in [120, 80, 60, 40] {
+        let rendered = render_action_help(&registry, width);
+        let section = rendered
+            .split_once("\nKeys\n")
+            .unwrap_or_else(|| panic!("no Keys section at {width}:\n{rendered}"))
+            .1;
+        let compact = |text: &str| text.split_whitespace().collect::<String>();
+        let section = compact(section);
+        for key in &keys {
+            assert!(
+                section.contains(&compact(&key.label))
+                    && section.contains(&compact(key.description)),
+                "{:?} was lost at {width}:\n{rendered}",
+                key.label
+            );
+        }
+    }
+}
+
+#[test]
+fn banner_hints_list_the_hinted_keys_and_fit_without_dropping_one() {
+    let registry = ActionRegistry::final_surface();
+    for width in [120, 80, 60, 40] {
+        let rendered = render_key_hints(&registry, width);
+        assert!(
+            rendered
+                .lines()
+                .all(|line| crate::render::line::cells(line) <= width),
+            "banner exceeded {width} cells:\n{rendered}"
+        );
+        let rows = rendered.lines().map(str::trim).collect::<Vec<_>>();
+        for item in [
+            "Esc interrupts",
+            "Enter queues",
+            "Ctrl+S draft",
+            "Option+P models",
+            "/help",
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|row| row.split(" · ").any(|part| part == item)),
+                "{item:?} missing or split at {width}:\n{rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn adding_a_registry_key_changes_the_banner_and_the_help_without_editing_either() {
+    // Catches: the banner and the help each keeping their own key table.
+    let registry = ActionRegistry::final_surface().with_binding(
+        crate::repl::actions::KeyBinding::new("Ctrl+Q", "quits", "Leave without asking"),
+    );
+    assert!(render_key_hints(&registry, 120).contains("Ctrl+Q quits"));
+    assert!(render_action_help(&registry, 120).contains("Ctrl+Q  Leave without asking"));
+    let plain = ActionRegistry::final_surface();
+    assert!(!render_key_hints(&plain, 120).contains("Ctrl+Q"));
+    assert!(!render_action_help(&plain, 120).contains("Ctrl+Q"));
+}
+
+#[test]
 fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let phase = SurfacePhase::new(EditPhase::Idle);
     let (input_sender, input) = bounded(CHANNEL_CAPACITY);

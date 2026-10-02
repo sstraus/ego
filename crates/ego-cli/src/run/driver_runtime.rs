@@ -1011,6 +1011,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             continue;
                                         };
                                         seat.busy();
+                                        let receipt = format!(
+                                            "Model: {}{}",
+                                            request.target().0,
+                                            if request.is_persistent() {
+                                                ""
+                                            } else {
+                                                " (this session only)"
+                                            }
+                                        );
                                         let applied = owner.apply(request).await;
                                         let publication = match &applied {
                                             Ok(publication) => publication.as_ref(),
@@ -1026,9 +1035,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     "model defaults are authoritative with a durability warning: {diagnostic}"
                                 ));
                                         }
-                                        if let Err(error) = applied {
-                                            diagnostics
-                                                .note(&format!("model switch failed: {error}"));
+                                        match applied {
+                                            Ok(_) => diagnostics.note(&receipt),
+                                            Err(error) => diagnostics
+                                                .note(&format!("model switch failed: {error}")),
                                         }
                                         if let Some(status) = status.as_ref()
                                             && status.human

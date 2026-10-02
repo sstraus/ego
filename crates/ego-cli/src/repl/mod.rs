@@ -17,10 +17,10 @@ pub mod surface;
 pub(crate) use policy_controls::PermissionRuleApplication;
 pub(crate) use seat::Confirmation;
 pub(crate) use seat::effective_statusline_segments;
-pub(crate) use seat::render_action_help;
 pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };
+pub(crate) use seat::{render_action_help, render_key_hints};
 
 use actions::{ActionId, ExportSelection, SkillSurfaceAction};
 use ego_core::skill::AdmittedSkillOperation;

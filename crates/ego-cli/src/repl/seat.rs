@@ -382,6 +382,10 @@ struct SurfaceStatus {
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
+    /// Keys the picker has been sent and not yet applied. The editor parses a
+    /// whole burst of input before running its first command and drops the
+    /// rest, so typed keys wait here instead of riding on that command.
+    picker_keys: Vec<String>,
     model_selection: Option<Arc<GenerationSelection>>,
     question_selector: Option<Arc<Mutex<Selector>>>,
     permission_modal: bool,
@@ -423,6 +427,7 @@ impl Default for SurfaceStatus {
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             model_picker: None,
+            picker_keys: Vec::new(),
             model_selection: None,
             question_selector: None,
             permission_modal: false,
@@ -1495,6 +1500,10 @@ impl crate::run::InteractiveSeat for Seat {
         render_action_help(&self.registry, self.width().saturating_sub(4))
     }
 
+    fn key_hints(&self) -> String {
+        render_key_hints(&self.registry, self.width())
+    }
+
     fn read_startup_model(
         &self,
         picker: Arc<Mutex<ModelPicker>>,
@@ -1808,8 +1817,8 @@ mod question;
 
 #[cfg(test)]
 use action_execution::apply_surface_effect;
-pub(crate) use action_execution::render_action_help;
 use action_execution::surface_line;
+pub(crate) use action_execution::{render_action_help, render_key_hints};
 pub use edit_mode::SurfaceEditMode;
 pub(crate) use permission::Confirmation;
 #[cfg(test)]

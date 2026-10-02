@@ -1096,9 +1096,14 @@ settlement, usage, cost, or tool-result accounting.
 open the same action as `/model`. On macOS, a terminal that emits the composed
 `π` character for Option-P opens that action too. `/model` remains the exact
 keyboard-independent equivalent. The picker shows provider,
-model, context capability, and reasoning effort. Arrow keys navigate; `Enter`
-sets the default for new sessions, `s` applies only to this session, and `Esc`
-cancels. A selection made while a request is in flight applies at the next
+model, context capability, and reasoning effort. The cursor starts on the
+current model, which carries a `✓ current` marker; the reasoning step marks the
+current effort the same way. Arrow keys navigate, a digit selects by number
+while no filter is typed, and typing narrows the list by substring (`Backspace`
+edits; no match shows an empty state and `Enter` does nothing). `Enter` at the
+reasoning step sets the default for new sessions, `s` there applies only to this
+session, and `Esc` cancels. A completed change writes a `Model: <slug>` line to
+the transcript. A selection made while a request is in flight applies at the next
 generation boundary, never by mutating an active request.
 
 The picker owns no rows. regression case brings the final shared catalogue into
