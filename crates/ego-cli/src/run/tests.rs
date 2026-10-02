@@ -1968,54 +1968,20 @@ fn prompt_submitted(text: &str) -> PublicEvent {
     }
 }
 
-/// catches: a permission wait that is invisible from another tab — the seat
-/// blocks on a modal and TUIC still shows the pane as running.
+/// catches: maintainer being notified, and the tab badged as waiting, for a request
+/// that a judge or a stored rule settles by itself. The request event is raised
+/// before that decision, so it must announce nothing; the terminal owner
+/// announces the wait when it actually puts the question (`Osc::awaiting`).
 #[test]
-fn a_permission_wait_is_announced_once_with_the_state_and_one_notification() {
-    let out = Stdout::new(CancelToken::new());
-    let state = SessionState::default();
-
-    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
-    assert_eq!(
-        inside.signal(&permission_started("bash"), &state),
-        "\x1b]7770;state=awaiting\x07\x1b]777;notify;εgo;permission needed for bash\x07"
-    );
-
-    // Other hosts get the one spelling the ADR's matrix gives them, and no
-    // private state.
-    let elsewhere = Announce::new(&out, capabilities(OscProfile::Standard), false);
-    assert_eq!(
-        elsewhere.signal(&permission_started("bash"), &state),
-        "\x1b]9;εgo: permission needed for bash\x07"
-    );
-}
-
-/// catches: the answer notifying a second time, or leaving the pane marked as
-/// waiting after the person has already decided.
-#[test]
-fn the_answer_returns_to_busy_and_never_notifies_again() {
+fn an_auto_decidable_permission_request_announces_nothing() {
     let out = Stdout::new(CancelToken::new());
     let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
     let state = SessionState::default();
 
-    for allowed in [true, false] {
-        assert_eq!(
-            inside.signal(&permission_answered(allowed), &state),
-            "\x1b]7770;state=busy\x07"
-        );
-    }
-}
-
-/// catches: `-q` silencing the question badge along with the notification —
-/// quiet is presentation, and a pane that waits on a person must still say so.
-#[test]
-fn quiet_drops_the_notification_and_keeps_the_awaiting_state() {
-    let out = Stdout::new(CancelToken::new());
-    let quiet = Announce::new(&out, capabilities(OscProfile::Tuic), true);
-    assert_eq!(
-        quiet.signal(&permission_started("bash"), &SessionState::default()),
-        "\x1b]7770;state=awaiting\x07"
-    );
+    assert_eq!(inside.signal(&permission_started("bash"), &state), "");
+    // A judge's verdict completes the same item; with no wait announced there
+    // is nothing to take back, so no stray busy either.
+    assert_eq!(inside.signal(&permission_answered(true), &state), "");
 }
 
 /// catches: a TUIC tab with no intent or title for a turn, and a first turn

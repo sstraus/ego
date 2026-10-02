@@ -548,6 +548,7 @@ pub(super) async fn interactive_through(
         inner: &text_sink,
         announce: &announce,
     };
+    seat.announce_waits(Osc::new(capabilities), quiet);
     let interactive_seat: Arc<dyn InteractiveSeat> = seat.clone();
     let elicitor: Arc<dyn Elicitor> = seat.clone();
     let human = interactive_seat.has_human();
@@ -698,9 +699,9 @@ impl<'a> Announce<'a> {
     /// What one published event means for the pane, for the interactive seat.
     ///
     /// The seat is a conversation, so `preamble` and `postamble` (one run, one
-    /// block) do not describe it: TUIC has to learn per turn that ego is busy,
-    /// per question that it is waiting on a person, and per turn that it is
-    /// idle again. Each arm is silent unless [`Capabilities`] found a host that
+    /// block) do not describe it: TUIC has to learn per turn that ego is busy and
+    /// idle again (waits on a person are announced by the terminal owner).
+    /// Each arm is silent unless [`Capabilities`] found a host that
     /// reads it.
     pub(super) fn signal(&self, event: &PublicEvent, state: &SessionState) -> String {
         use ego_core::public::ItemKind as Kind;
@@ -710,17 +711,9 @@ impl<'a> Announce<'a> {
                 text: Some(prompt),
                 ..
             } => self.turn_started(prompt, state.title.as_deref()),
-            PublicEvent::ItemStarted {
-                kind: Kind::Permission,
-                name,
-                ..
-            } => self.awaiting(name.as_deref()),
-            // Allowed, denied or amended away: the wait is over either way,
-            // and the notification is not repeated — it belongs to the request.
-            PublicEvent::ItemCompleted {
-                kind: Kind::Permission,
-                ..
-            } => self.osc.state(State::Busy),
+            // A permission request is deliberately not a signal here: it is
+            // raised before a judge or a stored rule may settle it, and the
+            // terminal owner announces the wait when it puts the question.
             PublicEvent::TurnCompleted { .. } => self.osc.state(State::Idle),
             _ => String::new(),
         }
@@ -743,24 +736,6 @@ impl<'a> Announce<'a> {
             None => String::new(),
         };
         [self.osc.title(&label), intent, self.osc.state(State::Busy)].concat()
-    }
-
-    /// Blocked on a person: the state TUIC turns into a question badge, and
-    /// one notification for the request. `-q` suppresses the notification, as
-    /// it does at the end of a run, and never the state.
-    fn awaiting(&self, tool: Option<&str>) -> String {
-        let notification = if self.quiet {
-            String::new()
-        } else {
-            self.osc.notify(
-                crate::DISPLAY_NAME,
-                &match tool {
-                    Some(tool) => format!("permission needed for {tool}"),
-                    None => "permission needed".to_string(),
-                },
-            )
-        };
-        [self.osc.state(State::Awaiting), notification].concat()
     }
 
     pub(super) fn postamble(&self, termination: &RunTermination, elapsed: Duration) -> String {
