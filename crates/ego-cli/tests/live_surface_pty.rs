@@ -4685,7 +4685,10 @@ fn the_pickers_open_on_the_current_value_name_it_and_hint_the_session_key_at_ste
         assert!(row("2. ollama/qwen3").starts_with("> "), "{screen:#?}");
         assert!(row("2. ollama/qwen3").contains("✓ current"), "{screen:#?}");
         assert!(row("1. ollama/aaa-first").starts_with("  "), "{screen:#?}");
-        assert!(!row("1. ollama/aaa-first").contains("current"), "{screen:#?}");
+        assert!(
+            !row("1. ollama/aaa-first").contains("current"),
+            "{screen:#?}"
+        );
         // Catches: the session-only key explained only at the reasoning step.
         assert!(
             rows.join("\n").contains("s = this session only"),
@@ -4735,7 +4738,9 @@ fn typing_filters_the_model_list_while_digits_select_only_before_the_filter_star
         // Catches: type-to-search that takes digits before any filter exists.
         term.send(b"1");
         term.until("row 1 selected by number", |screen| {
-            screen.iter().any(|row| row.starts_with("> 1. ollama/aaa-first"))
+            screen
+                .iter()
+                .any(|row| row.starts_with("> 1. ollama/aaa-first"))
         });
 
         for key in [b"z", b"z", b"z"] {
@@ -4780,7 +4785,9 @@ fn a_filter_with_no_match_shows_an_empty_state_and_enter_does_nothing() {
         // A row selected before the filter emptied the list must not survive it.
         term.send(b"2");
         term.until("row 2 selected", |screen| {
-            screen.iter().any(|row| row.starts_with("> 2. ollama/qwen3"))
+            screen
+                .iter()
+                .any(|row| row.starts_with("> 2. ollama/qwen3"))
         });
         term.send(b"k");
         term.send(b"k");

@@ -523,7 +523,8 @@ fn banner_hints_list_the_hinted_keys_and_fit_without_dropping_one() {
             "/help",
         ] {
             assert!(
-                rows.iter().any(|row| row.split(" · ").any(|part| part == item)),
+                rows.iter()
+                    .any(|row| row.split(" · ").any(|part| part == item)),
                 "{item:?} missing or split at {width}:\n{rendered}"
             );
         }

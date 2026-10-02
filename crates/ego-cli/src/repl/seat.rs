@@ -1817,8 +1817,8 @@ mod question;
 
 #[cfg(test)]
 use action_execution::apply_surface_effect;
-pub(crate) use action_execution::{render_action_help, render_key_hints};
 use action_execution::surface_line;
+pub(crate) use action_execution::{render_action_help, render_key_hints};
 pub use edit_mode::SurfaceEditMode;
 pub(crate) use permission::Confirmation;
 #[cfg(test)]

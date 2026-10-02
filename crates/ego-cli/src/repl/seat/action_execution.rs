@@ -118,9 +118,7 @@ pub(crate) fn render_key_hints(registry: &ActionRegistry, width: usize) -> Strin
     let mut rows: Vec<String> = Vec::new();
     for item in items {
         match rows.last_mut() {
-            Some(row)
-                if crate::render::Line::plain(format!("{row} · {item}")).width() <= limit =>
-            {
+            Some(row) if crate::render::Line::plain(format!("{row} · {item}")).width() <= limit => {
                 row.push_str(" · ");
                 row.push_str(&item);
             }

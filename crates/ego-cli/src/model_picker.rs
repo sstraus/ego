@@ -357,10 +357,9 @@ impl ModelPicker {
             (PickerInput::Char('s' | 'S'), Some(ModalState::Reasoning { .. })) => {
                 PickerInput::SessionOnly
             }
-            (
-                PickerInput::Char(_) | PickerInput::Backspace,
-                Some(ModalState::Reasoning { .. }),
-            ) => return Ok(PickerInputOutcome::Consumed),
+            (PickerInput::Char(_) | PickerInput::Backspace, Some(ModalState::Reasoning { .. })) => {
+                return Ok(PickerInputOutcome::Consumed);
+            }
             (input, _) => input,
         };
         match self.modal.take().ok_or(PickerError::Closed)? {

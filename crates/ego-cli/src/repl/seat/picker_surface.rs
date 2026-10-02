@@ -36,12 +36,12 @@ pub(super) fn run_model_picker(
         );
         let line = answer(false, editor.read_line(&prompt));
         let inputs = match &line {
-            Line::HostCommand(HostCommand::ModelPicker(_)) => std::mem::take(
-                &mut status.lock().expect("surface status lock").picker_keys,
-            )
-            .iter()
-            .filter_map(|command| model_picker_input(command))
-            .collect(),
+            Line::HostCommand(HostCommand::ModelPicker(_)) => {
+                std::mem::take(&mut status.lock().expect("surface status lock").picker_keys)
+                    .iter()
+                    .filter_map(|command| model_picker_input(command))
+                    .collect()
+            }
             Line::HostCommand(_) => Vec::new(),
             Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => vec![PickerInput::Escape],
             Line::Blank | Line::Submitted(_) | Line::Refused(_) => Vec::new(),
