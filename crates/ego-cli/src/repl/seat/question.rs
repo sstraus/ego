@@ -1,5 +1,5 @@
-use super::*;
 use super::edit_mode::PICKER_KEYS;
+use super::*;
 use crate::render::osc::State;
 use std::io::Write as _;
 
