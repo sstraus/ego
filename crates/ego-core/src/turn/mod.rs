@@ -4776,7 +4776,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                             )
                                             .await?;
                                             return Ok(match denial {
-                                                PolicyDenied::Redirected { .. } => answered(false, denial.to_string()),
+                                                PolicyDenied::Redirected { .. } => {
+                                                    answered(false, denial.to_string())
+                                                }
                                                 denial => ToolOutcome::Refused { denial },
                                             });
                                         }
@@ -4845,7 +4847,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                     )
                                     .await?;
                                     return Ok(match denial {
-                                        PolicyDenied::Redirected { .. } => answered(false, denial.to_string()),
+                                        PolicyDenied::Redirected { .. } => {
+                                            answered(false, denial.to_string())
+                                        }
                                         denial => ToolOutcome::Refused { denial },
                                     });
                                 }

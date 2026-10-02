@@ -1108,9 +1108,11 @@ impl PolicyEngine {
         match self.classify(call) {
             Classification::Ask(mut pending) => {
                 let represent = |plan: Result<RememberPlan, _>| {
-                    plan.map_err(|error: crate::config::rule_management::RuleManagementError| {
-                        format!("this call cannot be represented by a persistent rule: {error}")
-                    })
+                    plan.map_err(
+                        |error: crate::config::rule_management::RuleManagementError| {
+                            format!("this call cannot be represented by a persistent rule: {error}")
+                        },
+                    )
                 };
                 let remember = represent(RuleManagement::remember(
                     &pending.call,

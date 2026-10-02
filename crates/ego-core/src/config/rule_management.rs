@@ -517,7 +517,9 @@ const LAUNCHERS: &[&str] = &[
 
 /// Programs whose first bare word selects what they do, so `git status *` is
 /// offered instead of `git *`.
-const SUBCOMMAND_PROGRAMS: &[&str] = &["git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh"];
+const SUBCOMMAND_PROGRAMS: &[&str] = &[
+    "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh",
+];
 
 /// The pattern text of the prefix rule for one argv, or `None` when the exact
 /// form must be kept: the program is a launcher, is not a bare command name
@@ -545,9 +547,9 @@ fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
 fn is_plain_word(word: &str) -> bool {
     !word.is_empty()
         && !word.starts_with('-')
-        && word
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '+' | '-'))
+        && word.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '+' | '-')
+        })
 }
 
 fn render_argv(argv: &[std::ffi::OsString]) -> Option<String> {

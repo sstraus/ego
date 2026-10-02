@@ -1968,12 +1968,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             pixel_height: 0,
         })
         .expect("resize");
-    until_from(
-        &reader,
-        &mut output,
-        resize_start,
-        b"[d] details",
-    );
+    until_from(&reader, &mut output, resize_start, b"[d] details");
     input.write_all(b"y").expect("immediate permission answer");
     input.flush().expect("permission answer flush");
     until(&reader, &mut output, b"NEWEST-DRAFT-RECEIVED");
@@ -2032,11 +2027,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     assert!(output.windows(8).any(|window| window == b"\x1b[?2004l"));
 
     let rendered = normalized(&output);
-    for fact in [
-        "Allow write ",
-        "✓ write notes.md",
-        "Risk: limited",
-    ] {
+    for fact in ["Allow write ", "✓ write notes.md", "Risk: limited"] {
         assert!(
             rendered.contains(fact),
             "permission presentation omitted {fact:?}: {rendered}"
@@ -5705,7 +5696,6 @@ fn exec_permission_is_a_compact_modal_and_the_detail_sits_behind_d() {
         .rposition(|line| line.contains("[d] details"))
         .expect("the key row");
     let modal = compact[first..=last].join("\n");
-    eprintln!("MODAL BEFORE d:\n{modal}");
     assert!(last - first < 4, "the modal is more than 4 rows:\n{modal}");
     assert!(modal.contains("Allow run seq 1 3?"), "{modal}");
     assert!(modal.contains("Risk: unknown - "), "{modal}");
@@ -5734,7 +5724,6 @@ fn exec_permission_is_a_compact_modal_and_the_detail_sits_behind_d() {
     session.press(b"d");
     session.wait("Parameters:");
     let details = session.screen().join("\n");
-    eprintln!("SCREEN AFTER d:\n{details}");
     for fact in [
         "Operations:",
         "- spawn",
@@ -5744,7 +5733,10 @@ fn exec_permission_is_a_compact_modal_and_the_detail_sits_behind_d() {
         "Parameters:",
         "\"argv\"",
     ] {
-        assert!(details.contains(fact), "{fact:?} missing after d:\n{details}");
+        assert!(
+            details.contains(fact),
+            "{fact:?} missing after d:\n{details}"
+        );
     }
 
     session.press(b"y");

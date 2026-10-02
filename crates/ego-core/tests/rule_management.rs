@@ -331,7 +331,10 @@ fn suggested_exec_rule_for_a_subcommand_program_keeps_the_subcommand() {
     let root = Path::new("/workspace");
     assert!(rules[0].matches(&exec_op(&["git", "commit", "-m", "y"]), root));
     assert!(!rules[0].matches(&exec_op(&["git", "push"]), root));
-    assert!(!rules[0].matches(&exec_op(&["git", "-c", "core.sshCommand=x", "commit"]), root));
+    assert!(!rules[0].matches(
+        &exec_op(&["git", "-c", "core.sshCommand=x", "commit"]),
+        root
+    ));
     assert_eq!(
         suggested(&exec_call(&["git", "-C", "..", "status"])),
         vec![rule("exec(git *)")],
@@ -364,7 +367,10 @@ fn suggested_exec_rule_falls_back_to_the_exact_form_for_launchers_and_metacharac
             .candidates;
         let rules = suggested(&call);
         assert_eq!(rules, exact, "{argv:?} was widened");
-        assert!(!rules[0].matches(&hostile, root), "{argv:?} authorises {hostile:?}");
+        assert!(
+            !rules[0].matches(&hostile, root),
+            "{argv:?} authorises {hostile:?}"
+        );
     }
 }
 

@@ -95,8 +95,12 @@ pub enum PermissionDecision {
     /// A refusal that carries the human's words. Unlike [`Self::Deny`], which
     /// ends the run, the call is answered with the instruction and the model
     /// continues.
-    DenyWithInstruction { instruction: String },
-    Amend { params: Value },
+    DenyWithInstruction {
+        instruction: String,
+    },
+    Amend {
+        params: Value,
+    },
 }
 
 /// The final party in the permission order, called only after the turn has
