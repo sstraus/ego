@@ -66,7 +66,7 @@ fn transcript(case: &str, answer: Option<&str>) -> String {
             .args(["--model", "ollama/qwen3", "--sandbox", "off"])
             .run_pty_trusting(answer.unwrap_or("yes"), "hello")
             .stdout;
-        readable(&raw.replace(&root, "<workspace>"))
+        redact_session_id(&readable(&raw.replace(&root, "<workspace>")))
     };
     let first = launch(places.ego(&stub));
     // The second launch is where a remembered answer proves itself, so both
@@ -74,6 +74,23 @@ fn transcript(case: &str, answer: Option<&str>) -> String {
     // that asks every time.
     let second = launch(places.ego(&stub));
     format!("# {case}: first launch\n{first}\n# {case}: next launch\n{second}")
+}
+
+/// The resume hint names a session id minted per run, so the golden carries a
+/// placeholder in its place. Without it every run would differ from the file.
+fn redact_session_id(text: &str) -> String {
+    const HINT: &str = "ego resume ";
+    const ID_LEN: usize = "0198c7f4-9c1f-7a2b-8c3d-4e5f60718293".len();
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(HINT) {
+        let id_start = at + HINT.len();
+        out.push_str(&rest[..id_start]);
+        out.push_str("<session>");
+        rest = &rest[(id_start + ID_LEN).min(rest.len())..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Strip the terminal's own bookkeeping and collapse repaints.
@@ -239,6 +256,16 @@ fn readable_discards_reply_row_repaints_but_keeps_the_answer() {
     // a timed thinking row, and a busy composer before the answer arrives.
     let raw = "hello> hello\r\n◐ thinking for 0s — Esc cancels\r\n◓ thinking for 1s — Esc cancels\r\nEsc cancels | >\r\na launch transcript\r\n";
     assert_eq!(readable(raw), "hello\na launch transcript\n");
+}
+
+#[test]
+fn redact_session_id_replaces_only_the_id_after_the_resume_hint() {
+    assert_eq!(
+        redact_session_id(
+            "εgo: To resume: ego resume 0198c7f4-9c1f-7a2b-8c3d-4e5f60718293\nid 0198c7f4-9c1f-7a2b-8c3d-4e5f60718293\n"
+        ),
+        "εgo: To resume: ego resume <session>\nid 0198c7f4-9c1f-7a2b-8c3d-4e5f60718293\n"
+    );
 }
 
 #[test]
