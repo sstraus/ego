@@ -4487,3 +4487,168 @@ mod secret_mask_critic_round_five {
         }
     }
 }
+
+#[cfg(test)]
+mod secret_mask_critic_round_six {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn detail(cause: &str) -> String {
+        bounded_detail(cause).unwrap_or_default()
+    }
+
+    fn assert_hidden(cause: &str, secret: &str) {
+        let out = detail(cause);
+        assert!(
+            !out.contains(secret),
+            "{cause:?} leaked {secret:?}: {out:?}"
+        );
+    }
+
+    #[test]
+    fn record_marker_survives_brackets_inside_unmasked_strings() {
+        // catches: the record depth counting the `(` `)` `}` of a plain text member between
+        // `name` and `value`, so the marker is disarmed (or the value looks nested) and the
+        // value of `{"name":"x-api-key","hint":")","value":"X"}` is published.
+        for (cause, secret) in [
+            (
+                r#"{"name":"x-api-key","hint":"(","value":"LEAKH1"}"#,
+                "LEAKH1",
+            ),
+            (
+                r#"{"name":"authorization","note":"see )","value":"Bearer LEAKH2"}"#,
+                "LEAKH2",
+            ),
+            (
+                r#"Header { name: "x-api-key", hint: "}", value: "LEAKH3" }"#,
+                "LEAKH3",
+            ),
+            (
+                r#"{"name":"x-api-key","hint":":)","value":"LEAKH4"}"#,
+                "LEAKH4",
+            ),
+        ] {
+            assert_hidden(cause, secret);
+        }
+    }
+
+    #[test]
+    fn bracket_value_with_a_string_ending_in_an_escaped_backslash_is_masked_whole() {
+        // catches: `bracket_end` closing a plain string only on a quote with no backslash before
+        // it, so `"C:\\"` (a path ending in an escaped backslash, as Rust Debug and JSON print
+        // it) leaves the string open, flips the string parity and ends the secret object at a
+        // bracket that sits inside a later string, publishing the members after it.
+        for (cause, secret) in [
+            (
+                r#"token: {"dir":"C:\\","note":"}","pw":"LEAKB1"} done"#,
+                "LEAKB1",
+            ),
+            (
+                r#"token: {'dir': 'C:\\', 'note': ']', 'pw': 'LEAKB2'} done"#,
+                "LEAKB2",
+            ),
+        ] {
+            let out = detail(cause);
+            assert!(!out.contains(secret), "{cause:?} leaked {secret:?}: {out:?}");
+            assert!(out.ends_with("done"), "{cause:?} lost its tail: {out:?}");
+        }
+    }
+
+    #[test]
+    fn prefixed_secret_name_arms_the_value_member() {
+        // catches: `names_secret` stopping at the `b`/`u` of `b'x-api-key'`, so a Python repr
+        // record `{'name': b'x-api-key', 'value': b'X'}` is not recognised and the value leaks.
+        for (cause, secret) in [
+            (r#"{'name': b'x-api-key', 'value': b'LEAKP1'}"#, "LEAKP1"),
+            (r#"{'name': u'x-api-key', 'value': u'LEAKP2'}"#, "LEAKP2"),
+            (r#"Header(name=b'x-api-key', value=b'LEAKP3')"#, "LEAKP3"),
+        ] {
+            assert_hidden(cause, secret);
+        }
+    }
+
+    #[test]
+    fn two_letter_prefixes_and_a_blank_before_the_prefix_still_open_a_tuple() {
+        // catches: the prefix strip handling one letter only (`rb'..'`, `Rb".."`) or running after
+        // the blank trim (`( b'..'`), so those header tuples fall back to text and leak.
+        for (cause, secret) in [
+            (r#"[(rb'x-api-key', rb'LEAKT1')]"#, "LEAKT1"),
+            (r#"[(Rb"authorization", Rb"Bearer LEAKT2")]"#, "LEAKT2"),
+            (r#"[( b'x-api-key', b'LEAKT3' )]"#, "LEAKT3"),
+        ] {
+            assert_hidden(cause, secret);
+        }
+    }
+
+    #[test]
+    fn a_nested_value_member_of_a_secret_record_is_kept_and_the_record_value_is_masked() {
+        // catches: the record marker masking the first `value` it meets at any depth, which
+        // would blank `schema.value` and leave the real `value` after it public.
+        assert_eq!(
+            detail(r#"{"name":"x-api-key","schema":{"value":"public"},"value":"LEAK"}"#),
+            r#"{"name":"x-api-key","schema":{"value":"public"},"value":***}"#
+        );
+    }
+
+    #[test]
+    fn every_new_rule_is_linear_on_100k_adversarial_chars() {
+        // catches: a look-behind or look-ahead of the round-six rules (backslash runs after
+        // `name:`, tuple heads, record markers, string-aware brackets, string prefixes) that
+        // rescans the same span at every separator.
+        let n = 100_000;
+        let cases = [
+            ("name then backslash run", format!("name:{}", "\\".repeat(n))),
+            (
+                "key separators each followed by a backslash",
+                "key:\\".repeat(n / 5),
+            ),
+            (
+                "plain quote around backslash pairs",
+                format!("password=\"{}\"", "\\\\".repeat(n / 2)),
+            ),
+            (
+                "escaped quote runs never closed",
+                format!("password=\\\"{}", "\\\\\\\"".repeat(n / 4)),
+            ),
+            (
+                "records armed and consumed",
+                r#"{"name":"token","value":1}"#.repeat(n / 26),
+            ),
+            (
+                "records armed and never closed",
+                r#"{"name":"token","#.repeat(n / 16),
+            ),
+            ("unquoted records", "name=token value=".repeat(n / 17)),
+            ("spaced prefixed tuple heads", "( b'a', ".repeat(n / 8)),
+            ("prefixed secret tuple heads", "(b'token', ".repeat(n / 11)),
+            (
+                "long prefixed name before a comma",
+                format!("(b'{}', x", "a".repeat(n)),
+            ),
+            (
+                "bracket value with escaped quote runs",
+                format!("token=[{}", "\\\"".repeat(n / 2)),
+            ),
+            (
+                "bracket value with both quote kinds",
+                format!("token=[{}", "\"'".repeat(n / 2)),
+            ),
+            (
+                "bracket value with backslash runs in a string",
+                format!("token=[\"{}\"]", "\\\\".repeat(n / 2)),
+            ),
+            ("string prefixes", "password=bb'".repeat(n / 12)),
+            ("nested secret brackets", "token=[".repeat(n / 7)),
+        ];
+        for (label, cause) in cases {
+            let started = Instant::now();
+            let _ = bounded_detail(&cause);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(3),
+                "{label}: {elapsed:?} for {} chars",
+                cause.len()
+            );
+        }
+    }
+}
