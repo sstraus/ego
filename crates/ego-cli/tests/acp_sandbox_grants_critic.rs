@@ -171,3 +171,76 @@ fn a_session_answer_does_not_cover_another_session_of_the_same_connection() {
         "session two read a path that only session one was allowed"
     );
 }
+
+/// Catches: `end_session` is wired to `session/load` but not to `session/resume`
+/// (or only to close), so a session answer survives a close followed by a resume
+/// of the same id, which resets the exec session approval.
+#[test]
+fn a_session_answer_ends_when_the_session_is_closed_and_resumed() {
+    let places = Places::new();
+    configure(&places);
+    let (_keep, file) = outside_file();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            cat_call("first", &file),
+            Reply::Sse(text("first done")),
+            cat_call("second", &file),
+            Reply::Sse(text("second done")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    host.initialize();
+    let workspace = places.workspace_path().to_str().expect("UTF-8 root");
+    let session = host.new_session(workspace);
+
+    let first = prompt(&mut host, &session);
+    let question = sandbox_question(&mut host, first).expect("the first read is refused");
+    answer(&mut host, &question, "sandbox-session");
+    finish(&mut host, first);
+
+    let closed = host.request("session/close", serde_json::json!({"sessionId": session}));
+    assert!(closed["result"].is_object(), "{closed}");
+    let resumed = host.request(
+        "session/resume",
+        serde_json::json!({"sessionId": session, "cwd": workspace, "mcpServers": []}),
+    );
+    assert!(resumed["result"].is_object(), "{resumed}");
+
+    let second = prompt(&mut host, &session);
+    assert!(
+        sandbox_question(&mut host, second).is_some(),
+        "the session answer outlived the session it was given in"
+    );
+}
+
+/// Catches: the question shows a command other than the one that re-runs (the
+/// argv is paraphrased, reordered or cut), so the person approves a different
+/// command from the one executed.
+#[test]
+fn the_question_shows_the_exact_command_that_runs_again() {
+    let places = Places::new();
+    configure(&places);
+    let (_keep, file) = outside_file();
+    let stub = Stub::start(Plan {
+        completions: vec![cat_call("first", &file), Reply::Sse(text("first done"))],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    host.initialize();
+    let workspace = places.workspace_path().to_str().expect("UTF-8 root");
+    let session = host.new_session(workspace);
+
+    let first = prompt(&mut host, &session);
+    let question = sandbox_question(&mut host, first).expect("the first read is refused");
+    let shown = title(&question);
+    assert!(
+        shown.ends_with(&format!(
+            "This command will run again:\n/bin/cat {}",
+            file.display()
+        )),
+        "{shown}"
+    );
+    answer(&mut host, &question, "sandbox-deny");
+    finish(&mut host, first);
+}

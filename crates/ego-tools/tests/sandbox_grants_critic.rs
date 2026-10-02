@@ -40,6 +40,7 @@ struct Seat {
     allow: fn(&SandboxGrant) -> bool,
     asked: Mutex<Vec<SandboxGrant>>,
     granted: Mutex<Vec<SandboxGrant>>,
+    commands: Mutex<Vec<String>>,
 }
 
 impl Seat {
@@ -48,7 +49,13 @@ impl Seat {
             allow,
             asked: Mutex::default(),
             granted: Mutex::default(),
+            commands: Mutex::default(),
         })
+    }
+
+    /// The command line each question showed the person.
+    fn commands(&self) -> Vec<String> {
+        self.commands.lock().unwrap().clone()
     }
 
     fn asked(&self) -> Vec<SandboxGrant> {
@@ -75,6 +82,11 @@ impl SandboxGrantPort for Seat {
             self.granted.lock().unwrap().push(request.clone());
         }
         Box::pin(async move { yes })
+    }
+
+    fn ask_for<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool> {
+        self.commands.lock().unwrap().push(command.to_owned());
+        self.ask(request)
     }
 }
 
@@ -485,6 +497,215 @@ mod seatbelt {
             !note_of(&outcome).contains("no one was available"),
             "the person answered all three questions: {}",
             note_of(&outcome)
+        );
+    }
+}
+
+// ---- round 2 -------------------------------------------------------------
+
+/// Catches: the component-wise argv gate drops the `--flag=/path` spelling, so a
+/// genuine refusal of `--out=/outside/f` is never put to the person.
+#[test]
+fn a_flag_value_path_on_the_command_line_is_a_question_for_that_path() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let target = write_file(&fixture.outside.join("f"), "x");
+    let mut flag = OsString::from("--out=");
+    flag.push(target.as_os_str());
+    let _ = fixture.run(vec![
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from(
+            "p=${0#--out=}; printf '%s: Operation not permitted\\n' \"$p\" >&2; exit 1",
+        ),
+        flag,
+    ]);
+    assert_eq!(fixture.seat.asked_paths(), vec![target]);
+}
+
+/// Catches: a symlink on the command line is compared by spelling, so a refusal
+/// printed below the link's target (the path the sandbox actually checks) is not
+/// recognised as named by the command line.
+#[test]
+fn a_symlinked_command_line_path_anchors_the_files_below_its_target() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let real = fixture.outside.join("real");
+    let target = write_file(&real.join("f"), "x");
+    let link = fixture.outside.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let _ = fixture.sh(
+        "printf '%s/f: Operation not permitted\\n' \"$0\" >&2; exit 1",
+        &[&link],
+    );
+    assert_eq!(fixture.seat.asked_paths(), vec![target]);
+}
+
+/// Catches: `..` segments and a trailing slash in the command-line spelling are
+/// compared literally, so the same directory spelled `sub/../real/` does not
+/// anchor `real/f`.
+#[test]
+fn dotdot_and_trailing_slash_spellings_anchor_the_same_directory() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let target = write_file(&fixture.outside.join("real/f"), "x");
+    std::fs::create_dir_all(fixture.outside.join("sub")).expect("sub");
+    let mut spelled = fixture.outside.join("sub/../real").into_os_string();
+    spelled.push("/");
+    let _ = fixture.sh(
+        "printf '%sf: Operation not permitted\\n' \"$0\" >&2; exit 1",
+        &[Path::new(&spelled)],
+    );
+    assert_eq!(fixture.seat.asked_paths(), vec![target]);
+}
+
+/// Catches: a command line that names only `/` anchors every path on the machine
+/// (`path.is_or_under("/")`), so the "the command line named it" gate is empty
+/// for `ls /` and a forged refusal of any outside file becomes a question.
+#[test]
+fn a_command_line_naming_only_the_filesystem_root_does_not_anchor_other_paths() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let target = write_file(&fixture.outside.join("f"), "x");
+    let script = format!(
+        "printf '%s: Operation not permitted\\n' '{}' >&2; exit 1",
+        target.display()
+    );
+    let _ = fixture.sh(&script, &[Path::new("/")]);
+    assert!(
+        fixture.seat.asked().is_empty(),
+        "`/` on the command line does not name {}: {:?}",
+        target.display(),
+        fixture.seat.asked()
+    );
+}
+
+/// Catches: the same hole through the home directory: a symlink spelled on the
+/// command line that resolves to HOME anchors everything below HOME (`.ssh`,
+/// `Library`), though the person approved a command about a workspace link.
+#[test]
+fn a_command_line_path_that_resolves_to_home_does_not_anchor_files_below_it() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let home = std::fs::canonicalize(std::env::var_os("HOME").expect("HOME")).expect("home");
+    let below = home.join("Library");
+    if !below.exists() {
+        return;
+    }
+    let link = fixture.workspace.as_path().join("h");
+    std::os::unix::fs::symlink(&home, &link).expect("symlink");
+    let script = format!(
+        "printf '%s: Operation not permitted\\n' '{}' >&2; exit 1",
+        below.display()
+    );
+    let _ = fixture.sh(&script, &[&link]);
+    assert!(
+        fixture.seat.asked().is_empty(),
+        "asked about {} because a link to HOME was on the command line: {:?}",
+        below.display(),
+        fixture.seat.asked()
+    );
+}
+
+/// Catches: HOME, an ancestor of HOME, or `/`, reached through a symlink spelled
+/// on the command line and printed back, escapes the too-broad rule, which only
+/// looks at the printed spelling.
+#[test]
+fn symlinks_to_home_its_parent_and_root_are_never_asked() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let home = std::fs::canonicalize(std::env::var_os("HOME").expect("HOME")).expect("home");
+    let parent = home.parent().expect("home parent").to_path_buf();
+    for (name, to) in [("home", home.clone()), ("up", parent), ("root", "/".into())] {
+        let link = fixture.outside.join(name);
+        std::os::unix::fs::symlink(&to, &link).expect("symlink");
+        let _ = fixture.sh(FORGE_PATH_FROM_ARG, &[&link]);
+    }
+    assert!(
+        fixture.seat.asked().is_empty(),
+        "asked to open a location at or above HOME: {:?}",
+        fixture.seat.asked()
+    );
+}
+
+/// Catches: a stored grant that the profile cannot express (a hand-edited or
+/// older ledger entry with a control character) makes `render` fail on every
+/// command of the workspace, not just the grant's own path.
+#[test]
+fn a_stored_grant_the_profile_cannot_render_does_not_break_every_command() {
+    let seat = Seat::new(no);
+    seat.granted
+        .lock()
+        .unwrap()
+        .push(SandboxGrant::new(CanonPath::new("/opt/a\tb"), SandboxAccess::Read));
+    let Some(fixture) = open(Confinement::Workspace, seat) else {
+        return;
+    };
+    let outcome = fixture.run(vec![OsString::from("/usr/bin/true")]);
+    assert!(outcome.is_ok(), "a harmless command failed: {outcome:?}");
+}
+
+fn is_bare_word(command: &str, token: &str) -> bool {
+    command.split(' ').any(|word| word == token)
+}
+
+/// Catches: an argument with shell metacharacters but no whitespace is shown bare,
+/// so the person reads `echo a;b` as two commands (or `$HOME`/`*` as expanded)
+/// although the exec runs one program with those literal arguments.
+#[test]
+fn arguments_a_shell_would_reinterpret_are_quoted_in_the_question() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let target = write_file(&fixture.outside.join("f"), "x");
+    let _ = fixture.run(vec![
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("printf '%s: Operation not permitted\\n' \"$5\" >&2; exit 1"),
+        OsString::from("a;b"),
+        OsString::from("$HOME"),
+        OsString::from("*"),
+        OsString::from("x\\y"),
+        OsString::from("(z)"),
+        target.into_os_string(),
+    ]);
+    let commands = fixture.seat.commands();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    for token in ["a;b", "$HOME", "*", "x\\y", "(z)"] {
+        assert!(
+            !is_bare_word(&commands[0], token),
+            "{token} is shown unquoted: {}",
+            commands[0]
+        );
+    }
+}
+
+/// Catches: the command line is cut at a fixed length, so a long `sh -c` script (or
+/// the arguments after it) is hidden and the person approves re-running a command
+/// they could not read. Either the whole command is shown or no question is asked.
+#[test]
+fn a_question_never_hides_the_end_of_the_command_it_re_runs() {
+    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+        return;
+    };
+    let target = write_file(&fixture.outside.join("f"), "x");
+    let script = format!(
+        "# {}\nprintf '%s: Operation not permitted\\n' \"$0\" >&2; exit 1 # END_OF_SCRIPT",
+        "x".repeat(900)
+    );
+    let _ = fixture.sh(&script, &[&target]);
+    for command in fixture.seat.commands() {
+        assert!(
+            command.contains("END_OF_SCRIPT") && command.contains(&*target.to_string_lossy()),
+            "the person was asked about a command they could not read to the end: {} chars, ends {:?}",
+            command.len(),
+            command.chars().rev().take(20).collect::<String>().chars().rev().collect::<String>()
         );
     }
 }
