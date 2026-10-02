@@ -14,6 +14,10 @@ pub mod selector;
 pub mod status;
 pub mod surface;
 
+/// What Esc leaves in the transcript, whether it stopped a turn or answered a
+/// permission modal.
+pub(crate) const INTERRUPTED_RECEIPT: &str = "Interrupted by user";
+
 pub(crate) use policy_controls::PermissionRuleApplication;
 pub(crate) use seat::Confirmation;
 pub(crate) use seat::effective_statusline_segments;

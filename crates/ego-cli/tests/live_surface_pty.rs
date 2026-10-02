@@ -3382,6 +3382,85 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     );
 }
 
+/// catches: Esc on the permission modal leaving no receipt, or two.
+#[test]
+fn esc_on_the_permission_modal_denies_the_call_and_leaves_one_receipt() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "slow-exec",
+                "exec",
+                r#"{"argv":["/bin/echo","denied-probe"],"cwd":null,"timeout_ms":15000}"#,
+            )),
+            Reply::Sse(text("AFTER-DENIAL")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((40, 100)),
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"run a tool\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    drain_until_quiet(&reader, &mut output);
+    let escaped = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, escaped, "Interrupted by user");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(40, 100, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "one receipt: {visible:?}"
+    );
+    assert!(
+        !visible.contains("denied-probe\n"),
+        "the call ran: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+}
+
 #[test]
 fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
     let finished = Ego::nowhere()

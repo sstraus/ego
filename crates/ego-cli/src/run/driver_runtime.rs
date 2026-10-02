@@ -1886,7 +1886,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 && !cancel.is_cancelled()
                             {
                                 diagnostics.note(&format!(
-                                    "Interrupted by user after {:.1}s",
+                                    "{} after {:.1}s",
+                                    repl::INTERRUPTED_RECEIPT,
                                     turn_started.elapsed().as_secs_f64()
                                 ));
                             }

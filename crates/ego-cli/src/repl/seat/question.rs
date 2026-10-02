@@ -305,10 +305,12 @@ pub(super) fn answer_control(
                         }
                         None => continue,
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         break PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         break PermissionDecision::Deny;
                     }
                     Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
