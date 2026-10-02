@@ -197,7 +197,9 @@ fn exec_target(spec: &SpawnSpec) -> Option<PathBuf> {
 
 /// The command line as the person reads it, whole: the person approves the
 /// re-run on this text, so no part of it is cut. An argument with any
-/// character a shell would read as more than a word is single-quoted.
+/// character a shell would read as more than a word is single-quoted, and a
+/// control or bidirectional-control character is spelled `\u{..}` so a host
+/// terminal can neither act on it nor reorder the text around it.
 pub(super) fn command_line(spec: &SpawnSpec) -> String {
     spec.argv()
         .iter()
@@ -208,13 +210,30 @@ pub(super) fn command_line(spec: &SpawnSpec) -> String {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
             if plain {
-                argument.into_owned()
-            } else {
-                format!("'{}'", argument.replace('\'', "'\\''"))
+                return argument.into_owned();
             }
+            let mut quoted = String::with_capacity(argument.len() + 2);
+            quoted.push('\'');
+            for c in argument.chars() {
+                match c {
+                    '\'' => quoted.push_str("'\\''"),
+                    c if c.is_control() || is_bidi_control(c) => {
+                        quoted.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+                    }
+                    c => quoted.push(c),
+                }
+            }
+            quoted.push('\'');
+            quoted
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Embeddings, overrides and isolates (U+202A-202E, U+2066-2069) and the
+/// directional marks (U+200E, U+200F, U+061C).
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{61c}')
 }
 
 /// How a refused command ended, for the note appended to its output.
