@@ -23,7 +23,7 @@ use ego_core::endpoint::Admitted;
 use ego_core::event::domain::CancelCause;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::mcp::McpRuntimeBinding;
-use ego_core::permit::{CanonPath, Confinement, ExecObservation, RunConfinement};
+use ego_core::permit::{CanonPath, Confinement, ExecObservation, RunConfinement, SpawnSpec};
 use ego_core::run::RunRoot;
 use ego_core::run::{RunController, RunRetention, RunTermination};
 use ego_core::session_lifecycle::{SessionLifecycle, SessionRunLifecycle};
@@ -31,7 +31,7 @@ use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::{AdmittedToolSource, CancelToken, CapturedToolCatalogue, ToolCatalogueError};
 use ego_mcp::{
     MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT, McpAcpEffects,
-    McpDuplexEffectsFactory, McpEnvironmentBinding, McpHeaderBinding, McpHttpEffects,
+    McpDuplexEffects, McpDuplexEffectsFactory, McpEnvironmentBinding, McpError, McpFailure, McpHeaderBinding, McpHttpEffects,
     McpRegistryCandidate, McpRegistryRefresh, McpRegistryRuntime, McpServerAdmission,
     McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
@@ -60,8 +60,6 @@ use crate::{run, session};
 /// cancelled when the session closes, so no process outlives its session.
 struct SessionMcpScope {
     confinement: Confinement,
-    /// Whether stdio servers run in this scope, so the pick cannot move.
-    pins_confinement: bool,
     cancel: CancelToken,
     _effects: CommandHttpScope,
 }
@@ -71,7 +69,6 @@ impl SessionMcpScope {
         root: &RunRoot,
         confinement: Confinement,
         observation: Option<&ExecObservation>,
-        pins_confinement: bool,
     ) -> Result<Self, McpSessionAdmissionError> {
         let cancel = CancelToken::new();
         let run_confinement =
@@ -87,7 +84,6 @@ impl SessionMcpScope {
                 })?;
         Ok(Self {
             confinement,
-            pins_confinement,
             cancel,
             _effects: effects,
         })
@@ -103,6 +99,23 @@ impl SessionMcpScope {
 impl Drop for SessionMcpScope {
     fn drop(&mut self) {
         self.cancel.cancel(CancelCause::Host);
+    }
+}
+
+/// The stdio side of a session that supplied no stdio server: every attempt
+/// to start a process is refused.
+struct NoStdioEffects;
+
+impl McpDuplexEffectsFactory for NoStdioEffects {
+    fn create(
+        &self,
+        _server: McpServerName,
+        _spec: SpawnSpec,
+    ) -> Result<Box<dyn McpDuplexEffects>, McpError> {
+        Err(McpError::new(
+            McpFailure::Authority,
+            "this session did not supply a stdio MCP server",
+        ))
     }
 }
 
@@ -171,10 +184,7 @@ impl SessionMcpAdmission for AcpSessionMcpAdmission {
     }
 
     fn pinned_confinement(&self) -> Option<Confinement> {
-        self.scope
-            .as_ref()
-            .filter(|scope| scope.pins_confinement)
-            .map(|scope| scope.confinement)
+        self.scope.as_ref().map(|scope| scope.confinement)
     }
 
     fn cancel_active(&self) {
@@ -692,15 +702,24 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                 // Stdio discovery starts processes, so it runs in a scope
                 // confined as the session's own pick, never the online one
                 // the HTTP management shares.
-                let pick = context.confinement.as_ref();
-                let scope = SessionMcpScope::open(
-                    &context.root,
-                    pick.map_or(Confinement::Off, |pick| pick.level),
-                    pick.and_then(|pick| pick.observation.as_ref()),
-                    has_stdio,
-                )
-                .await?;
-                let stdio_management = scope.stdio_management();
+                // A session with no stdio server starts no process, so it
+                // neither measures nor pins a confinement.
+                let scope = if has_stdio {
+                    let pick = context.confinement.as_ref();
+                    Some(
+                        SessionMcpScope::open(
+                            &context.root,
+                            pick.map_or(Confinement::Off, |pick| pick.level),
+                            pick.and_then(|pick| pick.observation.as_ref()),
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let stdio_management = scope
+                    .as_ref()
+                    .map_or_else(|| Arc::new(NoStdioEffects) as Arc<dyn McpDuplexEffectsFactory>, SessionMcpScope::stdio_management);
                 let runtime = Arc::new(
                     McpRegistryRuntime::new_with_acp(
                         registry_journal,
@@ -738,7 +757,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                     runtime,
                     storage,
                     acp_effects,
-                    Some(scope),
+                    scope,
                 )) as Arc<dyn SessionMcpAdmission>))
             }
             .await;
@@ -1051,6 +1070,21 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                 RunEffectPorts::diagnostic_capabilities(&policy, cancel, ExecLimits::default())
                     .await,
             );
+        });
+    }
+
+    // The first session of a connection should find its sandbox already
+    // measured: start every offered measurement now, while the host is still
+    // initializing, instead of when its first `session/new` arrives.
+    {
+        let cancel = mcp_cancel.clone();
+        let warm_root = root.as_path().to_path_buf();
+        tokio::spawn(async move {
+            if let Err(error) =
+                crate::acp_confinement::warm_process_cache(ceiling, cancel, &warm_root).await
+            {
+                tracing::debug!(%error, "the ACP confinement warm-up did not finish");
+            }
         });
     }
 

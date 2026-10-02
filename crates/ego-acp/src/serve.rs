@@ -1518,6 +1518,7 @@ fn unsupported_block(what: &str) -> String {
 /// resume path.
 async fn hold<const RELEASE: bool>(
     lifecycle: Option<&dyn LifecycleOperations>,
+    unadmitted: &UnadmittedSessions,
     request: &AcpHoldRequest<RELEASE>,
     responder: Responder<serde_json::Value>,
 ) -> Result<(), Error> {
@@ -1549,6 +1550,9 @@ async fn hold<const RELEASE: bool>(
             );
         }
     };
+    if let Err(error) = unadmitted.refuse(session) {
+        return responder.respond_with_error(error);
+    }
     let outcome = if RELEASE {
         lifecycle.release(session, request_id).await
     } else {
@@ -1926,6 +1930,13 @@ impl Drop for UnadmittedSession {
     }
 }
 
+/// Whether admitting these servers starts a local process.
+fn spawns_process(servers: &[v1::McpServer]) -> bool {
+    servers
+        .iter()
+        .any(|server| matches!(server, v1::McpServer::Stdio(_)))
+}
+
 /// Admit the MCP servers a session request supplied.
 ///
 /// The caller has already measured the session's confinement: admission starts
@@ -1943,7 +1954,7 @@ async fn admit_session_mcp(
     if servers.is_empty() {
         return Ok(None);
     }
-    let confinement = match controls {
+    let confinement = match controls.filter(|_| spawns_process(&servers)) {
         Some(controls) => {
             let state = controls
                 .state(session)
@@ -2546,9 +2557,17 @@ where
                     // session's measured confinement: measure first, admit
                     // after, and take the session back if either refuses so a
                     // refused request leaves no empty session behind.
+                    // Only a server that starts a process needs the measurement
+                    // before admission; the others keep the deferred offer.
                     let admits_mcp = !request.mcp_servers.is_empty();
+                    let measures_first = spawns_process(&request.mcp_servers);
                     let mcp = if admits_mcp {
-                        let admitted = match initialize_confinement(confinement.as_ref(), session, &root).await {
+                        let measured = if measures_first {
+                            initialize_confinement(confinement.as_ref(), session, &root).await
+                        } else {
+                            Ok(())
+                        };
+                        let admitted = match measured {
                             Ok(()) => admit_session_mcp(
                                 mcp_admitter.as_ref(),
                                 request.mcp_servers,
@@ -2571,7 +2590,7 @@ where
                     } else {
                         None
                     };
-                    let pending_measurement = (!admits_mcp)
+                    let pending_measurement = (!measures_first)
                         .then(|| {
                             confinement
                                 .as_ref()
@@ -2660,21 +2679,35 @@ where
                         Ok(root) => root,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
-                    let cursor = match request.cursor.map(SessionCursor::parse).transpose() {
+                    let mut cursor = match request.cursor.map(SessionCursor::parse).transpose() {
                         Ok(cursor) => cursor,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
-                    let page = match lifecycle.list(cursor.as_ref(), root.as_ref().map(RunRoot::as_path)) {
-                        Ok(page) => page,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                    // A hidden session is filtered out of its page, so keep
+                    // reading pages until the response holds as many rows as
+                    // a full page, and the cursor always names the last row
+                    // read: no visible row is skipped or left behind.
+                    let mut visible = Vec::new();
+                    let mut wanted = None;
+                    let next_cursor = loop {
+                        let page = match lifecycle.list(cursor.as_ref(), root.as_ref().map(RunRoot::as_path)) {
+                            Ok(page) => page,
+                            Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                        };
+                        let wanted = *wanted.get_or_insert(page.items.len());
+                        visible.extend(page.items.into_iter().filter(|meta| !unadmitted.contains(meta.id)));
+                        match page.next_cursor {
+                            Some(next) if visible.len() < wanted => cursor = Some(next),
+                            next => break next,
+                        }
                     };
-                    let items = page.items.into_iter().filter(|meta| !unadmitted.contains(meta.id)).map(|meta| {
+                    let items = visible.into_iter().map(|meta| {
                         lifecycle.hold(meta.id).map(|hold| session_info(meta, hold))
                     }).collect::<Result<Vec<_>, _>>();
                     match items {
                         Ok(items) => responder.respond(
                             v1::ListSessionsResponse::new(items)
-                                .next_cursor(page.next_cursor.map(|cursor| cursor.to_string())),
+                                .next_cursor(next_cursor.map(|cursor| cursor.to_string())),
                         ),
                         Err(error) => responder.respond_with_error(lifecycle_error(&error)),
                     }
@@ -3097,11 +3130,13 @@ where
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
                 let bindings_builder = Arc::clone(&bindings_builder);
+                let unadmitted = unadmitted.clone();
                 let notices = notices.clone();
                 async move |request: v1::DeleteSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
                     let bindings_builder = Arc::clone(&bindings_builder);
+                    let unadmitted = unadmitted.clone();
                     let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
@@ -3112,6 +3147,9 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(id) {
+                        return responder.respond_with_error(error);
+                    }
                     match lifecycle.delete(id).await {
                         Ok(()) => {
                             if let Some(mcp) = sessions.close(&request.session_id) {
@@ -3133,11 +3171,13 @@ where
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
                 let bindings_builder = Arc::clone(&bindings_builder);
+                let unadmitted = unadmitted.clone();
                 let notices = notices.clone();
                 async move |request: v1::CloseSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
                     let bindings_builder = Arc::clone(&bindings_builder);
+                    let unadmitted = unadmitted.clone();
                     let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
@@ -3148,6 +3188,9 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(id) {
+                        return responder.respond_with_error(error);
+                    }
                     match lifecycle.close(id).await {
                         Ok(()) => {
                             if let Some(mcp) = sessions.close(&request.session_id) {
@@ -3210,6 +3253,7 @@ where
         .on_receive_request(
             {
                 let sessions = sessions.clone();
+                let unadmitted = unadmitted.clone();
                 let controller = Arc::clone(&controller);
                 let spawner = Arc::clone(&spawner);
                 let ids = Arc::clone(&ids);
@@ -3225,6 +3269,9 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(durable_session) {
+                        return responder.respond_with_error(error);
+                    }
                     // Serialized, so a numeric `41` and a string `"41"` stay
                     // two different requests exactly as JSON-RPC says they are.
                     let command = serde_json::to_string(responder.id())
@@ -3561,10 +3608,12 @@ where
         .on_receive_request(
             {
                 let compaction = compaction.clone();
+                let unadmitted = unadmitted.clone();
                 move |request: AcpCompactRequest,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let compaction = compaction.clone();
+                    let unadmitted = unadmitted.clone();
                     async move {
                     let Some(compaction) = compaction else {
                         return responder.respond_with_error(Error::method_not_found());
@@ -3590,6 +3639,9 @@ where
                             );
                         }
                     };
+                    if let Err(error) = unadmitted.refuse(source) {
+                        return responder.respond_with_error(error);
+                    }
                     match compaction
                         .compact(CompactionTransitionRequest { request_id, source })
                         .await
@@ -3613,11 +3665,13 @@ where
         .on_receive_request(
             {
                 let lifecycle = lifecycle.clone();
+                let unadmitted = unadmitted.clone();
                 move |request: AcpHoldRequest<false>,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let lifecycle = lifecycle.clone();
-                    async move { hold(lifecycle.as_deref(), &request, responder).await }
+                    let unadmitted = unadmitted.clone();
+                    async move { hold(lifecycle.as_deref(), &unadmitted, &request, responder).await }
                 }
             },
             on_receive_request!(),
@@ -3625,11 +3679,13 @@ where
         .on_receive_request(
             {
                 let lifecycle = lifecycle.clone();
+                let unadmitted = unadmitted.clone();
                 move |request: AcpHoldRequest<true>,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let lifecycle = lifecycle.clone();
-                    async move { hold(lifecycle.as_deref(), &request, responder).await }
+                    let unadmitted = unadmitted.clone();
+                    async move { hold(lifecycle.as_deref(), &unadmitted, &request, responder).await }
                 }
             },
             on_receive_request!(),
@@ -3638,6 +3694,7 @@ where
             {
                 let controls = controls.clone();
                 let sessions = sessions.clone();
+                let unadmitted = unadmitted.clone();
                 let confinement = confinement.clone();
                 async move |request: v1::SetSessionConfigOptionRequest, responder, _cx| {
                     // Absent controls are unavailable, not partially emulated:
@@ -3650,6 +3707,9 @@ where
                         Ok(session) => session,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(session) {
+                        return responder.respond_with_error(error);
+                    }
                     // Read the offer, resolve against it, then stage. Reading
                     // first is what makes "a value ego never offered" and "a
                     // control ego never advertised" the same refusal instead of

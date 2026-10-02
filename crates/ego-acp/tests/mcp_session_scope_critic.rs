@@ -446,6 +446,72 @@ async fn unadmitted_new_session_is_not_listed_while_its_servers_are_admitted() {
     connection.abort().await;
 }
 
+/// Catches: the hidden session being filtered out of its page after the page
+/// was cut, so a page that holds it comes back one row short (the fixed page
+/// size is 50) and a host that stops at a short page misses the tail.
+#[tokio::test]
+async fn a_hidden_session_never_shortens_a_list_page_or_loses_a_row() {
+    let gate = Arc::new(Gate::default());
+    let world = World::new(|admitter| admitter.gate = Some(Arc::clone(&gate)));
+    let seeded: Vec<String> = (0..60)
+        .map(|index| {
+            world
+                .fixture
+                .seed_replay_session(ROOT, &format!("Source {index}"), 200_000)
+                .session_id
+        })
+        .collect();
+    let mut connection = world.connect().await;
+    let pending = connection
+        .send_request(
+            "session/new",
+            serde_json::json!({ "cwd": ROOT, "mcpServers": servers() }),
+        )
+        .await;
+    tokio::time::timeout(WAIT, gate.entered.notified())
+        .await
+        .expect("admission started");
+    let hidden = world.admitter.last_session().to_string();
+
+    let mut pages = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let params = match &cursor {
+            Some(cursor) => serde_json::json!({ "cwd": ROOT, "cursor": cursor }),
+            None => serde_json::json!({ "cwd": ROOT }),
+        };
+        let (response, _) = tokio::time::timeout(WAIT, connection.request("session/list", params))
+            .await
+            .expect("session/list was answered while an admission was pending");
+        let rows: Vec<String> = response["result"]["sessions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no sessions array: {response}"))
+            .iter()
+            .map(|session| session["sessionId"].as_str().expect("id").to_owned())
+            .collect();
+        cursor = response["result"]["nextCursor"].as_str().map(str::to_owned);
+        pages.push(rows);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    gate.release.notify_one();
+    connection.response(pending).await;
+
+    assert!(
+        pages[0].len() >= 50,
+        "the first page came back short: {} rows",
+        pages[0].len()
+    );
+    let mut all: Vec<String> = pages.concat();
+    assert!(!all.contains(&hidden), "the hidden session was listed");
+    all.sort();
+    let mut expected = seeded;
+    expected.sort();
+    assert_eq!(all, expected, "a visible row was lost or repeated across pages");
+    connection.abort().await;
+}
+
 /// Catches: `session/fork` publishing the child before its servers are
 /// admitted, so a client can list or load a child that is about to be taken
 /// back.
@@ -945,13 +1011,16 @@ async fn a_dropped_mcp_entry_refuses_the_request_on_every_session_method() {
 }
 
 /// Catches: the count check refusing selections that were not dropped:
-/// duplicates the library keeps are the admitter's business, an absent or
-/// empty list is a session with no servers.
+/// duplicates the library keeps are the admitter's business, an empty list is
+/// a session with no servers.
 #[tokio::test]
 async fn whole_selections_are_not_refused_by_the_dropped_entry_check() {
     let valid = servers()[0].clone();
     for (label, params) in [
-        ("absent", serde_json::json!({ "cwd": ROOT })),
+        // No "absent" case: ACP schema 1.5.0 makes `mcpServers` a required
+        // field of `session/new` and `session/load` (agent.rs:1026, :1175), so
+        // the library refuses it before ego sees the request. `resume` and
+        // `fork` default it; the dropped-entry check treats those as empty.
         (
             "empty",
             serde_json::json!({ "cwd": ROOT, "mcpServers": [] }),

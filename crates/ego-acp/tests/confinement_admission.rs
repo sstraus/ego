@@ -870,3 +870,37 @@ async fn refused_mcp_admission_on_session_fork_lists_only_the_source() {
     assert_eq!(listed(&mut connection).await, vec![source]);
     connection.abort().await;
 }
+
+/// Catches: `session/new` waiting for the sandbox measurement before it
+/// admits servers that start no process (an ACP-channel server is what a host
+/// chat sends), so every new chat pays the probe for nothing.
+#[tokio::test]
+async fn a_session_with_no_process_server_is_admitted_without_waiting_for_measurement() {
+    let fixture = support::DurableAcpFixture::new();
+    let admission = Arc::new(Admission::default());
+    admission.blocks();
+    let admitter = RefusingMcpAdmitter::new(Arc::clone(&admission));
+    let mut connection = support::Connected::new(mcp_router(&fixture, &admitter, &admission));
+    connection.initialize().await;
+    let (response, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        connection.request(
+            "session/new",
+            serde_json::json!({
+                "cwd": ROOT,
+                "mcpServers": [{"type": "acp", "name": "tuic", "serverId": "tuic"}],
+            }),
+        ),
+    )
+    .await
+    .expect("session/new waited for a measurement an ACP-channel server does not need");
+    assert!(response["error"].is_object(), "{response}");
+    {
+        let seen = admitter.seen.lock().expect("seen admissions");
+        assert_eq!(seen.len(), 1);
+        assert!(!seen[0].measured_first, "the ACP server waited for the probe");
+        assert!(seen[0].level.is_none(), "an ACP server was given a sandbox pick");
+    }
+    admission.release();
+    connection.abort().await;
+}
