@@ -3535,6 +3535,14 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice() {
     input.flush().expect("startup reasoning accept flush");
     until_prompt_from(&reader, &mut output, reasoning_start);
     drain_until_quiet(&reader, &mut output);
+    let after_pickers = normalized(&output[reasoning_start..]);
+    let banner = after_pickers
+        .find("εgo: ego")
+        .unwrap_or_else(|| panic!("no banner after the pickers: {after_pickers:?}"));
+    assert!(
+        after_pickers[..banner].ends_with('\n') || banner == 0,
+        "the banner shares a row with the picker: {after_pickers:?}"
+    );
 
     let config = std::fs::read_to_string(home.path().join("config.toml"))
         .expect("startup selection persisted atomically");
