@@ -4219,3 +4219,257 @@ mod secret_mask_critic_round_four {
         assert_eq!(detail("key= "), "key=");
     }
 }
+
+#[cfg(test)]
+mod secret_mask_critic_round_five {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn detail(cause: &str) -> String {
+        bounded_detail(cause).unwrap_or_default()
+    }
+
+    fn assert_hidden(cause: &str, secret: &str) {
+        let out = detail(cause);
+        assert!(
+            !out.contains(secret),
+            "{cause:?} leaked {secret:?}: {out:?}"
+        );
+    }
+
+    fn assert_kept(cause: &str, kept: &str) {
+        let out = detail(cause);
+        assert!(out.contains(kept), "{cause:?} lost {kept:?}: {out:?}");
+    }
+
+    #[test]
+    fn long_inputs_are_masked_in_linear_time() {
+        // catches: `name:` followed by an unclosed or nested bracket makes `names_secret` rescan
+        // (and copy) the rest of the text at every `name:`, so n members cost n squared.
+        let cases = [
+            ("unclosed objects", "name:{".repeat(10_000)),
+            ("unclosed arrays", "name:[".repeat(10_000)),
+            (
+                "nested objects",
+                format!("{}1{}", r#"{"name":"#.repeat(12_000), "}".repeat(12_000)),
+            ),
+            ("blank key pairs", "key= ".repeat(50_000)),
+            (
+                "authorization chain",
+                "authorization: Bearer ".repeat(20_000),
+            ),
+            ("tuple heads", r#"("token", "#.repeat(20_000)),
+        ];
+        for (label, cause) in cases {
+            let started = Instant::now();
+            let _ = bounded_detail(&cause);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(3),
+                "{label}: {elapsed:?} for {} chars",
+                cause.len()
+            );
+        }
+    }
+
+    #[test]
+    fn every_prefix_and_suffix_of_a_dense_sample_is_masked_without_panicking() {
+        // catches: an index past the end in the look-ahead, escape-run, bracket or record scans
+        // when the text is cut at any point.
+        let sample = format!(
+            "\u{e9}\u{200d}{}",
+            r#"{\"name\":\"x-api-key\",\"value\":\\\"a\\\\\"b\",\"token\":{\"a\":[\"b\"]},("key", 'v')} Authorization: Digest a="b c", d=\"e\" name: token value: [x {y 'z \\\\"#
+        );
+        let cuts = sample
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(sample.len()));
+        for cut in cuts {
+            let _ = bounded_detail(&sample[..cut]);
+            let _ = bounded_detail(&sample[cut..]);
+        }
+    }
+
+    #[test]
+    fn name_value_record_with_an_auth_scheme_word_as_name_hides_the_value() {
+        // catches: `names_secret` reading `name=token value=X` as the scheme `token` plus its
+        // credential `value=X`, so the content is not a single name and `value` stays public.
+        for cause in [
+            "param name=token value=LEAKREC",
+            "param name: token value: LEAKREC",
+            "param name=bearer value=LEAKREC",
+        ] {
+            assert_hidden(cause, "LEAKREC");
+        }
+    }
+
+    #[test]
+    fn key_value_records_hide_the_value_member() {
+        // catches: `{"Key":"db_password","Value":"X"}` (AWS tags, Postman, env lists): `key` is
+        // itself a secret suffix, so only its value is masked and the sibling `Value` leaks.
+        for cause in [
+            r#"{"key":"API_TOKEN","value":"LEAKKV"}"#,
+            r#"{"Key":"db_password","Value":"LEAKKV"}"#,
+            r#"[{"Key":"Environment","Value":"prod"},{"Key":"api_key","Value":"LEAKKV"}]"#,
+        ] {
+            assert_hidden(cause, "LEAKKV");
+        }
+    }
+
+    #[test]
+    fn name_value_record_hides_the_value_and_keeps_other_records() {
+        // catches: the record rule masking every `value` (or none) instead of the one that
+        // follows a secret-looking `name`.
+        let cause = r#"[{"name":"token","value":"LEAKR1"},{"name":"mode","value":"fast"}]"#;
+        assert_hidden(cause, "LEAKR1");
+        assert_kept(cause, r#""value":"fast""#);
+        let escaped = r#"{\\\"name\\\":\\\"x-api-key\\\",\\\"value\\\":\\\"LEAKR2\\\"}"#;
+        assert_hidden(escaped, "LEAKR2");
+    }
+
+    #[test]
+    fn a_name_marker_does_not_outlive_its_record() {
+        // catches: `record_secret` staying set after `{"name":"token"}` (no `value` member), so
+        // the `value` of an unrelated later object is published as `***`.
+        assert_kept(
+            r#"[{"name":"token","type":"string"},{"id":7,"value":"public"}]"#,
+            "public",
+        );
+    }
+
+    #[test]
+    fn pretty_printed_debug_tuples_hide_the_value() {
+        // catches: `opens_tuple` requiring `("name"` with no blank, so `{:#?}` output (whitespace
+        // collapsed to `( "x-api-key", "X", )`) falls back to text and leaks.
+        for cause in [
+            "(\n    \"x-api-key\",\n    \"LEAKPT\",\n)",
+            "Header(\n    \"authorization\",\n    \"Bearer LEAKPT\",\n)",
+            "[\n    (\n        \"x-api-key\",\n        \"LEAKPT\",\n    ),\n]",
+        ] {
+            assert_hidden(cause, "LEAKPT");
+        }
+    }
+
+    #[test]
+    fn python_bytes_tuples_hide_the_value() {
+        // catches: `opens_tuple` not seeing `(b'x-api-key'`, so ASGI/requests style header lists
+        // `[(b'authorization', b'Bearer X')]` fall back to text and leak.
+        for cause in [
+            r#"[(b'x-api-key', b'LEAKBT')]"#,
+            r#"[(b'authorization', b'Bearer LEAKBT')]"#,
+        ] {
+            assert_hidden(cause, "LEAKBT");
+        }
+    }
+
+    #[test]
+    fn debug_tuples_hide_the_value_and_lists_stay_text() {
+        // catches: the tuple rule dropped (leak) or widened back to every quoted pair (lists
+        // lose their second element).
+        for cause in [
+            r#"Some(("x-api-key", "LEAKT"))"#,
+            r#"[("accept", "*/*"), ("x-api-key", "LEAKT")]"#,
+            r#"(\"x-api-key\", \"LEAKT\")"#,
+            r#"[('Authorization', 'Bearer LEAKT')]"#,
+        ] {
+            assert_hidden(cause, "LEAKT");
+        }
+        for cause in [
+            r#"missing properties ["key", "name"]"#,
+            r#"{"error":"invalid token","code":401}"#,
+        ] {
+            assert_eq!(detail(cause), cause);
+        }
+    }
+
+    #[test]
+    fn brackets_inside_json_strings_of_an_escaped_nested_value_do_not_close_it() {
+        // catches: `bracket_end` skipping the escaped quotes of a JSON body embedded in a string,
+        // so it never sees `"x}y"` as a string and closes the value at the `}` inside it.
+        let cause = r#"{\"token\":{\"a\":\"x}y\",\"b\":\"LEAKBR\"},\"user\":\"bob\"} done"#;
+        assert_hidden(cause, "LEAKBR");
+        assert_kept(cause, "bob");
+    }
+
+    #[test]
+    fn brackets_inside_single_quoted_strings_of_a_nested_value_do_not_close_it() {
+        // catches: `bracket_end` tracking only double quotes, so a Python dict repr
+        // `{'token': {'a': 'x}y', 'b': 'X'}}` closes at the `}` inside the string.
+        let cause = r#"{'token': {'a': 'x}y', 'b': 'LEAKSQ'}, 'user': 'bob'} done"#;
+        assert_hidden(cause, "LEAKSQ");
+        assert_kept(cause, "bob");
+    }
+
+    #[test]
+    fn balanced_nested_values_are_masked_whole_and_the_text_after_them_is_kept() {
+        // catches: masking only the first brace or word of a nested value, or swallowing the
+        // siblings that follow it.
+        for cause in [
+            r#"{"token":{"a":{"b":"LEAKN1"},"c":["LEAKN2","LEAKN3"]},"user":"bob"} done"#,
+            r#"{"token":{"a":"x}y","b":"LEAKN4"},"user":"bob"} done"#,
+            r#"{\"token\":{\"a\":{\"b\":\"LEAKN5\"}},\"user\":\"bob\"} done"#,
+        ] {
+            let out = detail(cause);
+            assert!(!out.contains("LEAKN"), "{cause:?} leaked: {out:?}");
+            assert!(
+                out.contains("bob") && out.ends_with("done"),
+                "{cause:?} lost its siblings: {out:?}"
+            );
+        }
+        assert_hidden("token: {truncated LEAKN6", "LEAKN6");
+    }
+
+    #[test]
+    fn embedded_escaped_quotes_stay_inside_the_secret_at_every_depth() {
+        // catches: a closing quote picked from an inner escaped quote (`LEAKA\"LEAKB`), which
+        // publishes the tail of the secret; depth 0, 1 and 2.
+        for cause in [
+            r#"password="LEAKA\"LEAKB" user=bob"#,
+            r#"password='LEAKA\'LEAKB' user=bob"#,
+            r#"{\"password\":\"LEAKA\\\"LEAKB\",\"user\":\"bob\"}"#,
+            r#"{\\\"password\\\":\\\"LEAKA\\\\\\\"LEAKB\\\",\\\"user\\\":\\\"bob\\\"}"#,
+        ] {
+            let out = detail(cause);
+            assert!(!out.contains("LEAK"), "{cause:?} leaked: {out:?}");
+            assert!(out.contains("bob"), "{cause:?} lost its sibling: {out:?}");
+        }
+    }
+
+    #[test]
+    fn joiners_after_ascii_never_split_a_secret_name_and_joiners_in_text_survive() {
+        // catches: keeping a joiner or variation selector after ASCII (splits `to<ZWJ>ken`), or
+        // dropping it after a non-ASCII character (breaks emoji and Persian text).
+        for joiner in ['\u{200c}', '\u{200d}', '\u{fe0f}', '\u{e0100}'] {
+            for cause in [
+                format!("to{joiner}ken=LEAKJ"),
+                format!("api_{joiner}key: LEAKJ"),
+                format!("to\u{200b}{joiner}ken=LEAKJ"),
+                format!("\u{e9}{joiner}token=LEAKJ"),
+            ] {
+                assert_hidden(&cause, "LEAKJ");
+            }
+        }
+        assert_eq!(
+            detail("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} token=LEAKJ"),
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} token=***"
+        );
+        assert_eq!(
+            detail("\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}"),
+            "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}"
+        );
+    }
+
+    #[test]
+    fn ordinary_pairs_and_records_without_a_secret_name_are_kept() {
+        // catches: over-masking from the round-five rules (bracket values, records, tuples).
+        for cause in [
+            "duplicate tool identity: search",
+            "mode=fast retries=3",
+            r#"{"name":"mode","value":"fast"}"#,
+            r#"{"name":"theme","value":"dark","extra":{"value":1}}"#,
+            "name: web value: 42",
+        ] {
+            assert_eq!(detail(cause), cause);
+        }
+    }
+}
