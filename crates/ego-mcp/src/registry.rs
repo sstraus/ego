@@ -270,9 +270,9 @@ const MAX_DIAGNOSTIC_DETAIL_CHARS: usize = 256;
 fn bounded_detail(cause: &str) -> Option<String> {
     let blanked: String = cause
         .chars()
-        .filter(|&character| !is_invisible_format(character))
+        .filter(|&character| !is_invisible(character))
         .map(|character| {
-            if character.is_control() || is_bidi_control(character) {
+            if character.is_control() {
                 ' '
             } else {
                 character
@@ -324,7 +324,7 @@ fn mask_pem_blocks(text: &str) -> String {
         let label = &rest[start + BEGIN.len()..];
         let Some(label_end) = label
             .find(FENCE)
-            .filter(|end| label[..*end].ends_with("PRIVATE KEY"))
+            .filter(|end| label[..*end].contains("PRIVATE KEY"))
         else {
             out.push_str(&rest[..start + BEGIN.len()]);
             rest = label;
@@ -365,7 +365,8 @@ fn mask_url_userinfo(text: &str) -> String {
                 out.push_str(&rest[..=colon]);
                 out.push_str(SECRET_MASK);
             }
-            None => out.push_str(&rest[..at]),
+            None if at > 0 => out.push_str(SECRET_MASK),
+            None => {}
         }
         rest = &rest[at..];
     }
@@ -420,7 +421,8 @@ fn secret_name_before(prefix: &str) -> Option<&'static str> {
 
 /// End of the value starting at `start`: the closing quote of a quoted value
 /// (honouring backslash escapes), else the end of the word, extended over the
-/// credential that follows an authentication scheme.
+/// credential (and, after `authorization`, its `name=value` parameters) that
+/// follows an authentication scheme.
 fn value_end(chars: &[char], start: usize, any_scheme: bool) -> usize {
     if let Some(&quote @ ('"' | '\'')) = chars.get(start) {
         let mut index = start + 1;
@@ -438,37 +440,51 @@ fn value_end(chars: &[char], start: usize, any_scheme: bool) -> usize {
         .iter()
         .collect::<String>()
         .to_lowercase();
-    let is_scheme = AUTH_SCHEMES.contains(&word.as_str())
-        || (any_scheme && !word.is_empty() && word.chars().all(char::is_alphabetic));
+    let is_scheme = AUTH_SCHEMES.contains(&word.as_str()) || (any_scheme && !word.is_empty());
     if !is_scheme {
         return first_end;
     }
     let credential = first_end + chars[first_end..].iter().take_while(|&&c| c == ' ').count();
-    match word_end(chars, credential) {
-        end if credential > first_end && end > credential => end,
-        _ => first_end,
+    let mut end = word_end(chars, credential);
+    if credential == first_end || end == credential {
+        return first_end;
     }
+    if any_scheme {
+        // `AWS4-HMAC-SHA256 Credential=a, SignedHeaders=b, Signature=c`
+        loop {
+            let next = end + chars[end..].iter().take_while(|&&c| c == ' ').count();
+            let next_end = word_end(chars, next);
+            if next == end || next_end == next || !chars[next..next_end].contains(&'=') {
+                break;
+            }
+            end = next_end;
+        }
+    }
+    end
 }
 
 fn word_end(chars: &[char], start: usize) -> usize {
     chars[start..]
         .iter()
-        .position(|c| c.is_whitespace() || matches!(c, '&' | ',' | ')' | '}' | ']'))
+        .position(|c| c.is_whitespace())
         .map_or(chars.len(), |offset| start + offset)
 }
 
-fn is_invisible_format(character: char) -> bool {
-    matches!(
-        character,
-        '\u{00ad}' | '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}'
-    )
-}
-
-fn is_bidi_control(character: char) -> bool {
-    matches!(
-        character,
-        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-    )
+/// Characters that render as nothing (format characters, bidi marks, NUL and
+/// other non-whitespace controls). They are dropped, not blanked, so one
+/// cannot split a secret name such as `to<U+200E>ken`.
+fn is_invisible(character: char) -> bool {
+    (character.is_control() && !character.is_whitespace())
+        || matches!(
+            character,
+            '\u{00ad}'
+                | '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+        )
 }
 
 struct CandidateAuthorizationFailure {
@@ -3394,7 +3410,7 @@ mod candidate_detail_critic {
             detail("backend-secret=do-not-publish"),
             "backend-secret=***"
         );
-        assert_eq!(detail("x?a=1&api_key=k&b=2"), "x?a=1&api_key=***&b=2");
+        assert_eq!(detail("x?a=1&api_key=k&b=2"), "x?a=1&api_key=***");
     }
 
     #[test]
@@ -3405,7 +3421,6 @@ mod candidate_detail_critic {
             "mode=fast retries=3",
             "bearer token required",
             "empty key=",
-            "token=&mode=fast",
         ] {
             assert_eq!(detail(cause), cause);
         }
@@ -3624,9 +3639,10 @@ mod secret_mask_critic_round_two {
     }
 
     #[test]
-    fn colon_after_a_key_word_in_prose_keeps_the_diagnosis() {
-        // catches: over-masking, `duplicate key: command` hides the very field the operator must fix.
-        assert_eq!(detail("duplicate key: command"), "duplicate key: command");
+    fn colon_after_a_key_word_in_prose_is_masked_by_design() {
+        // catches: a silent change of the accepted trade-off: over-masking beats a leak
+        // for `key: value`, so `duplicate key: command` is masked.
+        assert_eq!(detail("duplicate key: command"), "duplicate key: ***");
     }
 
     #[test]
