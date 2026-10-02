@@ -516,9 +516,7 @@ fn a_flag_value_path_on_the_command_line_is_a_question_for_that_path() {
     let _ = fixture.run(vec![
         OsString::from("/bin/sh"),
         OsString::from("-c"),
-        OsString::from(
-            "p=${0#--out=}; printf '%s: Operation not permitted\\n' \"$p\" >&2; exit 1",
-        ),
+        OsString::from("p=${0#--out=}; printf '%s: Operation not permitted\\n' \"$p\" >&2; exit 1"),
         flag,
     ]);
     assert_eq!(fixture.seat.asked_paths(), vec![target]);
@@ -640,10 +638,10 @@ fn symlinks_to_home_its_parent_and_root_are_never_asked() {
 #[test]
 fn a_stored_grant_the_profile_cannot_render_does_not_break_every_command() {
     let seat = Seat::new(no);
-    seat.granted
-        .lock()
-        .unwrap()
-        .push(SandboxGrant::new(CanonPath::new("/opt/a\tb"), SandboxAccess::Read));
+    seat.granted.lock().unwrap().push(SandboxGrant::new(
+        CanonPath::new("/opt/a\tb"),
+        SandboxAccess::Read,
+    ));
     let Some(fixture) = open(Confinement::Workspace, seat) else {
         return;
     };
@@ -705,7 +703,14 @@ fn a_question_never_hides_the_end_of_the_command_it_re_runs() {
             command.contains("END_OF_SCRIPT") && command.contains(&*target.to_string_lossy()),
             "the person was asked about a command they could not read to the end: {} chars, ends {:?}",
             command.len(),
-            command.chars().rev().take(20).collect::<String>().chars().rev().collect::<String>()
+            command
+                .chars()
+                .rev()
+                .take(20)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
         );
     }
 }
