@@ -3775,7 +3775,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         // This empty fixture cannot prepare compaction; wait for its outcome.
         ("compact", Some("compaction failed")),
         ("clear", None),
-        ("usage", Some("usage as_of=")),
+        ("usage", Some("usage as of")),
         ("export", None),
         ("doctor", Some("acp.extension:hold")),
         ("new", None),

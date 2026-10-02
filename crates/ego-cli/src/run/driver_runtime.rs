@@ -1249,8 +1249,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             Ok(report) => {
                                                 // `/usage` has no flags, so it
                                                 // gets the compact default.
-                                                let rendered =
-                                                    crate::usage::render_text(&report, false);
+                                                let rendered = crate::usage::render_text(
+                                                    &report,
+                                                    false,
+                                                    Some(state.context),
+                                                );
                                                 diagnostics.note(rendered.trim_end());
                                             }
                                             Err(error) => diagnostics.note(&format!(
