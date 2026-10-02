@@ -11,5 +11,6 @@ pub mod negotiate;
 pub mod permission;
 pub mod project;
 pub mod question;
+pub mod sandbox;
 pub mod serve;
 pub mod sink;

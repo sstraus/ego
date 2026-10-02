@@ -2,8 +2,8 @@
 
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -11,8 +11,8 @@ use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::EffectScope;
 use ego_core::permit::{
     CleanupCertainty, DuplexEnd, DuplexSession, DuplexSettlement, ExecCaps, ProcessError,
-    RunConfinement, SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult, TransportError,
-    TransportFailure,
+    RunConfinement, SandboxGrant, SandboxGrantPort, SpawnSpec, StreamProvenance, ToolContentBlock,
+    ToolResult, TransportError, TransportFailure,
 };
 use ego_core::store::evidence::{EvidenceError, EvidenceStore as _, EvidenceWriter};
 use ego_core::turn::CancelToken;
@@ -27,7 +27,12 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt as _, TokioAsyncWriteCo
 
 use super::ExecLimits;
 use super::backend::{Backend, executable, prefixed_command};
+use super::denial;
 use super::process_tree::ManagedChild;
+
+/// Questions one command may put to the human before its refusal is final.
+/// Each answer can reveal one more path, so the bound is a few paths, not one.
+const MAX_SANDBOX_QUESTIONS: usize = 3;
 
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
@@ -41,6 +46,10 @@ pub(crate) struct RunProcessContext {
     limits: ExecLimits,
     confinement: RunConfinement,
     capabilities: ExecCaps,
+    sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
+    /// The last profile rendered for a grant list, so a run of commands under
+    /// the same grants shares one private profile file.
+    widened: Mutex<Option<(Vec<SandboxGrant>, Arc<dyn Backend>)>>,
 }
 
 impl RunProcessContext {
@@ -51,6 +60,7 @@ impl RunProcessContext {
         limits: ExecLimits,
         confinement: RunConfinement,
         capabilities: ExecCaps,
+        sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     ) -> Self {
         Self {
             backend,
@@ -59,6 +69,8 @@ impl RunProcessContext {
             limits,
             confinement,
             capabilities,
+            sandbox_grants,
+            widened: Mutex::new(None),
         }
     }
 
@@ -93,7 +105,21 @@ impl RunProcessContext {
             .requirements()
             .check(self.capabilities)
             .map_err(ProcessError::MissingCapabilities)?;
-        let backend = Arc::clone(&self.backend);
+        match (&self.sandbox_grants, &handler) {
+            (Some(grants), None) => self.execute_asking(grants.as_ref(), spec).await,
+            _ => {
+                self.spawn_once(Arc::clone(&self.backend), spec, handler)
+                    .await
+            }
+        }
+    }
+
+    async fn spawn_once(
+        &self,
+        backend: Arc<dyn Backend>,
+        spec: &SpawnSpec,
+        handler: Option<(Vec<u8>, EffectScope)>,
+    ) -> Result<ToolResult, ProcessError> {
         let evidence = self.evidence.clone();
         let cancel = self.cancel.clone();
         let limits = self.limits;
@@ -102,6 +128,70 @@ impl RunProcessContext {
             .spawn(async move { execute(backend, evidence, cancel, limits, &spec, handler).await })
             .await
             .map_err(|error| ProcessError::Backend(format!("process task failed: {error}")))?
+    }
+
+    /// Run a command, and when the sandbox refuses a path it names, ask the
+    /// human whether to open that one path and run it again.
+    ///
+    /// The command is re-run only after it has exited unsuccessfully, so no
+    /// process of the first attempt is still alive; whatever it did before the
+    /// refusal is not undone, and the human is told which path the retry is
+    /// for.
+    async fn execute_asking(
+        &self,
+        grants: &dyn SandboxGrantPort,
+        spec: &SpawnSpec,
+    ) -> Result<ToolResult, ProcessError> {
+        let mut questions = 0;
+        loop {
+            let granted = grants.granted();
+            let backend = self.backend_under(&granted)?;
+            let (code, mut result) = match self.spawn_once(backend, spec, None).await {
+                Err(ProcessError::Exit { code, result }) => (code, result),
+                other => return other,
+            };
+            let Some(found) = denial::analyze(spec, &result, &self.confinement, &granted) else {
+                return Err(ProcessError::Exit { code, result });
+            };
+            let outcome = match &found.request {
+                Some(request) if questions < MAX_SANDBOX_QUESTIONS => {
+                    questions += 1;
+                    if grants.ask(request).await {
+                        continue;
+                    }
+                    denial::Outcome::Declined
+                }
+                _ => denial::Outcome::NobodyToAsk,
+            };
+            result.content.push(ToolContentBlock::builtin(denial::note(
+                &found,
+                &self.confinement,
+                outcome,
+            )));
+            return Err(ProcessError::Exit { code, result });
+        }
+    }
+
+    /// The backend with `granted` added, or the admitted one when nothing is
+    /// granted or the mechanism cannot express a per-path grant.
+    fn backend_under(&self, granted: &[SandboxGrant]) -> Result<Arc<dyn Backend>, ProcessError> {
+        if granted.is_empty() {
+            return Ok(Arc::clone(&self.backend));
+        }
+        let mut cache = self
+            .widened
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((known, backend)) = cache.as_ref()
+            && known.as_slice() == granted
+        {
+            return Ok(Arc::clone(backend));
+        }
+        let Some(widened) = self.backend.widened(granted)? else {
+            return Ok(Arc::clone(&self.backend));
+        };
+        *cache = Some((granted.to_vec(), Arc::clone(&widened)));
+        Ok(widened)
     }
 
     pub(crate) async fn spawn_duplex(

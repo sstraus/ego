@@ -484,6 +484,11 @@ pub trait RunBindingsBuilder: Send + Sync {
 pub struct AcpRunBindingsBuilder {
     controls: Option<Arc<dyn SessionControls>>,
     permission_rules: Option<Arc<dyn crate::permission::PermissionRuleWriter>>,
+    sandbox_store: Option<Arc<dyn crate::sandbox::SandboxGrantStore>>,
+    /// One list per session: a session answer outlives the prompt that asked
+    /// and ends with the connection. Keyed by the wire session id.
+    sandbox_sessions:
+        std::sync::Mutex<std::collections::HashMap<String, crate::sandbox::SessionSandboxGrants>>,
 }
 
 impl AcpRunBindingsBuilder {
@@ -495,7 +500,18 @@ impl AcpRunBindingsBuilder {
         Self {
             controls,
             permission_rules: None,
+            sandbox_store: None,
+            sandbox_sessions: std::sync::Mutex::default(),
         }
+    }
+
+    /// Keep "allow always" sandbox answers for the workspace in `store`.
+    pub fn with_sandbox_store(
+        mut self,
+        store: Option<Arc<dyn crate::sandbox::SandboxGrantStore>>,
+    ) -> Self {
+        self.sandbox_store = store;
+        self
     }
 
     pub fn with_permission_rules(
@@ -543,6 +559,20 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
                 .with_rule_writer(self.permission_rules.clone())
                 .with_session_approval(session_approval)
                 .approver();
+        let session_grants = Arc::clone(
+            self.sandbox_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(session.0.to_string())
+                .or_default(),
+        );
+        let sandbox_grants = crate::sandbox::AcpSandboxGrants::new(
+            session.clone(),
+            connection.clone(),
+            root.as_path().to_path_buf(),
+            self.sandbox_store.clone(),
+            session_grants,
+        );
         let bindings = ego_core::run::RunExecutionBindings::new(
             Arc::new(AcpSinkFactory {
                 connection,
@@ -551,7 +581,8 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
             }),
             Some(elicitor),
         )
-        .with_human(human);
+        .with_human(human)
+        .with_sandbox_grants(Arc::new(sandbox_grants));
         match &self.controls {
             Some(controls) => bindings.with_controls(Arc::clone(controls)),
             None => bindings,

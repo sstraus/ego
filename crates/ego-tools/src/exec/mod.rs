@@ -1,6 +1,7 @@
 //! Exact argv-native execution behind one run-owned process boundary.
 
 mod backend;
+mod denial;
 mod editor_process;
 mod identity;
 #[cfg(target_os = "linux")]
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use ego_core::permit::{
     CanonPath, DuplexSpawner, ExecCaps, ExecObservation, OneHop, PolicyDigest, Resolver,
-    RunConfinement, SpawnSpec,
+    RunConfinement, SandboxGrantPort, SpawnSpec,
 };
 use ego_core::turn::CancelToken;
 use futures::future::BoxFuture;
@@ -106,6 +107,7 @@ pub struct ExecRunConfig {
     run_deadline: Option<Instant>,
     resolver: Arc<dyn Resolver>,
     admitted_observation: Option<ExecObservation>,
+    sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
 }
 
 impl ExecRunConfig {
@@ -127,7 +129,17 @@ impl ExecRunConfig {
             run_deadline,
             resolver,
             admitted_observation: None,
+            sandbox_grants: None,
         }
+    }
+
+    /// Let a human widen the sandbox of this run's commands by one path when
+    /// a command is refused it. The admitted observation does not change:
+    /// the grant is a delta the person made, not a different confinement.
+    #[must_use]
+    pub fn with_sandbox_grants(mut self, grants: Arc<dyn SandboxGrantPort>) -> Self {
+        self.sandbox_grants = Some(grants);
+        self
     }
 
     /// Require the reconstructed effects to match the session's admitted facts.
@@ -452,6 +464,7 @@ impl RunEffectPorts {
             config.exec_limits,
             config.policy,
             capabilities,
+            config.sandbox_grants,
         ));
         Self {
             process: Arc::new(GuardedExec::new(Arc::clone(&context))),

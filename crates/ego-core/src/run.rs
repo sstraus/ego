@@ -19,7 +19,7 @@
 //! the same table.
 
 use crate::event::domain::{CancelCause, ExitReason};
-use crate::permit::{Authority, Confinement, ExecObservation, HumanApprover};
+use crate::permit::{Authority, Confinement, ExecObservation, HumanApprover, SandboxGrantPort};
 use crate::public::QuestionReport;
 
 use std::any::Any;
@@ -1235,6 +1235,7 @@ pub struct RunExecutionBindings {
     budget_gate: Option<SharedBudgetGate>,
     effect_tools: Option<Arc<BTreeSet<String>>>,
     human: Option<Arc<dyn HumanApprover>>,
+    sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     controls: Option<Arc<dyn crate::control::SessionControls>>,
     host: Option<crate::turn::HostClient>,
 }
@@ -1253,6 +1254,7 @@ impl RunExecutionBindings {
             budget_gate: None,
             effect_tools: None,
             human: None,
+            sandbox_grants: None,
             controls: None,
             host: None,
         }
@@ -1283,6 +1285,18 @@ impl RunExecutionBindings {
 
     pub fn human(&self) -> Option<Arc<dyn HumanApprover>> {
         self.human.as_ref().map(Arc::clone)
+    }
+
+    /// Attach the seat that can widen this execution's process sandbox for one
+    /// path. Travels beside `human` for the same reason: only a connected host
+    /// has a person to ask, and a headless run keeps its sandbox as admitted.
+    pub fn with_sandbox_grants(mut self, grants: Arc<dyn SandboxGrantPort>) -> Self {
+        self.sandbox_grants = Some(grants);
+        self
+    }
+
+    pub fn sandbox_grants(&self) -> Option<Arc<dyn SandboxGrantPort>> {
+        self.sandbox_grants.as_ref().map(Arc::clone)
     }
 
     /// Attach the operator seat's generation controls for this execution.

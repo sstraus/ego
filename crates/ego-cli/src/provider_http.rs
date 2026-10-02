@@ -6,8 +6,8 @@ use std::time::Instant;
 use ego_ai::http::{Http, HttpCall, HttpProfileFingerprint, PreparedHttpCall};
 use ego_core::event::id::SessionId;
 use ego_core::permit::{
-    CanonPath, Confinement, ExecObservation, GuardedHttp, RunConfinement, TransportError,
-    TransportFailure,
+    CanonPath, Confinement, ExecObservation, GuardedHttp, RunConfinement, SandboxGrantPort,
+    TransportError, TransportFailure,
 };
 use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::CancelToken;
@@ -92,6 +92,7 @@ pub(crate) async fn run_effect_ports(
     cancel: CancelToken,
     run_deadline: Option<Instant>,
     admitted_observation: Option<&ExecObservation>,
+    sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
 ) -> Result<
     (
         Arc<RunEffectPorts>,
@@ -111,6 +112,10 @@ pub(crate) async fn run_effect_ports(
     );
     let config = match admitted_observation {
         Some(observation) => config.with_admitted_observation(observation.clone()),
+        None => config,
+    };
+    let config = match sandbox_grants {
+        Some(grants) => config.with_sandbox_grants(grants),
         None => config,
     };
     let (ports, observation, probe_evidence) = RunEffectPorts::for_run(config).await?;
@@ -154,9 +159,10 @@ impl CommandHttpScope {
         .map_err(|error| {
             McpProcessScopeError::Setup(format!("could not open the MCP evidence store: {error}"))
         })?;
-        let (ports, _, _) = run_effect_ports(confinement, evidence, cancel, run_deadline, None)
-            .await
-            .map_err(McpProcessScopeError::Effects)?;
+        let (ports, _, _) =
+            run_effect_ports(confinement, evidence, cancel, run_deadline, None, None)
+                .await
+                .map_err(McpProcessScopeError::Effects)?;
         let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn Http>;
         Ok(Self {
             _evidence_directory: evidence_directory,
