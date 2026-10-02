@@ -387,13 +387,16 @@ fn mask_key_values(text: &str) -> String {
     // object (same bracket depth) is the secret.
     let mut record_depth: Option<isize> = None;
     let mut depth: isize = 0;
+    let mut strings = StringScan::default();
     while index < chars.len() {
         let character = chars[index];
-        out.push(character);
-        index += 1;
+        let outside_string = !strings.in_string();
+        let next = strings.step(&chars, index);
+        out.extend(&chars[index..next]);
+        index = next;
         match character {
-            '{' | '(' | '[' => depth += 1,
-            '}' | ')' | ']' => {
+            '{' | '(' | '[' if outside_string => depth += 1,
+            '}' | ')' | ']' if outside_string => {
                 depth -= 1;
                 if record_depth.is_some_and(|armed| depth < armed) {
                     record_depth = None;
@@ -496,6 +499,14 @@ const STRING_PREFIXES: [char; 6] = ['b', 'r', 'u', 'B', 'R', 'U'];
 fn names_secret(chars: &[char], index: usize) -> bool {
     const MAX_NAME_CHARS: usize = 128;
     let mut start = index + chars[index..].iter().take_while(|&&c| c == ' ').count();
+    let prefix = chars[start..]
+        .iter()
+        .take(2)
+        .take_while(|&&c| STRING_PREFIXES.contains(&c))
+        .count();
+    if matches!(chars.get(start + prefix), Some('"' | '\'' | '\\')) {
+        start += prefix;
+    }
     start += chars[start..].iter().take_while(|&&c| c == '\\').count();
     if matches!(chars.get(start), Some('"' | '\'')) {
         start += 1;
@@ -568,41 +579,62 @@ fn quoted_end(chars: &[char], start: usize) -> Option<usize> {
     Some(chars.len())
 }
 
-/// End of the balanced `{...}` / `[...]` starting at `start`, brackets inside
-/// strings ignored (`"..."`, `'...'` and their JSON-escaped forms, told apart
-/// by quote and backslash count); the end of the text when unbalanced.
+/// Quote state of a left-to-right scan: `"..."`, `'...'` and their
+/// JSON-escaped forms (`\"..\"`), told apart by quote and backslash count. A
+/// plain string closes on a quote after an even run of backslashes (`"C:\\"`);
+/// an escaped one only on exactly the opening run, longer runs are the
+/// escaped quotes of the inner text.
+#[derive(Default)]
+struct StringScan(Option<(char, usize)>);
+
+impl StringScan {
+    fn in_string(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Consumes the unit at `index` (a quote with its backslash run, or one
+    /// character) and returns the index after it.
+    fn step(&mut self, chars: &[char], index: usize) -> usize {
+        if !matches!(chars[index], '\\' | '"' | '\'') {
+            return index + 1;
+        }
+        let run = chars[index..].iter().take_while(|&&c| c == '\\').count();
+        let after = index + run;
+        let Some(&quote @ ('"' | '\'')) = chars.get(after) else {
+            return after.max(index + 1);
+        };
+        match self.0 {
+            None => self.0 = Some((quote, run)),
+            Some((open, 0)) if open == quote => {
+                if run % 2 == 0 {
+                    self.0 = None;
+                }
+            }
+            Some(open) if open == (quote, run) => self.0 = None,
+            Some(_) => {}
+        }
+        after + 1
+    }
+}
+
+/// End of the balanced `{...}` / `[...]` / `(...)` starting at `start`,
+/// brackets inside strings ignored; the end of the text when unbalanced.
 fn bracket_end(chars: &[char], start: usize) -> usize {
-    let (mut depth, mut string, mut index) = (0usize, None::<(char, usize)>, start);
+    let (mut depth, mut strings, mut index) = (0usize, StringScan::default(), start);
     while index < chars.len() {
         let character = chars[index];
-        if matches!(character, '\\' | '"' | '\'') {
-            let run = chars[index..].iter().take_while(|&&c| c == '\\').count();
-            let after = index + run;
-            if let Some(&quote @ ('"' | '\'')) = chars.get(after) {
-                match string {
-                    None => string = Some((quote, run)),
-                    Some(open) if open == (quote, run) => string = None,
-                    Some(_) => {}
+        let outside_string = !strings.in_string();
+        index = strings.step(chars, index);
+        match character {
+            '{' | '[' | '(' if outside_string => depth += 1,
+            '}' | ']' | ')' if outside_string => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index;
                 }
-                index = after + 1;
-            } else {
-                index = after.max(index + 1);
             }
-            continue;
+            _ => {}
         }
-        if string.is_none() {
-            match character {
-                '{' | '[' => depth += 1,
-                '}' | ']' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return index + 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-        index += 1;
     }
     chars.len()
 }
@@ -612,8 +644,13 @@ fn bracket_end(chars: &[char], start: usize) -> usize {
 /// parameters, quoted values with blanks included) that follows an
 /// authentication scheme.
 fn value_end(chars: &[char], start: usize, any_scheme: bool) -> usize {
-    if matches!(chars.get(start), Some('{' | '[')) {
-        return bracket_end(chars, start);
+    // A bracketed value, or a call such as `Some("a b")` / `Token(..)`.
+    let call = chars[start..]
+        .iter()
+        .take_while(|&&c| c.is_alphanumeric() || c == '_')
+        .count();
+    if matches!(chars.get(start + call), Some('{' | '[' | '(')) {
+        return bracket_end(chars, start + call);
     }
     if let Some(end) = quoted_end(chars, start) {
         return end;
@@ -3784,6 +3821,19 @@ mod candidate_detail_critic {
             r#"{ "password": *** } ok"#
         );
         assert_eq!(detail(r#"token=["a","}"] ok"#), "token=*** ok");
+    }
+
+    #[test]
+    fn call_wrapped_secret_values_are_masked_to_the_balanced_close() {
+        // catches: `token: Some("a LEAK")` masking only `Some("a` and publishing the rest.
+        assert_eq!(
+            detail(r#"token: Some("a LEAK") rejected"#),
+            "token: *** rejected"
+        );
+        assert_eq!(
+            detail(r#"password=Secret(("x", ")")) end"#),
+            "password=*** end"
+        );
     }
 }
 
