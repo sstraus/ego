@@ -1073,6 +1073,7 @@ fn overview(program: &str) -> String {
         "ego {} — an agent you run from a terminal.\n\nUsage:\n  {program} [OPTIONS] [PROMPT]\n  {program} <COMMAND> [OPTIONS]\n\nInteractive:\n  {program} -m ollama/qwen3\n\nCommands:\n",
         env!("CARGO_PKG_VERSION")
     );
+    let width = BUILT.iter().map(|name| name.len()).max().unwrap_or(0) + 2;
     for name in BUILT {
         let about = match *name {
             "run" => "Run an agent from a prompt, headless",
@@ -1085,6 +1086,8 @@ fn overview(program: &str) -> String {
             "models" => "List the shared model catalogue",
             "hooks" => "Inspect the admitted hook catalogue",
             "acp" => "Serve the Agent Client Protocol on stdio",
+            "a2a" => "Serve Agent2Agent discovery information",
+            "doctor" => "Print a read-only redacted health snapshot",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "auth" => "Manage subscription credentials",
             "mcp" => "Manage configured MCP servers",
@@ -1092,7 +1095,7 @@ fn overview(program: &str) -> String {
             "rules" => "Inspect and manage permission rules",
             other => other,
         };
-        text.push_str(&format!("  {name:<8}{about}\n"));
+        text.push_str(&format!("  {name:<width$}{about}\n"));
     }
     text.push_str(&format!(
         "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
@@ -1835,5 +1838,36 @@ mod permission_red {
         assert!(managed_rule_id("not-a-rule-id").is_err());
         assert!(rule_arguments(r#"{"path":"src/main.rs"}"#).is_ok());
         assert!(rule_arguments("[\"not\",\"an\",\"object\"]").is_err());
+    }
+}
+
+#[cfg(test)]
+mod overview_red {
+    use super::*;
+
+    /// Catches a command listed with its own name as the description and a
+    /// name longer than the fixed column running into its description.
+    #[test]
+    fn every_built_command_has_a_description_separated_from_its_name() {
+        let text = overview("ego");
+        for name in BUILT {
+            let row = text
+                .lines()
+                .find(|line| line.trim_start().starts_with(name) && line.starts_with("  "))
+                .unwrap_or_else(|| panic!("no row for {name}"));
+            let rest = row
+                .trim_start()
+                .strip_prefix(name)
+                .expect("row starts with the name");
+            assert!(
+                rest.starts_with("  "),
+                "`{name}` is not separated from its description: {row:?}"
+            );
+            assert_ne!(rest.trim(), *name, "`{name}` describes itself: {row:?}");
+            assert!(
+                !rest.trim().is_empty(),
+                "`{name}` has no description: {row:?}"
+            );
+        }
     }
 }
