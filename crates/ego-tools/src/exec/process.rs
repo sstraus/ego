@@ -154,14 +154,17 @@ impl RunProcessContext {
                 return Err(ProcessError::Exit { code, result });
             };
             let outcome = match &found.request {
+                Some(_) if !self.backend.can_widen() => denial::Outcome::CannotWiden,
                 Some(request) if questions < MAX_SANDBOX_QUESTIONS => {
                     questions += 1;
-                    if grants.ask(request).await {
-                        continue;
+                    match self.ask_until_cancelled(grants, request, spec).await {
+                        Some(true) => continue,
+                        Some(false) => denial::Outcome::Declined,
+                        None => return Err(ProcessError::Cancelled),
                     }
-                    denial::Outcome::Declined
                 }
-                _ => denial::Outcome::NobodyToAsk,
+                Some(_) => denial::Outcome::QuestionLimit,
+                None => denial::Outcome::NobodyToAsk,
             };
             result.content.push(ToolContentBlock::builtin(denial::note(
                 &found,
@@ -169,6 +172,29 @@ impl RunProcessContext {
                 outcome,
             )));
             return Err(ProcessError::Exit { code, result });
+        }
+    }
+
+    /// The person's answer, or `None` when the run was cancelled first: a
+    /// question nobody answers must not hold a cancelled run open.
+    async fn ask_until_cancelled(
+        &self,
+        grants: &dyn SandboxGrantPort,
+        request: &SandboxGrant,
+        spec: &SpawnSpec,
+    ) -> Option<bool> {
+        let command = denial::command_line(spec);
+        let question = grants.ask_for(request, &command);
+        tokio::pin!(question);
+        loop {
+            tokio::select! {
+                answer = &mut question => return Some(answer),
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                    if self.cancel.is_cancelled() {
+                        return None;
+                    }
+                }
+            }
         }
     }
 
@@ -1180,5 +1206,183 @@ fn status_error(status: ExitStatus, result: ToolResult) -> ProcessError {
             signal: None,
             result,
         }
+    }
+}
+
+#[cfg(test)]
+mod sandbox_question_tests {
+    use std::ffi::OsString;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ego_core::event::domain::CancelCause;
+    use ego_core::event::id::SessionId;
+    use ego_core::permit::{
+        BackendIdentity, CanonPath, Confinement, EnvPolicy, ExecCaps, ProcessError, RunConfinement,
+        SandboxGrant, SandboxGrantPort, SpawnSpec,
+    };
+    use futures::future::BoxFuture;
+
+    use super::*;
+    use crate::exec::backend::LaunchPrefix;
+    use crate::exec::null::NullBackend;
+
+    /// Unconfined like [`NullBackend`], but claims it can open one more path.
+    struct Widening;
+
+    impl Backend for Widening {
+        fn identity(&self) -> BackendIdentity {
+            NullBackend.identity()
+        }
+
+        fn maximum_demonstrable_caps(&self) -> ExecCaps {
+            ExecCaps::null()
+        }
+
+        fn launch_prefix(&self) -> LaunchPrefix {
+            NullBackend.launch_prefix()
+        }
+
+        fn widened(&self, _: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
+            Ok(Some(Arc::new(NullBackend)))
+        }
+
+        fn can_widen(&self) -> bool {
+            true
+        }
+    }
+
+    /// A seat that counts questions and, when `hang`, never answers.
+    struct Seat {
+        asked: AtomicUsize,
+        hang: bool,
+    }
+
+    impl SandboxGrantPort for Seat {
+        fn granted(&self) -> Vec<SandboxGrant> {
+            Vec::new()
+        }
+
+        fn ask<'a>(&'a self, _: &'a SandboxGrant) -> BoxFuture<'a, bool> {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            if self.hang {
+                Box::pin(std::future::pending())
+            } else {
+                Box::pin(async { true })
+            }
+        }
+    }
+
+    struct Rig {
+        context: RunProcessContext,
+        cancel: CancelToken,
+        seat: Arc<Seat>,
+        spec: SpawnSpec,
+        _dirs: Vec<tempfile::TempDir>,
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test Tokio runtime")
+            .block_on(future)
+    }
+
+    /// A run whose child exits 1 printing a refusal for a file outside the
+    /// workspace that its own command line names.
+    fn rig(backend: Arc<dyn Backend>, hang: bool) -> Rig {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let evidence = tempfile::tempdir().expect("evidence");
+        let target = std::fs::canonicalize(outside.path())
+            .expect("canonical outside")
+            .join("f");
+        std::fs::write(&target, "x").expect("outside file");
+        let confinement = RunConfinement::new(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(std::fs::canonicalize(workspace.path()).expect("canonical workspace")),
+        )
+        .expect("confinement");
+        let cancel = CancelToken::new();
+        let seat = Arc::new(Seat {
+            asked: AtomicUsize::new(0),
+            hang,
+        });
+        let context = RunProcessContext::new(
+            backend,
+            SessionEvidenceStore::open(evidence.path(), SessionId::new(), 1024 * 1024)
+                .expect("evidence store"),
+            cancel.clone(),
+            ExecLimits::new(4096, Duration::from_millis(250)).expect("limits"),
+            confinement.clone(),
+            ExecCaps::READ_SCOPED
+                .union(ExecCaps::WRITE_SCOPED)
+                .union(ExecCaps::WRITE_DENIED)
+                .union(ExecCaps::NO_IP_NETWORK),
+            Some(Arc::clone(&seat) as Arc<dyn SandboxGrantPort>),
+        );
+        let spec = SpawnSpec::new(
+            vec![
+                OsString::from("/bin/sh"),
+                OsString::from("-c"),
+                OsString::from("printf '%s: Operation not permitted\\n' \"$0\" >&2; exit 1"),
+                target.into_os_string(),
+            ],
+            Some(confinement.workspace().clone()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .expect("spawn spec");
+        Rig {
+            context,
+            cancel,
+            seat,
+            spec,
+            _dirs: vec![workspace, outside, evidence],
+        }
+    }
+
+    /// Catches: on a backend that cannot widen after admission (Landlock) the
+    /// person is asked, answers yes, and is told a grant is in force although
+    /// the retry runs under the same confinement.
+    #[test]
+    fn a_backend_that_cannot_widen_is_never_asked_and_says_so() {
+        let rig = rig(Arc::new(NullBackend), false);
+        let outcome = block_on(rig.context.execute(&rig.spec));
+        let Err(ProcessError::Exit { result, .. }) = outcome else {
+            panic!("the forged refusal exits 1: {outcome:?}");
+        };
+        assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 0);
+        let text = result
+            .content
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("cannot open extra paths"), "{text}");
+    }
+
+    /// Catches: a sandbox question nobody answers holds a cancelled run open
+    /// forever, because `ask` is awaited without watching the run's cancel
+    /// token.
+    #[test]
+    fn a_cancelled_run_does_not_wait_for_a_sandbox_answer() {
+        let rig = rig(Arc::new(Widening), true);
+        let cancel = rig.cancel.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            cancel.cancel(CancelCause::User);
+        });
+        let outcome = block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), rig.context.execute(&rig.spec)).await
+        });
+        canceller.join().expect("canceller thread");
+        assert!(
+            matches!(outcome, Ok(Err(ProcessError::Cancelled))),
+            "{outcome:?}"
+        );
+        assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 1);
     }
 }

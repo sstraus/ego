@@ -32,6 +32,12 @@ pub(crate) trait Backend: Send + Sync {
     fn widened(&self, _grants: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
         Ok(None)
     }
+
+    /// Whether [`Self::widened`] returns a backend. A human is asked to open a
+    /// path only on a backend that can act on the answer.
+    fn can_widen(&self) -> bool {
+        false
+    }
 }
 
 /// A mechanism selected only after paired production-path probes. Its
@@ -85,6 +91,10 @@ impl Backend for MeasuredBackend {
 
     fn widened(&self, grants: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
         self.inner.widened(grants)
+    }
+
+    fn can_widen(&self) -> bool {
+        self.inner.can_widen()
     }
 }
 
@@ -219,5 +229,9 @@ impl Backend for super::seatbelt::SeatbeltBackend {
         let widened: Arc<dyn Backend> =
             Arc::new(super::seatbelt::SeatbeltBackend::widened(self, grants)?);
         Ok(Some(widened))
+    }
+
+    fn can_widen(&self) -> bool {
+        true
     }
 }

@@ -5,8 +5,11 @@
 //! program's own `<path>: Operation not permitted` line. That line is written
 //! by a process the model chose, so it is never trusted by itself. A path
 //! becomes a question for the human only when the command line the human
-//! already approved also names it, it resolves to a location the profile does
-//! not already open, and it is not inside the workspace the run owns.
+//! already approved names it (or a directory above it), it resolves to a
+//! location the profile does not already open and can express, it is not
+//! inside the workspace the run owns, and it is not a place so broad that
+//! opening it would open the person's whole machine (`/`, the home directory,
+//! or any directory above the workspace).
 
 use std::path::{Path, PathBuf};
 
@@ -58,17 +61,26 @@ pub(super) fn analyze(
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let printed = stderr.lines().find_map(printed_path)?;
-    let request = request_for(
-        printed,
-        &argv,
-        spec,
-        confinement.workspace().as_path(),
-        granted,
-    );
-    Some(Denial {
+    let mut first = None;
+    for printed in stderr.lines().filter_map(printed_path) {
+        let request = request_for(
+            printed,
+            &argv,
+            spec,
+            confinement.workspace().as_path(),
+            granted,
+        );
+        if request.is_some() {
+            return Some(Denial {
+                printed: printed.to_owned(),
+                request,
+            });
+        }
+        first.get_or_insert(printed);
+    }
+    first.map(|printed| Denial {
         printed: printed.to_owned(),
-        request,
+        request: None,
     })
 }
 
@@ -87,13 +99,18 @@ fn request_for(
     workspace: &Path,
     granted: &[SandboxGrant],
 ) -> Option<SandboxGrant> {
-    // The command line the human approved must name the path. Without this a
-    // program could print any path it likes and have the human asked about it.
-    if !argv.iter().any(|argument| argument.contains(printed)) {
+    let (path, exists) = canonical(Path::new(printed))?;
+    // The command line the human approved must name the path, or a directory
+    // above it: without this a program could print any path it likes and have
+    // the human asked about it. Names are compared by resolved path component,
+    // never as substrings (`/a/Gits` is not named by `/a/Gits-evil/f`).
+    if !argv_anchors(argv).any(|anchor| path.is_or_under(&anchor)) {
         return None;
     }
-    let (path, exists) = canonical(Path::new(printed))?;
-    if path.is_or_under(&CanonPath::new(workspace)) {
+    if path.is_or_under(&CanonPath::new(workspace)) || too_broad(&path, workspace) {
+        return None;
+    }
+    if !renderable(path.as_path()) {
         return None;
     }
     let access = if exec_target(spec).is_some_and(|target| target == path.as_path()) {
@@ -116,6 +133,44 @@ fn request_for(
     Some(SandboxGrant::new(path, access))
 }
 
+/// The absolute paths the command line spells, resolved: whole arguments and
+/// the value of `--flag=/path`.
+fn argv_anchors(argv: &[String]) -> impl Iterator<Item = CanonPath> + '_ {
+    argv.iter().filter_map(|argument| {
+        let spelled = match argument.split_once('=') {
+            Some((_, value)) if value.starts_with('/') => value,
+            _ => argument.as_str(),
+        };
+        spelled
+            .starts_with('/')
+            .then(|| canonical(Path::new(spelled)))
+            .flatten()
+            .map(|(path, _)| path)
+    })
+}
+
+/// A grant of `/`, of the home directory, or of a directory above the
+/// workspace would hand the command far more than the one path it was refused.
+fn too_broad(path: &CanonPath, workspace: &Path) -> bool {
+    let above = |other: &Path| CanonPath::new(other).is_or_under(path);
+    path.as_path() == Path::new("/")
+        || above(workspace)
+        || std::env::var_os("HOME")
+            .and_then(|home| std::fs::canonicalize(home).ok())
+            .is_some_and(|home| above(&home))
+}
+
+#[cfg(target_os = "macos")]
+fn renderable(path: &Path) -> bool {
+    super::profile::renderable(path)
+}
+
+/// Landlock takes the path as a handle, so every path is expressible.
+#[cfg(not(target_os = "macos"))]
+fn renderable(_: &Path) -> bool {
+    true
+}
+
 /// The resolved location, and whether the path itself exists. A path that is
 /// not there yet resolves through its parent, so the grant names the exact
 /// file a write would create.
@@ -134,11 +189,41 @@ fn exec_target(spec: &SpawnSpec) -> Option<PathBuf> {
     }
 }
 
+/// The command line as the person reads it: arguments with whitespace or quotes
+/// are single-quoted, and a very long one is cut.
+pub(super) fn command_line(spec: &SpawnSpec) -> String {
+    const LIMIT: usize = 600;
+    let line = spec
+        .argv()
+        .iter()
+        .map(|argument| {
+            let argument = argument.to_string_lossy();
+            if argument.is_empty()
+                || argument.contains(|c: char| c.is_whitespace() || "'\"".contains(c))
+            {
+                format!("'{}'", argument.replace('\'', "'\\''"))
+            } else {
+                argument.into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    match line.char_indices().nth(LIMIT) {
+        Some((end, _)) => format!("{}...", &line[..end]),
+        None => line,
+    }
+}
+
 /// How a refused command ended, for the note appended to its output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Outcome {
     Declined,
     NobodyToAsk,
+    /// The person answered every question one command may raise, and the
+    /// command was refused again.
+    QuestionLimit,
+    /// This platform's sandbox cannot open a path after the run was admitted.
+    CannotWiden,
 }
 
 /// The note appended to a refused command's output, for the model and the
@@ -154,6 +239,14 @@ pub(super) fn note(denial: &Denial, confinement: &RunConfinement, outcome: Outco
             "sandbox denied {request} (confinement {level}); no one was available to allow it, \
              so the command did not complete"
         ),
+        (Some(request), Outcome::CannotWiden) => format!(
+            "sandbox denied {request} (confinement {level}); this platform's sandbox cannot open \
+             extra paths after the run started, so the command did not complete"
+        ),
+        (Some(request), Outcome::QuestionLimit) => format!(
+            "sandbox denied {request} (confinement {level}); this command already raised the \
+             most sandbox questions one command may ask, so it did not complete"
+        ),
         (None, _) => format!(
             "{} was refused with 'Operation not permitted' under confinement {level}; exec can \
              only reach the workspace, fixed system paths and paths a person allowed, and a \
@@ -165,7 +258,8 @@ pub(super) fn note(denial: &Denial, confinement: &RunConfinement, outcome: Outco
 
 #[cfg(test)]
 mod tests {
-    use super::printed_path;
+    use super::{command_line, printed_path};
+    use ego_core::permit::{EnvPolicy, SpawnSpec};
 
     // Lines recorded from macOS `cat`, `ls` and `touch` under `sandbox-exec`
     // with a profile that does not open the path, 2026-10-02.
@@ -196,5 +290,19 @@ mod tests {
             None
         );
         assert_eq!(printed_path("Operation not permitted"), None);
+    }
+
+    #[test]
+    fn the_command_line_quotes_what_a_person_could_misread() {
+        let spec = SpawnSpec::new(
+            ["/bin/sh", "-c", "echo hi there", ""]
+                .map(Into::into)
+                .to_vec(),
+            None,
+            None,
+            EnvPolicy::Inherited,
+        )
+        .expect("spawn spec");
+        assert_eq!(command_line(&spec), "/bin/sh -c 'echo hi there' ''");
     }
 }

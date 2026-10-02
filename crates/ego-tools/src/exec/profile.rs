@@ -200,6 +200,11 @@ fn path_literal(path: &Path) -> Result<String, ProfileError> {
     Ok(encoded)
 }
 
+/// Whether [`render`] can express `path`; the one place that rule lives.
+pub(super) fn renderable(path: &Path) -> bool {
+    path_literal(path).is_ok()
+}
+
 fn path_label(path: &Path) -> String {
     format!("{:?}", path.as_os_str())
 }

@@ -120,6 +120,10 @@ fn sandbox_question(host: &mut AcpHost, file: &std::path::Path) -> serde_json::V
     let text = title(&question);
     assert!(text.contains("sandbox refused"), "{question}");
     assert!(
+        text.contains("/bin/cat"),
+        "the question did not show the command that will run again: {question}"
+    );
+    assert!(
         text.contains(&file.display().to_string()) && text.contains("read"),
         "the question did not name the path and the operation: {question}"
     );

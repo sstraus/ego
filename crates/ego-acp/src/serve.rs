@@ -477,6 +477,10 @@ pub trait RunBindingsBuilder: Send + Sync {
         root: &RunRoot,
         session_approval: Arc<AtomicBool>,
     ) -> ego_core::run::RunExecutionBindings;
+
+    /// The session was closed, deleted, loaded or resumed: whatever a person
+    /// allowed for "this session" ends with it, like the exec session approval.
+    fn end_session(&self, _session: &v1::SessionId) {}
 }
 
 /// Production ACP bindings: live updates plus the existing question adapter.
@@ -486,7 +490,7 @@ pub struct AcpRunBindingsBuilder {
     permission_rules: Option<Arc<dyn crate::permission::PermissionRuleWriter>>,
     sandbox_store: Option<Arc<dyn crate::sandbox::SandboxGrantStore>>,
     /// One list per session: a session answer outlives the prompt that asked
-    /// and ends with the connection. Keyed by the wire session id.
+    /// and ends with the session (`end_session`). Keyed by the wire session id.
     sandbox_sessions:
         std::sync::Mutex<std::collections::HashMap<String, crate::sandbox::SessionSandboxGrants>>,
 }
@@ -541,6 +545,13 @@ impl EventSinkFactory for AcpSinkFactory {
 }
 
 impl RunBindingsBuilder for AcpRunBindingsBuilder {
+    fn end_session(&self, session: &v1::SessionId) {
+        self.sandbox_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session.0.as_ref());
+    }
+
     fn build(
         &self,
         connection: ConnectionTo<Client>,
@@ -2483,6 +2494,7 @@ where
                         .expect("initialize capability lock poisoned")
                         .clone();
                     let session_approval = Arc::new(AtomicBool::new(false));
+                    bindings_builder.end_session(&request.session_id);
                     let bindings = session_bindings(
                         bindings_builder.as_ref(),
                         cx.clone(),
@@ -2615,6 +2627,7 @@ where
                         .expect("initialize capability lock poisoned")
                         .clone();
                     let session_approval = Arc::new(AtomicBool::new(false));
+                    bindings_builder.end_session(&request.session_id);
                     let bindings = session_bindings(
                         bindings_builder.as_ref(),
                         cx.clone(),
@@ -2765,10 +2778,12 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
+                let bindings_builder = Arc::clone(&bindings_builder);
                 let notices = notices.clone();
                 async move |request: v1::DeleteSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
+                    let bindings_builder = Arc::clone(&bindings_builder);
                     let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
@@ -2784,6 +2799,7 @@ where
                             if let Some(mcp) = sessions.close(&request.session_id) {
                                 mcp.close().await;
                             }
+                            bindings_builder.end_session(&request.session_id);
                             notices.unregister(&request.session_id);
                             responder.respond(v1::DeleteSessionResponse::new())
                         }
@@ -2798,10 +2814,12 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
+                let bindings_builder = Arc::clone(&bindings_builder);
                 let notices = notices.clone();
                 async move |request: v1::CloseSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
+                    let bindings_builder = Arc::clone(&bindings_builder);
                     let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
@@ -2817,6 +2835,7 @@ where
                             if let Some(mcp) = sessions.close(&request.session_id) {
                                 mcp.close().await;
                             }
+                            bindings_builder.end_session(&request.session_id);
                             notices.unregister(&request.session_id);
                             responder.respond(v1::CloseSessionResponse::new())
                         }

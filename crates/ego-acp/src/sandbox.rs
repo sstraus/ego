@@ -73,6 +73,7 @@ impl AcpSandboxGrants {
     pub fn request(
         session: &v1::SessionId,
         grant: &SandboxGrant,
+        command: &str,
         rememberable: bool,
     ) -> v1::RequestPermissionRequest {
         let action = match grant.access {
@@ -82,7 +83,7 @@ impl AcpSandboxGrants {
         };
         let title = format!(
             "The sandbox refused a command access to {path}.\nAllow it to {action} {path}? \
-             The command will run again.",
+             This command will run again:\n{command}",
             path = grant.path
         );
         let tool_call = v1::ToolCallUpdate::new(
@@ -119,8 +120,8 @@ impl AcpSandboxGrants {
         }
     }
 
-    async fn decide(&self, grant: &SandboxGrant) -> bool {
-        let wire = Self::request(&self.session, grant, self.store.is_some());
+    async fn decide(&self, grant: &SandboxGrant, command: &str) -> bool {
+        let wire = Self::request(&self.session, grant, command, self.store.is_some());
         let response = match self.connection.send_request(wire).block_task().await {
             Ok(response) => response,
             Err(error) => {
@@ -173,6 +174,10 @@ impl SandboxGrantPort for AcpSandboxGrants {
     }
 
     fn ask<'a>(&'a self, request: &'a SandboxGrant) -> BoxFuture<'a, bool> {
-        Box::pin(self.decide(request))
+        Box::pin(self.decide(request, ""))
+    }
+
+    fn ask_for<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(self.decide(request, command))
     }
 }
