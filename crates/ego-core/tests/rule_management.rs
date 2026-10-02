@@ -286,3 +286,165 @@ fn remember_deduplicates_rules_uses_absolute_paths_and_refuses_omitted_or_outsid
         ));
     }
 }
+
+fn exec_op(argv: &[&str]) -> Op {
+    Op::Spawn {
+        spec: ego_core::permit::SpawnSpec::new(
+            argv.iter().map(std::ffi::OsString::from).collect(),
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+        )
+        .unwrap(),
+    }
+}
+
+fn exec_call(argv: &[&str]) -> PreparedCall {
+    PreparedCall::new("exec", exec_op(argv))
+}
+
+fn suggested(call: &PreparedCall) -> Vec<Rule> {
+    RuleManagement::suggest_remember(call, ManagedRuleEffect::Allow, Path::new("/workspace"))
+        .unwrap()
+        .candidates
+}
+
+/// Catches an exact-argv rule that can never match the next call: remembering
+/// `python3 -c <this code>` must also cover `python3 -c <other code>`.
+#[test]
+fn suggested_exec_rule_is_the_argv_prefix_and_matches_the_next_call() {
+    let rules = suggested(&exec_call(&["python3", "-c", "print(1)"]));
+    assert_eq!(rules, vec![rule("exec(python3 *)")]);
+    assert!(rules[0].matches(
+        &exec_op(&["python3", "-c", "print(2)"]),
+        Path::new("/workspace")
+    ));
+    assert!(!rules[0].matches(&exec_op(&["python", "-c", "x"]), Path::new("/workspace")));
+}
+
+/// Catches `git *` standing for `git -c core.sshCommand=... fetch`: a
+/// subcommand program keeps its subcommand, and an option is not one.
+#[test]
+fn suggested_exec_rule_for_a_subcommand_program_keeps_the_subcommand() {
+    let rules = suggested(&exec_call(&["git", "commit", "-m", "x"]));
+    assert_eq!(rules, vec![rule("exec(git commit *)")]);
+    let root = Path::new("/workspace");
+    assert!(rules[0].matches(&exec_op(&["git", "commit", "-m", "y"]), root));
+    assert!(!rules[0].matches(&exec_op(&["git", "push"]), root));
+    assert!(!rules[0].matches(&exec_op(&["git", "-c", "core.sshCommand=x", "commit"]), root));
+    assert_eq!(
+        suggested(&exec_call(&["git", "-C", "..", "status"])),
+        vec![rule("exec(git *)")],
+        "an option is never taken for the subcommand"
+    );
+}
+
+/// Catches a prefix rule that authorises arbitrary code: a launcher, a path,
+/// or a name carrying shell metacharacters keeps its exact form, which a
+/// different command cannot match.
+#[test]
+fn suggested_exec_rule_falls_back_to_the_exact_form_for_launchers_and_metacharacters() {
+    let root = Path::new("/workspace");
+    let hostile = exec_op(&["bash", "-c", "rm -rf /"]);
+    for argv in [
+        vec!["bash", "-c", "echo hi; echo there"],
+        vec!["sh", "-c", "true"],
+        vec!["env", "FOO=1", "ls"],
+        vec!["sudo", "rm", "x"],
+        vec!["xargs", "rm"],
+        vec!["/bin/ls", "-l"],
+        vec!["./run.sh"],
+        vec!["ls;rm", "x"],
+        vec!["$(evil)", "x"],
+        vec!["py*", "x"],
+    ] {
+        let call = exec_call(&argv);
+        let exact = RuleManagement::remember(&call, ManagedRuleEffect::Allow, root)
+            .unwrap()
+            .candidates;
+        let rules = suggested(&call);
+        assert_eq!(rules, exact, "{argv:?} was widened");
+        assert!(!rules[0].matches(&hostile, root), "{argv:?} authorises {hostile:?}");
+    }
+}
+
+/// Catches remember widening beyond the workspace: the write rule is the
+/// workspace glob, not a path, a parent, or a root.
+#[test]
+fn suggested_write_rule_is_the_workspace_glob_and_never_wider() {
+    let call = PreparedCall::new(
+        "write",
+        Op::Write {
+            path: CanonPath::new("/workspace/src/main.rs"),
+            change: Change::Whole(b"x".to_vec()),
+        },
+    );
+    let plan =
+        RuleManagement::suggest_remember(&call, ManagedRuleEffect::Allow, Path::new("/workspace"))
+            .unwrap();
+    assert_eq!(plan.candidates, vec![rule("write(/workspace/**)")]);
+    assert_eq!(plan.omitted, vec![OmittedDimension::Change]);
+    let write = |path: &str| Op::Write {
+        path: CanonPath::new(path),
+        change: Change::Whole(Vec::new()),
+    };
+    let root = Path::new("/workspace");
+    assert!(plan.candidates[0].matches(&write("/workspace/docs/new.md"), root));
+    assert!(!plan.candidates[0].matches(&write("/workspace-other/x"), root));
+    assert!(!plan.candidates[0].matches(&write("/other/x"), root));
+
+    let outside = PreparedCall::new(
+        "write",
+        Op::Write {
+            path: CanonPath::new("/other/x"),
+            change: Change::Whole(Vec::new()),
+        },
+    );
+    assert!(matches!(
+        RuleManagement::suggest_remember(&outside, ManagedRuleEffect::Allow, root),
+        Err(RuleManagementError::OutsideWorkspace { .. })
+    ));
+    assert!(
+        matches!(
+            RuleManagement::suggest_remember(&call, ManagedRuleEffect::Allow, Path::new("/")),
+            Err(RuleManagementError::NonPersistible(_))
+        ),
+        "a filesystem-root workspace must never become write(/**)"
+    );
+}
+
+/// Catches a remembered prefix overriding a system deny: the broader allow
+/// is only an allow, and deny precedence is evaluated first.
+#[test]
+fn a_suggested_rule_cannot_lift_a_system_deny() {
+    use ego_core::config::Mode;
+    use ego_core::permit::{Classification, PolicyDenied, PolicyEngine};
+
+    let mut rules = system_rules(&[], &["write(/workspace/secrets/**)"]);
+    let plan = RuleManagement::suggest_remember(
+        &PreparedCall::new(
+            "write",
+            Op::Write {
+                path: CanonPath::new("/workspace/notes.md"),
+                change: Change::Whole(Vec::new()),
+            },
+        ),
+        ManagedRuleEffect::Allow,
+        Path::new("/workspace"),
+    )
+    .unwrap();
+    Ruleset::merge(&mut rules.allow, plan.candidates[0].clone(), Source::User);
+    let engine = PolicyEngine::new(CanonPath::new("/workspace"), Mode::Default, rules);
+
+    let secret = PreparedCall::new(
+        "write",
+        Op::Write {
+            path: CanonPath::new("/workspace/secrets/key"),
+            change: Change::Whole(Vec::new()),
+        },
+    );
+    assert!(matches!(
+        engine.classify(secret),
+        Classification::Settled(Err(PolicyDenied::Denied { .. }))
+    ));
+}
