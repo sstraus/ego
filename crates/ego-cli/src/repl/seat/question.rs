@@ -536,15 +536,10 @@ fn other_text(
     {
         let mut status = surface.status.lock().expect("surface status lock");
         status.question_selector = None;
-        // Keys of the burst that opened the entry belong to the selector it
-        // replaced, whether queued here or still unread: either would act on a
-        // stale choice (a stale Enter blank-submits this entry, then reopens it).
+        // Queued keys belong to the selector this entry replaces; replayed
+        // after backing out they would act on a stale choice. Keys the editor
+        // has not read yet are typed-ahead input for the entry and stay.
         status.picker_keys.clear();
-    }
-    while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-        if crossterm::event::read().is_err() {
-            break;
-        }
     }
     let prompt = Question::new(format!("{OTHER_LABEL}: "), Arc::clone(surface.status));
     let entry = loop {

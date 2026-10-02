@@ -4397,6 +4397,32 @@ fn keys_queued_behind_the_other_row_are_not_replayed_after_backing_out() {
     let call = serde_json::json!({
         "prompt": "Which function would you like to add?",
         "mode": "single",
+/// catches: typed-ahead keys of one burst being dropped when the `Other`
+/// entry opens, so the free text never reaches the entry.
+#[test]
+fn a_burst_that_opens_the_other_row_and_types_its_text_answers_with_it() {
+    let call = serde_json::json!({
+        "prompt": "Which function would you like to add?",
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract"},
+            {"id": "divide", "label": "divide"},
+        ],
+        "free_text": true,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        selector_screen(reader, output);
+        input.write_all(b"3\rhello\r").expect("one burst");
+        input.flush().expect("burst flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "hello") > 0,
+        "the typed-ahead text answers the Other row: {}",
+        generations[1]
+    );
+}
+
         "options": [
             {"id": "subtract", "label": "subtract"},
             {"id": "divide", "label": "divide"},
@@ -4410,10 +4436,6 @@ fn keys_queued_behind_the_other_row_are_not_replayed_after_backing_out() {
         input.write_all(b"3\r\r").expect("burst into Other");
         input.flush().expect("burst flush");
         until_normalized(reader, output, from, "Other: ");
-        let backed = output.len();
-        input.write_all(b"\r").expect("blank line backs out");
-        input.flush().expect("back flush");
-        until_from(reader, output, backed, b"Up/Down or number selects");
         drain_until_quiet(reader, output);
         input.write_all(b"1\r").expect("answer on the selector");
         input.flush().expect("answer flush");
@@ -4424,6 +4446,20 @@ fn keys_queued_behind_the_other_row_are_not_replayed_after_backing_out() {
         generations[1]
     );
 }
+        // The burst's second Enter is a blank submit when the entry has read
+        // it; otherwise this one is. Either way the selector is back, once.
+        let screen = normalized(&output[from..]);
+        let backed_out = screen
+            .rfind("Up/Down or number selects")
+            .zip(screen.rfind("Other: "))
+            .is_some_and(|(selector, entry)| selector > entry);
+        if !backed_out {
+            let backed = output.len();
+            input.write_all(b"\r").expect("blank line backs out");
+            input.flush().expect("back flush");
+            until_from(reader, output, backed, b"Up/Down or number selects");
+            drain_until_quiet(reader, output);
+        }
 
 /// What one scripted tool turn left on a real terminal screen.
 struct ToolTurnScreens {
