@@ -88,6 +88,12 @@ fn elapsed_never_decreases_across_the_end_of_a_suspension() {
     let late_mid = clock.elapsed();
     drop(stop);
     let after = clock.elapsed();
-    assert!(late_mid >= mid.saturating_sub(ms(2)), "{mid:?} -> {late_mid:?}");
-    assert!(after >= late_mid.saturating_sub(ms(2)), "{late_mid:?} -> {after:?}");
+    assert!(
+        late_mid >= mid.saturating_sub(ms(2)),
+        "{mid:?} -> {late_mid:?}"
+    );
+    assert!(
+        after >= late_mid.saturating_sub(ms(2)),
+        "{late_mid:?} -> {after:?}"
+    );
 }
