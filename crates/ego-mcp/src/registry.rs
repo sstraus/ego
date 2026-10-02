@@ -4549,7 +4549,10 @@ mod secret_mask_critic_round_six {
             ),
         ] {
             let out = detail(cause);
-            assert!(!out.contains(secret), "{cause:?} leaked {secret:?}: {out:?}");
+            assert!(
+                !out.contains(secret),
+                "{cause:?} leaked {secret:?}: {out:?}"
+            );
             assert!(out.ends_with("done"), "{cause:?} lost its tail: {out:?}");
         }
     }
@@ -4597,7 +4600,10 @@ mod secret_mask_critic_round_six {
         // rescans the same span at every separator.
         let n = 100_000;
         let cases = [
-            ("name then backslash run", format!("name:{}", "\\".repeat(n))),
+            (
+                "name then backslash run",
+                format!("name:{}", "\\".repeat(n)),
+            ),
             (
                 "key separators each followed by a backslash",
                 "key:\\".repeat(n / 5),
