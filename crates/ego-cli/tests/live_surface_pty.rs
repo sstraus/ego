@@ -4552,3 +4552,298 @@ fn rows_fit_the_terminal_at_120_80_60_and_40_columns() {
         );
     }
 }
+
+const PICKER_ROWS: u16 = 40;
+/// Three chat models around the session's `qwen3`, so the current model is
+/// neither the first nor the last row.
+const PICKER_TAGS: &str = r#"{"models":[{"name":"aaa-first","capabilities":["completion","tools"]},{"name":"qwen3","capabilities":["completion","tools"]},{"name":"zzz-last","capabilities":["completion","tools"]}]}"#;
+
+/// A live terminal whose oracle is the emulated screen, never the bytes ego
+/// wrote.
+struct Term<'a> {
+    input: &'a mut PtyWriter,
+    reader: &'a mpsc::Receiver<Vec<u8>>,
+    output: &'a mut Vec<u8>,
+    cols: u16,
+}
+
+impl Term<'_> {
+    fn send(&mut self, bytes: &[u8]) {
+        self.input.write_all(bytes).expect("terminal input");
+        self.input.flush().expect("terminal input flush");
+    }
+
+    fn screen(&self) -> Vec<String> {
+        screen_rows(self.output, PICKER_ROWS, self.cols)
+    }
+
+    /// Reads until the emulated screen satisfies `ready`, lets the redraw
+    /// settle, and returns the screen.
+    fn until(&mut self, what: &str, ready: impl Fn(&[String]) -> bool) -> Vec<String> {
+        let deadline = Instant::now() + PROGRESS_DEADLINE;
+        while !ready(&self.screen()) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.reader.recv_timeout(remaining) {
+                Ok(chunk) => self.output.extend(chunk),
+                Err(_) => panic!("never saw {what}; screen:\n{}", self.screen().join("\n")),
+            }
+        }
+        drain_until_quiet(self.reader, self.output);
+        self.screen()
+    }
+
+    fn close_picker(&mut self) {
+        self.send(b"\x1b");
+        self.until("the picker to close", |screen| {
+            !screen.iter().any(|row| row.starts_with("Select "))
+        });
+    }
+}
+
+/// One session at `cols` columns, past the trust question, with the picker
+/// catalogue above. `drive` leaves the composer idle.
+fn picker_session(cols: u16, drive: impl FnOnce(&mut Term<'_>, &Stub)) {
+    let stub = Stub::start(Plan {
+        tags_refusal: Some((200, PICKER_TAGS.to_string())),
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# picker fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: PICKER_ROWS,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((PICKER_ROWS, cols)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    drain_until_quiet(&reader, &mut output);
+    drive(
+        &mut Term {
+            input: &mut input,
+            reader: &reader,
+            output: &mut output,
+            cols,
+        },
+        &stub,
+    );
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+}
+
+/// The picker's own rows: everything below its heading.
+fn picker_rows(screen: &[String]) -> &[String] {
+    let heading = screen
+        .iter()
+        .rposition(|row| row.starts_with("Select "))
+        .expect("a picker heading is on screen");
+    &screen[heading..]
+}
+
+#[test]
+fn the_pickers_open_on_the_current_value_name_it_and_hint_the_session_key_at_step_one() {
+    picker_session(120, |term, _stub| {
+        term.send(b"/model\r");
+        let screen = term.until("the model picker", |screen| {
+            screen.iter().any(|row| row.contains("Esc cancels"))
+        });
+        let rows = picker_rows(&screen);
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?} row:\n{}", screen.join("\n")))
+        };
+        // Catches: the cursor fixed on row 1 and no marker on the current model.
+        assert!(row("2. ollama/qwen3").starts_with("> "), "{screen:#?}");
+        assert!(row("2. ollama/qwen3").contains("✓ current"), "{screen:#?}");
+        assert!(row("1. ollama/aaa-first").starts_with("  "), "{screen:#?}");
+        assert!(!row("1. ollama/aaa-first").contains("current"), "{screen:#?}");
+        // Catches: the session-only key explained only at the reasoning step.
+        assert!(
+            rows.join("\n").contains("s = this session only"),
+            "{screen:#?}"
+        );
+
+        term.send(b"\r");
+        let screen = term.until("the reasoning step", |screen| {
+            screen
+                .iter()
+                .any(|row| row.starts_with("Select reasoning for ollama/qwen3"))
+        });
+        // Catches: no current effort marked after choosing the current model.
+        assert_eq!(
+            picker_rows(&screen)
+                .iter()
+                .filter(|row| row.contains("✓ current"))
+                .count(),
+            1,
+            "{screen:#?}"
+        );
+        term.close_picker();
+
+        term.send(b"/thinking\r");
+        let screen = term.until("the effort picker", |screen| {
+            screen
+                .iter()
+                .any(|row| row.starts_with("Select reasoning for ollama/qwen3"))
+        });
+        // Catches: the effort picker's cursor and marker on different rows.
+        let marked = picker_rows(&screen)
+            .iter()
+            .find(|row| row.contains("✓ current"))
+            .unwrap_or_else(|| panic!("no current effort:\n{}", screen.join("\n")));
+        assert!(marked.starts_with("> "), "{screen:#?}");
+        term.close_picker();
+    });
+}
+
+#[test]
+fn typing_filters_the_model_list_while_digits_select_only_before_the_filter_starts() {
+    picker_session(120, |term, _stub| {
+        term.send(b"/model\r");
+        term.until("the model picker", |screen| {
+            screen.iter().any(|row| row.contains("Esc cancels"))
+        });
+        // Catches: type-to-search that takes digits before any filter exists.
+        term.send(b"1");
+        term.until("row 1 selected by number", |screen| {
+            screen.iter().any(|row| row.starts_with("> 1. ollama/aaa-first"))
+        });
+
+        for key in [b"z", b"z", b"z"] {
+            term.send(key);
+        }
+        let screen = term.until("the zzz filter", |screen| {
+            screen.iter().any(|row| row.contains("filter: zzz"))
+        });
+        let rows = picker_rows(&screen).join("\n");
+        assert!(rows.contains("ollama/zzz-last"), "{screen:#?}");
+        assert!(!rows.contains("ollama/aaa-first"), "{screen:#?}");
+        assert!(!rows.contains("ollama/qwen3"), "{screen:#?}");
+
+        // Catches: digits still selecting rows once a filter has started, which
+        // makes `qwen3` impossible to type.
+        for _ in 0..3 {
+            term.send(b"\x7f");
+        }
+        for key in [b"q", b"w", b"e", b"n", b"3"] {
+            term.send(key);
+        }
+        let screen = term.until("the qwen3 filter", |screen| {
+            screen.iter().any(|row| row.contains("filter: qwen3"))
+        });
+        assert!(
+            picker_rows(&screen)
+                .iter()
+                .any(|row| row.starts_with("> 1. ollama/qwen3")),
+            "{screen:#?}"
+        );
+        term.close_picker();
+    });
+}
+
+#[test]
+fn a_filter_with_no_match_shows_an_empty_state_and_enter_does_nothing() {
+    picker_session(120, |term, _stub| {
+        term.send(b"/model\r");
+        term.until("the model picker", |screen| {
+            screen.iter().any(|row| row.contains("Esc cancels"))
+        });
+        // A row selected before the filter emptied the list must not survive it.
+        term.send(b"2");
+        term.until("row 2 selected", |screen| {
+            screen.iter().any(|row| row.starts_with("> 2. ollama/qwen3"))
+        });
+        term.send(b"k");
+        term.send(b"k");
+        let screen = term.until("the empty state", |screen| {
+            screen.iter().any(|row| row.contains("No model matches"))
+        });
+        assert!(
+            !picker_rows(&screen)
+                .iter()
+                .any(|row| row.contains(". ollama/")),
+            "{screen:#?}"
+        );
+        // Catches: Enter continuing with the stale row.
+        term.send(b"\r");
+        std::thread::sleep(Duration::from_millis(500));
+        drain_until_quiet(term.reader, term.output);
+        let screen = term.screen();
+        assert!(
+            screen.iter().any(|row| row.contains("No model matches")),
+            "{screen:#?}"
+        );
+        assert!(
+            !screen.iter().any(|row| row.starts_with("Select reasoning")),
+            "{screen:#?}"
+        );
+        term.close_picker();
+    });
+}
+
+#[test]
+fn choosing_a_model_writes_a_receipt_into_the_transcript() {
+    picker_session(120, |term, stub| {
+        term.send(b"/model\r");
+        term.until("the model picker", |screen| {
+            screen.iter().any(|row| row.contains("Esc cancels"))
+        });
+        for key in [b"a", b"a", b"a"] {
+            term.send(key);
+        }
+        term.until("the aaa filter", |screen| {
+            screen.iter().any(|row| row.contains("filter: aaa"))
+        });
+        term.send(b"\r");
+        term.until("the reasoning step", |screen| {
+            screen
+                .iter()
+                .any(|row| row.starts_with("Select reasoning for ollama/aaa-first"))
+        });
+        term.send(b"1");
+        term.until("a highlighted effort", |screen| {
+            screen.iter().any(|row| row.starts_with("> 1."))
+        });
+        term.send(b"s");
+        // Catches: a silent model change.
+        let screen = term.until("the receipt", |screen| {
+            screen
+                .iter()
+                .any(|row| row.contains("Model: ollama/aaa-first (this session only)"))
+        });
+        assert!(
+            !screen.iter().any(|row| row.starts_with("Select ")),
+            "{screen:#?}"
+        );
+        assert!(stub.generations().is_empty());
+    });
+}

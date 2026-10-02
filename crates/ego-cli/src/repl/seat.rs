@@ -382,6 +382,10 @@ struct SurfaceStatus {
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
+    /// Keys the picker has been sent and not yet applied. The editor parses a
+    /// whole burst of input before running its first command and drops the
+    /// rest, so typed keys wait here instead of riding on that command.
+    picker_keys: Vec<String>,
     model_selection: Option<Arc<GenerationSelection>>,
     question_selector: Option<Arc<Mutex<Selector>>>,
     permission_modal: bool,
@@ -423,6 +427,7 @@ impl Default for SurfaceStatus {
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             model_picker: None,
+            picker_keys: Vec::new(),
             model_selection: None,
             question_selector: None,
             permission_modal: false,
