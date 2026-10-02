@@ -4708,3 +4708,100 @@ mod secret_mask_critic_round_six {
         }
     }
 }
+
+#[cfg(test)]
+mod secret_mask_critic_round_seven {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn detail(cause: &str) -> String {
+        bounded_detail(cause).unwrap_or_default()
+    }
+
+    fn assert_hidden(cause: &str, secret: &str) {
+        let out = detail(cause);
+        assert!(
+            !out.contains(secret),
+            "{cause:?} leaked {secret:?}: {out:?}"
+        );
+    }
+
+    #[test]
+    fn text_glued_to_the_closing_paren_of_a_secret_is_hidden() {
+        // catches: `call` sending `Pass(word)LEAKA` to `bracket_end`, which stops at the `)` and
+        // publishes the rest of the same word (word-end masking covered it before the delta).
+        assert_hidden("password=Pass(word)LEAKA end", "LEAKA");
+        assert_hidden("pwd=(abc)LEAKB end", "LEAKB");
+    }
+
+    #[test]
+    fn struct_literal_wrapped_secret_values_are_hidden() {
+        // catches: `call` stopping at the blank of `Wrapper { .. }`, so only `Wrapper` is masked
+        // and the Debug body `{ inner: "LEAKC" }` is published.
+        assert_hidden(
+            r#"config token: Wrapper { inner: "LEAKC" } rejected"#,
+            "LEAKC",
+        );
+        assert_hidden(
+            r#"password=Mutex { data: "LEAKD", poisoned: false, .. } end"#,
+            "LEAKD",
+        );
+    }
+
+    #[test]
+    fn record_marker_survives_a_masked_closing_quote_before_it() {
+        // catches: the main scan never stepping over the masked span: `token=abc",` consumes the
+        // closing quote of the `msg` string, the quote parity inverts, the `}` of the `"}"` string
+        // counts as a real bracket, the record is disarmed and `LEAKE` is published.
+        assert_hidden(
+            r#"{ "msg": "bad token=abc", "name": "x-api-key", "note": "}", "value": "LEAKE" }"#,
+            "LEAKE",
+        );
+    }
+
+    #[test]
+    fn record_marker_survives_a_masked_closing_bracket_between_name_and_value() {
+        // catches: a masked word that ends in `)` leaving `depth` one too high, so the `value`
+        // member looks nested and `LEAKF` is published.
+        assert_hidden(
+            r#"Header { name: "x-api-key", meta: Meta(token=abc), value: "LEAKF" }"#,
+            "LEAKF",
+        );
+    }
+
+    #[test]
+    fn call_wrapped_record_name_arms_the_value_member() {
+        // catches: `names_secret` reading `Some(` as the name `some`, so the `value` sibling of
+        // `name: Some("x-api-key")` is published although the value side is call-aware.
+        assert_hidden(
+            r#"Header { name: Some("x-api-key"), value: Some("LEAKG") }"#,
+            "LEAKG",
+        );
+    }
+
+    #[test]
+    fn round_seven_adversarial_input_stays_linear() {
+        // catches: the call prefix, the even-run close or the record bookkeeping rescanning
+        // the tail for every unit of a 100k adversarial input.
+        let n = 100_000;
+        let cases = [
+            ("empty calls", "token=Some() ".repeat(n / 13)),
+            ("open calls", "token=Some(".repeat(n / 11)),
+            ("call words", "token=aaaaaaaa ".repeat(n / 15)),
+            ("escaped runs", format!("token=[\"{}\"]", "\\".repeat(n))),
+            ("even runs", "token=[\"a\\\\\" ".repeat(n / 12)),
+            ("armed records", r#"name: b"x-api-key" "#.repeat(n / 19)),
+            ("struct bodies", "token: W { ".repeat(n / 11)),
+        ];
+        for (label, cause) in cases {
+            let started = Instant::now();
+            let _ = bounded_detail(&cause);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(3),
+                "{label}: {elapsed:?} for {} chars",
+                cause.len()
+            );
+        }
+    }
+}
