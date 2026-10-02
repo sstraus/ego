@@ -1855,13 +1855,19 @@ mod overview_red {
                 .lines()
                 .find(|line| line.trim_start().starts_with(name) && line.starts_with("  "))
                 .unwrap_or_else(|| panic!("no row for {name}"));
-            let rest = row.trim_start().strip_prefix(name).expect("row starts with the name");
+            let rest = row
+                .trim_start()
+                .strip_prefix(name)
+                .expect("row starts with the name");
             assert!(
                 rest.starts_with("  "),
                 "`{name}` is not separated from its description: {row:?}"
             );
             assert_ne!(rest.trim(), *name, "`{name}` describes itself: {row:?}");
-            assert!(!rest.trim().is_empty(), "`{name}` has no description: {row:?}");
+            assert!(
+                !rest.trim().is_empty(),
+                "`{name}` has no description: {row:?}"
+            );
         }
     }
 }
