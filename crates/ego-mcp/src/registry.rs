@@ -322,25 +322,30 @@ fn mask_pem_blocks(text: &str) -> String {
     let mut rest = text;
     while let Some(start) = rest.find(BEGIN) {
         let label = &rest[start + BEGIN.len()..];
-        let Some(label_end) = label
-            .find(FENCE)
-            .filter(|end| label[..*end].contains("PRIVATE KEY"))
-        else {
+        let header_end = label.find(FENCE);
+        let header = &label[..header_end.unwrap_or(label.len())];
+        if !header.contains("PRIVATE KEY") {
             out.push_str(&rest[..start + BEGIN.len()]);
             rest = label;
             continue;
-        };
+        }
         out.push_str(&rest[..start]);
         out.push_str(SECRET_MASK);
-        let body = &label[label_end + FENCE.len()..];
-        rest = match body.find(END) {
-            Some(end) => {
-                let footer = &body[end + END.len()..];
-                footer
-                    .find(FENCE)
-                    .map_or("", |close| &footer[close + FENCE.len()..])
-            }
+        // Without closing dashes the body cannot be told from the text after it.
+        rest = match header_end {
             None => "",
+            Some(header_end) => {
+                let body = &label[header_end + FENCE.len()..];
+                match body.find(END) {
+                    Some(end) => {
+                        let footer = &body[end + END.len()..];
+                        footer
+                            .find(FENCE)
+                            .map_or("", |close| &footer[close + FENCE.len()..])
+                    }
+                    None => "",
+                }
+            }
         };
     }
     out.push_str(rest);
@@ -382,7 +387,13 @@ fn mask_key_values(text: &str) -> String {
         let character = chars[index];
         out.push(character);
         index += 1;
-        if !matches!(character, '=' | ':') {
+        // `,` only separates a quoted name from its value: `("x-api-key", "v")`.
+        let is_separator = match character {
+            '=' | ':' => true,
+            ',' => out[..out.len() - 1].ends_with(['"', '\'']),
+            _ => false,
+        };
+        if !is_separator {
             continue;
         }
         let Some(name) = secret_name_before(&out[..out.len() - 1]) else {
@@ -390,6 +401,10 @@ fn mask_key_values(text: &str) -> String {
         };
         let blanks = chars[index..].iter().take_while(|&&c| c == ' ').count();
         let start = index + blanks;
+        if blanks > 0 && starts_with_pair(&chars, start) {
+            // `key= mode=fast`: the value is empty and the next pair is unrelated.
+            continue;
+        }
         let end = value_end(&chars, start, name == "authorization");
         if end > start {
             out.push_str(&" ".repeat(blanks));
@@ -401,10 +416,14 @@ fn mask_key_values(text: &str) -> String {
 }
 
 /// The lowercase secret suffix that ends the name right before a separator,
-/// looking past blanks and one closing quote.
+/// looking past blanks, one `]` and one closing quote (plain or JSON-escaped).
 fn secret_name_before(prefix: &str) -> Option<&'static str> {
     let prefix = prefix.trim_end_matches(' ');
-    let prefix = prefix.strip_suffix(['"', '\'']).unwrap_or(prefix);
+    let prefix = prefix.strip_suffix(']').unwrap_or(prefix);
+    let prefix = prefix
+        .strip_suffix("\\\"")
+        .or_else(|| prefix.strip_suffix(['"', '\'']))
+        .unwrap_or(prefix);
     let name: String = prefix
         .chars()
         .rev()
@@ -419,21 +438,49 @@ fn secret_name_before(prefix: &str) -> Option<&'static str> {
         .find(|suffix| name.ends_with(suffix))
 }
 
-/// End of the value starting at `start`: the closing quote of a quoted value
-/// (honouring backslash escapes), else the end of the word, extended over the
-/// credential (and, after `authorization`, its `name=value` parameters) that
-/// follows an authentication scheme.
-fn value_end(chars: &[char], start: usize, any_scheme: bool) -> usize {
-    if let Some(&quote @ ('"' | '\'')) = chars.get(start) {
-        let mut index = start + 1;
-        while index < chars.len() {
-            match chars[index] {
-                '\\' => index += 2,
-                c if c == quote => return index + 1,
-                _ => index += 1,
-            }
+/// Whether the word at `start` is a `name=value` pair (`mode=fast`, not the
+/// base64 padding of `YWJjZA==`).
+fn starts_with_pair(chars: &[char], start: usize) -> bool {
+    let word = &chars[start..word_end(chars, start)];
+    let Some(equals) = word.iter().position(|&c| c == '=') else {
+        return false;
+    };
+    let name = &word[..equals];
+    name.first().is_some_and(|c| c.is_alphabetic() || *c == '_')
+        && name
+            .iter()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        && word.get(equals + 1).is_some_and(|&c| c != '=')
+}
+
+/// End of a quoted value starting at `start` (`None` when it is not quoted).
+/// The quote may be JSON-escaped (`\"x\"`), then only `\"` closes it; in a
+/// plain quote a backslash escapes the next character.
+fn quoted_end(chars: &[char], start: usize) -> Option<usize> {
+    let (open_len, quote, escaped) = match (chars.get(start), chars.get(start + 1)) {
+        (Some(&quote @ ('"' | '\'')), _) => (1, quote, false),
+        (Some('\\'), Some(&quote @ ('"' | '\''))) => (2, quote, true),
+        _ => return None,
+    };
+    let mut index = start + open_len;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' if escaped && chars.get(index + 1) == Some(&quote) => return Some(index + 2),
+            '\\' => index += 2,
+            c if c == quote && !escaped => return Some(index + 1),
+            _ => index += 1,
         }
-        return chars.len();
+    }
+    Some(chars.len())
+}
+
+/// End of the value starting at `start`: a quoted value, else the end of the
+/// word, extended over the credential (and, after `authorization`, its
+/// parameters, quoted values with blanks included) that follows an
+/// authentication scheme.
+fn value_end(chars: &[char], start: usize, any_scheme: bool) -> usize {
+    if let Some(end) = quoted_end(chars, start) {
+        return end;
     }
     let first_end = word_end(chars, start);
     let word: String = chars[start..first_end]
@@ -445,22 +492,31 @@ fn value_end(chars: &[char], start: usize, any_scheme: bool) -> usize {
         return first_end;
     }
     let credential = first_end + chars[first_end..].iter().take_while(|&&c| c == ' ').count();
-    let mut end = word_end(chars, credential);
+    let mut end = quoted_end(chars, credential).unwrap_or_else(|| word_end(chars, credential));
     if credential == first_end || end == credential {
         return first_end;
     }
     if any_scheme {
-        // `AWS4-HMAC-SHA256 Credential=a, SignedHeaders=b, Signature=c`
+        // `AWS4-HMAC-SHA256 Credential=a, SignedHeaders=b, Signature=c` and
+        // `Digest realm="my realm", response="c"`: keep taking `name=value`
+        // words, and every word while a quote is open.
+        let mut open = has_odd_quotes(&chars[credential..end]);
         loop {
             let next = end + chars[end..].iter().take_while(|&&c| c == ' ').count();
             let next_end = word_end(chars, next);
-            if next == end || next_end == next || !chars[next..next_end].contains(&'=') {
+            let word = &chars[next..next_end];
+            if next == end || word.is_empty() || !(open || word.contains(&'=')) {
                 break;
             }
+            open ^= has_odd_quotes(word);
             end = next_end;
         }
     }
     end
+}
+
+fn has_odd_quotes(chars: &[char]) -> bool {
+    chars.iter().filter(|&&c| c == '"').count() % 2 == 1
 }
 
 fn word_end(chars: &[char], start: usize) -> usize {
@@ -470,20 +526,41 @@ fn word_end(chars: &[char], start: usize) -> usize {
         .map_or(chars.len(), |offset| start + offset)
 }
 
-/// Characters that render as nothing (format characters, bidi marks, NUL and
-/// other non-whitespace controls). They are dropped, not blanked, so one
-/// cannot split a secret name such as `to<U+200E>ken`.
+/// Characters that render as nothing: every Unicode `Cf` (format) and `Cc`
+/// (control) character that is not whitespace, plus the remaining
+/// `Default_Ignorable_Code_Point` ones (variation selectors, combining grapheme
+/// joiner, Hangul fillers, tag characters). They are dropped, not blanked, so
+/// one cannot split a secret name such as `to<U+200E>ken`. The table follows
+/// Unicode 16 and std has no property lookup for it.
 fn is_invisible(character: char) -> bool {
     (character.is_control() && !character.is_whitespace())
         || matches!(
-            character,
-            '\u{00ad}'
-                | '\u{061c}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2060}'..='\u{206f}'
-                | '\u{feff}'
-                | '\u{fff9}'..='\u{fffb}'
+            u32::from(character),
+            0x00AD
+                | 0x034F
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x115F..=0x1160
+                | 0x17B4..=0x17B5
+                | 0x180B..=0x180F
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x206F
+                | 0x3164
+                | 0xFE00..=0xFE0F
+                | 0xFEFF
+                | 0xFFA0
+                | 0xFFF0..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0000..=0xE0FFF
         )
 }
 
@@ -3433,6 +3510,83 @@ mod candidate_detail_critic {
         let out = detail(&cause);
         assert!(!out.contains("SUPER"), "{out:?}");
         assert!(out.ends_with("api_key=***"), "{out:?}");
+    }
+
+    #[test]
+    fn json_escaped_inside_a_string_is_masked_with_its_structure_kept() {
+        // catches: `\"token\":\"x\"` inside a JSON string leaking, or the mask eating the
+        // text after the escaped value.
+        assert_eq!(
+            detail(r#"body {\"token\":\"LEAK\"} rejected"#),
+            r#"body {\"token\":***} rejected"#
+        );
+    }
+
+    #[test]
+    fn digest_quoted_params_with_blanks_are_masked_to_the_last_one() {
+        // catches: the parameter loop stopping inside `realm="my realm"`, leaking `response=`.
+        assert_eq!(
+            detail(r#"Authorization: Digest username="u", realm="my realm", response="LEAK" end"#),
+            "Authorization: *** end"
+        );
+    }
+
+    #[test]
+    fn every_default_ignorable_or_format_mark_is_dropped_before_matching() {
+        // catches: a name split by a mark outside a hand-picked list (grapheme joiner,
+        // variation selector, tag character, Hangul filler, Arabic number sign).
+        for mark in [
+            '\u{034f}',
+            '\u{fe0f}',
+            '\u{e0041}',
+            '\u{180e}',
+            '\u{3164}',
+            '\u{0600}',
+            '\u{115f}',
+        ] {
+            assert_eq!(detail(&format!("to{mark}ken=LEAK done")), "token=*** done");
+        }
+    }
+
+    #[test]
+    fn bracketed_and_tuple_names_are_masked() {
+        // catches: `params[token]=x` and Debug tuples `("x-api-key", "x")` leaking.
+        assert_eq!(detail("params[token]=LEAK&a=1"), "params[token]=***");
+        assert_eq!(
+            detail(r#"header ("x-api-key", "LEAK") rejected"#),
+            r#"header ("x-api-key", ***) rejected"#
+        );
+    }
+
+    #[test]
+    fn quoted_credential_with_a_blank_after_a_scheme_is_masked_whole() {
+        // catches: the credential ending at its first blank and leaking the second word.
+        assert_eq!(
+            detail(r#"Authorization: Bearer "abc LEAK" rejected"#),
+            "Authorization: *** rejected"
+        );
+    }
+
+    #[test]
+    fn unterminated_private_key_header_masks_to_the_end() {
+        // catches: a header without closing dashes publishing the key body.
+        assert_eq!(
+            detail("bad -----BEGIN RSA PRIVATE KEY MIIEvLEAK"),
+            "bad ***"
+        );
+        assert_eq!(
+            detail("see -----BEGIN CERTIFICATE----- ok"),
+            "see -----BEGIN CERTIFICATE----- ok"
+        );
+    }
+
+    #[test]
+    fn empty_value_masks_nothing_after_the_blank_but_a_spaced_value_is_masked() {
+        // catches: `key= mode=fast` masking the unrelated next pair; and, in the other
+        // direction, the pair check hiding `token: YWJjZA==` (base64 padding is no pair).
+        assert_eq!(detail("empty key= mode=fast"), "empty key= mode=fast");
+        assert_eq!(detail("token: YWJjZA== end"), "token: *** end");
+        assert_eq!(detail("api_key = LEAK end"), "api_key = *** end");
     }
 }
 
