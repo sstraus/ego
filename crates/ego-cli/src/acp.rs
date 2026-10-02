@@ -989,6 +989,11 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                 rule_target,
             )) as Arc<dyn ego_acp::permission::PermissionRuleWriter>
         });
+    let sandbox_grants: Option<Arc<dyn ego_acp::sandbox::SandboxGrantStore>> =
+        crate::config::ego_home().map(|home| {
+            Arc::new(crate::acp_sandbox_grants::FileSandboxGrants::new(home))
+                as Arc<dyn ego_acp::sandbox::SandboxGrantStore>
+        });
     let confinement_port: Arc<dyn SessionConfinementAdmission> =
         Arc::new(CliSessionConfinementAdmission::with_reporter(
             Arc::clone(&store),
@@ -1016,7 +1021,8 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             ids.clone(),
             Arc::new(
                 AcpRunBindingsBuilder::with_controls(Some(Arc::clone(&control_port)))
-                    .with_permission_rules(permission_rules.clone()),
+                    .with_permission_rules(permission_rules.clone())
+                    .with_sandbox_store(sandbox_grants.clone()),
             ),
             Arc::clone(&mcp_admitter),
             Arc::clone(&compaction),

@@ -300,6 +300,79 @@ fn permitted_acp_mcp_call_does_not_fail_for_a_missing_resume_sealer() {
 }
 
 #[test]
+fn allow_always_on_an_opaque_mcp_call_stores_a_tool_rule_that_covers_the_next_session() {
+    // catches: "Allow always" missing on an opaque MCP tool, or stored in a
+    // form the next call does not match, so the user is asked again.
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    )
+    .expect("isolated profile configuration");
+    let stub = Stub::start_mcp_tool(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("mcp-first", "search_tools", "{}")),
+            Reply::Sse(text("first done")),
+            Reply::Sse(tool_call("mcp-second", "search_tools", "{}")),
+            Reply::Sse(text("second done")),
+        ],
+        ..Plan::default()
+    });
+    let open = |host: &mut AcpHost| {
+        host.initialize();
+        let opened = host.request(
+            "session/new",
+            serde_json::json!({
+                "cwd": places.workspace_path(),
+                "mcpServers": [{"type":"http","name":"tuicommander","url":format!("http://{}/mcp", stub.address),"headers":[]}],
+            }),
+        );
+        opened["result"]["sessionId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("MCP session was not opened: {opened}"))
+            .to_owned()
+    };
+
+    let mut first = host(&places, &stub);
+    let session = open(&mut first);
+    let id = send_prompt(&mut first, &session);
+    let question = permission(&mut first);
+    let options = question["params"]["options"]
+        .as_array()
+        .expect("ACP options");
+    assert!(
+        options.iter().any(|row| row["optionId"] == "allow-always"),
+        "an opaque MCP call was not offered Allow always: {question}"
+    );
+    select(&mut first, &question, "allow-always");
+    let finished = loop {
+        let frame = first.read_frame();
+        if frame["id"].as_u64() == Some(id) {
+            break frame;
+        }
+    };
+    assert!(finished["result"].is_object(), "{finished}");
+    first.finish();
+
+    let rules = listed_rules(&places, Some(PROFILE));
+    assert!(
+        rules["rules"]
+            .as_array()
+            .expect("profile rules")
+            .iter()
+            .any(|row| row["rule"] == "tool(tuicommander/search_tools)" && row["effect"] == "allow"),
+        "{rules}"
+    );
+
+    let mut second = host(&places, &stub);
+    let session = open(&mut second);
+    let id = send_prompt(&mut second, &session);
+    let finished = settle_without_question(&mut second, id);
+    assert!(finished["result"].is_object(), "{finished}");
+    second.finish();
+}
+
+#[test]
 fn allow_always_writes_one_profile_rule_and_revoke_restores_the_question() {
     let places = Places::new();
     configure(&places);

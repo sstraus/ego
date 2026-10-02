@@ -21,6 +21,7 @@ pub(super) async fn effect_scope(
         cancel.clone(),
         run_deadline,
         None,
+        None,
     )
     .await
     .map_err(|error| process_error_termination(error, confinement, cancel))

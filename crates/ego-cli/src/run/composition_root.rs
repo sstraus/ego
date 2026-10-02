@@ -297,6 +297,7 @@ impl CliPrepared {
             cancel.clone(),
             self.run_deadline,
             self.admitted_sandbox_observation.as_ref(),
+            bindings.sandbox_grants(),
         )
         .await
         {
