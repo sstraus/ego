@@ -382,4 +382,16 @@ mod text_red {
         );
         assert_eq!(context_line(ContextWindow::default()), "context unknown");
     }
+
+    /// Catches: the readable text view changing the machine form. `--json`
+    /// serialises the report as it always did; this pins its bytes.
+    #[test]
+    fn the_json_form_is_unchanged_by_the_text_view() {
+        let json =
+            serde_json::to_string(&report(1_790_662_411_741, usd(156_247, 8))).expect("serialise");
+        assert_eq!(
+            json,
+            r#"{"v":2,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[]}}}}"#
+        );
+    }
 }
