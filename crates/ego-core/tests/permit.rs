@@ -1125,6 +1125,7 @@ mod permit {
         let capped = ScanRequest {
             root: CanonPath::new("/ws/src"),
             skip_dirs: Vec::new(),
+            respect_ignore: false,
             limits: ScanLimits {
                 max_entries: 1,
                 ..ScanLimits::default()
@@ -1146,6 +1147,7 @@ mod permit {
         let shallow = ScanRequest {
             root: CanonPath::new("/ws/src"),
             skip_dirs: Vec::new(),
+            respect_ignore: false,
             limits: ScanLimits {
                 max_depth: 0,
                 ..ScanLimits::default()
@@ -1178,6 +1180,7 @@ mod permit {
         let skipping = ScanRequest {
             root: CanonPath::new("/ws/src"),
             skip_dirs: vec!["target".to_string()],
+            respect_ignore: false,
             limits: ScanLimits::default(),
         };
         let scan = guarded.list(&skipping).expect("the root is authorised");
@@ -1355,6 +1358,7 @@ mod permit {
         let starved = ScanRequest {
             root: CanonPath::new("/ws/src"),
             skip_dirs: Vec::new(),
+            respect_ignore: false,
             limits: ScanLimits {
                 max_bytes: 1,
                 ..ScanLimits::default()

@@ -501,6 +501,7 @@ mod walking {
             .scan(&ScanRequest {
                 root: tree.canon_root(),
                 skip_dirs: Vec::new(),
+                respect_ignore: false,
                 // `0` is the root's own children and nothing below.
                 limits: ScanLimits {
                     max_depth: 0,
@@ -533,6 +534,7 @@ mod walking {
             .scan(&ScanRequest {
                 root: tree.canon_root(),
                 skip_dirs: Vec::new(),
+                respect_ignore: false,
                 limits: ScanLimits {
                     max_entries: 2,
                     ..ScanLimits::default()
@@ -558,6 +560,7 @@ mod walking {
         let capped = ScanRequest {
             root: tree.canon_root(),
             skip_dirs: Vec::new(),
+            respect_ignore: false,
             limits: ScanLimits {
                 max_entries: 3,
                 ..ScanLimits::default()
@@ -588,6 +591,7 @@ mod walking {
             .scan(&ScanRequest {
                 root: tree.canon_root(),
                 skip_dirs: vec!["target".to_string()],
+                respect_ignore: false,
                 limits: ScanLimits::default(),
             })
             .expect("the root is a directory");
@@ -599,6 +603,94 @@ mod walking {
             names(&scan, EntryKind::Dir)
         );
         assert!(!scan.truncated);
+    }
+
+    fn ignoring(root: CanonPath) -> ScanRequest {
+        ScanRequest {
+            respect_ignore: true,
+            ..ScanRequest::new(root)
+        }
+    }
+
+    #[test]
+    fn scan_leaves_out_what_gitignore_lists_and_honours_a_nested_whitelist() {
+        // catches: ignore rules skipped by a scan, so a search returns
+        // `__pycache__/*.pyc` next to the sources.
+        let tree = Tree::new();
+        tree.dir(".git");
+        tree.file(".gitignore", "__pycache__/\n*.log\n");
+        tree.file("src/a.py", "");
+        tree.file("src/__pycache__/a.pyc", "");
+        tree.file("run.log", "");
+        tree.file("keep/.gitignore", "!important.log\n");
+        tree.file("keep/important.log", "");
+        tree.file("keep/other.log", "");
+        let os = OsFs;
+
+        let scan = os
+            .scan(&ignoring(tree.canon_root()))
+            .expect("the root is a directory");
+
+        assert_eq!(
+            names(&scan, EntryKind::File),
+            [
+                ".gitignore",
+                "keep/.gitignore",
+                "keep/important.log",
+                "src/a.py"
+            ]
+        );
+        assert!(
+            !names(&scan, EntryKind::Dir).contains(&"src/__pycache__".to_owned()),
+            "an ignored directory is not reported: {:?}",
+            names(&scan, EntryKind::Dir)
+        );
+        assert!(!scan.truncated);
+    }
+
+    #[test]
+    fn scan_applies_the_repository_gitignore_to_a_subdirectory_root() {
+        let tree = Tree::new();
+        tree.dir(".git");
+        tree.file(".gitignore", "__pycache__/\n");
+        tree.file("src/a.py", "");
+        tree.file("src/__pycache__/a.pyc", "");
+        let os = OsFs;
+
+        let scan = os
+            .scan(&ignoring(CanonPath::new(tree.path("src"))))
+            .expect("the root is a directory");
+
+        assert_eq!(names(&scan, EntryKind::File), ["a.py"]);
+    }
+
+    #[test]
+    fn scan_of_an_ignored_directory_named_as_the_root_still_lists_it() {
+        // catches: over-filtering that hides a path the caller asked for.
+        let tree = Tree::new();
+        tree.dir(".git");
+        tree.file(".gitignore", "__pycache__/\n");
+        tree.file("src/__pycache__/a.pyc", "");
+        let os = OsFs;
+
+        let scan = os
+            .scan(&ignoring(CanonPath::new(tree.path("src/__pycache__"))))
+            .expect("the root is a directory");
+
+        assert_eq!(names(&scan, EntryKind::File), ["a.pyc"]);
+    }
+
+    #[test]
+    fn scan_without_respect_ignore_lists_ignored_files() {
+        let tree = Tree::new();
+        tree.dir(".git");
+        tree.file(".gitignore", "*.log\n");
+        tree.file("run.log", "");
+        let os = OsFs;
+
+        let scan = tree.scan(&os);
+
+        assert!(names(&scan, EntryKind::File).contains(&"run.log".to_owned()));
     }
 
     #[test]
