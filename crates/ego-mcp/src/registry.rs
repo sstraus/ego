@@ -268,17 +268,17 @@ const MAX_DIAGNOSTIC_DETAIL_CHARS: usize = 256;
 /// looking values are masked before the bound, so a secret straddling the cut
 /// never leaks a prefix. `None` when nothing readable remains.
 fn bounded_detail(cause: &str) -> Option<String> {
-    let blanked: String = cause
-        .chars()
-        .filter(|&character| !is_invisible(character))
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
+    let mut blanked = String::with_capacity(cause.len());
+    for character in cause.chars() {
+        if is_invisible(character) && !is_joiner_in_text(character, blanked.chars().next_back()) {
+            continue;
+        }
+        blanked.push(if character.is_control() {
+            ' '
+        } else {
+            character
+        });
+    }
     let collapsed = blanked.split_whitespace().collect::<Vec<_>>().join(" ");
     let detail: String = mask_secrets(&collapsed)
         .chars()
@@ -383,29 +383,39 @@ fn mask_key_values(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut index = 0;
+    // Set after `name: "x-api-key"`: the next `value` member is the secret.
+    let mut record_secret = false;
     while index < chars.len() {
         let character = chars[index];
         out.push(character);
         index += 1;
-        // `,` only separates a quoted name from its value: `("x-api-key", "v")`.
+        // `,` only separates a quoted name from its value inside a tuple:
+        // `("x-api-key", "v")`; `["key", "name"]` and `"invalid token","code"` are text.
         let is_separator = match character {
             '=' | ':' => true,
-            ',' => out[..out.len() - 1].ends_with(['"', '\'']),
+            ',' => opens_tuple(&out[..out.len() - 1]),
             _ => false,
         };
         if !is_separator {
             continue;
         }
-        let Some(name) = secret_name_before(&out[..out.len() - 1]) else {
+        let key = name_before(&out[..out.len() - 1]);
+        let secret = secret_suffix(&key);
+        let record_value = secret.is_none() && key == "value" && record_secret;
+        if secret.is_none() && !record_value {
+            if key == "name" && character != ',' {
+                record_secret = names_secret(&chars, index);
+            }
             continue;
-        };
+        }
+        record_secret = false;
         let blanks = chars[index..].iter().take_while(|&&c| c == ' ').count();
         let start = index + blanks;
         if blanks > 0 && starts_with_pair(&chars, start) {
             // `key= mode=fast`: the value is empty and the next pair is unrelated.
             continue;
         }
-        let end = value_end(&chars, start, name == "authorization");
+        let end = value_end(&chars, start, secret == Some("authorization"));
         if end > start {
             out.push_str(&" ".repeat(blanks));
             out.push_str(SECRET_MASK);
@@ -415,27 +425,56 @@ fn mask_key_values(text: &str) -> String {
     out
 }
 
-/// The lowercase secret suffix that ends the name right before a separator,
-/// looking past blanks, one `]` and one closing quote (plain or JSON-escaped).
-fn secret_name_before(prefix: &str) -> Option<&'static str> {
+fn is_name_char(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '-' | '.')
+}
+
+/// The lowercase name right before a separator, looking past blanks, one `]`
+/// and one closing quote (plain or JSON-escaped at any depth).
+fn name_before(prefix: &str) -> String {
     let prefix = prefix.trim_end_matches(' ');
     let prefix = prefix.strip_suffix(']').unwrap_or(prefix);
-    let prefix = prefix
-        .strip_suffix("\\\"")
-        .or_else(|| prefix.strip_suffix(['"', '\'']))
-        .unwrap_or(prefix);
+    let prefix = match prefix.strip_suffix(['"', '\'']) {
+        Some(unquoted) => unquoted.trim_end_matches('\\'),
+        None => prefix,
+    };
     let name: String = prefix
         .chars()
         .rev()
-        .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>()
-        .to_lowercase();
+        .take_while(|&c| is_name_char(c))
+        .collect();
+    name.chars().rev().collect::<String>().to_lowercase()
+}
+
+fn secret_suffix(name: &str) -> Option<&'static str> {
     SECRET_NAME_SUFFIXES
         .into_iter()
         .find(|suffix| name.ends_with(suffix))
+}
+
+/// Whether `prefix` ends in `("<name>"`, the head of a Debug tuple.
+fn opens_tuple(prefix: &str) -> bool {
+    let Some(closed) = prefix.strip_suffix(['"', '\'']) else {
+        return false;
+    };
+    closed
+        .trim_end_matches('\\')
+        .trim_end_matches(is_name_char)
+        .strip_suffix(['"', '\''])
+        .is_some_and(|opened| opened.trim_end_matches('\\').ends_with('('))
+}
+
+/// Whether the value after `name:` is itself a secret-looking single name
+/// (`"name": "x-api-key"`), which makes the sibling `value` member a secret.
+fn names_secret(chars: &[char], index: usize) -> bool {
+    let start = index + chars[index..].iter().take_while(|&&c| c == ' ').count();
+    let end = value_end(chars, start, false);
+    let content: String = chars[start..end]
+        .iter()
+        .collect::<String>()
+        .trim_matches(|c| matches!(c, '"' | '\'' | '\\' | ','))
+        .to_lowercase();
+    !content.is_empty() && content.chars().all(is_name_char) && secret_suffix(&content).is_some()
 }
 
 /// Whether the word at `start` is a `name=value` pair (`mode=fast`, not the
@@ -454,24 +493,63 @@ fn starts_with_pair(chars: &[char], start: usize) -> bool {
 }
 
 /// End of a quoted value starting at `start` (`None` when it is not quoted).
-/// The quote may be JSON-escaped (`\"x\"`), then only `\"` closes it; in a
-/// plain quote a backslash escapes the next character.
+/// The quote may be JSON-escaped at any depth (`\"x\"`, `\\\"x\\\"`); then only
+/// a run of exactly the opening backslashes plus the quote closes it, longer
+/// runs are escaped quotes of the inner text. In a plain quote a backslash
+/// escapes the next character.
 fn quoted_end(chars: &[char], start: usize) -> Option<usize> {
-    let (open_len, quote, escaped) = match (chars.get(start), chars.get(start + 1)) {
-        (Some(&quote @ ('"' | '\'')), _) => (1, quote, false),
-        (Some('\\'), Some(&quote @ ('"' | '\''))) => (2, quote, true),
+    let slashes = chars[start..].iter().take_while(|&&c| c == '\\').count();
+    let quote = match chars.get(start + slashes) {
+        Some(&quote @ ('"' | '\'')) => quote,
         _ => return None,
     };
-    let mut index = start + open_len;
+    let mut index = start + slashes + 1;
     while index < chars.len() {
-        match chars[index] {
-            '\\' if escaped && chars.get(index + 1) == Some(&quote) => return Some(index + 2),
-            '\\' => index += 2,
-            c if c == quote && !escaped => return Some(index + 1),
-            _ => index += 1,
+        let character = chars[index];
+        if slashes == 0 {
+            match character {
+                '\\' => index += 2,
+                c if c == quote => return Some(index + 1),
+                _ => index += 1,
+            }
+        } else if character == '\\' {
+            let run = chars[index..].iter().take_while(|&&c| c == '\\').count();
+            let after = index + run;
+            if chars.get(after) == Some(&quote) {
+                if run == slashes {
+                    return Some(after + 1);
+                }
+                index = after + 1;
+            } else {
+                index = after;
+            }
+        } else {
+            index += 1;
         }
     }
     Some(chars.len())
+}
+
+/// End of the balanced `{...}` / `[...]` starting at `start`, brackets inside
+/// quoted strings ignored; the end of the text when unbalanced.
+fn bracket_end(chars: &[char], start: usize) -> usize {
+    let (mut depth, mut in_quote, mut index) = (0usize, false, start);
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 1,
+            '"' => in_quote = !in_quote,
+            '{' | '[' if !in_quote => depth += 1,
+            '}' | ']' if !in_quote => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    chars.len()
 }
 
 /// End of the value starting at `start`: a quoted value, else the end of the
@@ -479,6 +557,9 @@ fn quoted_end(chars: &[char], start: usize) -> Option<usize> {
 /// parameters, quoted values with blanks included) that follows an
 /// authentication scheme.
 fn value_end(chars: &[char], start: usize, any_scheme: bool) -> usize {
+    if matches!(chars.get(start), Some('{' | '[')) {
+        return bracket_end(chars, start);
+    }
     if let Some(end) = quoted_end(chars, start) {
         return end;
     }
@@ -524,6 +605,16 @@ fn word_end(chars: &[char], start: usize) -> usize {
         .iter()
         .position(|c| c.is_whitespace())
         .map_or(chars.len(), |offset| start + offset)
+}
+
+/// Joiners and variation selectors that sit after a non-ASCII character are
+/// kept: emoji sequences and Persian or Indic text need them. Secret names are
+/// ASCII, so a mark splitting one always follows an ASCII character.
+fn is_joiner_in_text(character: char, previous: Option<char>) -> bool {
+    matches!(
+        u32::from(character),
+        0x200C | 0x200D | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF
+    ) && previous.is_some_and(|previous| !previous.is_ascii())
 }
 
 /// Characters that render as nothing: every Unicode `Cf` (format) and `Cc`
@@ -3587,6 +3678,68 @@ mod candidate_detail_critic {
         assert_eq!(detail("empty key= mode=fast"), "empty key= mode=fast");
         assert_eq!(detail("token: YWJjZA== end"), "token: *** end");
         assert_eq!(detail("api_key = LEAK end"), "api_key = *** end");
+    }
+
+    #[test]
+    fn joiners_after_non_ascii_text_are_kept_but_never_split_a_secret_name() {
+        // catches: dropping ZWJ/ZWNJ/VS16 from emoji and Persian text, and, the other way,
+        // keeping a joiner that splits `token` after an ASCII letter.
+        assert_eq!(detail("failed 👨\u{200d}👩 ok"), "failed 👨\u{200d}👩 ok");
+        assert_eq!(detail("می\u{200c}خواهد"), "می\u{200c}خواهد");
+        assert_eq!(detail("❤\u{fe0f} ok"), "❤\u{fe0f} ok");
+        assert_eq!(detail("to\u{200d}ken=LEAK"), "token=***");
+        assert_eq!(detail("é\u{200d}token=LEAK"), "é\u{200d}token=***");
+    }
+
+    #[test]
+    fn json_text_and_lists_naming_secret_words_are_kept_verbatim() {
+        // catches: the tuple rule masking the next member of an error body or list.
+        for cause in [
+            r#"{"error":"invalid token","code":401}"#,
+            r#"missing properties ["key", "name"]"#,
+        ] {
+            assert_eq!(detail(cause), cause);
+        }
+    }
+
+    #[test]
+    fn name_value_records_mask_the_value_member() {
+        // catches: `{"name":"x-api-key","value":"v"}` and `Header { name, value }` leaking.
+        assert_eq!(
+            detail(r#"{"name":"x-api-key","value":"LEAK","k":1}"#),
+            r#"{"name":"x-api-key","value":***,"k":1}"#
+        );
+        assert_eq!(
+            detail(r#"Header { name: "x-api-key", value: "LEAK" }"#),
+            r#"Header { name: "x-api-key", value: *** }"#
+        );
+        assert_eq!(
+            detail(r#"{"name":"content-type","value":"json"}"#),
+            r#"{"name":"content-type","value":"json"}"#
+        );
+    }
+
+    #[test]
+    fn escaped_json_of_any_depth_masks_the_value_and_keeps_the_tail() {
+        // catches: one-level-only `\"` handling and an embedded `\\\"` ending the value.
+        assert_eq!(
+            detail(r#"o {\\\"token\\\":\\\"LEAK\\\"} end"#),
+            r#"o {\\\"token\\\":***} end"#
+        );
+        assert_eq!(
+            detail(r#"o {\"password\":\"pa\\\"LEAK\"} end"#),
+            r#"o {\"password\":***} end"#
+        );
+    }
+
+    #[test]
+    fn nested_object_or_array_under_a_secret_name_is_masked_whole() {
+        // catches: only the opening brace being masked.
+        assert_eq!(
+            detail(r#"{ "password": { "value": "LEAK", "b": ["x"] } } ok"#),
+            r#"{ "password": *** } ok"#
+        );
+        assert_eq!(detail(r#"token=["a","}"] ok"#), "token=*** ok");
     }
 }
 
