@@ -96,9 +96,11 @@ pub(super) fn choose_permission_action(
             question_selector_prompt(&request, &selector),
             Arc::clone(status),
         );
-        match answer(false, editor.read_line(&prompt)) {
+        match queued_selector_line(status)
+            .unwrap_or_else(|| answer(false, editor.read_line(&prompt)))
+        {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = question_selector_key(&command) else {
+                let Some(key) = next_selector_key(status, &command) else {
                     break PermissionMenuChoice::Cancelled;
                 };
                 let mut selector = selector.lock().expect("permission selector lock");
@@ -410,9 +412,11 @@ fn select_permission_value(
             question_selector_prompt(&request, &selector),
             Arc::clone(status),
         );
-        match answer(false, editor.read_line(&question)) {
+        match queued_selector_line(status)
+            .unwrap_or_else(|| answer(false, editor.read_line(&question)))
+        {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = question_selector_key(&command) else {
+                let Some(key) = next_selector_key(status, &command) else {
                     continue;
                 };
                 let mut selector = selector.lock().expect("permission value selector lock");
@@ -501,9 +505,11 @@ pub(super) fn choose_policy_mode(
             question_selector_prompt(&request, &selector),
             Arc::clone(status),
         );
-        match answer(false, editor.read_line(&prompt)) {
+        match queued_selector_line(status)
+            .unwrap_or_else(|| answer(false, editor.read_line(&prompt)))
+        {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = question_selector_key(&command) else {
+                let Some(key) = next_selector_key(status, &command) else {
                     break PolicyModeChoice::Cancelled;
                 };
                 let mut selector = selector.lock().expect("policy mode selector lock");
@@ -690,9 +696,11 @@ pub(super) fn choose_statusline_preset(
             question_selector_prompt(&request, &selector),
             Arc::clone(status),
         );
-        match answer(false, editor.read_line(&prompt)) {
+        match queued_selector_line(status)
+            .unwrap_or_else(|| answer(false, editor.read_line(&prompt)))
+        {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = question_selector_key(&command) else {
+                let Some(key) = next_selector_key(status, &command) else {
                     continue;
                 };
                 let mut selector = selector.lock().expect("status-line selector lock");

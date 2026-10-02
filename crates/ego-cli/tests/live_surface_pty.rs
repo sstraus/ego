@@ -4312,6 +4312,36 @@ fn a_question_whose_call_json_wraps_shows_its_prompt_and_options_once_and_no_raw
     );
 }
 
+/// catches: the editor parsing a burst (`2` then Enter in one write) and running
+/// only its first command, so the selector moved to option 2 and the Enter was
+/// dropped, leaving the question unanswered.
+#[test]
+fn a_selector_applies_keys_typed_in_one_burst_in_order() {
+    let call = serde_json::json!({
+        "prompt": "Burst question",
+        "mode": "single",
+        "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}],
+        "free_text": false,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        selector_screen(reader, output);
+        input.write_all(b"2\r").expect("burst answer");
+        input.flush().expect("burst answer flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "no") > 0,
+        "option 2 chosen by the burst reaches the model: {}",
+        generations[1]
+    );
+    assert_eq!(
+        count_exact_strings(&generations[1], "yes"),
+        0,
+        "the burst must not answer with the default option: {}",
+        generations[1]
+    );
+}
+
 #[test]
 fn the_other_row_opens_a_text_entry_and_its_text_is_the_answer() {
     let call = serde_json::json!({
