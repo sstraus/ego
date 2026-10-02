@@ -4380,6 +4380,43 @@ fn the_other_row_opens_a_text_entry_and_its_text_is_the_answer() {
     );
 }
 
+/// catches: keys of a burst that follow the Enter opening the `Other` entry
+/// staying in the shared selector queue, so backing out of the entry replays
+/// them on the selector (a stale Enter reopens `Other` and swallows the next
+/// answer as free text instead of choosing the option typed).
+#[test]
+fn keys_queued_behind_the_other_row_are_not_replayed_after_backing_out() {
+    let call = serde_json::json!({
+        "prompt": "Which function would you like to add?",
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract"},
+            {"id": "divide", "label": "divide"},
+        ],
+        "free_text": true,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        selector_screen(reader, output);
+        let from = output.len();
+        input.write_all(b"3\r\r").expect("burst into Other");
+        input.flush().expect("burst flush");
+        until_normalized(reader, output, from, "Other: ");
+        let backed = output.len();
+        input.write_all(b"\r").expect("blank line backs out");
+        input.flush().expect("back flush");
+        until_from(reader, output, backed, b"Up/Down or number selects");
+        drain_until_quiet(reader, output);
+        input.write_all(b"1\r").expect("answer on the selector");
+        input.flush().expect("answer flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "subtract") > 0,
+        "after backing out, `1` Enter chooses option 1: {}",
+        generations[1]
+    );
+}
+
 /// What one scripted tool turn left on a real terminal screen.
 struct ToolTurnScreens {
     /// The screen once the turn has ended and the composer is back.
