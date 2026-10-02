@@ -483,6 +483,27 @@ mod faults {
         );
     }
 
+    /// A manifest whose `updated` is AHEAD of the log's last event is not the
+    /// append-lag steady state: the log lost events the manifest saw. Catches:
+    /// the lag exemption comparing everything but `updated` in both
+    /// directions, so a truncated log is refreshed with no repair reported.
+    #[test]
+    fn faults_manifest_ahead_of_its_log_is_still_reported_as_a_repair() {
+        let fx = healthy_session();
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fx.manifest_path()).unwrap()).unwrap();
+        json["updated"] = serde_json::json!(99_999_u64);
+        std::fs::write(fx.manifest_path(), serde_json::to_vec(&json).unwrap()).unwrap();
+
+        let repair = fx.store.recover(&fx.id).unwrap();
+
+        assert!(
+            repair.manifest_rebuilt,
+            "a manifest newer than its log is damage, not lag"
+        );
+        assert_eq!(fx.manifest().updated, Timestamp::from_millis(1_300));
+    }
+
     /// A manifest whose bytes do not parse is treated exactly like a
     /// missing one: it is a derived cache, and the log can regenerate it.
     #[test]
