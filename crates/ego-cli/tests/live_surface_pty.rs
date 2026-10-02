@@ -3081,6 +3081,204 @@ fn cancelling_before_reply_clears_the_thinking_row() {
     writer_join.join().expect("writer thread");
 }
 
+/// catches: an Esc that stops a turn without a word in the transcript, and a
+/// `thinking for` row left behind in the scrollback.
+#[test]
+fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Paced {
+            head: String::new(),
+            tail: text("TOO-LATE"),
+            pause: Duration::from_secs(5),
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((40, 100)),
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"cancel check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, 0, "Esc cancels");
+    let cancel_start = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(40, 100, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "one receipt: {visible:?}"
+    );
+    assert!(
+        !visible.contains("thinking for") && !visible.contains("working for"),
+        "no activity row stays behind: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+}
+
+/// catches: Esc on a running tool leaving no tool row and no receipt, and its
+/// `thinking for` row staying in the scrollback.
+#[cfg(unix)]
+#[test]
+fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(tool_call(
+            "slow-exec",
+            "exec",
+            r#"{"argv":["slow-work"],"cwd":null,"timeout_ms":15000}"#,
+        ))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "yolo",
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let executable = ego.home_file(
+        ".local/bin/slow-work",
+        "#!/bin/sh\nprintf started > \"$EGO_HOME/tool-started\"\n/bin/sleep 30\n",
+    );
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("slow tool metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("make slow tool executable");
+    let path = format!("{}:/usr/bin:/bin", executable.parent().unwrap().display());
+    let started = ego.home_path().join("tool-started");
+    let ego = ego.env("PATH", &path).env("TERM", "xterm-256color");
+
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((40, 100)),
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"run slow tool\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "tool did not start: {:?}",
+            normalized(&output)
+        );
+        drain(&reader, &mut output);
+        thread::sleep(Duration::from_millis(20));
+    }
+    let cancel_start = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(40, 100, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "one receipt: {visible:?}"
+    );
+    assert!(
+        visible.contains("slow-work"),
+        "the cancelled tool keeps its row: {visible:?}"
+    );
+    assert!(
+        !visible.contains("thinking for") && !visible.contains("working for"),
+        "no activity row stays behind: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    let log = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("session log");
+    assert!(
+        log.contains(r#""kind":"ToolCallCompleted","ok":false"#)
+            && !log.contains(r#""kind":"ToolCallCompleted","ok":true"#),
+        "the cancelled call is settled as a failure in the durable record: {log}"
+    );
+    assert!(
+        log.contains(r#""exit_reason":{"Cancelled":"User"}"#),
+        "the turn is recorded as cancelled by the user: {log}"
+    );
+}
+
 #[test]
 fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
     let finished = Ego::nowhere()
