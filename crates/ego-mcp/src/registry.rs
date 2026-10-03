@@ -575,7 +575,7 @@ impl CandidateFailure {
     fn admission(error: McpCandidateError) -> Self {
         match error {
             McpCandidateError::Invalid { cause } => Self {
-                detail: bounded_detail(&cause),
+                detail: Some(cause),
                 ..Self::materialization(McpFailure::InvalidValue)
             },
             McpCandidateError::AuthorizationRequired {
@@ -598,13 +598,9 @@ impl CandidateFailure {
         failure_message(self.failure)
     }
 
-    /// What the host sees for this server: the fixed cause, then the bounded
-    /// detail the candidate reported. The journal keeps only the fixed cause.
+    /// Public diagnostics contain only the fixed failure classification.
     fn diagnostic_message(&self) -> String {
-        match &self.detail {
-            Some(detail) => format!("{}: {detail}", self.sanitized_cause()),
-            None => self.sanitized_cause().to_owned(),
-        }
+        self.sanitized_cause().to_owned()
     }
 }
 
@@ -2217,6 +2213,10 @@ impl McpRegistryController {
         failure: &CandidateFailure,
         predecessor: &Arc<AdmittedRegistrySnapshot>,
     ) -> Result<(), McpRegistryError> {
+        if let Some(cause) = &failure.detail {
+            self.journal
+                .record_private_diagnostic(server.as_str(), cause)?;
+        }
         if let Some(authorization) = &failure.authorization {
             self.journal
                 .append(McpRegistryEvent::AuthorizationRequired {
@@ -2971,6 +2971,14 @@ mod collapsed_mcp_red {
     }
 
     impl McpRegistryJournal for Journal {
+        fn record_private_diagnostic(
+            &self,
+            _server: &str,
+            _cause: &str,
+        ) -> Result<(), McpRegistryJournalError> {
+            Ok(())
+        }
+
         fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
             self.events.lock().expect("events").push(event);
             Ok(())

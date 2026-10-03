@@ -44,6 +44,7 @@ pub enum McpRegistryEvent {
 pub enum McpRegistryJournalOperation {
     Append,
     BeginRefresh,
+    PrivateDiagnostic,
     Replay,
 }
 
@@ -52,6 +53,7 @@ impl fmt::Display for McpRegistryJournalOperation {
         f.write_str(match self {
             Self::Append => "append",
             Self::BeginRefresh => "begin refresh",
+            Self::PrivateDiagnostic => "private diagnostic",
             Self::Replay => "replay",
         })
     }
@@ -115,6 +117,14 @@ impl std::error::Error for McpRegistryJournalError {}
 /// Consumer-owned machine journal port.
 pub trait McpRegistryJournal: Send + Sync {
     fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError>;
+
+    /// Persist original backend text privately, never as replayable machine evidence.
+    /// Implementations enforce owner-only access before writing any raw bytes.
+    fn record_private_diagnostic(
+        &self,
+        server: &str,
+        cause: &str,
+    ) -> Result<(), McpRegistryJournalError>;
 
     fn begin_refresh(
         &self,

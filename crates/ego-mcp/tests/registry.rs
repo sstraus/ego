@@ -30,6 +30,8 @@ struct JournalState {
     next_epoch: u64,
     fail_begin: bool,
     fail_append: bool,
+    private_diagnostics: Vec<(String, String)>,
+    fail_private: bool,
 }
 #[derive(Default)]
 struct FakeJournal {
@@ -44,6 +46,23 @@ impl FakeJournal {
     }
 }
 impl McpRegistryJournal for FakeJournal {
+    fn record_private_diagnostic(
+        &self,
+        server: &str,
+        cause: &str,
+    ) -> Result<(), McpRegistryJournalError> {
+        let mut state = self.state.lock().expect("journal state");
+        if state.fail_private {
+            return Err(McpRegistryJournalError::new(
+                ego_core::turn::McpRegistryJournalOperation::PrivateDiagnostic,
+                ego_core::turn::McpRegistryJournalErrorKind::Unavailable,
+            ));
+        }
+        state
+            .private_diagnostics
+            .push((server.to_owned(), cause.to_owned()));
+        Ok(())
+    }
     fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
         let mut state = self.state.lock().expect("journal state");
         if state.fail_append {
@@ -1955,12 +1974,16 @@ async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text(
             state: Arc::new(Mutex::new(AdmissionState::default())),
             gate: Arc::new(Mutex::new(None)),
         });
-        admission.push(Outcome::Invalid(cause));
+        admission.push(Outcome::Invalid(cause.clone()));
         let (registry, journal) = controller(admission);
         registry
             .reconcile(refresh(RegistryTrigger::Add))
             .await
             .expect("publication");
+        assert_eq!(
+            journal.state.lock().expect("journal").private_diagnostics,
+            [("alpha".to_owned(), cause)]
+        );
         let status = registry.status();
         let server = status.servers().first().expect("status");
         let diagnostic = server.diagnostic().expect("diagnostic");
@@ -1980,5 +2003,42 @@ async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text(
     assert!(
         leaks.is_empty(),
         "raw backend detail published for corpus cases {leaks:?}"
+    );
+}
+
+// Catches: logging failure publishing a raw-derived status or losing the failure
+// silently while reporting successful registry publication.
+#[tokio::test(flavor = "current_thread")]
+async fn allowlisted_diagnostics_private_log_failure_stops_publication_without_echoing_raw_text() {
+    let admission = Arc::new(FakeAdmission {
+        state: Arc::new(Mutex::new(AdmissionState::default())),
+        gate: Arc::new(Mutex::new(None)),
+    });
+    admission.push(Outcome::Invalid("--api-key PRIVATE-RAW".to_owned()));
+    let (registry, journal) = controller(admission);
+    journal.state.lock().expect("journal").fail_private = true;
+    let error = registry
+        .reconcile(refresh(RegistryTrigger::Add))
+        .await
+        .err()
+        .expect("private log failure");
+    assert_eq!(
+        error.to_string(),
+        "MCP registry journal private diagnostic failed (unavailable)"
+    );
+    assert!(registry.status().mcp_errors().is_empty());
+    assert!(
+        journal
+            .state
+            .lock()
+            .expect("journal")
+            .private_diagnostics
+            .is_empty()
+    );
+    assert!(
+        journal
+            .events()
+            .iter()
+            .all(|event| !matches!(event, McpRegistryEvent::SnapshotPublished { .. }))
     );
 }

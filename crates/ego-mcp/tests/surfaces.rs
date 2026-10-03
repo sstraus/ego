@@ -197,6 +197,14 @@ struct DynamicJournal {
 }
 
 impl McpRegistryJournal for DynamicJournal {
+    fn record_private_diagnostic(
+        &self,
+        _server: &str,
+        _cause: &str,
+    ) -> Result<(), McpRegistryJournalError> {
+        Ok(())
+    }
+
     fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
         self.events.lock().expect("events").push(event);
         Ok(())

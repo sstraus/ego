@@ -10,11 +10,20 @@ use ego_core::turn::{
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::privacy::{PrivatePathKind, harden_private_path, validate_private_path};
 use crate::store::{AtomicReplacePublication, StoreIo};
 
 const JOURNAL_FILE: &str = "registry.jsonl";
 const LOCK_FILE: &str = "registry.lock";
 const RECORD_VERSION: u32 = 1;
+const PRIVATE_DIRECTORY: &str = "private-diagnostics";
+const PRIVATE_LOG: &str = "errors.jsonl";
+
+#[derive(Serialize)]
+struct PrivateDiagnostic<'a> {
+    server: &'a str,
+    cause: &'a str,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,12 +42,24 @@ pub struct JsonlMcpRegistryJournal {
     path: PathBuf,
     lock_path: PathBuf,
     io: Box<dyn StoreIo>,
+    private_root: PathBuf,
 }
 
 impl JsonlMcpRegistryJournal {
     pub fn new(root: impl Into<PathBuf>, io: Box<dyn StoreIo>) -> Self {
         let root = root.into();
+        Self::with_private_diagnostic_root(&root, root.join(PRIVATE_DIRECTORY), io)
+    }
+
+    /// Keep private diagnostics beyond an ephemeral registry's lifetime.
+    pub fn with_private_diagnostic_root(
+        root: impl Into<PathBuf>,
+        private_root: impl Into<PathBuf>,
+        io: Box<dyn StoreIo>,
+    ) -> Self {
+        let root = root.into();
         Self {
+            private_root: private_root.into(),
             path: root.join(JOURNAL_FILE),
             lock_path: root.join(LOCK_FILE),
             io,
@@ -141,6 +162,87 @@ impl JsonlMcpRegistryJournal {
 }
 
 impl McpRegistryJournal for JsonlMcpRegistryJournal {
+    fn record_private_diagnostic(
+        &self,
+        server: &str,
+        cause: &str,
+    ) -> Result<(), McpRegistryJournalError> {
+        let operation = McpRegistryJournalOperation::PrivateDiagnostic;
+        let error = || Self::error(operation, McpRegistryJournalErrorKind::Unavailable);
+        self.with_lock(operation, || {
+            let root = &self.private_root;
+            if let Some(parent) = root.parent() {
+                fs::create_dir_all(parent).map_err(|_| error())?;
+            }
+            // The directory is private before the first backend byte is written.
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&root) {
+                Ok(()) => {
+                    harden_private_path(&root, PrivatePathKind::Directory).map_err(|_| error())?
+                }
+                Err(failure) if failure.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(error()),
+            }
+            validate_private_path(root, PrivatePathKind::Directory).map_err(|_| error())?;
+            let lock_path = root.join("errors.lock");
+            let mut options = OpenOptions::new();
+            options.create(true).read(true).write(true).truncate(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            // Reject substituted objects before opening a private lock.
+            match fs::symlink_metadata(&lock_path) {
+                Ok(_) => {
+                    validate_private_path(&lock_path, PrivatePathKind::File).map_err(|_| error())?
+                }
+                Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(error()),
+            }
+            let lock_file = options.open(&lock_path).map_err(|_| error())?;
+            harden_private_path(&lock_path, PrivatePathKind::File).map_err(|_| error())?;
+            let mut private_lock = RwLock::new(lock_file);
+            let _guard = private_lock.write().map_err(|_| error())?;
+            let path = root.join(PRIVATE_LOG);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) => {
+                    validate_private_path(&path, PrivatePathKind::File).map_err(|_| error())?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        if metadata.nlink() != 1 {
+                            return Err(error());
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    let _ = metadata;
+                }
+                Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(error()),
+            }
+            let mut bytes = self
+                .io
+                .read(&path)
+                .map_err(|_| error())?
+                .unwrap_or_default();
+            serde_json::to_writer(&mut bytes, &PrivateDiagnostic { server, cause })
+                .map_err(|_| error())?;
+            bytes.push(b'\n');
+            // Reuse the existing private atomic writer; ordinary append_line does
+            // not enforce private permissions. The writer lock serializes appends.
+            self.io
+                .replace_atomic_private(&path, &bytes)
+                .map_err(|_| error())?;
+            validate_private_path(&path, PrivatePathKind::File).map_err(|_| error())
+        })
+    }
+
     fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
         self.with_lock(McpRegistryJournalOperation::Append, || {
             self.append_locked(event, McpRegistryJournalOperation::Append)
