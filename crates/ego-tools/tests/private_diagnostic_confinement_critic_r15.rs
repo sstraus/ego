@@ -1,5 +1,8 @@
-//! Round-fifteen critic case: the raw cause lands only in the owner-only private log.
+//! Round-fifteen critic case: raw cause stays only in its owner-only private log.
 #![cfg(unix)]
+
+#[path = "support/private_logs.rs"]
+mod private_logs;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -46,13 +49,13 @@ fn raw_cause_exists_only_in_the_owner_only_private_log() {
             fs::read(path).is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(MARKER))
         })
         .collect();
-    assert_eq!(holders, [&dir.path().join("private/errors.jsonl")]);
+    assert_eq!(holders.len(), 1);
     assert_eq!(
-        fs::metadata(dir.path().join("private/errors.jsonl"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
+        holders[0].parent(),
+        Some(dir.path().join("private").as_path())
+    );
+    assert_eq!(
+        fs::metadata(holders[0]).unwrap().permissions().mode() & 0o777,
         0o600
     );
     assert_eq!(

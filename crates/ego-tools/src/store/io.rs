@@ -160,14 +160,23 @@ pub enum AtomicReplacePublication {
     PublishedDurabilityUncertain { diagnostic: String },
 }
 
+/// One private diagnostic owner; implementations retain an exclusively created handle.
+pub trait PrivateLogWriter: Send {
+    /// Write a bounded record, or discard it once this owner's cap is exhausted.
+    fn append(&mut self, line: &[u8]) -> io::Result<()>;
+}
+
 /// The filesystem operations the durable session adapters need, and nothing else.
 pub trait StoreIo: Send + Sync {
-    /// Append a bounded record under an owner-only directory and descriptor lock.
-    /// Refuse symlinks and shared inodes. Drop torn tails and expired segments.
-    fn append_private_log(&self, _root: &Path, _line: &[u8], _max_bytes: u64) -> io::Result<()> {
+    /// Exclusively create one retained owner file; never reopen an existing log.
+    fn open_private_log(
+        &self,
+        _root: &Path,
+        _max_bytes: u64,
+    ) -> io::Result<Box<dyn PrivateLogWriter>> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "private log append unavailable",
+            "private log creation unavailable",
         ))
     }
 
@@ -588,8 +597,12 @@ fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
 pub struct OsIo;
 
 impl StoreIo for OsIo {
-    fn append_private_log(&self, root: &Path, line: &[u8], max_bytes: u64) -> io::Result<()> {
-        super::private_log::append(root, line, max_bytes, self)
+    fn open_private_log(
+        &self,
+        root: &Path,
+        max_bytes: u64,
+    ) -> io::Result<Box<dyn PrivateLogWriter>> {
+        super::private_log::open(root, max_bytes)
     }
 
     fn replace_atomic_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {

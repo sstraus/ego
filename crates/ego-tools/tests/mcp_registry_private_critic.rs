@@ -2,6 +2,9 @@
 //! Unix only: symlinks, hard links and mode bits have no Windows equivalent here.
 #![cfg(unix)]
 
+#[path = "support/private_logs.rs"]
+mod private_logs;
+
 use std::fs;
 use std::io;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -10,8 +13,6 @@ use std::path::Path;
 use ego_core::turn::McpRegistryJournal;
 use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
 use ego_tools::store::{OsIo, StoreIo};
-
-const VICTIM: &str = "VICTIM-FILE-CONTENT-71c2";
 
 fn adapter(root: &Path) -> JsonlMcpRegistryJournal {
     JsonlMcpRegistryJournal::with_private_diagnostic_root(
@@ -22,13 +23,8 @@ fn adapter(root: &Path) -> JsonlMcpRegistryJournal {
 }
 
 fn log(root: &Path) -> String {
-    fs::read_to_string(root.join("private/errors.jsonl")).unwrap_or_default()
+    String::from_utf8(private_logs::bytes(&root.join("private"))).expect("owner logs")
 }
-
-// Former RacyIo read-hook cases are superseded by the real OsIo races in
-// private_log_regression_r11: live_swapping_the_log_leaf_never_writes_through_to_the_victim
-// and live_replacing_the_private_directory_never_writes_into_the_decoy.
-// Private append never calls StoreIo::read, so those hooks no longer ran.
 
 /// Catches: no bound on one backend cause (the public path capped it at 256
 /// characters); a hostile server fills the disk through one record.
@@ -38,7 +34,7 @@ fn one_oversized_cause_cannot_become_an_oversized_record() {
     let journal = adapter(dir.path());
     let _ = journal.record_private_diagnostic("alpha", &"x".repeat(8 * 1024 * 1024));
     assert!(
-        log(dir.path()).len() <= 1024 * 1024,
+        log(dir.path()).len() <= 128 * 1024,
         "{}",
         log(dir.path()).len()
     );
@@ -57,7 +53,7 @@ fn repeated_failures_do_not_grow_the_log_without_bound() {
             .expect("record");
     }
     assert!(
-        log(dir.path()).len() <= 1024 * 1024,
+        log(dir.path()).len() <= 128 * 1024,
         "{}",
         log(dir.path()).len()
     );
@@ -129,10 +125,12 @@ fn private_directory_symlink_is_refused_and_target_stays_empty() {
 fn storage_error_text_never_reaches_the_typed_error() {
     struct Leaky;
     impl StoreIo for Leaky {
-        fn append_private_log(&self, _: &Path, bytes: &[u8], _: u64) -> io::Result<()> {
-            Err(io::Error::other(
-                String::from_utf8_lossy(bytes).into_owned(),
-            ))
+        fn open_private_log(
+            &self,
+            _: &Path,
+            _: u64,
+        ) -> io::Result<Box<dyn ego_tools::store::PrivateLogWriter>> {
+            Ok(Box::new(private_logs::EchoingFailure))
         }
         fn append_line(&self, _: &Path, _: &[u8]) -> io::Result<()> {
             Ok(())

@@ -3,6 +3,9 @@
 //! The port belongs to `ego-core`; this suite crosses the final filesystem
 //! adapter and reopens it to prove that replay does not infer settlement.
 
+#[path = "support/private_logs.rs"]
+mod private_logs;
+
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -19,8 +22,12 @@ fn journal(root: &std::path::Path) -> JsonlMcpRegistryJournal {
 struct FailingFsyncIo;
 
 impl StoreIo for FailingFsyncIo {
-    fn append_private_log(&self, _root: &Path, line: &[u8], _max_bytes: u64) -> io::Result<()> {
-        Err(io::Error::other(String::from_utf8_lossy(line).into_owned()))
+    fn open_private_log(
+        &self,
+        _root: &Path,
+        _max_bytes: u64,
+    ) -> io::Result<Box<dyn ego_tools::store::PrivateLogWriter>> {
+        Ok(Box::new(private_logs::EchoingFailure))
     }
 
     fn append_line(&self, path: &Path, line: &[u8]) -> io::Result<()> {
@@ -439,7 +446,9 @@ fn private_diagnostics_keep_original_text_out_of_replay_and_use_owner_only_acces
     adapter
         .record_private_diagnostic("beta", "second error")
         .expect("append");
-    let path = root.join("mcp/private-diagnostics/errors.jsonl");
+    let path = private_logs::files(&root.join("mcp/private-diagnostics"))
+        .pop()
+        .expect("owner file");
     let bytes = std::fs::read(&path).expect("log");
     let records: Vec<serde_json::Value> = bytes
         .split(|byte| *byte == b'\n')
@@ -496,35 +505,27 @@ fn private_diagnostics_storage_failure_is_fixed_and_never_falls_back_to_public_a
         error.to_string(),
         "MCP registry journal private diagnostic failed (unavailable)"
     );
-    assert!(
-        !temp
-            .path()
-            .join("mcp/private-diagnostics/errors.jsonl")
-            .exists()
-    );
+    assert!(private_logs::files(&temp.path().join("mcp/private-diagnostics")).is_empty());
     assert!(!temp.path().join("mcp/registry.jsonl").exists());
 }
 
-// Catches: appending raw secrets through an existing symlink, a shared hard link,
+// Catches: appending raw secrets through a shared hard link,
 // or a file/directory whose permissions were widened outside ego.
 #[cfg(unix)]
 #[test]
 fn private_diagnostics_refuse_symlinks_hardlinks_and_widened_permissions() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
-    for kind in ["symlink", "hardlink", "file mode", "directory mode"] {
+    use std::os::unix::fs::PermissionsExt;
+    for kind in ["hardlink", "file mode", "directory mode"] {
         let temp = tempfile::tempdir().expect("tempdir");
         let adapter = journal(temp.path());
         adapter
             .record_private_diagnostic("alpha", "old")
             .expect("initial private log");
-        let path = temp.path().join("mcp/private-diagnostics/errors.jsonl");
+        let path = private_logs::files(&temp.path().join("mcp/private-diagnostics"))
+            .pop()
+            .expect("owner file");
         let outside = temp.path().join("outside");
         match kind {
-            "symlink" => {
-                std::fs::write(&outside, "outside unchanged").expect("outside");
-                std::fs::remove_file(&path).expect("remove");
-                symlink(&outside, &path).expect("link");
-            }
             "hardlink" => {
                 std::fs::hard_link(&path, &outside).expect("hardlink");
             }
@@ -555,9 +556,9 @@ fn private_diagnostics_refuse_symlinks_hardlinks_and_widened_permissions() {
 }
 
 // Catches: ACP's ephemeral registry deleting its raw failure log and independent
-// registry locks allowing concurrent writers to overwrite a shared private log.
+// owner handles accidentally sharing a leaf and overwriting each other.
 #[test]
-fn private_diagnostics_outlive_ephemeral_registries_and_serialize_shared_writers() {
+fn private_diagnostics_outlive_ephemeral_registries_and_isolate_owner_writers() {
     let retained = tempfile::tempdir().expect("retained log root");
     let private_root = retained.path().join("private");
     std::thread::scope(|scope| {
@@ -576,7 +577,7 @@ fn private_diagnostics_outlive_ephemeral_registries_and_serialize_shared_writers
             });
         }
     });
-    let text = std::fs::read_to_string(private_root.join("errors.jsonl")).expect("retained log");
+    let text = String::from_utf8(private_logs::bytes(&private_root)).expect("retained owner logs");
     let mut causes: Vec<String> = text
         .lines()
         .map(|line| {
@@ -606,8 +607,7 @@ fn private_diagnostics_mark_utf8_cause_truncation_and_bound_escaped_records() {
             .record_private_diagnostic("alpha", &source)
             .expect("bounded log");
     }
-    let bytes =
-        std::fs::read(temp.path().join("mcp/private-diagnostics/errors.jsonl")).expect("log");
+    let bytes = private_logs::bytes(&temp.path().join("mcp/private-diagnostics"));
     let records: Vec<serde_json::Value> = bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())

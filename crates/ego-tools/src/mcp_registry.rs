@@ -2,6 +2,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use ego_core::turn::{
     McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, McpRegistryJournalErrorKind,
@@ -10,7 +11,7 @@ use ego_core::turn::{
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::store::{AtomicReplacePublication, StoreIo};
+use crate::store::{AtomicReplacePublication, PrivateLogWriter, StoreIo};
 
 const JOURNAL_FILE: &str = "registry.jsonl";
 const LOCK_FILE: &str = "registry.lock";
@@ -30,7 +31,7 @@ const MAX_PRIVATE_CAUSE_BYTES: usize = 16 * 1024;
 /// Six-byte JSON escapes for each source byte fit below this record ceiling.
 const MAX_PRIVATE_RECORD_BYTES: usize = 128 * 1024;
 /// Retain one recent segment; discard the prior segment before exceeding 1 MiB.
-const MAX_PRIVATE_LOG_BYTES: u64 = 1024 * 1024;
+const MAX_PRIVATE_LOG_BYTES: u64 = 128 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +51,7 @@ pub struct JsonlMcpRegistryJournal {
     lock_path: PathBuf,
     io: Box<dyn StoreIo>,
     private_root: PathBuf,
+    private_writer: Mutex<Option<Box<dyn PrivateLogWriter>>>,
 }
 
 impl JsonlMcpRegistryJournal {
@@ -67,6 +69,7 @@ impl JsonlMcpRegistryJournal {
         let root = root.into();
         Self {
             private_root: private_root.into(),
+            private_writer: Mutex::new(None),
             path: root.join(JOURNAL_FILE),
             lock_path: root.join(LOCK_FILE),
             io,
@@ -189,8 +192,18 @@ impl McpRegistryJournal for JsonlMcpRegistryJournal {
         if record.len() > MAX_PRIVATE_RECORD_BYTES {
             return Err(error());
         }
-        self.io
-            .append_private_log(&self.private_root, &record, MAX_PRIVATE_LOG_BYTES)
+        let mut writer = self.private_writer.lock().map_err(|_| error())?;
+        if writer.is_none() {
+            *writer = Some(
+                self.io
+                    .open_private_log(&self.private_root, MAX_PRIVATE_LOG_BYTES)
+                    .map_err(|_| error())?,
+            );
+        }
+        writer
+            .as_mut()
+            .expect("initialized private writer")
+            .append(&record)
             .map_err(|_| error())
     }
 

@@ -1,45 +1,274 @@
-//! Bounded private logs; paths select handles, handles own all subsequent I/O.
+//! Best-effort owner logs: exclusively create once, then write only the pinned handle.
 
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
-use fd_lock::RwLock;
+use super::io::PrivateLogWriter;
 
-use super::io::StoreIo;
+const RETAINED_FILES: usize = 16;
+const RETENTION_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-pub(super) fn append(root: &Path, line: &[u8], max_bytes: u64, io: &dyn StoreIo) -> io::Result<()> {
-    let added = u64::try_from(line.len())
-        .ok()
-        .and_then(|len| len.checked_add(1))
-        .filter(|len| *len <= max_bytes)
-        .ok_or_else(|| io::Error::other("private log record exceeds retention"))?;
+struct OwnerLog {
+    directory: File,
+    file: File,
+    written: u64,
+    cap: u64,
+    failed: bool,
+}
+
+impl PrivateLogWriter for OwnerLog {
+    fn append(&mut self, line: &[u8]) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::other("private writer previously failed"));
+        }
+        let added = u64::try_from(line.len())
+            .ok()
+            .and_then(|len| len.checked_add(1))
+            .filter(|len| *len <= self.cap)
+            .ok_or_else(|| io::Error::other("private log record exceeds retention"))?;
+        if self
+            .written
+            .checked_add(added)
+            .is_none_or(|len| len > self.cap)
+        {
+            return Ok(());
+        }
+        validate(&self.directory, true)?;
+        validate(&self.file, false)?;
+        // Charge the entire attempted write, including any partial write, and
+        // never retry into a damaged tail. No reopen, recovery or crash barrier.
+        self.written += added;
+        if let Err(error) = write_record(&mut self.file, line) {
+            self.failed = true;
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn open(root: &Path, cap: u64) -> io::Result<Box<dyn PrivateLogWriter>> {
     let directory = private_directory(root)?;
-    let mut lock = RwLock::new(open_child(&directory, root, "errors.lock", false)?);
-    let _guard = lock.write()?;
-    let mut log = open_child(&directory, root, "errors.jsonl", true)?;
-    let len = log.metadata()?.len();
-    if len > max_bytes {
-        log.set_len(0)?;
-    } else {
-        recover_tail(&mut log, len)?;
+    // Cleanup failure cannot turn optional old-log retention into admission.
+    prune(&directory, root, cap, SystemTime::now());
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|_| io::Error::other("private name unavailable"))?;
+    let name = format!("owner-{:032x}.jsonl", u128::from_ne_bytes(random));
+    let file = create_owner(&directory, root, &name)?;
+    Ok(Box::new(OwnerLog {
+        directory,
+        file,
+        written: 0,
+        cap,
+        failed: false,
+    }))
+}
+
+fn write_record(log: &mut impl Write, line: &[u8]) -> io::Result<()> {
+    let mut record = Vec::with_capacity(line.len() + 1);
+    record.extend_from_slice(line);
+    record.push(b'\n');
+    log.write_all(&record)
+}
+
+struct RetainedFile {
+    name: std::ffi::OsString,
+    modified: SystemTime,
+    len: u64,
+}
+
+fn prune(directory: &File, root: &Path, cap: u64, now: SystemTime) {
+    let Ok(mut files) = retained_files(directory, root) else {
+        return;
+    };
+    files.sort_by(|a, b| a.modified.cmp(&b.modified).then(a.name.cmp(&b.name)));
+    files.retain(|file| {
+        if file.len > cap
+            || now
+                .duration_since(file.modified)
+                .is_ok_and(|age| age > RETENTION_AGE)
+        {
+            return remove_retained(directory, root, &file.name).is_err();
+        }
+        true
+    });
+    let mut remaining = files.len();
+    for file in files {
+        if remaining < RETAINED_FILES {
+            break;
+        }
+        if remove_retained(directory, root, &file.name).is_ok() {
+            remaining -= 1;
+        }
     }
-    if log
-        .metadata()?
-        .len()
-        .checked_add(added)
-        .is_none_or(|len| len > max_bytes)
-    {
-        // Retain the new segment, never reread or rewrite previous records.
-        log.set_len(0)?;
+}
+
+#[cfg(unix)]
+fn retained_files(directory: &File, _root: &Path) -> io::Result<Vec<RetainedFile>> {
+    use rustix::fs::{AtFlags, Dir, FileType, statat};
+    use std::os::unix::ffi::OsStringExt;
+    let mut files = Vec::new();
+    for entry in Dir::read_from(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let stat = match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(error) if error == rustix::io::Errno::NOENT => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            continue;
+        }
+        let seconds = u64::try_from(stat.st_mtime).unwrap_or(0);
+        let nanos = u32::try_from(stat.st_mtime_nsec)
+            .unwrap_or(0)
+            .min(999_999_999);
+        files.push(RetainedFile {
+            name: std::ffi::OsString::from_vec(name.to_bytes().to_vec()),
+            modified: SystemTime::UNIX_EPOCH
+                .checked_add(Duration::new(seconds, nanos))
+                .unwrap_or(SystemTime::UNIX_EPOCH),
+            len: u64::try_from(stat.st_size).unwrap_or(u64::MAX),
+        });
     }
-    write_record(&mut log, line)?;
-    log.sync_all()?;
-    directory.sync_all()?;
-    // Sync for existing roots too: a concurrent loser can append before the
-    // initializer reaches its own barrier, but must not report weaker durability.
-    io.fsync(private_parent(root))?;
-    Ok(())
+    Ok(files)
+}
+
+#[cfg(unix)]
+fn remove_retained(directory: &File, _root: &Path, name: &std::ffi::OsStr) -> io::Result<()> {
+    match rustix::fs::unlinkat(directory, name, rustix::fs::AtFlags::empty()) {
+        Ok(()) => Ok(()),
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(windows)]
+fn retained_files(_directory: &File, root: &Path) -> io::Result<Vec<RetainedFile>> {
+    use std::os::windows::fs::MetadataExt;
+    let mut files = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.is_file() && metadata.file_attributes() & 0x400 == 0 {
+            files.push(RetainedFile {
+                name: entry.file_name(),
+                modified: metadata.modified()?,
+                len: metadata.len(),
+            });
+        }
+    }
+    Ok(files)
+}
+
+#[cfg(windows)]
+fn remove_retained(_directory: &File, root: &Path, name: &std::ffi::OsStr) -> io::Result<()> {
+    match fs::remove_file(root.join(name)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn retained_files(_directory: &File, _root: &Path) -> io::Result<Vec<RetainedFile>> {
+    Err(invalid())
+}
+#[cfg(not(any(unix, windows)))]
+fn remove_retained(_directory: &File, _root: &Path, _name: &std::ffi::OsStr) -> io::Result<()> {
+    Err(invalid())
+}
+
+#[cfg(unix)]
+fn create_owner(directory: &File, _root: &Path, name: &str) -> io::Result<File> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::PermissionsExt;
+    let flags =
+        OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let file = File::from(
+        openat(directory, name, flags, Mode::S_IRUSR | Mode::S_IWUSR).map_err(io::Error::from)?,
+    );
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    validate(&file, false)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn create_owner(_directory: &File, root: &Path, name: &str) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .access_mode(0x80000000 | 0x40000000 | 0x00020000 | 0x00040000)
+        .custom_flags(0x00200000)
+        .share_mode(0x1 | 0x2)
+        .open(root.join(name))?;
+    harden_handle(&mut file, false)?;
+    validate(&file, false)?;
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_owner(_directory: &File, _root: &Path, _name: &str) -> io::Result<File> {
+    Err(invalid())
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    // Catches: splitting a record into separate payload/newline submissions.
+    #[test]
+    fn owner_record_uses_one_buffer() {
+        struct Once(Vec<u8>);
+        impl Write for Once {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if !self.0.is_empty() {
+                    return Err(io::Error::other("second submission"));
+                }
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = Once(Vec::new());
+        write_record(&mut writer, b"payload").unwrap();
+        assert_eq!(writer.0, b"payload\n");
+    }
+
+    // Catches: create-new accidentally falling back to opening a collision,
+    // including a symlink/FIFO/regular leaf selected before creation.
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_owner_creation_never_opens_a_colliding_leaf() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("private");
+        let directory = private_directory(&root).unwrap();
+        let victim = temp.path().join("victim");
+        fs::write(&victim, b"unchanged").unwrap();
+        for kind in ["regular", "symlink", "fifo", "directory"] {
+            let path = root.join(kind);
+            match kind {
+                "regular" => fs::write(&path, b"unchanged").unwrap(),
+                "symlink" => symlink(&victim, &path).unwrap(),
+                "fifo" => nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRUSR).unwrap(),
+                "directory" => fs::create_dir(&path).unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(create_owner(&directory, &root, kind).is_err());
+        }
+        assert_eq!(fs::read(victim).unwrap(), b"unchanged");
+        assert_eq!(fs::read(root.join("regular")).unwrap(), b"unchanged");
+    }
 }
 
 fn private_parent(root: &Path) -> &Path {
@@ -67,7 +296,6 @@ fn private_directory(root: &Path) -> io::Result<File> {
     }
     let staging = builder.tempdir_in(parent)?;
     let directory = open_directory(staging.path(), true)?;
-    directory.sync_all()?;
     // Windows pins the directory against deletion; release the unpublished
     // handle before rename, then open and validate the published handle.
     #[cfg(windows)]
@@ -94,36 +322,18 @@ fn private_directory(root: &Path) -> io::Result<File> {
 
 #[cfg(unix)]
 fn publish_directory(staging: &Path, root: &Path) -> io::Result<()> {
-    rename_exclusive(rustix::fs::CWD, staging, rustix::fs::CWD, root)
-}
-
-#[cfg(unix)]
-fn rename_exclusive(
-    old_directory: impl std::os::fd::AsFd,
-    staging: &Path,
-    new_directory: impl std::os::fd::AsFd,
-    target: &Path,
-) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     {
-        use rustix::fs::{RenameFlags, renameat_with};
-        // Do not replace an existing empty directory or a private file another
-        // initializer has already opened. Publication also exposes ready modes.
-        renameat_with(
-            old_directory,
-            staging,
-            new_directory,
-            target,
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(Into::into)
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        // Publish only the hardened shared parent, never replace its winner.
+        renameat_with(CWD, staging, CWD, root, RenameFlags::NOREPLACE).map_err(Into::into)
     }
     #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
     {
-        let _ = (old_directory, staging, new_directory, target);
+        let _ = (staging, root);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "exclusive private publication is unavailable",
+            "exclusive private parent publication is unavailable",
         ))
     }
 }
@@ -137,41 +347,6 @@ fn publish_directory(staging: &Path, root: &Path) -> io::Result<()> {
 #[cfg(not(any(unix, windows)))]
 fn publish_directory(_staging: &Path, _root: &Path) -> io::Result<()> {
     Err(invalid())
-}
-
-fn write_record(log: &mut (impl Write + Seek), line: &[u8]) -> io::Result<()> {
-    // Explicit access_mode on Windows does not imply FILE_APPEND_DATA.
-    // Recovery and rotation may leave that handle's cursor beyond the new EOF.
-    log.seek(SeekFrom::End(0))?;
-    let mut record = Vec::with_capacity(line.len() + 1);
-    record.extend_from_slice(line);
-    record.push(b'\n');
-    log.write_all(&record)
-}
-
-fn recover_tail(log: &mut File, len: u64) -> io::Result<()> {
-    if len == 0 {
-        return Ok(());
-    }
-    let mut end = len;
-    let mut buffer = [0_u8; 4096];
-    // Ordinary complete tails read one byte; damaged tails scan at most retention.
-    log.seek(SeekFrom::Start(len - 1))?;
-    log.read_exact(&mut buffer[..1])?;
-    if buffer[0] == b'\n' {
-        return Ok(());
-    }
-    while end != 0 {
-        let start = end.saturating_sub(buffer.len() as u64);
-        let count = usize::try_from(end - start).expect("bounded chunk");
-        log.seek(SeekFrom::Start(start))?;
-        log.read_exact(&mut buffer[..count])?;
-        if let Some(index) = buffer[..count].iter().rposition(|byte| *byte == b'\n') {
-            return log.set_len(start + index as u64 + 1);
-        }
-        end = start;
-    }
-    log.set_len(0)
 }
 
 fn invalid() -> io::Error {
@@ -189,7 +364,7 @@ fn validate(file: &File, directory: bool) -> io::Result<()> {
     let kind = if directory {
         metadata.is_dir()
     } else {
-        metadata.is_file() && metadata.nlink() == 1
+        metadata.is_file() && metadata.nlink() <= 1
     };
     if !kind
         || metadata.permissions().mode() & 0o777 != expected
@@ -216,96 +391,6 @@ fn open_directory(path: &Path, created: bool) -> io::Result<File> {
     Ok(file)
 }
 
-#[cfg(unix)]
-fn open_child(directory: &File, _root: &Path, name: &str, append: bool) -> io::Result<File> {
-    use nix::fcntl::{OFlag, openat};
-    use nix::sys::stat::Mode;
-    use std::os::unix::fs::PermissionsExt;
-    let flags = OFlag::O_RDWR
-        | OFlag::O_NOFOLLOW
-        | OFlag::O_CLOEXEC
-        | OFlag::O_NONBLOCK
-        | if append {
-            OFlag::O_APPEND
-        } else {
-            OFlag::empty()
-        };
-    let open_existing = || -> io::Result<File> {
-        let file =
-            File::from(openat(directory, name, flags, Mode::empty()).map_err(io::Error::from)?);
-        validate(&file, false)?;
-        Ok(file)
-    };
-    match open_existing() {
-        Ok(file) => return Ok(file),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    // A canonical O_CREAT exposes umask-masked 0400 before fchmod. Prepare a
-    // unique leaf relative to the pinned directory and publish only at 0600.
-    let mut random = [0_u8; 16];
-    getrandom::fill(&mut random)
-        .map_err(|_| io::Error::other("private staging name unavailable"))?;
-    let staging = format!(".mcp-private-{:032x}", u128::from_ne_bytes(random));
-    let mode = Mode::S_IRUSR | Mode::S_IWUSR;
-    let fd = openat(
-        directory,
-        staging.as_str(),
-        flags | OFlag::O_CREAT | OFlag::O_EXCL,
-        mode,
-    )
-    .map_err(io::Error::from)?;
-    let file = File::from(fd);
-    let publication = (|| {
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        validate(&file, false)?;
-        rename_exclusive(directory, Path::new(&staging), directory, Path::new(name))
-    })();
-    match publication {
-        Ok(()) => Ok(file),
-        Err(error) => {
-            let cleanup =
-                rustix::fs::unlinkat(directory, staging.as_str(), rustix::fs::AtFlags::empty())
-                    .map_err(io::Error::from);
-            if cleanup.is_err() {
-                return Err(with_cleanup_context(error, cleanup));
-            }
-            if error.kind() == io::ErrorKind::AlreadyExists {
-                open_existing()
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn with_cleanup_context(original: io::Error, cleanup: io::Result<()>) -> io::Error {
-    #[derive(Debug)]
-    struct CleanupContext {
-        original: io::Error,
-        cleanup: io::Error,
-    }
-    impl std::fmt::Display for CleanupContext {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(
-                formatter,
-                "{}; staging cleanup failed: {}",
-                self.original, self.cleanup
-            )
-        }
-    }
-    impl std::error::Error for CleanupContext {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            Some(&self.original)
-        }
-    }
-    match cleanup {
-        Ok(()) => original,
-        Err(cleanup) => io::Error::new(original.kind(), CleanupContext { original, cleanup }),
-    }
-}
-
 #[cfg(windows)]
 fn open_directory(path: &Path, created: bool) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -321,36 +406,6 @@ fn open_directory(path: &Path, created: bool) -> io::Result<File> {
         harden_handle(&mut file, true)?;
     }
     validate(&file, true)?;
-    Ok(file)
-}
-
-#[cfg(windows)]
-fn open_child(_directory: &File, root: &Path, name: &str, append: bool) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    let path = root.join(name);
-    let options = |create: bool| {
-        let mut options = fs::OpenOptions::new();
-        options
-            .read(true)
-            .write(true)
-            .append(append)
-            .create_new(create)
-            .access_mode(0x80000000 | 0x40000000 | 0x00020000 | 0x00040000)
-            .custom_flags(0x00200000)
-            .share_mode(0x1 | 0x2);
-        options
-    };
-    let (mut file, created) = match options(true).open(&path) {
-        Ok(file) => (file, true),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            (options(false).open(&path)?, false)
-        }
-        Err(error) => return Err(error),
-    };
-    if created {
-        harden_handle(&mut file, false)?;
-    }
-    validate(&file, false)?;
     Ok(file)
 }
 
@@ -413,8 +468,3 @@ fn validate(file: &File, directory: bool) -> io::Result<()> {
 fn open_directory(_path: &Path, _created: bool) -> io::Result<File> {
     Err(invalid())
 }
-#[cfg(not(any(unix, windows)))]
-fn open_child(_directory: &File, _root: &Path, _name: &str, _append: bool) -> io::Result<File> {
-    Err(invalid())
-}
-
