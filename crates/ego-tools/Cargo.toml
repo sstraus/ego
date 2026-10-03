@@ -42,7 +42,7 @@ zeroize = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["process", "signal", "term", "user", "fs"] }
-# Already locked transitively; safe exclusive directory rename on Linux/macOS.
+# Already locked transitively; safe descriptor-relative enumeration and unlink.
 rustix = { version = "1.1.4", features = ["fs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

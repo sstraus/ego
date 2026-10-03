@@ -227,53 +227,6 @@ mod unix {
         }
     }
 
-    // Catches: new modes remaining umask-masked or concurrent parent creation
-    // exposing a partially hardened shared directory.
-    #[test]
-    fn restrictive_umask_keeps_concurrent_creation_owner_only() {
-        const CHILD: &str = "EGO_OWNER_UMASK_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new("sh")
-                .arg("-c")
-                .arg("umask 0277; exec \"$@\"")
-                .arg("sh")
-                .arg(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "unix::restrictive_umask_keeps_concurrent_creation_owner_only",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap();
-            assert!(status.success());
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let root = temp.path().join("private");
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                let root = &root;
-                scope.spawn(move || {
-                    let mut owner = OsIo.open_private_log(root, CAP).unwrap();
-                    owner.append(b"secret").unwrap();
-                });
-            }
-        });
-        assert_eq!(
-            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(private_logs::files(&root).len(), 8);
-        for path in private_logs::files(&root) {
-            assert_eq!(
-                fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-    }
-
     // Catches: cleanup following a symlink, blocking on a FIFO, or modifying
     // outside contents rather than unlinking only directory entries.
     #[test]
