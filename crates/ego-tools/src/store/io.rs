@@ -162,6 +162,15 @@ pub enum AtomicReplacePublication {
 
 /// The filesystem operations the durable session adapters need, and nothing else.
 pub trait StoreIo: Send + Sync {
+    /// Append a bounded record under an owner-only directory and descriptor lock.
+    /// Refuse symlinks and shared inodes. Drop torn tails and expired segments.
+    fn append_private_log(&self, _root: &Path, _line: &[u8], _max_bytes: u64) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private log append unavailable",
+        ))
+    }
+
     /// Atomically publish a private advisory document. Unsupported adapters
     /// report a cache miss; they must not silently publish with wider permissions.
     fn replace_atomic_private(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
@@ -579,6 +588,10 @@ fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
 pub struct OsIo;
 
 impl StoreIo for OsIo {
+    fn append_private_log(&self, root: &Path, line: &[u8], max_bytes: u64) -> io::Result<()> {
+        super::private_log::append(root, line, max_bytes)
+    }
+
     fn replace_atomic_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         match replace_atomic_publication_with_privacy(path, bytes, Barrier::Fsync, true)? {
             ReplacePublication::PublishedDurably => Ok(()),

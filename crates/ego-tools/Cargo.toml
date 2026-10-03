@@ -41,7 +41,7 @@ url = "2.5.8"
 zeroize = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", features = ["process", "signal", "term"] }
+nix = { version = "0.31.3", features = ["process", "signal", "term", "user"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
@@ -53,7 +53,7 @@ process-wrap = { path = "../../vendor/process-wrap", default-features = false, f
     "job-object",
     "kill-on-drop",
 ] }
-windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
+windows = { version = "0.62.2", features = ["Win32_System_Threading", "Win32_Storage_FileSystem"] }
 windows-permissions = "0.2.4"
 
 [features]

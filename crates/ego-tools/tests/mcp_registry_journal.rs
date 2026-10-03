@@ -19,6 +19,10 @@ fn journal(root: &std::path::Path) -> JsonlMcpRegistryJournal {
 struct FailingFsyncIo;
 
 impl StoreIo for FailingFsyncIo {
+    fn append_private_log(&self, _root: &Path, line: &[u8], _max_bytes: u64) -> io::Result<()> {
+        Err(io::Error::other(String::from_utf8_lossy(line).into_owned()))
+    }
+
     fn append_line(&self, path: &Path, line: &[u8]) -> io::Result<()> {
         OsIo.append_line(path, line)
     }
@@ -589,4 +593,31 @@ fn private_diagnostics_outlive_ephemeral_registries_and_serialize_shared_writers
             .map(|index| format!("cause-{index}"))
             .collect::<Vec<_>>()
     );
+}
+
+// Catches: byte-based cause truncation splitting UTF-8, JSON escaping growing an
+// unbounded record, or truncation silently pretending the full cause survived.
+#[test]
+fn private_diagnostics_mark_utf8_cause_truncation_and_bound_escaped_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let adapter = journal(temp.path());
+    for source in ["🦀".repeat(6000), "\u{0}".repeat(20000)] {
+        adapter
+            .record_private_diagnostic("alpha", &source)
+            .expect("bounded log");
+    }
+    let bytes =
+        std::fs::read(temp.path().join("mcp/private-diagnostics/errors.jsonl")).expect("log");
+    let records: Vec<serde_json::Value> = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            assert!(line.len() <= 128 * 1024);
+            serde_json::from_slice(line).expect("record")
+        })
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["cause"], "🦀".repeat(4096));
+    assert_eq!(records[1]["cause"], "\u{0}".repeat(16384));
+    assert!(records.iter().all(|record| record["truncated"] == true));
 }
