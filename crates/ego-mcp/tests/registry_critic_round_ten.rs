@@ -160,7 +160,8 @@ async fn private_log_failure_stops_reconcile_and_hides_the_cause() {
     let error = registry
         .reconcile(refresh())
         .await
-        .expect_err("fail closed");
+        .err()
+        .expect("fail closed");
     assert!(!format!("{error}").contains(MARKER));
     assert!(!format!("{error:?}").contains(MARKER));
     assert_eq!(registry.publication().generation(), before);
