@@ -81,7 +81,16 @@ fn policy_control_case_aliases_cannot_gain_allow_authority_on_apfs() {
     let engine = PolicyEngine::new(CanonPath::new(&repository.0), Mode::Default, rules.clone());
     let mut covered = Vec::new();
     for variant in [".GIT", ".Git"] {
-        std::fs::rename(repository.0.join(".git"), repository.0.join(variant)).unwrap();
+        std::fs::rename(
+            repository.0.join(".git"),
+            repository.0.join("control-renaming"),
+        )
+        .unwrap();
+        std::fs::rename(
+            repository.0.join("control-renaming"),
+            repository.0.join(variant),
+        )
+        .unwrap();
         let canonical = std::fs::canonicalize(repository.0.join(".git/config")).unwrap();
         assert!(
             canonical.starts_with(repository.0.join(variant)),
@@ -94,7 +103,16 @@ fn policy_control_case_aliases_cannot_gain_allow_authority_on_apfs() {
         {
             covered.push(variant);
         }
-        std::fs::rename(repository.0.join(variant), repository.0.join(".git")).unwrap();
+        std::fs::rename(
+            repository.0.join(variant),
+            repository.0.join("control-renaming"),
+        )
+        .unwrap();
+        std::fs::rename(
+            repository.0.join("control-renaming"),
+            repository.0.join(".git"),
+        )
+        .unwrap();
     }
     assert!(
         covered.is_empty(),
