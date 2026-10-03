@@ -1,4 +1,4 @@
-//! Critic cases: remembered Git commands must not acquire unseen hook or alias authority.
+//! Remembered Git subcommand prefixes cover later templates and alias arguments.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -24,7 +24,7 @@ fn spawn(workspace: &Path, argv: &[&str]) -> PreparedCall {
     )
 }
 
-fn assert_changed_command_needs_approval(workspace: &Path, original: &[&str], later: &[&str]) {
+fn assert_changed_command_is_covered(workspace: &Path, original: &[&str], later: &[&str]) {
     let original = spawn(workspace, original);
     let mut rules = Ruleset::default();
     for candidate in
@@ -37,20 +37,23 @@ fn assert_changed_command_needs_approval(workspace: &Path, original: &[&str], la
     let later = spawn(workspace, later);
     let engine = PolicyEngine::new(CanonPath::new(workspace), Mode::Default, rules.clone());
     assert!(
-        matches!(engine.classify(later.clone()), Classification::Ask(_)),
-        "remembering {original:?} authorized different control/code argv {later:?}"
+        matches!(
+            engine.classify(later.clone()),
+            Classification::Settled(Ok(_))
+        ),
+        "remembering {original:?} must cover later arguments {later:?}"
     );
     assert_eq!(
         RuleManagement::explain(&later, &rules, workspace).outcome,
-        RuleOutcome::Uncovered
+        RuleOutcome::Allowed
     );
 }
 
-// Catches: remembering ordinary init authorizes a later template that installs
-// unseen hooks, including with a separately located Git control directory.
+// Catches: retaining an exact-only init exception that rejects template or
+// control-directory arguments covered by the displayed git init prefix.
 #[test]
-fn remembered_git_init_cannot_authorize_unseen_hook_templates() {
-    assert_changed_command_needs_approval(
+fn remembered_git_init_prefix_covers_later_hook_templates() {
+    assert_changed_command_is_covered(
         Path::new("/workspace"),
         &["git", "init", "."],
         &[
@@ -63,11 +66,11 @@ fn remembered_git_init_cannot_authorize_unseen_hook_templates() {
     );
 }
 
-// Catches: remembering clone authorizes installing a different hook template
-// into the current repository rather than cloning the approved destination.
+// Catches: retaining an exact-only clone exception that rejects a later
+// template or destination covered by the displayed git clone prefix.
 #[test]
-fn remembered_git_clone_cannot_authorize_unseen_hook_templates_in_workspace() {
-    assert_changed_command_needs_approval(
+fn remembered_git_clone_prefix_covers_later_hook_templates_in_workspace() {
+    assert_changed_command_is_covered(
         Path::new("/workspace"),
         &["git", "clone", "/workspace/source", "ordinary"],
         &[
@@ -80,10 +83,10 @@ fn remembered_git_clone_cannot_authorize_unseen_hook_templates_in_workspace() {
     );
 }
 
-// Catches: a Git alias to config evades the exact-argv config exception;
-// remembering its query grants a later hooksPath mutation through that alias.
+// Catches: narrowing a plain Git alias to exact argv despite the displayed
+// alias prefix; the live Git probe records the alias configuration effect.
 #[test]
-fn remembered_unknown_git_alias_cannot_authorize_hook_redirection() {
+fn remembered_git_alias_prefix_covers_later_hook_redirection() {
     let workspace = std::env::temp_dir().join(format!("ego-critic-alias-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&workspace).unwrap();
     let git = |args: &[&str]| {
@@ -109,7 +112,7 @@ fn remembered_unknown_git_alias_cannot_authorize_hook_redirection() {
         b"unseen-hooks\n"
     );
     std::fs::remove_dir_all(&workspace).unwrap();
-    assert_changed_command_needs_approval(
+    assert_changed_command_is_covered(
         &workspace,
         &["git", "inspect", "--get", "user.name"],
         &["git", "inspect", "core.hooksPath", "unseen-hooks"],

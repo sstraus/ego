@@ -1,5 +1,4 @@
-//! Regression coverage: routes by which a remembered or configured
-//! exec rule reaches unseen code, tool configuration, or control paths.
+//! Remembered exec authority: named subcommands cover later arguments; other shapes stay exact.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -74,6 +73,38 @@ fn assert_none_widened(cases: &[(&[&str], &[&str])]) {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
+fn assert_all_covered(cases: &[(&[&str], &[&str])]) {
+    for (original, later) in cases {
+        let mut rules = Ruleset::default();
+        for candidate in RuleManagement::suggest_remember(
+            &spawn(original),
+            ManagedRuleEffect::Allow,
+            Path::new(WORKSPACE),
+        )
+        .unwrap()
+        .candidates
+        {
+            Ruleset::merge(&mut rules.allow, candidate, Source::User);
+        }
+        let engine = PolicyEngine::new(CanonPath::new(WORKSPACE), Mode::Default, rules.clone());
+        for argv in [original, later] {
+            let call = spawn(argv);
+            assert!(
+                matches!(
+                    engine.classify(call.clone()),
+                    Classification::Settled(Ok(_))
+                ),
+                "remembering {original:?} must cover {argv:?}"
+            );
+            assert_eq!(
+                RuleManagement::explain(&call, &rules, Path::new(WORKSPACE)).outcome,
+                RuleOutcome::Allowed,
+                "remembering {original:?} must explain {argv:?} as allowed"
+            );
+        }
+    }
+}
+
 // Catches: launcher/Git recognition is case-sensitive while the filesystem
 // resolving the program is not (APFS, NTFS): remembering `Bash -c x` stores
 // `exec(Bash *)`, which covers any later code run through the same shell.
@@ -134,12 +165,11 @@ fn remembered_unlisted_interpreters_and_runners_keep_exact_argv() {
     ]);
 }
 
-// Catches: a configuration query of a tool program keeps the prefix, so the
-// remembered read-only form authorizes a later write of tool configuration
-// (the same class as the six Git control subcommands, for every other program).
+// Catches: treating config queries as exact-only despite the displayed
+// named-subcommand prefix, or disagreeing between admission and explanation.
 #[test]
-fn remembered_tool_config_queries_cannot_authorize_config_writes() {
-    assert_none_widened(&[
+fn remembered_tool_subcommand_prefixes_cover_config_writes() {
+    assert_all_covered(&[
         (
             &["npm", "config", "get", "registry"],
             &["npm", "config", "set", "script-shell", "/workspace/evil"],
@@ -177,14 +207,11 @@ fn remembered_tool_config_queries_cannot_authorize_config_writes() {
     ]);
 }
 
-// Catches: the unseen-code subcommand list is an enumeration with holes, the
-// failure mode the Git allowlist was introduced to remove: `yarn exec`,
-// `npm init/create/explore`, `pnpm/yarn create`, `docker container exec` and
-// `docker compose run` all run what the operator never saw, like the listed
-// `npm exec`, `pnpm exec`, `docker exec`.
+// Catches: keeping a launcher exception list that narrows a displayed
+// named-subcommand prefix instead of covering its later program arguments.
 #[test]
-fn remembered_unseen_code_subcommands_outside_the_exact_list_keep_exact_argv() {
-    assert_none_widened(&[
+fn remembered_code_running_subcommand_prefixes_cover_later_programs() {
+    assert_all_covered(&[
         (
             &["yarn", "exec", "ls"],
             &["yarn", "exec", "sh", "-c", "unseen"],
@@ -208,12 +235,11 @@ fn remembered_unseen_code_subcommands_outside_the_exact_list_keep_exact_argv() {
     ]);
 }
 
-// Catches: a build/test prefix covers options that name a program to run
-// (`go test -exec`, `cargo --config ...runner`, `npm run --script-shell`),
-// i.e. `find -exec` for subcommand programs.
+// Catches: filtering runner/config options after an approved subcommand,
+// or treating a leading option as a subcommand and widening exact argv.
 #[test]
-fn remembered_build_prefixes_cannot_cover_options_that_name_a_program() {
-    assert_none_widened(&[
+fn remembered_build_prefixes_cover_program_options_but_leading_options_stay_exact() {
+    assert_all_covered(&[
         (
             &["go", "test", "./..."],
             &["go", "test", "-exec", "/workspace/evil", "./..."],
@@ -243,6 +269,26 @@ fn remembered_build_prefixes_cannot_cover_options_that_name_a_program() {
         (
             &["npm", "run", "build"],
             &["npm", "run", "build", "--script-shell=/workspace/evil"],
+        ),
+    ]);
+    assert_none_widened(&[
+        (
+            &[
+                "cargo",
+                "--config",
+                "target.x.runner=\"/workspace/seen\"",
+                "test",
+            ],
+            &[
+                "cargo",
+                "--config",
+                "target.x.runner=\"/workspace/evil\"",
+                "test",
+            ],
+        ),
+        (
+            &["git", "-c", "core.hooksPath=seen", "status"],
+            &["git", "-c", "core.hooksPath=unseen", "status"],
         ),
     ]);
 }
@@ -337,18 +383,18 @@ fn policy_exec_allow_never_covers_control_path_operands_or_cwd() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
-// Catches: the Git allowlist compares case-sensitively and accepts any plain
-// word, so a near-spelling of ls-tree or the bare program gets a prefix.
+// Catches: retaining the retired ls-tree allowlist instead of covering plain
+// subcommand spellings, or treating an unrecognized executable as git.
 #[test]
-fn remembered_git_near_spellings_of_the_allowlist_keep_exact_argv() {
-    assert_none_widened(&[
+fn remembered_git_plain_subcommand_spellings_get_prefixes_but_git_exe_stays_exact() {
+    assert_all_covered(&[
         (&["git", "LS-TREE", "HEAD"], &["git", "LS-TREE", "--x"]),
         (&["git", "ls-tree.x", "HEAD"], &["git", "ls-tree.x", "--x"]),
         (&["git", "ls_tree", "HEAD"], &["git", "ls_tree", "--x"]),
         (&["git", "ls-tree+", "HEAD"], &["git", "ls-tree+", "--x"]),
-        (
-            &["git.exe", "log"],
-            &["git.exe", "config", "core.hooksPath", "x"],
-        ),
     ]);
+    assert_none_widened(&[(
+        &["git.exe", "log"],
+        &["git.exe", "config", "core.hooksPath", "x"],
+    )]);
 }
