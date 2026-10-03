@@ -1574,3 +1574,305 @@ mod secret_mask_critic_round_eight {
         }
     }
 }
+
+mod published_secret_mask_regressions {
+    use super::*;
+
+    fn detail(cause: &str) -> String {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let admission = Arc::new(FakeAdmission {
+                    state: Arc::new(Mutex::new(AdmissionState::default())),
+                    gate: Arc::new(Mutex::new(None)),
+                });
+                admission.push(Outcome::Invalid(cause.to_owned()));
+                let (registry, _) = controller(admission);
+                registry
+                    .reconcile(refresh(RegistryTrigger::Add))
+                    .await
+                    .expect("publication");
+                let messages = registry.status().mcp_errors();
+                assert_eq!(messages.len(), 1, "{messages:?}");
+                messages[0]
+                    .strip_prefix("MCP server `alpha`: server configuration is invalid: ")
+                    .expect("published diagnostic detail")
+                    .to_owned()
+            })
+    }
+
+    fn assert_hidden(cause: &str, secret: &str) {
+        let out = detail(cause);
+        assert!(
+            !out.contains(secret),
+            "{cause:?} leaked {secret:?}: {out:?}"
+        );
+    }
+
+    // Catches: scheme masking requiring a header separator or supporting only Bearer.
+    #[test]
+    fn standalone_auth_schemes_mask_the_remaining_public_diagnostic() {
+        for cause in [
+            "Authorization\nBearer LEAKSCHEME",
+            "failed Basic LEAKSCHEME done",
+            "failed tOkEn LEAKSCHEME done",
+            "failed Digest response=LEAKSCHEME done",
+        ] {
+            assert_hidden(cause, "LEAKSCHEME");
+            assert_hidden(cause, "done");
+        }
+    }
+
+    // Catches: ASCII-only matching or a partial confusable table missing Greek keys.
+    #[test]
+    fn compatibility_and_confusable_names_mask_public_credentials() {
+        for cause in [
+            "ｔｏｋｅｎ＝LEAKUNICODE",
+            "𝐭𝐨𝐤𝐞𝐧=LEAKUNICODE",
+            "tоken=LEAKUNICODE",
+            "tοken=LEAKUNICODE",
+            "ｎａｍｅ: Qualified(\"scope\", \"tоken\"), value: LEAKUNICODE",
+            "{\"value\":\"LEAKUNICODE\",\"nаme\":\"token\"}",
+        ] {
+            assert_hidden(cause, "LEAKUNICODE");
+        }
+    }
+
+    #[test]
+    fn json_escaped_inside_a_string_masks_the_remaining_line() {
+        // catches: escaped JSON credentials or suffixes leaking past a guessed closing quote.
+        assert_eq!(
+            detail(r#"body {\"token\":\"LEAK\"} rejected"#),
+            r#"body {\"token\":***"#
+        );
+    }
+
+    #[test]
+    fn digest_quoted_params_with_blanks_are_masked_to_the_last_one() {
+        // catches: the parameter loop stopping inside `realm="my realm"`, leaking `response=`.
+        assert_eq!(
+            detail(r#"Authorization: Digest username="u", realm="my realm", response="LEAK" end"#),
+            "Authorization: ***"
+        );
+    }
+
+    #[test]
+    fn every_default_ignorable_or_format_mark_is_dropped_before_matching() {
+        // catches: a name split by a mark outside a hand-picked list (grapheme joiner,
+        // variation selector, tag character, Hangul filler, Arabic number sign).
+        for mark in [
+            '\u{034f}',
+            '\u{fe0f}',
+            '\u{e0041}',
+            '\u{180e}',
+            '\u{3164}',
+            '\u{0600}',
+            '\u{115f}',
+        ] {
+            assert_eq!(detail(&format!("to{mark}ken=LEAK done")), "token=***");
+        }
+    }
+
+    #[test]
+    fn bracketed_and_tuple_names_are_masked() {
+        // catches: `params[token]=x` and Debug tuples `("x-api-key", "x")` leaking.
+        assert_eq!(detail("params[token]=LEAK&a=1"), "params[token]=***");
+        assert_eq!(
+            detail(r#"header ("x-api-key", "LEAK") rejected"#),
+            r#"header ("x-api-key", ***"#
+        );
+    }
+
+    #[test]
+    fn quoted_credential_with_a_blank_after_a_scheme_is_masked_whole() {
+        // catches: the credential ending at its first blank and leaking the second word.
+        assert_eq!(
+            detail(r#"Authorization: Bearer "abc LEAK" rejected"#),
+            "Authorization: ***"
+        );
+    }
+
+    #[test]
+    fn a_blank_after_a_sensitive_key_never_preserves_the_next_pair() {
+        // catches: guessing an empty value at a blank and publishing the remaining line.
+        assert_eq!(detail("empty key= mode=fast"), "empty key= ***");
+        assert_eq!(detail("token: YWJjZA== end"), "token: ***");
+        assert_eq!(detail("api_key = LEAK end"), "api_key = ***");
+        // catches: treating whitespace or a later original line as a safe end of the secret.
+        assert_eq!(detail("password=first SECOND mode=fast"), "password=***");
+        assert_eq!(detail("token=first\nSECOND mode=fast"), "token=***");
+    }
+
+    #[test]
+    fn name_value_records_mask_the_value_member() {
+        // catches: `{"name":"x-api-key","value":"v"}` and `Header { name, value }` leaking.
+        assert_eq!(
+            detail(r#"{"name":"x-api-key","value":"LEAK","k":1}"#),
+            "***"
+        );
+        assert_eq!(
+            detail(r#"Header { name: "x-api-key", value: "LEAK" }"#),
+            "***"
+        );
+        assert_eq!(
+            detail(r#"{"name":"content-type","value":"json"}"#),
+            r#"{"name":"content-type","value":"json"}"#
+        );
+    }
+
+    #[test]
+    fn escaped_json_of_any_depth_masks_the_remaining_line() {
+        // catches: one-level-only `\"` handling and an embedded `\\\"` ending the value.
+        assert_eq!(
+            detail(r#"o {\\\"token\\\":\\\"LEAK\\\"} end"#),
+            r#"o {\\\"token\\\":***"#
+        );
+        assert_eq!(
+            detail(r#"o {\"password\":\"pa\\\"LEAK\"} end"#),
+            r#"o {\"password\":***"#
+        );
+    }
+
+    #[test]
+    fn nested_object_or_array_under_a_secret_name_is_masked_whole() {
+        // catches: only the opening brace being masked.
+        assert_eq!(
+            detail(r#"{ "password": { "value": "LEAK", "b": ["x"] } } ok"#),
+            r#"{ "password": ***"#
+        );
+        assert_eq!(detail(r#"token=["a","}"] ok"#), "token=***");
+    }
+
+    #[test]
+    fn call_wrapped_secret_values_mask_the_remaining_line() {
+        // catches: `token: Some("a LEAK")` masking only `Some("a` and publishing the rest.
+        assert_eq!(detail(r#"token: Some("a LEAK") rejected"#), "token: ***");
+        assert_eq!(detail(r#"password=Secret(("x", ")")) end"#), "password=***");
+    }
+
+    #[test]
+    fn base64_padding_in_value_is_fully_masked() {
+        // catches: inner `=` padding restarts parsing and leaves part of the value visible.
+        let out = detail("token=YWJjZA== done");
+        assert_eq!(out, "token=***");
+    }
+
+    #[test]
+    fn an_apparently_empty_value_masks_the_next_pair() {
+        // catches: treating the next pair as public after a sensitive key and a blank.
+        assert_eq!(detail("empty key= mode=fast"), "empty key= ***");
+    }
+
+    #[test]
+    fn name_value_record_hides_the_value_and_later_records() {
+        // catches: resuming publication of sibling records after a sensitive name.
+        let cause = r#"[{"name":"token","value":"LEAKR1"},{"name":"mode","value":"fast"}]"#;
+        assert_hidden(cause, "LEAKR1");
+        assert_hidden(cause, r#""value":"fast""#);
+        let escaped = r#"{\\\"name\\\":\\\"x-api-key\\\",\\\"value\\\":\\\"LEAKR2\\\"}"#;
+        assert_hidden(escaped, "LEAKR2");
+    }
+
+    #[test]
+    fn a_sensitive_name_masks_later_records_even_without_its_value() {
+        // catches: resuming publication after a sensitive declaration with no value member.
+        assert_hidden(
+            r#"[{"name":"token","type":"string"},{"id":7,"value":"public"}]"#,
+            "public",
+        );
+    }
+
+    #[test]
+    fn brackets_inside_json_strings_of_an_escaped_nested_value_do_not_close_it() {
+        // catches: `bracket_end` skipping the escaped quotes of a JSON body embedded in a string,
+        // so it never sees `"x}y"` as a string and closes the value at the `}` inside it.
+        let cause = r#"{\"token\":{\"a\":\"x}y\",\"b\":\"LEAKBR\"},\"user\":\"bob\"} done"#;
+        assert_hidden(cause, "LEAKBR");
+        assert_hidden(cause, "bob");
+    }
+
+    #[test]
+    fn brackets_inside_single_quoted_strings_of_a_nested_value_do_not_close_it() {
+        // catches: `bracket_end` tracking only double quotes, so a Python dict repr
+        // `{'token': {'a': 'x}y', 'b': 'X'}}` closes at the `}` inside the string.
+        let cause = r#"{'token': {'a': 'x}y', 'b': 'LEAKSQ'}, 'user': 'bob'} done"#;
+        assert_hidden(cause, "LEAKSQ");
+        assert_hidden(cause, "bob");
+    }
+
+    #[test]
+    fn nested_secret_values_and_the_text_after_them_are_masked() {
+        // catches: stopping the mask at a closing bracket and exposing later text.
+        for cause in [
+            r#"{"token":{"a":{"b":"LEAKN1"},"c":["LEAKN2","LEAKN3"]},"user":"bob"} done"#,
+            r#"{"token":{"a":"x}y","b":"LEAKN4"},"user":"bob"} done"#,
+            r#"{\"token\":{\"a\":{\"b\":\"LEAKN5\"}},\"user\":\"bob\"} done"#,
+        ] {
+            let out = detail(cause);
+            assert!(!out.contains("LEAKN"), "{cause:?} leaked: {out:?}");
+            assert!(
+                !out.contains("bob") && !out.contains("done"),
+                "{cause:?} exposed its suffix: {out:?}"
+            );
+        }
+        assert_hidden("token: {truncated LEAKN6", "LEAKN6");
+    }
+
+    #[test]
+    fn embedded_escaped_quotes_stay_inside_the_secret_at_every_depth() {
+        // catches: a closing quote picked from an inner escaped quote (`LEAKA\"LEAKB`), which
+        // publishes the tail of the secret; depth 0, 1 and 2.
+        for cause in [
+            r#"password="LEAKA\"LEAKB" user=bob"#,
+            r#"password='LEAKA\'LEAKB' user=bob"#,
+            r#"{\"password\":\"LEAKA\\\"LEAKB\",\"user\":\"bob\"}"#,
+            r#"{\\\"password\\\":\\\"LEAKA\\\\\\\"LEAKB\\\",\\\"user\\\":\\\"bob\\\"}"#,
+        ] {
+            let out = detail(cause);
+            assert!(!out.contains("LEAK"), "{cause:?} leaked: {out:?}");
+            assert!(
+                !out.contains("bob"),
+                "{cause:?} exposed its suffix: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bracket_value_with_a_string_ending_in_an_escaped_backslash_is_masked_whole() {
+        // catches: `bracket_end` closing a plain string only on a quote with no backslash before
+        // it, so `"C:\\"` (a path ending in an escaped backslash, as Rust Debug and JSON print
+        // it) leaves the string open, flips the string parity and ends the secret object at a
+        // bracket that sits inside a later string, publishing the members after it.
+        for (cause, secret) in [
+            (
+                r#"token: {"dir":"C:\\","note":"}","pw":"LEAKB1"} done"#,
+                "LEAKB1",
+            ),
+            (
+                r#"token: {'dir': 'C:\\', 'note': ']', 'pw': 'LEAKB2'} done"#,
+                "LEAKB2",
+            ),
+        ] {
+            let out = detail(cause);
+            assert!(
+                !out.contains(secret),
+                "{cause:?} leaked {secret:?}: {out:?}"
+            );
+            assert!(
+                !out.contains("done"),
+                "{cause:?} exposed its suffix: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sensitive_record_name_masks_nested_members_and_its_value() {
+        // catches: nested members distracting the mask from the record's real secret value.
+        assert_eq!(
+            detail(r#"{"name":"x-api-key","schema":{"value":"public"},"value":"LEAK"}"#),
+            "***"
+        );
+    }
+}
