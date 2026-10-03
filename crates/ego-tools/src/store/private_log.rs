@@ -341,6 +341,8 @@ mod tests {
         }
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("tempdir");
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("writable parent outside the private-directory contract");
         let root = temp.path().join("private");
         append(&root, b"fresh", 64).expect("first append under umask 0277");
         assert_eq!(fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
