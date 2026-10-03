@@ -5466,3 +5466,84 @@ fn the_banner_lists_the_keys_at_120_80_60_and_40_columns() {
         });
     }
 }
+
+/// catches: Esc in the permission edit form denying the call without the
+/// `Interrupted by user` receipt the plain modal leaves.
+#[test]
+fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
+    let write_arguments = serde_json::json!({
+        "path": "notes.md",
+        "contents": "permission",
+    })
+    .to_string();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("write-1", "write", &write_arguments)),
+            Reply::Sse(text("AFTER-EDIT-ESC")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "default",
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let idle_start = output.len();
+    until_prompt_from(&reader, &mut output, idle_start);
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    drain_until_quiet(&reader, &mut output);
+    let edit_start = output.len();
+    input.write_all(b"e").expect("open the edit form");
+    input.flush().expect("edit flush");
+    until_normalized(&reader, &mut output, edit_start, "path: ");
+    drain_until_quiet(&reader, &mut output);
+    let esc_start = output.len();
+    input.write_all(b"\x1b").expect("Esc in the form");
+    input.flush().expect("Esc flush");
+    until_normalized(&reader, &mut output, esc_start, "permission was refused");
+    until_prompt_from(&reader, &mut output, esc_start);
+    drain_until_quiet(&reader, &mut output);
+    let after_esc = normalized(&output[esc_start..]);
+    assert_eq!(
+        after_esc.matches("Interrupted by user").count(),
+        1,
+        "Esc in the edit form must leave exactly one receipt: {after_esc}"
+    );
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+}
