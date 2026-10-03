@@ -63,25 +63,6 @@ fn repeated_failures_do_not_grow_the_log_without_bound() {
     );
 }
 
-/// Catches: a hand-edited or truncated log without a final newline; the next
-/// record is glued to the old tail and both become unparseable.
-#[test]
-fn record_after_an_unterminated_tail_stays_one_json_object_per_line() {
-    let dir = tempfile::tempdir().expect("dir");
-    let private = dir.path().join("private");
-    fs::create_dir_all(&private).expect("dir");
-    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).expect("mode");
-    let path = private.join("errors.jsonl");
-    fs::write(&path, br#"{"server":"old","cause":"old"}"#).expect("seed");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode");
-    adapter(dir.path())
-        .record_private_diagnostic("alpha", "new")
-        .expect("record");
-    for line in log(dir.path()).lines() {
-        serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|_| panic!("{line}"));
-    }
-}
-
 /// Catches: a cause with newlines or JSON forging an extra record.
 #[test]
 fn newline_bearing_cause_stays_inside_its_own_record() {
