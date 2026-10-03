@@ -408,6 +408,11 @@ impl DurableAcpFixture {
         session.to_string()
     }
 
+    /// Inject a store-port failure before the quarantine marker is published.
+    pub fn fail_quarantine(&self) {
+        *self.store.fail_quarantine.lock().unwrap() = true;
+    }
+
     /// Hold this session's writer lease for as long as the guard lives.
     ///
     /// A lease race decided by a scheduler is not a test. This takes the lease
@@ -670,6 +675,7 @@ pub struct Store {
     leases: Arc<Mutex<BTreeSet<SessionId>>>,
     /// Sessions hidden for good, as the real store keeps a marker beside the log.
     quarantined: Arc<Mutex<BTreeSet<SessionId>>>,
+    fail_quarantine: Arc<Mutex<bool>>,
     uncertain_settlement: Arc<Mutex<Option<String>>>,
 }
 
@@ -681,6 +687,7 @@ impl Store {
             effects,
             leases: Arc::default(),
             quarantined: Arc::default(),
+            fail_quarantine: Arc::default(),
             uncertain_settlement: Arc::default(),
         }
     }
@@ -928,6 +935,11 @@ impl SessionLifecycleStore for Store {
     }
 
     fn quarantine(&self, id: SessionId) -> Result<(), StoreError> {
+        if *self.fail_quarantine.lock().unwrap() {
+            return Err(StoreError::Io(std::io::Error::other(
+                "injected quarantine marker write failure",
+            )));
+        }
         self.quarantined
             .lock()
             .expect("support quarantine")

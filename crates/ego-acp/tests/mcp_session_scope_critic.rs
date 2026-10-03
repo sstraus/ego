@@ -1244,3 +1244,41 @@ async fn refused_admission_with_a_busy_writer_does_not_reappear_after_reconnect(
         "a refused session survived failed deletion and reappeared after reconnect: {rows:?}"
     );
 }
+
+/// Catches: a failed marker write falls back to connection-local hiding, so
+/// reconnect publishes a refused session whose deletion also lost the lease.
+#[tokio::test]
+async fn refused_admission_with_failed_quarantine_cannot_reappear_after_reconnect() {
+    let gate = Arc::new(Gate::default());
+    let world = World::new(|admitter| {
+        admitter.gate = Some(Arc::clone(&gate));
+        admitter.refuse.store(true, Ordering::SeqCst);
+    });
+    world.fixture.fail_quarantine();
+    let mut connection = world.connect().await;
+    let pending = connection
+        .send_request(
+            "session/new",
+            serde_json::json!({ "cwd": ROOT, "mcpServers": servers() }),
+        )
+        .await;
+    tokio::time::timeout(WAIT, gate.entered.notified())
+        .await
+        .expect("admission started");
+    let hidden = world.admitter.last_session().to_string();
+    let lease = world.fixture.hold_lease(&hidden);
+    gate.release.notify_one();
+    let (refused, _) = connection.response(pending).await;
+    assert!(refused["error"].is_object(), "{refused}");
+    assert!(listed(&mut connection).await.is_empty());
+    drop(lease);
+    connection.abort().await;
+
+    let mut reconnected = world.connect().await;
+    let rows = listed(&mut reconnected).await;
+    reconnected.abort().await;
+    assert!(
+        rows.is_empty(),
+        "failed marker write exposes refused session after reconnect: {rows:?}"
+    );
+}
