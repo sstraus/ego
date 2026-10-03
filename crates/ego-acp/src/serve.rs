@@ -1654,6 +1654,9 @@ trait LifecycleOperations: Send + Sync {
         target: SessionId,
     ) -> LifecycleFuture<'_, ego_core::session_lifecycle::CreatedSession>;
     fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
+    /// Hide a session this server refused to open, durably and without its
+    /// writer lease.
+    fn quarantine(&self, id: SessionId) -> Result<(), LifecycleError>;
     fn close(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
     fn pause(&self, id: SessionId, request: RequestId) -> LifecycleFuture<'_, HoldState>;
     /// `release` and not `resume`, which this trait already uses for
@@ -1721,6 +1724,10 @@ where
 
     fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()> {
         Box::pin(async move { SessionLifecycle::delete(self, id).await.map(|_| ()) })
+    }
+
+    fn quarantine(&self, id: SessionId) -> Result<(), LifecycleError> {
+        SessionLifecycle::quarantine(self, id)
     }
 
     fn close(&self, id: SessionId) -> LifecycleFuture<'_, ()> {
@@ -1893,8 +1900,10 @@ struct UnadmittedSession {
 
 impl UnadmittedSession {
     /// Delete the session this request created and cannot finish opening. A
-    /// session that cannot be deleted stays hidden for the life of the server
-    /// and the request fails, so a refused session is never left visible.
+    /// session that cannot be deleted (another writer holds it) is quarantined
+    /// in the store, so every connection and every later server hides it; only
+    /// if that fails too does it stay hidden for the life of this server. The
+    /// request fails either way, so a refused session is never left visible.
     async fn discard(
         mut self,
         lifecycle: Option<&dyn LifecycleOperations>,
@@ -1906,7 +1915,10 @@ impl UnadmittedSession {
         match lifecycle.delete(self.session).await {
             Ok(_) => refusal,
             Err(error) => {
-                self.hidden_for_good = true;
+                if let Err(quarantine) = lifecycle.quarantine(self.session) {
+                    self.hidden_for_good = true;
+                    tracing::error!(%quarantine, session = %self.session, "a refused session could not be quarantined");
+                }
                 tracing::error!(%error, session = %self.session, "a refused session could not be deleted");
                 Error::internal_error().data(format!(
                     "{}; the session it created could not be removed: {error}",

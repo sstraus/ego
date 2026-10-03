@@ -668,6 +668,8 @@ pub struct Store {
     /// two writers both pass their read-decide step and both append, and the
     /// test blames the code for what the double allowed.
     leases: Arc<Mutex<BTreeSet<SessionId>>>,
+    /// Sessions hidden for good, as the real store keeps a marker beside the log.
+    quarantined: Arc<Mutex<BTreeSet<SessionId>>>,
     uncertain_settlement: Arc<Mutex<Option<String>>>,
 }
 
@@ -678,6 +680,7 @@ impl Store {
             metadata: Arc::default(),
             effects,
             leases: Arc::default(),
+            quarantined: Arc::default(),
             uncertain_settlement: Arc::default(),
         }
     }
@@ -922,6 +925,22 @@ impl SessionLifecycleStore for Store {
             session: id,
             store: self.clone(),
         }))
+    }
+
+    fn quarantine(&self, id: SessionId) -> Result<(), StoreError> {
+        self.quarantined
+            .lock()
+            .expect("support quarantine")
+            .insert(id);
+        Ok(())
+    }
+
+    fn is_quarantined(&self, id: SessionId) -> Result<bool, StoreError> {
+        Ok(self
+            .quarantined
+            .lock()
+            .expect("support quarantine")
+            .contains(&id))
     }
 
     fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication {
