@@ -1930,6 +1930,11 @@ impl SessionStore for JsonlStore {
                 );
                 continue;
             }
+            // A quarantined session is refused for good, so no catalogue
+            // reader may see it, whichever of manifest or log named it.
+            if self.io.exists(&self.quarantine_path(&meta.id))? {
+                continue;
+            }
             if !deleted {
                 metas.push(meta);
             }

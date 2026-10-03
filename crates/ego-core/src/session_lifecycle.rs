@@ -919,6 +919,11 @@ where
         if self.runs.activity(id).await? == SessionActivity::Uncertain {
             return Err(LifecycleError::EffectUncertain);
         }
+        // Another connection may have quarantined the session while activity
+        // was awaited; the check inside `replay` ran before that.
+        if self.metadata.store.is_quarantined(id)? {
+            return Err(LifecycleError::UnknownSession);
+        }
         let context_window = ManifestEvidence::rebuild(&*self.metadata.store, &id)?
             .generations()
             .last()
