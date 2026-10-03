@@ -25,82 +25,10 @@ fn log(root: &Path) -> String {
     fs::read_to_string(root.join("private/errors.jsonl")).unwrap_or_default()
 }
 
-/// Delegates to `OsIo`, running `before_read` just before `read` of the log: the
-/// window between the adapter's metadata check and its use of the path.
-struct RacyIo<F: Fn(&Path) + Send + Sync>(F);
-
-impl<F: Fn(&Path) + Send + Sync> StoreIo for RacyIo<F> {
-    fn append_line(&self, path: &Path, line: &[u8]) -> io::Result<()> {
-        OsIo.append_line(path, line)
-    }
-    fn fsync(&self, path: &Path) -> io::Result<()> {
-        OsIo.fsync(path)
-    }
-    fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
-        (self.0)(path);
-        OsIo.read(path)
-    }
-    fn exists(&self, path: &Path) -> io::Result<bool> {
-        OsIo.exists(path)
-    }
-    fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        OsIo.replace_atomic(path, bytes)
-    }
-    fn replace_atomic_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        OsIo.replace_atomic_private(path, bytes)
-    }
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        OsIo.truncate(path, len)
-    }
-    fn remove_file(&self, path: &Path) -> io::Result<()> {
-        OsIo.remove_file(path)
-    }
-    fn list_dirs(&self, path: &Path) -> io::Result<Vec<std::path::PathBuf>> {
-        OsIo.list_dirs(path)
-    }
-}
-
-/// Catches: the log path swapped for a symlink after the check; the adapter's
-/// read follows it and copies the target's bytes into the private log.
-#[test]
-fn symlink_swapped_in_after_the_check_is_not_read_into_the_log() {
-    let dir = tempfile::tempdir().expect("dir");
-    let victim = dir.path().join("victim.txt");
-    fs::write(&victim, VICTIM).expect("victim");
-    let target = victim.clone();
-    let journal = JsonlMcpRegistryJournal::with_private_diagnostic_root(
-        dir.path().join("registry"),
-        dir.path().join("private"),
-        Box::new(RacyIo(move |path: &Path| {
-            if !path.exists() && path.symlink_metadata().is_err() {
-                let _ = symlink(&target, path);
-            }
-        })),
-    );
-    let _ = journal.record_private_diagnostic("alpha", "cause");
-    assert!(!log(dir.path()).contains(VICTIM), "{}", log(dir.path()));
-}
-
-/// Catches: the log path replaced by a hard link after the check; the victim's
-/// bytes are folded into the log.
-#[test]
-fn hard_link_swapped_in_after_the_check_is_not_read_into_the_log() {
-    let dir = tempfile::tempdir().expect("dir");
-    let victim = dir.path().join("victim.txt");
-    fs::write(&victim, VICTIM).expect("victim");
-    let target = victim.clone();
-    let journal = JsonlMcpRegistryJournal::with_private_diagnostic_root(
-        dir.path().join("registry"),
-        dir.path().join("private"),
-        Box::new(RacyIo(move |path: &Path| {
-            if path.symlink_metadata().is_err() {
-                let _ = fs::hard_link(&target, path);
-            }
-        })),
-    );
-    let _ = journal.record_private_diagnostic("alpha", "cause");
-    assert!(!log(dir.path()).contains(VICTIM), "{}", log(dir.path()));
-}
+// Former RacyIo read-hook cases are superseded by the real OsIo races in
+// private_log_regression_r11: live_swapping_the_log_leaf_never_writes_through_to_the_victim
+// and live_replacing_the_private_directory_never_writes_into_the_decoy.
+// Private append never calls StoreIo::read, so those hooks no longer ran.
 
 /// Catches: no bound on one backend cause (the public path capped it at 256
 /// characters); a hostile server fills the disk through one record.
@@ -220,6 +148,11 @@ fn private_directory_symlink_is_refused_and_target_stays_empty() {
 fn storage_error_text_never_reaches_the_typed_error() {
     struct Leaky;
     impl StoreIo for Leaky {
+        fn append_private_log(&self, _: &Path, bytes: &[u8], _: u64) -> io::Result<()> {
+            Err(io::Error::other(
+                String::from_utf8_lossy(bytes).into_owned(),
+            ))
+        }
         fn append_line(&self, _: &Path, _: &[u8]) -> io::Result<()> {
             Ok(())
         }

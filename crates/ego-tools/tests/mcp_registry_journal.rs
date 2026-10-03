@@ -601,7 +601,7 @@ fn private_diagnostics_outlive_ephemeral_registries_and_serialize_shared_writers
 fn private_diagnostics_mark_utf8_cause_truncation_and_bound_escaped_records() {
     let temp = tempfile::tempdir().expect("tempdir");
     let adapter = journal(temp.path());
-    for source in ["🦀".repeat(6000), "\u{0}".repeat(20000)] {
+    for source in [format!("x{}", "🦀".repeat(6000)), "\u{0}".repeat(20000)] {
         adapter
             .record_private_diagnostic("alpha", &source)
             .expect("bounded log");
@@ -617,7 +617,7 @@ fn private_diagnostics_mark_utf8_cause_truncation_and_bound_escaped_records() {
         })
         .collect();
     assert_eq!(records.len(), 2);
-    assert_eq!(records[0]["cause"], "🦀".repeat(4096));
+    assert_eq!(records[0]["cause"], format!("x{}", "🦀".repeat(4095)));
     assert_eq!(records[1]["cause"], "\u{0}".repeat(16384));
     assert!(records.iter().all(|record| record["truncated"] == true));
 }

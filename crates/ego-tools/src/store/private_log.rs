@@ -52,8 +52,13 @@ pub(super) fn append(root: &Path, line: &[u8], max_bytes: u64) -> io::Result<()>
 }
 
 fn write_record(log: &mut (impl Write + Seek), line: &[u8]) -> io::Result<()> {
-    log.write_all(line)?;
-    log.write_all(b"\n")
+    // Explicit access_mode on Windows does not imply FILE_APPEND_DATA.
+    // Recovery and rotation may leave that handle's cursor beyond the new EOF.
+    log.seek(SeekFrom::End(0))?;
+    let mut record = Vec::with_capacity(line.len() + 1);
+    record.extend_from_slice(line);
+    record.push(b'\n');
+    log.write_all(&record)
 }
 
 fn recover_tail(log: &mut File, len: u64) -> io::Result<()> {
@@ -108,12 +113,17 @@ fn validate(file: &File, directory: bool) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn open_directory(path: &Path, _created: bool) -> io::Result<File> {
+fn open_directory(path: &Path, created: bool) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY | nix::libc::O_CLOEXEC)
         .open(path)?;
+    if created {
+        use std::os::unix::fs::PermissionsExt;
+        // DirBuilder's initial permissions are masked by the process umask.
+        file.set_permissions(fs::Permissions::from_mode(0o700))?;
+    }
     validate(&file, true)?;
     Ok(file)
 }
@@ -266,7 +276,6 @@ fn open_child(_directory: &File, _root: &Path, _name: &str, _append: bool) -> io
     Err(invalid())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,7 +354,10 @@ mod tests {
             .expect("writable parent outside the private-directory contract");
         let root = temp.path().join("private");
         append(&root, b"fresh", 64).expect("first append under umask 0277");
-        assert_eq!(fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         assert_eq!(fs::read(root.join("errors.jsonl")).unwrap(), b"fresh\n");
     }
 }
