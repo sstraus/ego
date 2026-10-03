@@ -188,7 +188,7 @@ impl Opened<'_> {
             notes.push("an orphaned manifest temporary file was removed on the way in".to_owned());
         }
         if open.repair.manifest_rebuilt {
-            notes.push("the session manifest was rebuilt from the log on the way in".to_owned());
+            notes.push("the saved session details were missing or damaged and were restored from the session log".to_owned());
         }
 
         Some(notes.join("; "))
