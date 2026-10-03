@@ -1862,8 +1862,19 @@ impl SessionStore for JsonlStore {
             // one killing the whole call and the other not.
             let cached = match self.io.read(&manifest_path) {
                 Ok(Some(bytes)) => serde_json::from_slice::<RunManifest>(&bytes)
-                    .map(|manifest| (manifest.meta, manifest.deleted))
-                    .map_err(|error| error.to_string()),
+                    .map_err(|error| error.to_string())
+                    .and_then(|manifest| {
+                        // A manifest naming another session is as unusable
+                        // as a corrupt one: the log decides.
+                        if dir
+                            .file_name()
+                            .is_some_and(|name| name == &*session_dir_name(&manifest.meta.id))
+                        {
+                            Ok((manifest.meta, manifest.deleted))
+                        } else {
+                            Err("the manifest names a different session".to_owned())
+                        }
+                    }),
                 Ok(None) => Err("the manifest is missing".to_owned()),
                 Err(error) => Err(error.to_string()),
             };

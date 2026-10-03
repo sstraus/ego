@@ -259,6 +259,9 @@ fn a_deleted_session_stays_hidden_without_its_manifest() {
     w.store
         .append(&id, &ev(seq.next(), turn, EventKind::SessionDeleted, 2))
         .unwrap();
+    // `append` leaves the manifest at the pre-delete state; recovery
+    // refreshes it so the precondition is a manifest that says deleted.
+    w.store.recover(&id).unwrap();
     assert!(
         w.listed().is_empty(),
         "precondition: hidden with a manifest"
@@ -266,6 +269,24 @@ fn a_deleted_session_stays_hidden_without_its_manifest() {
     std::fs::remove_file(w.manifest(&id)).unwrap();
 
     assert!(w.listed().is_empty());
+}
+
+/// Catches: a header-only session (what `publish_empty_session` writes, and
+/// what recovery rebuilds a manifest for) vanishing from the listing when its
+/// manifest is gone, so `ego ls` and `ego resume` disagree about it.
+#[test]
+fn a_header_only_session_stays_listed_without_its_manifest() {
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    let w = World::new();
+    let id = SessionId::new();
+    w.store
+        .publish_empty_session(id, Path::new("/ws"), Timestamp::from_millis(1))
+        .unwrap();
+    let with_manifest = w.listed();
+    std::fs::remove_file(w.manifest(&id)).unwrap();
+
+    assert_eq!(w.listed(), with_manifest);
+    assert_eq!(with_manifest.len(), 1);
 }
 
 /// Catches: the listing projection and the recovery projection disagreeing
