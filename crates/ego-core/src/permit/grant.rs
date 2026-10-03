@@ -1279,7 +1279,7 @@ impl PolicyEngine {
             call.ops()
                 .iter()
                 .filter(|op| matches!(op, Op::Opaque { .. }))
-                .all(|op| self.matching(&self.allow, op).is_some())
+                .all(|op| self.matching_allow(op).is_some())
         });
         let mut rules: Vec<RuleAuthority> = Vec::new();
         let mut yolo_authorized_secret_egress = false;
@@ -1287,7 +1287,7 @@ impl PolicyEngine {
             if delegated_support == Some(index) {
                 continue;
             }
-            let Some(entry) = self.matching(&self.allow, op) else {
+            let Some(entry) = self.matching_allow(op) else {
                 if self.mode == Mode::Yolo && matches!(op, Op::SecretEgress { .. }) {
                     yolo_authorized_secret_egress = true;
                     continue;
@@ -1524,6 +1524,12 @@ impl PolicyEngine {
         }
 
         Ok(())
+    }
+
+    fn matching_allow(&self, op: &Op) -> Option<&SourcedRule> {
+        self.allow
+            .iter()
+            .find(|entry| entry.rule().matches_allow(op, self.workspace.as_path()))
     }
 
     /// The first rule in `rules` that covers `op`, if any.

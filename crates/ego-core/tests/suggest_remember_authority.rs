@@ -6,9 +6,11 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use ego_core::config::rule_management::RuleManagement;
-use ego_core::config::{ManagedRuleEffect, Ruleset, Source};
+use ego_core::config::{ManagedRuleEffect, Mode, Ruleset, Source};
 use ego_core::permit::rule::Rule;
-use ego_core::permit::{CanonPath, Change, EnvPolicy, Op, PreparedCall, SpawnSpec};
+use ego_core::permit::{
+    CanonPath, Change, Classification, EnvPolicy, Op, PolicyEngine, PreparedCall, SpawnSpec,
+};
 
 const WORKSPACE: &str = "/workspace";
 
@@ -93,6 +95,7 @@ fn cargo_options_and_toolchain_selectors_do_not_widen_to_every_subcommand() {
 #[test]
 fn programs_that_execute_their_arguments_are_not_offered_as_a_prefix() {
     let offenders: Vec<&str> = [
+        "python3",
         "node",
         "deno",
         "bun",
@@ -186,23 +189,32 @@ fn paths_env_assignments_and_launchers_stay_exact() {
 /// program, and `.ego` holds the policy that decides the next prompt.
 #[test]
 fn a_remembered_workspace_write_does_not_reach_git_hooks_or_ego_config() {
-    let rules = suggested(&write("/workspace/src/a.rs"));
+    let mut rules = Ruleset::default();
+    let candidates = suggested(&write("/workspace/src/a.rs"));
+    assert_eq!(
+        candidates,
+        vec![Rule::load("write(/workspace/**)").unwrap()]
+    );
+    for rule in candidates {
+        Ruleset::merge(&mut rules.allow, rule, Source::User);
+    }
+    let engine = PolicyEngine::new(CanonPath::new(WORKSPACE), Mode::Default, rules);
+    assert!(matches!(
+        engine.classify(write("/workspace/src/b.rs")),
+        Classification::Settled(Ok(_))
+    ));
     let reachable: Vec<&str> = [
         "/workspace/.git/hooks/pre-commit",
         "/workspace/.git/config",
         "/workspace/.ego/config.toml",
         "/workspace/.ego/sandbox/ledger",
         "/workspace/.claude/settings.json",
+        "/workspace/vendor/x/.git/hooks/y",
+        "/workspace/vendor/x/.ego/config.toml",
+        "/workspace/vendor/x/.claude/settings.json",
     ]
     .into_iter()
-    .filter(|path| {
-        let call = write(path);
-        rules.iter().all(|rule| {
-            call.ops()
-                .iter()
-                .all(|op| rule.matches(op, Path::new(WORKSPACE)))
-        })
-    })
+    .filter(|path| matches!(engine.classify(write(path)), Classification::Settled(Ok(_))))
     .collect();
     assert!(
         reachable.is_empty(),

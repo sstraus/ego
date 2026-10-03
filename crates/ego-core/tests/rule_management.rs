@@ -309,13 +309,16 @@ fn suggested(call: &PreparedCall) -> Vec<Rule> {
         .candidates
 }
 
-/// Catches an exact-argv rule that can never match the next call: remembering
-/// `python3 -c <this code>` must also cover `python3 -c <other code>`.
+/// Catches an interpreter prefix authorising different code after one approval.
 #[test]
-fn suggested_exec_rule_is_the_argv_prefix_and_matches_the_next_call() {
+fn suggested_python3_rule_keeps_exact_argv_and_does_not_authorise_other_code() {
     let rules = suggested(&exec_call(&["python3", "-c", "print(1)"]));
-    assert_eq!(rules, vec![rule("exec(python3 *)")]);
+    assert_eq!(rules, vec![rule("exec(python3 -c print(1))")]);
     assert!(rules[0].matches(
+        &exec_op(&["python3", "-c", "print(1)"]),
+        Path::new("/workspace")
+    ));
+    assert!(!rules[0].matches(
         &exec_op(&["python3", "-c", "print(2)"]),
         Path::new("/workspace")
     ));

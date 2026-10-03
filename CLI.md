@@ -942,14 +942,21 @@ the result through full preparation and policy classification again. `a`
 applies the displayed allow-rule plan through the single atomic config owner and
 then allows the current call; it never asks for the tool, JSON, or a second
 confirmation. Its rules are the narrowest the grammar can express that still
-match the next call: an argv prefix for `exec` (`exec(python3 *)`, and
+match the next call: an argv prefix for `exec` (`exec(ls *)`, and
 `exec(git commit *)` for programs that take a subcommand), the workspace glob
 for writes (`write(<workspace>/**)`), and the exact form for everything else.
 A command whose prefix would authorise code the operator never saw keeps its
-exact form: a shell or launcher (`bash -c`, `env`, `sudo`, `xargs`, ...), a
-program given by path, or a name carrying shell metacharacters or `*`. Deny
-rules, including system ones, are still evaluated first. The receipt is one
-sentence naming each stored rule, committed to the transcript. A write or
+exact form: a shell, interpreter, or launcher (`bash -c`, `python3 -c`,
+`env`, `sudo`, `xargs`, ...), a program given by path, or a name carrying shell
+metacharacters or `*`. Deny rules, including system ones, are still evaluated first. No allow rule,
+including an exact rule or one from user or project config, covers a canonical
+filesystem path containing a `.git`, `.ego`, or `.claude` component at any depth,
+including nested repositories. The remembered write glob stays workspace-wide;
+control paths remain uncovered and follow the existing mode/judge/human approval
+path. In default mode a control-path write still asks on each call; remembering
+cannot suppress that question. Other modes keep their existing settlement
+semantics. The receipt is one sentence naming each stored rule, committed to
+the transcript. A write or
 staging failure is shown there and denies the call. `n` asks `What should it do
 instead?`: words typed there answer the call as a failed tool result, so the
 model reads them and the run continues; an empty answer is a plain refusal,

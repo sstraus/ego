@@ -232,7 +232,7 @@ impl RuleManagement {
             match rules
                 .allow
                 .iter()
-                .find(|entry| entry.rule().matches(op, workspace))
+                .find(|entry| entry.rule().matches_allow(op, workspace))
             {
                 Some(entry) => authorities.push(explained_authority(
                     operation,
@@ -535,6 +535,7 @@ const LAUNCHERS: &[&str] = &[
     "stdbuf",
     "watch",
     "ssh",
+    "python3",
     "node",
     "deno",
     "bun",
