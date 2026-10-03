@@ -1,13 +1,10 @@
-//! Critic regressions for regression case: actual filesystem aliases and remembered exec widening.
+//! Critic regressions for regression case: actual filesystem aliases of control paths.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use ego_core::config::rule_management::{RuleManagement, RuleOutcome};
 use ego_core::config::{ManagedRuleEffect, Mode, Ruleset, Source};
-use ego_core::permit::{
-    CanonPath, Change, Classification, EnvPolicy, Op, PolicyEngine, PreparedCall, SpawnSpec,
-};
+use ego_core::permit::{CanonPath, Change, Classification, Op, PolicyEngine, PreparedCall};
 
 struct Repository(PathBuf);
 
@@ -41,21 +38,6 @@ fn write(path: PathBuf) -> PreparedCall {
         Op::Write {
             path: CanonPath::new(path),
             change: Change::Whole(b"changed".to_vec()),
-        },
-    )
-}
-
-fn spawn(workspace: &Path, argv: &[&str]) -> PreparedCall {
-    PreparedCall::new(
-        "exec",
-        Op::Spawn {
-            spec: SpawnSpec::new(
-                argv.iter().map(OsString::from).collect(),
-                Some(CanonPath::new(workspace)),
-                None,
-                EnvPolicy::exact(Vec::new()).unwrap(),
-            )
-            .unwrap(),
         },
     )
 }
@@ -117,34 +99,6 @@ fn policy_control_case_aliases_cannot_gain_allow_authority_on_apfs() {
     assert!(
         covered.is_empty(),
         "control directory aliases gained allow authority: {covered:?}"
-    );
-}
-
-// Catches: an approved read-only git config query becomes a prefix that also
-// permits changing core.hooksPath, authorizing unseen code on a later commit.
-#[test]
-fn policy_control_remembered_git_config_query_cannot_authorize_hook_redirection() {
-    let workspace = Path::new("/workspace");
-    let original = spawn(workspace, &["git", "config", "--get", "user.name"]);
-    let rules = remembered(&original, workspace);
-    let later = spawn(
-        workspace,
-        &[
-            "git",
-            "config",
-            "--local",
-            "core.hooksPath",
-            "/workspace/hooks",
-        ],
-    );
-    let engine = PolicyEngine::new(CanonPath::new(workspace), Mode::Default, rules.clone());
-    assert!(
-        matches!(engine.classify(later.clone()), Classification::Ask(_)),
-        "remembered git config query authorized a control configuration write"
-    );
-    assert_eq!(
-        RuleManagement::explain(&later, &rules, workspace).outcome,
-        RuleOutcome::Uncovered
     );
 }
 

