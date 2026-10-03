@@ -1915,8 +1915,9 @@ impl McpRegistryController {
         predecessor: &Arc<AdmittedRegistrySnapshot>,
     ) -> Result<(), McpRegistryError> {
         if let Some(cause) = &failure.detail {
-            self.journal
-                .record_private_diagnostic(server.as_str(), cause)?;
+            let _ = self
+                .journal
+                .record_private_diagnostic(server.as_str(), cause);
         }
         if let Some(authorization) = &failure.authorization {
             self.journal

@@ -174,15 +174,6 @@ fn remove_retained(_directory: &File, root: &Path, name: &std::ffi::OsStr) -> io
     }
 }
 
-#[cfg(not(any(unix, windows)))]
-fn retained_files(_directory: &File, _root: &Path) -> io::Result<Vec<RetainedFile>> {
-    Err(invalid())
-}
-#[cfg(not(any(unix, windows)))]
-fn remove_retained(_directory: &File, _root: &Path, _name: &std::ffi::OsStr) -> io::Result<()> {
-    Err(invalid())
-}
-
 #[cfg(unix)]
 fn create_owner(directory: &File, _root: &Path, name: &str) -> io::Result<File> {
     use nix::fcntl::{OFlag, openat};
@@ -212,11 +203,6 @@ fn create_owner(_directory: &File, root: &Path, name: &str) -> io::Result<File> 
     harden_handle(&mut file, false)?;
     validate(&file, false)?;
     Ok(file)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn create_owner(_directory: &File, _root: &Path, _name: &str) -> io::Result<File> {
-    Err(invalid())
 }
 
 #[cfg(test)]
@@ -344,11 +330,6 @@ fn publish_directory(staging: &Path, root: &Path) -> io::Result<()> {
     fs::rename(staging, root)
 }
 
-#[cfg(not(any(unix, windows)))]
-fn publish_directory(_staging: &Path, _root: &Path) -> io::Result<()> {
-    Err(invalid())
-}
-
 fn invalid() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -462,9 +443,4 @@ fn validate(file: &File, directory: bool) -> io::Result<()> {
         return Err(invalid());
     }
     Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_directory(_path: &Path, _created: bool) -> io::Result<File> {
-    Err(invalid())
 }

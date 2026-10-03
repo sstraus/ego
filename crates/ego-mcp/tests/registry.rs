@@ -1616,10 +1616,10 @@ async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text(
     );
 }
 
-// Catches: logging failure publishing a raw-derived status or losing the failure
-// silently while reporting successful registry publication.
+// Catches: an optional raw-log failure skipping RefreshFailed machine evidence
+// or preventing the fixed failed-server status from being published.
 #[tokio::test(flavor = "current_thread")]
-async fn allowlisted_diagnostics_private_log_failure_stops_publication_without_echoing_raw_text() {
+async fn private_log_failure_still_journals_refresh_failed_and_keeps_fixed_status() {
     let admission = Arc::new(FakeAdmission {
         state: Arc::new(Mutex::new(AdmissionState::default())),
         gate: Arc::new(Mutex::new(None)),
@@ -1627,16 +1627,14 @@ async fn allowlisted_diagnostics_private_log_failure_stops_publication_without_e
     admission.push(Outcome::Invalid("--api-key PRIVATE-RAW".to_owned()));
     let (registry, journal) = controller(admission);
     journal.state.lock().expect("journal").fail_private = true;
-    let error = registry
+    registry
         .reconcile(refresh(RegistryTrigger::Add))
         .await
-        .err()
-        .expect("private log failure");
+        .expect("best-effort private log");
     assert_eq!(
-        error.to_string(),
-        "MCP registry journal private diagnostic failed (unavailable)"
+        registry.status().mcp_errors(),
+        ["MCP server `alpha`: server configuration is invalid"]
     );
-    assert!(registry.status().mcp_errors().is_empty());
     assert!(
         journal
             .state
@@ -1645,17 +1643,23 @@ async fn allowlisted_diagnostics_private_log_failure_stops_publication_without_e
             .private_diagnostics
             .is_empty()
     );
+    let events = journal.events();
+    let failed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            McpRegistryEvent::RefreshFailed { cause, .. } => Some(cause.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, ["server configuration is invalid"]);
     assert!(
-        journal
-            .events()
+        events
             .iter()
-            .all(|event| !matches!(event, McpRegistryEvent::SnapshotPublished { .. }))
+            .any(|event| matches!(event, McpRegistryEvent::SnapshotPublished { .. }))
     );
+    assert!(!format!("{events:?}").contains("PRIVATE-RAW"));
 }
 
-// Recorded adversarial input generators from the retired masker tests.
-// Only their backend strings survive; each now crosses the public allowlist
-// boundary. Algorithm-output expectations and timing assertions are removed.
 fn legacy_masker_causes() -> Vec<(String, String)> {
     let mut causes = Vec::new();
     {
