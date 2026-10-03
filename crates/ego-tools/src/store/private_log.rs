@@ -12,21 +12,7 @@ pub(super) fn append(root: &Path, line: &[u8], max_bytes: u64) -> io::Result<()>
         .and_then(|len| len.checked_add(1))
         .filter(|len| *len <= max_bytes)
         .ok_or_else(|| io::Error::other("private log record exceeds retention"))?;
-    if let Some(parent) = root.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    let created = match builder.create(root) {
-        Ok(()) => true,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
-        Err(error) => return Err(error),
-    };
-    let directory = open_directory(root, created)?;
+    let directory = private_directory(root)?;
     let mut lock = RwLock::new(open_child(&directory, root, "errors.lock", false)?);
     let _guard = lock.write()?;
     let mut log = open_child(&directory, root, "errors.jsonl", true)?;
@@ -49,6 +35,80 @@ pub(super) fn append(root: &Path, line: &[u8], max_bytes: u64) -> io::Result<()>
     log.sync_all()?;
     directory.sync_all()?;
     Ok(())
+}
+
+fn private_directory(root: &Path) -> io::Result<File> {
+    match open_directory(root, false) {
+        Ok(directory) => return Ok(directory),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let parent = root
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    // Prepare off the public path: no concurrent opener or later process sees
+    // a directory whose mode is still masked by the initializer's umask.
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".mcp-private-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let staging = builder.tempdir_in(parent)?;
+    let directory = open_directory(staging.path(), true)?;
+    directory.sync_all()?;
+    // Windows pins the directory against deletion; release the unpublished
+    // handle before rename, then open and validate the published handle.
+    #[cfg(windows)]
+    drop(directory);
+    match publish_directory(staging.path(), root) {
+        Ok(()) => {
+            // The original sibling path no longer belongs to this TempDir.
+            let _ = staging.keep();
+            #[cfg(not(windows))]
+            return Ok(directory);
+            #[cfg(windows)]
+            return open_directory(root, false);
+        }
+        Err(error) => {
+            // A competing initializer may have published first. Never replace
+            // its directory, and never harden the winner through its path.
+            if fs::symlink_metadata(root).is_ok() {
+                return open_directory(root, false);
+            }
+            Err(error)
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn publish_directory(staging: &Path, root: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    // Ordinary Unix rename can replace an existing *empty* directory. The
+    // exclusive flag preserves an initializer's already-open winning handle.
+    renameat_with(CWD, staging, CWD, root, RenameFlags::NOREPLACE).map_err(Into::into)
+}
+
+#[cfg(windows)]
+fn publish_directory(staging: &Path, root: &Path) -> io::Result<()> {
+    // Windows rename cannot replace an existing directory.
+    fs::rename(staging, root)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
+fn publish_directory(_staging: &Path, _root: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "exclusive private directory publication is unavailable",
+    ))
 }
 
 fn write_record(log: &mut (impl Write + Seek), line: &[u8]) -> io::Result<()> {
@@ -320,9 +380,9 @@ mod tests {
     fn stale_cursor_after_truncation_cannot_create_a_nul_hole() {
         let mut writer = Cursor::new(b"old segment".to_vec());
         writer.set_position(11);
-        writer.get_mut().clear();
+        writer.get_mut().truncate(4);
         write_record(&mut writer, b"fresh").expect("append after truncate");
-        assert_eq!(writer.into_inner(), b"fresh\n");
+        assert_eq!(writer.into_inner(), b"old fresh\n");
     }
 
     // Catches: umask removing owner-write permission from a newly created
