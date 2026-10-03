@@ -4371,3 +4371,132 @@ mod secret_mask_critic_round_seven {
         }
     }
 }
+
+#[cfg(test)]
+mod secret_mask_critic_round_nine {
+    use super::*;
+
+    fn detail(cause: &str) -> String {
+        bounded_detail(cause).unwrap_or_default()
+    }
+
+    fn assert_hidden(cause: &str, secret: &str) {
+        let out = detail(cause);
+        assert!(
+            !out.contains(secret),
+            "{cause:?} leaked {secret:?}: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_joiner_after_a_foreign_letter_never_splits_a_secret_name() {
+        // catches: `is_joiner_in_text` keeping a ZWJ/ZWNJ/VS16 that follows a non-ASCII
+        // lookalike letter inside the name, so `is_name_char` ends the word at the joiner and
+        // `tok<cyrillic e><ZWJ>n=` is read as the key `n`.
+        for joiner in ['\u{200d}', '\u{200c}', '\u{fe0f}'] {
+            assert_hidden(&format!("tok\u{0435}{joiner}n=LEAKJ1 end"), "LEAKJ1");
+            assert_hidden(&format!("pas\u{0455}{joiner}word: LEAKJ2"), "LEAKJ2");
+            assert_hidden(
+                &format!("{{\"name\":\"x-api-k\u{0435}{joiner}y\",\"value\":\"LEAKJ3\"}}"),
+                "LEAKJ3",
+            );
+        }
+    }
+
+    #[test]
+    fn non_composing_combining_marks_never_split_a_secret_name() {
+        // catches: only Default_Ignorable marks being dropped, so a combining mark that is
+        // not alphanumeric (enclosing circle, combining long solidus) ends the word inside
+        // `to<mark>ken` and the key is read as `ken`.
+        for mark in ['\u{20dd}', '\u{0338}', '\u{0489}'] {
+            assert_hidden(&format!("to{mark}ken=LEAKM1 end"), "LEAKM1");
+            assert_hidden(&format!("pass{mark}word: LEAKM2 end"), "LEAKM2");
+        }
+    }
+
+    #[test]
+    fn confusable_letters_of_every_suffix_are_folded() {
+        // catches: the UTS 39 fold missing a letter class: Cyrillic/Greek lookalikes and a
+        // capital Cyrillic `І` (which UTS 39 maps to `l`, not `i`) inside `authorization`.
+        for (name, secret) in [
+            ("\u{0422}oken", "LEAKC1"),
+            ("t\u{043e}ken", "LEAKC2"),
+            ("tok\u{0435}n", "LEAKC3"),
+            ("p\u{0430}ssword", "LEAKC4"),
+            ("\u{0455}ecret", "LEAKC5"),
+            ("passw\u{043e}r\u{0501}", "LEAKC6"),
+            ("ke\u{0443}", "LEAKC7"),
+            ("\u{041a}ey", "LEAKC8"),
+            ("pass\u{051d}d", "LEAKC9"),
+            ("author\u{0456}zat\u{0456}on", "LEAKC10"),
+            ("author\u{0406}zat\u{0406}on", "LEAKC11"),
+            ("author\u{0130}zat\u{0130}on", "LEAKC12"),
+            ("author\u{0131}zat\u{0131}on", "LEAKC13"),
+        ] {
+            assert_hidden(&format!("{name}={secret} end"), secret);
+        }
+    }
+
+    #[test]
+    fn a_pair_in_a_plain_list_hides_its_value() {
+        // catches: `opens_tuple` accepting only `(`, so JSON/Python list pairs
+        // `["x-api-key","v"]` (fetch Headers init, requests header lists) publish the value.
+        assert_hidden(r#"headers: [["x-api-key","LEAKL1"]] rejected"#, "LEAKL1");
+        assert_hidden("headers [['Authorization', 'Basic LEAKL2']]", "LEAKL2");
+        assert_hidden(r#"["token", "LEAKL3"]"#, "LEAKL3");
+    }
+
+    #[test]
+    fn a_record_whose_name_field_is_prefixed_hides_the_line() {
+        // catches: `name_before(..) == "name"` matching only the bare word, so
+        // `header_name`/`headerName`/`header.name` records publish their value member.
+        assert_hidden(
+            r#"{"header_name":"x-api-key","header_value":"LEAKN1"}"#,
+            "LEAKN1",
+        );
+        assert_hidden(
+            r#"{"headerName":"authorization","headerValue":"LEAKN2"}"#,
+            "LEAKN2",
+        );
+        assert_hidden("header.name=x-api-key header.value=LEAKN3", "LEAKN3");
+    }
+
+    #[test]
+    fn a_command_line_flag_hides_its_blank_separated_value() {
+        // catches: only `=` and `:` arming the mask, so a spawn error echoing
+        // `server --api-key LEAK` or `--password LEAK` publishes the credential.
+        assert_hidden(
+            "spawn failed: mcp-server --api-key LEAKF1 --port 7",
+            "LEAKF1",
+        );
+        assert_hidden("exec: tool --password LEAKF2", "LEAKF2");
+        assert_hidden("exec: tool --token LEAKF3", "LEAKF3");
+    }
+
+    #[test]
+    fn url_userinfo_with_a_slash_query_or_hash_in_the_password_is_masked() {
+        // catches: the authority ending at the first `/`, `?` or `#` of an unencoded password,
+        // so no `@` is found (or the wrong one) and the password is published.
+        assert_hidden("connect postgres://user:LEAKU1/x@db/app failed", "LEAKU1");
+        assert_hidden("connect postgres://user:LEAKU2?x@db/app failed", "LEAKU2");
+        assert_hidden("connect postgres://user:LEAKU3#x@db/app failed", "LEAKU3");
+        assert_hidden("connect postgres://user:a@LEAKU4/b@db/app failed", "LEAKU4");
+    }
+
+    #[test]
+    fn a_scheme_word_followed_by_a_separator_hides_its_value() {
+        // catches: `is_auth_scheme` requiring whitespace after the word, so
+        // `Bearer: v` or `Bearer=v` publishes the credential.
+        assert_hidden("auth Bearer: LEAKB1", "LEAKB1");
+        assert_hidden("auth bearer=LEAKB2", "LEAKB2");
+    }
+
+    #[test]
+    fn a_bracketed_or_parenthesised_name_hides_its_value() {
+        // catches: `name_before` stripping one `]` only, so `[[token]]=`, `(token)=` and
+        // `<token>:` read as an empty name.
+        assert_hidden("cfg[[token]]=LEAKP1", "LEAKP1");
+        assert_hidden("cfg (token)=LEAKP2", "LEAKP2");
+        assert_hidden("cfg <token>: LEAKP3", "LEAKP3");
+    }
+}
