@@ -326,18 +326,23 @@ fn suggested_python3_rule_keeps_exact_argv_and_does_not_authorise_other_code() {
 }
 
 /// Catches `git *` standing for `git -c core.sshCommand=... fetch`: a
-/// subcommand program keeps its subcommand, and an option is not one.
+/// read-only subcommand keeps its subcommand, and an option is not one.
 #[test]
 fn suggested_exec_rule_for_a_subcommand_program_keeps_the_subcommand() {
-    let rules = suggested(&exec_call(&["git", "commit", "-m", "x"]));
-    assert_eq!(rules, vec![rule("exec(git commit *)")]);
+    let rules = suggested(&exec_call(&["git", "ls-tree", "HEAD"]));
+    assert_eq!(rules, vec![rule("exec(git ls-tree *)")]);
     let root = Path::new("/workspace");
-    assert!(rules[0].matches(&exec_op(&["git", "commit", "-m", "y"]), root));
+    assert!(rules[0].matches(&exec_op(&["git", "ls-tree", "-r", "HEAD"]), root));
     assert!(!rules[0].matches(&exec_op(&["git", "push"]), root));
     assert!(!rules[0].matches(
         &exec_op(&["git", "-c", "core.sshCommand=x", "commit"]),
         root
     ));
+    assert_eq!(
+        suggested(&exec_call(&["git", "commit", "-m", "x"])),
+        vec![rule("exec(git commit -m x)")],
+        "a command that runs hooks cannot become a prefix"
+    );
     assert_eq!(
         suggested(&exec_call(&["git", "-C", "..", "status"])),
         vec![rule("exec(git -C .. status)")],

@@ -558,21 +558,19 @@ const LAUNCHERS: &[&str] = &[
     "open",
 ];
 
-/// Programs whose first bare word selects what they do, so `git status *` is
+/// Programs whose first bare word selects what they do, so `git ls-tree *` is
 /// offered instead of `git *`.
 const SUBCOMMAND_PROGRAMS: &[&str] = &[
     "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh",
 ];
 
-/// Subcommands that run unseen code or mutate Git control state retain exact
-/// argv. A read-only query must not authorize a later metadata write.
+/// Git prefixes are closed by default. This object listing has no options
+/// that install templates, run hooks or change configuration; other Git
+/// subcommands (including unknown aliases) retain exact argv.
+const GIT_READ_ONLY_PREFIX_SUBCOMMANDS: &[&str] = &["ls-tree"];
+
+/// Subcommands that run unseen code retain exact argv.
 const EXACT_ARGV_SUBCOMMANDS: &[(&str, &str)] = &[
-    ("git", "config"),
-    ("git", "remote"),
-    ("git", "update-ref"),
-    ("git", "worktree"),
-    ("git", "submodule"),
-    ("git", "filter-branch"),
     ("npm", "exec"),
     ("npm", "x"),
     ("pnpm", "exec"),
@@ -593,8 +591,7 @@ const EXACT_ARGV_SUBCOMMANDS: &[(&str, &str)] = &[
 /// (a path, or a name carrying shell metacharacters or `*`), is empty, or is a
 /// subcommand program with no plain subcommand next (`git -c k=v ...`,
 /// `cargo +nightly ...`: the option or selector would be covered for any
-/// value) or with a subcommand that runs arbitrary code or mutates Git control
-/// state.
+/// value), runs arbitrary code, or is not on Git's read-only prefix allowlist.
 fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
     let program = argv.first()?.to_str()?;
     if !is_plain_word(program) || LAUNCHERS.contains(&program) {
@@ -606,7 +603,9 @@ fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
             .get(1)
             .and_then(|argument| argument.to_str())
             .filter(|subcommand| is_plain_word(subcommand))?;
-        if EXACT_ARGV_SUBCOMMANDS.contains(&(program, subcommand)) {
+        if (program == "git" && !GIT_READ_ONLY_PREFIX_SUBCOMMANDS.contains(&subcommand))
+            || EXACT_ARGV_SUBCOMMANDS.contains(&(program, subcommand))
+        {
             return None;
         }
         prefix.push(' ');

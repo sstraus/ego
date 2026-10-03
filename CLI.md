@@ -943,14 +943,16 @@ applies the displayed allow-rule plan through the single atomic config owner and
 then allows the current call; it never asks for the tool, JSON, or a second
 confirmation. Its rules are the narrowest the grammar can express that still
 match the next call: an argv prefix for `exec` (`exec(ls *)`, and
-`exec(git commit *)` for programs that take a subcommand), the workspace glob
+`exec(git ls-tree *)` for an approved read-only Git subcommand), the workspace glob
 for writes (`write(<workspace>/**)`), and the exact form for everything else.
 A command whose prefix would authorise code the operator never saw keeps its
 exact form: a shell, interpreter, or launcher (`bash -c`, `python3 -c`,
 `env`, `sudo`, `xargs`, ...), a program given by path, or a name carrying shell
-metacharacters or `*`. Git `config`, `remote`, `update-ref`, `worktree`,
-`submodule`, and `filter-branch` also keep exact argv, so remembering a query
-cannot authorize a later control-state mutation. Deny rules, including system ones, are still evaluated first. No allow rule,
+metacharacters or `*`. Git prefixes are closed by default: only `ls-tree`
+currently permits a prefix. Every other Git subcommand, including `commit`,
+`init`, `clone`, configuration queries and unknown aliases, keeps exact argv.
+Remembering it cannot authorize a later different control-state mutation.
+Deny rules, including system ones, are still evaluated first. No allow rule,
 including an exact rule or one from user or project config, covers a canonical
 filesystem path containing a `.git`, `.ego`, or `.claude` component at any depth
 (ASCII case-insensitive on every platform),
