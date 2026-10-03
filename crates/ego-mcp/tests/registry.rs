@@ -1480,3 +1480,97 @@ async fn server_instructions_reach_the_capture_in_server_name_order() {
         "nothing this short was cut"
     );
 }
+
+mod secret_mask_critic_round_eight {
+    use super::*;
+
+    async fn assert_hidden(cause: &str, secret: &str) {
+        let admission = Arc::new(FakeAdmission {
+            state: Arc::new(Mutex::new(AdmissionState::default())),
+            gate: Arc::new(Mutex::new(None)),
+        });
+        admission.push(Outcome::Invalid(cause.to_owned()));
+        let (registry, _) = controller(admission);
+        registry
+            .reconcile(refresh(RegistryTrigger::Add))
+            .await
+            .expect("invalid candidate publishes diagnostic");
+        let messages = registry.status().mcp_errors();
+        assert_eq!(messages.len(), 1, "no published error: {messages:?}");
+        assert!(
+            !messages[0].contains(secret),
+            "{cause:?} published {secret:?}: {:?}",
+            messages[0]
+        );
+    }
+
+    // Catches: an original newline, heredoc fence or continuation ends a sensitive mask.
+    #[tokio::test(flavor = "current_thread")]
+    async fn multiline_secret_values_do_not_resume_publication() {
+        for cause in [
+            "token:\nLEAKMULTI",
+            "password=<<EOF\nLEAKMULTI\nEOF\nmode=fast",
+            "client_secret=first\\\nLEAKMULTI",
+            "{\"token\": {\n\"value\":\"LEAKMULTI\"\n}}",
+            "token=-----BEGIN PRIVATE KEY-----\nLEAKMULTI\n-----END PRIVATE KEY-----",
+        ] {
+            assert_hidden(cause, "LEAKMULTI").await;
+        }
+    }
+
+    // Catches: prefixed uppercase suffix keys or space-separated key words bypass masking.
+    #[tokio::test(flavor = "current_thread")]
+    async fn prefixed_sensitive_names_mask_the_entire_suffix() {
+        for cause in [
+            "X-ApI-KeY=first LEAKPREFIX",
+            "AWS_SECRET_ACCESS_KEY: first LEAKPREFIX",
+            "api key = first LEAKPREFIX",
+            "client.secret=first LEAKPREFIX",
+            "DATABASE_URL=postgresql://alice:LEAKPREFIX@db/app",
+        ] {
+            assert_hidden(cause, "LEAKPREFIX").await;
+        }
+    }
+
+    // Catches: a comma in an untrusted name wrapper disarms the declaration before its key.
+    #[tokio::test(flavor = "current_thread")]
+    async fn comma_bearing_sensitive_name_wrappers_do_not_disarm_the_mask() {
+        for cause in [
+            r#"Header { name: Qualified("tenant", "x-api-key"), value: "LEAKWRAP" }"#,
+            r#"{"name":["scope","token"],"value":"LEAKWRAP"}"#,
+        ] {
+            assert_hidden(cause, "LEAKWRAP").await;
+        }
+    }
+
+    // Catches: stripping a bracket before its quoted key fails for quoted bracket notation.
+    #[tokio::test(flavor = "current_thread")]
+    async fn quoted_bracket_sensitive_keys_do_not_publish_the_value() {
+        for cause in [
+            r#"headers["x-api-key"]=LEAKBRACKET"#,
+            r#"params['token']=LEAKBRACKET"#,
+        ] {
+            assert_hidden(cause, "LEAKBRACKET").await;
+        }
+    }
+
+    // Catches: a sensitive record's value is published when it precedes the name field.
+    #[tokio::test(flavor = "current_thread")]
+    async fn value_before_sensitive_record_name_does_not_publish_the_secret() {
+        assert_hidden(r#"{"value":"LEAKBEFORE","name":"x-api-key"}"#, "LEAKBEFORE").await;
+    }
+
+    // Catches: a bare sensitive key followed by a newline publishes the next-line value.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bare_sensitive_key_on_the_previous_line_does_not_publish_the_value() {
+        assert_hidden("Authorization\nBearer LEAKBARE", "LEAKBARE").await;
+    }
+
+    // Catches: visually sensitive fullwidth and Cyrillic-lookalike keys publish values.
+    #[tokio::test(flavor = "current_thread")]
+    async fn confusable_sensitive_key_does_not_publish_the_value() {
+        for cause in ["ｔｏｋｅｎ=LEAKCONFUSABLE", "tоken=LEAKCONFUSABLE"] {
+            assert_hidden(cause, "LEAKCONFUSABLE").await;
+        }
+    }
+}
