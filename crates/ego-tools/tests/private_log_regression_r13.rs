@@ -24,7 +24,13 @@ fn mode(path: &Path) -> u32 {
 fn names(dir: &Path) -> Vec<String> {
     let mut found: Vec<String> = fs::read_dir(dir)
         .expect("read_dir")
-        .map(|entry| entry.expect("entry").file_name().into_string().expect("utf8"))
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .into_string()
+                .expect("utf8")
+        })
         .collect();
     found.sort();
     found
@@ -60,7 +66,11 @@ fn racing_first_use_threads_all_succeed_and_leave_no_staging_entries() {
                 .expect("worker")
                 .unwrap_or_else(|error| panic!("round {round}: {error}"));
         }
-        assert_eq!(names(dir.path()), ["private"], "round {round}: parent orphan");
+        assert_eq!(
+            names(dir.path()),
+            ["private"],
+            "round {round}: parent orphan"
+        );
         assert_eq!(
             names(&root),
             ["errors.jsonl", "errors.lock"],
@@ -133,7 +143,12 @@ fn dangling_symlink_root_is_refused_and_its_target_never_created() {
     symlink(&target, &root).expect("symlink");
     append(&root, "{}", 4096).expect_err("symlink root must be refused");
     assert!(!target.exists(), "target created through symlink");
-    assert!(fs::symlink_metadata(&root).unwrap().file_type().is_symlink());
+    assert!(
+        fs::symlink_metadata(&root)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert_eq!(names(dir.path()), ["private"]);
 }
 
