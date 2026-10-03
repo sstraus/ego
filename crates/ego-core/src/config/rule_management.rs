@@ -506,113 +506,25 @@ fn operation_subject(op: &Op, workspace: &Path) -> String {
     }
 }
 
-/// Programs that run whatever they are handed next: a shell, a launcher that
-/// execs its arguments, an interpreter, or a tool with an execute-this option
-/// (`find -exec`, `sed e`, `tar --to-command`). `exec(bash *)` would be
-/// `exec(anything)`, so these are never offered as a prefix and keep their
-/// exact form.
-const LAUNCHERS: &[&str] = &[
-    "sh",
-    "bash",
-    "zsh",
-    "dash",
-    "ksh",
-    "fish",
-    "env",
-    "sudo",
-    "doas",
-    "su",
-    "xargs",
-    "nohup",
-    "nice",
-    "time",
-    "timeout",
-    "command",
-    "exec",
-    "eval",
-    "busybox",
-    "setsid",
-    "stdbuf",
-    "watch",
-    "ssh",
-    "python3",
-    "node",
-    "deno",
-    "bun",
-    "perl",
-    "ruby",
-    "php",
-    "lua",
-    "awk",
-    "gawk",
-    "sed",
-    "find",
-    "make",
-    "npx",
-    "uvx",
-    "pnpx",
-    "osascript",
-    "tclsh",
-    "rsync",
-    "tar",
-    "open",
-];
-
-/// Programs whose first bare word selects what they do, so `git ls-tree *` is
-/// offered instead of `git *`.
+/// Recognized program families whose next bare word names a subcommand.
+/// Suggestions retain that named action; other program shapes stay exact.
 const SUBCOMMAND_PROGRAMS: &[&str] = &[
     "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh",
 ];
 
-/// Git prefixes are closed by default. This object listing has no options
-/// that install templates, run hooks or change configuration; other Git
-/// subcommands (including unknown aliases) retain exact argv.
-const GIT_READ_ONLY_PREFIX_SUBCOMMANDS: &[&str] = &["ls-tree"];
-
-/// Subcommands that run unseen code retain exact argv.
-const EXACT_ARGV_SUBCOMMANDS: &[(&str, &str)] = &[
-    ("npm", "exec"),
-    ("npm", "x"),
-    ("pnpm", "exec"),
-    ("pnpm", "dlx"),
-    ("yarn", "dlx"),
-    ("docker", "run"),
-    ("docker", "exec"),
-    ("kubectl", "exec"),
-    ("kubectl", "run"),
-    ("kubectl", "debug"),
-    ("go", "run"),
-    ("cargo", "run"),
-    ("cargo", "install"),
-];
-
-/// The pattern text of the prefix rule for one argv, or `None` when the exact
-/// form must be kept: the program is a launcher, is not a bare command name
-/// (a path, or a name carrying shell metacharacters or `*`), is empty, or is a
-/// subcommand program with no plain subcommand next (`git -c k=v ...`,
-/// `cargo +nightly ...`: the option or selector would be covered for any
-/// value), runs arbitrary code, or is not on Git's read-only prefix allowlist.
+/// Suggest only a program-plus-subcommand prefix, never a program wildcard.
+/// This follows the documented Claude Code prefix shape; paths, options,
+/// wrappers, interpreters and unrecognized programs use exact argv instead.
 fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
     let program = argv.first()?.to_str()?;
-    if !is_plain_word(program) || LAUNCHERS.contains(&program) {
+    if !SUBCOMMAND_PROGRAMS.contains(&program) {
         return None;
     }
-    let mut prefix = program.to_owned();
-    if SUBCOMMAND_PROGRAMS.contains(&program) {
-        let subcommand = argv
-            .get(1)
-            .and_then(|argument| argument.to_str())
-            .filter(|subcommand| is_plain_word(subcommand))?;
-        if (program == "git" && !GIT_READ_ONLY_PREFIX_SUBCOMMANDS.contains(&subcommand))
-            || EXACT_ARGV_SUBCOMMANDS.contains(&(program, subcommand))
-        {
-            return None;
-        }
-        prefix.push(' ');
-        prefix.push_str(subcommand);
+    let subcommand = argv.get(1)?.to_str()?;
+    if !is_plain_word(subcommand) {
+        return None;
     }
-    prefix.push_str(" *");
-    Some(prefix)
+    Some(format!("{program} {subcommand} *"))
 }
 
 /// A command word made only of characters no shell, glob or path syntax

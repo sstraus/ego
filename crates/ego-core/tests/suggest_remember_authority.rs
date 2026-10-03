@@ -126,33 +126,160 @@ fn programs_that_execute_their_arguments_are_not_offered_as_a_prefix() {
     );
 }
 
-/// Catches package-manager and container subcommands that run arbitrary code
-/// being generalised to every later invocation: `npm exec <pkg>`,
-/// `docker run --privileged -v /:/h`, `kubectl exec`, `go run`, `cargo run`.
+// Catches: denying an explicitly named subcommand family, or dropping its
+// subcommand and silently authorizing every action of the program.
 #[test]
-fn subcommands_that_execute_arbitrary_code_keep_their_exact_form() {
-    let cases: Vec<(&[&str], &[&str])> = vec![
-        (&["npm", "exec", "left-pad"], &["npm", "exec", "evil"]),
+fn supported_subcommand_prefixes_cover_named_actions_but_not_other_actions() {
+    let cases: Vec<(&[&str], &[&str], &[&str], &str)> = vec![
+        (
+            &["npm", "run", "build"],
+            &["npm", "run", "test"],
+            &["npm", "install"],
+            "exec(npm run *)",
+        ),
+        (
+            &["npm", "exec", "seen"],
+            &["npm", "exec", "other"],
+            &["npm", "config"],
+            "exec(npm exec *)",
+        ),
+        (
+            &["pnpm", "dlx", "seen"],
+            &["pnpm", "dlx", "other"],
+            &["pnpm", "config"],
+            "exec(pnpm dlx *)",
+        ),
+        (
+            &["yarn", "exec", "seen"],
+            &["yarn", "exec", "other"],
+            &["yarn", "config"],
+            "exec(yarn exec *)",
+        ),
         (
             &["docker", "run", "alpine"],
-            &["docker", "run", "--privileged", "alpine"],
+            &["docker", "run", "other"],
+            &["docker", "build"],
+            "exec(docker run *)",
         ),
-        (&["kubectl", "exec", "pod"], &["kubectl", "exec", "other"]),
-        (&["go", "run", "./a"], &["go", "run", "./evil"]),
         (
-            &["cargo", "run", "--bin"],
-            &["cargo", "run", "--bin", "evil"],
+            &["kubectl", "exec", "pod"],
+            &["kubectl", "exec", "other"],
+            &["kubectl", "config"],
+            "exec(kubectl exec *)",
+        ),
+        (
+            &["go", "run", "./a"],
+            &["go", "run", "./b"],
+            &["go", "env"],
+            "exec(go run *)",
+        ),
+        (
+            &["cargo", "run", "--bin", "a"],
+            &["cargo", "run", "--bin", "b"],
+            &["cargo", "install"],
+            "exec(cargo run *)",
+        ),
+        (
+            &["gh", "alias", "list"],
+            &["gh", "alias", "set", "x", "y"],
+            &["gh", "config"],
+            "exec(gh alias *)",
+        ),
+        (
+            &["git", "remote", "get-url", "origin"],
+            &["git", "remote", "set-url", "origin", "other"],
+            &["git", "config"],
+            "exec(git remote *)",
+        ),
+        (
+            &["git", "update-ref", "refs/heads/a", "HEAD"],
+            &["git", "update-ref", "refs/heads/b", "HEAD"],
+            &["git", "commit"],
+            "exec(git update-ref *)",
+        ),
+        (
+            &["git", "worktree", "list"],
+            &["git", "worktree", "add", "other"],
+            &["git", "config"],
+            "exec(git worktree *)",
+        ),
+        (
+            &["git", "submodule", "status"],
+            &["git", "submodule", "update"],
+            &["git", "config"],
+            "exec(git submodule *)",
+        ),
+        (
+            &["git", "filter-branch", "--tree-filter", "true"],
+            &["git", "filter-branch", "--tree-filter", "other"],
+            &["git", "config"],
+            "exec(git filter-branch *)",
         ),
     ];
-    let offenders: Vec<&str> = cases
-        .into_iter()
-        .filter(|(remembered, later)| covers(remembered, later))
-        .map(|(remembered, _)| remembered[0])
-        .collect();
+    let mut failures = Vec::new();
+    for (original, same_action, different_action, expected) in cases {
+        let candidates = suggested(&spawn(original));
+        let mut rules = Ruleset::default();
+        for rule in &candidates {
+            Ruleset::merge(&mut rules.allow, rule.clone(), Source::User);
+        }
+        let engine = PolicyEngine::new(CanonPath::new(WORKSPACE), Mode::Default, rules);
+        if candidates
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            != [expected]
+            || !matches!(
+                engine.classify(spawn(original)),
+                Classification::Settled(Ok(_))
+            )
+            || !matches!(
+                engine.classify(spawn(same_action)),
+                Classification::Settled(Ok(_))
+            )
+            || !matches!(
+                engine.classify(spawn(different_action)),
+                Classification::Ask(_)
+            )
+        {
+            failures.push((original, expected));
+        }
+    }
     assert!(
-        offenders.is_empty(),
-        "these remember a code-execution subcommand for any arguments: {offenders:?}"
+        failures.is_empty(),
+        "incorrect named-action prefixes: {failures:?}"
     );
+}
+
+// Catches: the generic program wildcard reappears, or an ordinary operand is
+// mistaken for a subcommand of an unrecognized program.
+#[test]
+fn ordinary_and_unrecognized_programs_never_gain_generic_prefixes() {
+    for (original, expected, different) in [
+        (vec!["ls", "src"], "exec(ls src)", vec!["ls", "other"]),
+        (
+            vec!["custom", "test", "one"],
+            "exec(custom test one)",
+            vec!["custom", "test", "two"],
+        ),
+        (vec!["git"], "exec(git)", vec!["git", "status"]),
+        (
+            vec!["npm", "--version"],
+            "exec(npm --version)",
+            vec!["npm", "install"],
+        ),
+        (
+            vec!["git", "commit;echo", "one"],
+            "exec(git commit;echo one)",
+            vec!["git", "commit;echo", "two"],
+        ),
+    ] {
+        assert_eq!(suggested(&spawn(&original))[0].to_string(), expected);
+        assert!(
+            !covers(&original, &different),
+            "{original:?} covers {different:?}"
+        );
+    }
 }
 
 /// Catches an absolute or relative program path, an env assignment, or a
@@ -182,59 +309,6 @@ fn paths_env_assignments_and_launchers_stay_exact() {
             "{remembered:?} covers {later:?}"
         );
     }
-}
-
-// Catches: remembering a Git metadata query or mutation grants a prefix that
-// later redirects a remote, rewrites refs, adds worktrees or runs a new filter.
-#[test]
-fn remembered_git_control_subcommands_cannot_authorize_different_metadata_writes() {
-    let cases: Vec<(&[&str], &[&str])> = vec![
-        (
-            &["git", "remote", "get-url", "origin"],
-            &[
-                "git",
-                "remote",
-                "set-url",
-                "origin",
-                "https://evil.invalid/repo",
-            ],
-        ),
-        (
-            &["git", "update-ref", "refs/heads/topic", "HEAD"],
-            &["git", "update-ref", "refs/heads/master", "HEAD"],
-        ),
-        (
-            &["git", "worktree", "list"],
-            &["git", "worktree", "add", "/workspace/other"],
-        ),
-        (
-            &["git", "submodule", "status"],
-            &["git", "submodule", "add", "https://evil.invalid/repo"],
-        ),
-        (
-            &["git", "filter-branch", "--tree-filter", "true", "HEAD"],
-            &["git", "filter-branch", "--tree-filter", "evil", "HEAD"],
-        ),
-    ];
-    let mut failures = Vec::new();
-    for (original, later) in cases {
-        let mut rules = Ruleset::default();
-        for rule in suggested(&spawn(original)) {
-            Ruleset::merge(&mut rules.allow, rule, Source::User);
-        }
-        let engine = PolicyEngine::new(CanonPath::new(WORKSPACE), Mode::Default, rules);
-        if !matches!(
-            engine.classify(spawn(original)),
-            Classification::Settled(Ok(_))
-        ) || !matches!(engine.classify(spawn(later)), Classification::Ask(_))
-        {
-            failures.push((original, later));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "remembered Git authority widened: {failures:?}"
-    );
 }
 
 /// Catches `write(<workspace>/**)` reaching the repository's own control
