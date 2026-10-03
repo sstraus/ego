@@ -1876,3 +1876,109 @@ mod published_secret_mask_regressions {
         );
     }
 }
+
+// Catches: arbitrary backend text crossing the public registry boundary even when
+// a heuristic masker does not recognize its credential syntax (critic rounds 7-9).
+#[tokio::test(flavor = "current_thread")]
+async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text() {
+    let mut causes: Vec<String> = [
+        "password=Pass(word)LEAKA end",
+        "pwd=(abc)LEAKB end",
+        r#"config token: Wrapper { inner: "LEAKC" } rejected"#,
+        r#"password=Mutex { data: "LEAKD", poisoned: false, .. } end"#,
+        r#"{ "msg": "bad token=abc", "name": "x-api-key", "note": "}", "value": "LEAKE" }"#,
+        r#"Header { name: "x-api-key", meta: Meta(token=abc), value: "LEAKF" }"#,
+        r#"Header { name: Some("x-api-key"), value: Some("LEAKG") }"#,
+        r#"Header { name: Qualified("tenant", "x-api-key"), value: "LEAKWRAP" }"#,
+        r#"{"name":["scope","token"],"value":"LEAKWRAP"}"#,
+        r#"{"value":"LEAKBEFORE","name":"x-api-key"}"#,
+        "Authorization\nBearer LEAKBARE",
+        "ｔｏｋｅｎ=LEAKCONFUSABLE",
+        "tоken=LEAKCONFUSABLE",
+        r#"headers: [["x-api-key","LEAKL1"]] rejected"#,
+        "headers [['Authorization', 'Basic LEAKL2']]",
+        r#"["token", "LEAKL3"]"#,
+        r#"{"header_name":"x-api-key","header_value":"LEAKN1"}"#,
+        r#"{"headerName":"authorization","headerValue":"LEAKN2"}"#,
+        "header.name=x-api-key header.value=LEAKN3",
+        "spawn failed: mcp-server --api-key LEAKF1 --port 7",
+        "exec: tool --password LEAKF2",
+        "exec: tool --token LEAKF3",
+        "connect postgres://user:LEAKU1/x@db/app failed",
+        "connect postgres://user:LEAKU2?x@db/app failed",
+        "connect postgres://user:LEAKU3#x@db/app failed",
+        "connect postgres://user:a@LEAKU4/b@db/app failed",
+        "auth Bearer: LEAKB1",
+        "auth bearer=LEAKB2",
+        "cfg[[token]]=LEAKP1",
+        "cfg (token)=LEAKP2",
+        "cfg <token>: LEAKP3",
+        "plain backend text without any credential marker",
+        "\n\u{1b}[31m raw backend text \u{0}",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    for joiner in ['\u{200d}', '\u{200c}', '\u{fe0f}'] {
+        causes.extend([
+            format!("tok\u{0435}{joiner}n=LEAKJ1 end"),
+            format!("pas\u{0455}{joiner}word: LEAKJ2"),
+            format!("{{\"name\":\"x-api-k\u{0435}{joiner}y\",\"value\":\"LEAKJ3\"}}"),
+        ]);
+    }
+    for mark in ['\u{20dd}', '\u{0338}', '\u{0489}'] {
+        causes.extend([
+            format!("to{mark}ken=LEAKM1 end"),
+            format!("pass{mark}word: LEAKM2 end"),
+        ]);
+    }
+    for name in [
+        "\u{0422}oken",
+        "t\u{043e}ken",
+        "tok\u{0435}n",
+        "p\u{0430}ssword",
+        "\u{0455}ecret",
+        "passw\u{043e}r\u{0501}",
+        "ke\u{0443}",
+        "\u{041a}ey",
+        "pass\u{051d}d",
+        "author\u{0456}zat\u{0456}on",
+        "author\u{0406}zat\u{0406}on",
+        "author\u{0130}zat\u{0130}on",
+        "author\u{0131}zat\u{0131}on",
+    ] {
+        causes.push(format!("{name}=LEAKCONFUSABLE end"));
+    }
+    let mut leaks = Vec::new();
+    for (index, cause) in causes.into_iter().enumerate() {
+        let admission = Arc::new(FakeAdmission {
+            state: Arc::new(Mutex::new(AdmissionState::default())),
+            gate: Arc::new(Mutex::new(None)),
+        });
+        admission.push(Outcome::Invalid(cause));
+        let (registry, journal) = controller(admission);
+        registry
+            .reconcile(refresh(RegistryTrigger::Add))
+            .await
+            .expect("publication");
+        let status = registry.status();
+        let server = status.servers().first().expect("status");
+        let diagnostic = server.diagnostic().expect("diagnostic");
+        if status.mcp_errors() != ["MCP server `alpha`: server configuration is invalid"]
+            || diagnostic.message() != "server configuration is invalid"
+            || diagnostic.failure() != McpFailure::InvalidValue
+        {
+            // Report the corpus index, never echo the raw cause into test diagnostics.
+            leaks.push(index);
+        }
+        for event in journal.events() {
+            if let McpRegistryEvent::RefreshFailed { cause, .. } = event {
+                assert_eq!(cause, "server configuration is invalid");
+            }
+        }
+    }
+    assert!(
+        leaks.is_empty(),
+        "raw backend detail published for corpus cases {leaks:?}"
+    );
+}
