@@ -84,12 +84,40 @@ fn private_directory(root: &Path) -> io::Result<File> {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[cfg(unix)]
 fn publish_directory(staging: &Path, root: &Path) -> io::Result<()> {
-    use rustix::fs::{CWD, RenameFlags, renameat_with};
-    // Ordinary Unix rename can replace an existing *empty* directory. The
-    // exclusive flag preserves an initializer's already-open winning handle.
-    renameat_with(CWD, staging, CWD, root, RenameFlags::NOREPLACE).map_err(Into::into)
+    rename_exclusive(rustix::fs::CWD, staging, rustix::fs::CWD, root)
+}
+
+#[cfg(unix)]
+fn rename_exclusive(
+    old_directory: impl std::os::fd::AsFd,
+    staging: &Path,
+    new_directory: impl std::os::fd::AsFd,
+    target: &Path,
+) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        use rustix::fs::{RenameFlags, renameat_with};
+        // Do not replace an existing empty directory or a private file another
+        // initializer has already opened. Publication also exposes ready modes.
+        renameat_with(
+            old_directory,
+            staging,
+            new_directory,
+            target,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(Into::into)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        let _ = (old_directory, staging, new_directory, target);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "exclusive private publication is unavailable",
+        ))
+    }
 }
 
 #[cfg(windows)]
@@ -98,17 +126,9 @@ fn publish_directory(staging: &Path, root: &Path) -> io::Result<()> {
     fs::rename(staging, root)
 }
 
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_vendor = "apple",
-    windows
-)))]
+#[cfg(not(any(unix, windows)))]
 fn publish_directory(_staging: &Path, _root: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "exclusive private directory publication is unavailable",
-    ))
+    Err(invalid())
 }
 
 fn write_record(log: &mut (impl Write + Seek), line: &[u8]) -> io::Result<()> {
@@ -202,26 +222,49 @@ fn open_child(directory: &File, _root: &Path, name: &str, append: bool) -> io::R
         } else {
             OFlag::empty()
         };
+    let open_existing = || -> io::Result<File> {
+        let file =
+            File::from(openat(directory, name, flags, Mode::empty()).map_err(io::Error::from)?);
+        validate(&file, false)?;
+        Ok(file)
+    };
+    match open_existing() {
+        Ok(file) => return Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    // A canonical O_CREAT exposes umask-masked 0400 before fchmod. Prepare a
+    // unique leaf relative to the pinned directory and publish only at 0600.
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|_| io::Error::other("private staging name unavailable"))?;
+    let staging = format!(".mcp-private-{:032x}", u128::from_ne_bytes(random));
     let mode = Mode::S_IRUSR | Mode::S_IWUSR;
-    let (fd, created) = match openat(
+    let fd = openat(
         directory,
-        name,
+        staging.as_str(),
         flags | OFlag::O_CREAT | OFlag::O_EXCL,
         mode,
-    ) {
-        Ok(fd) => (fd, true),
-        Err(nix::errno::Errno::EEXIST) => (
-            openat(directory, name, flags, Mode::empty()).map_err(io::Error::from)?,
-            false,
-        ),
-        Err(error) => return Err(io::Error::from(error)),
-    };
+    )
+    .map_err(io::Error::from)?;
     let file = File::from(fd);
-    if created {
+    let publication = (|| {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        validate(&file, false)?;
+        rename_exclusive(directory, Path::new(&staging), directory, Path::new(name))
+    })();
+    match publication {
+        Ok(()) => Ok(file),
+        Err(error) => {
+            rustix::fs::unlinkat(directory, staging.as_str(), rustix::fs::AtFlags::empty())
+                .map_err(io::Error::from)?;
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                open_existing()
+            } else {
+                Err(error)
+            }
+        }
     }
-    validate(&file, false)?;
-    Ok(file)
 }
 
 #[cfg(windows)]
