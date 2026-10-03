@@ -564,10 +564,15 @@ const SUBCOMMAND_PROGRAMS: &[&str] = &[
     "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh",
 ];
 
-/// Subcommands that run code the operator never saw (a package, an image, a
-/// pod, a program named by argument). `exec(npm exec *)` would be
-/// `exec(anything)`, so they keep their exact form.
-const CODE_RUNNING_SUBCOMMANDS: &[(&str, &str)] = &[
+/// Subcommands that run unseen code or mutate Git control state retain exact
+/// argv. A read-only query must not authorize a later metadata write.
+const EXACT_ARGV_SUBCOMMANDS: &[(&str, &str)] = &[
+    ("git", "config"),
+    ("git", "remote"),
+    ("git", "update-ref"),
+    ("git", "worktree"),
+    ("git", "submodule"),
+    ("git", "filter-branch"),
     ("npm", "exec"),
     ("npm", "x"),
     ("pnpm", "exec"),
@@ -588,7 +593,8 @@ const CODE_RUNNING_SUBCOMMANDS: &[(&str, &str)] = &[
 /// (a path, or a name carrying shell metacharacters or `*`), is empty, or is a
 /// subcommand program with no plain subcommand next (`git -c k=v ...`,
 /// `cargo +nightly ...`: the option or selector would be covered for any
-/// value) or with a subcommand that runs arbitrary code.
+/// value) or with a subcommand that runs arbitrary code or mutates Git control
+/// state.
 fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
     let program = argv.first()?.to_str()?;
     if !is_plain_word(program) || LAUNCHERS.contains(&program) {
@@ -600,7 +606,7 @@ fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
             .get(1)
             .and_then(|argument| argument.to_str())
             .filter(|subcommand| is_plain_word(subcommand))?;
-        if CODE_RUNNING_SUBCOMMANDS.contains(&(program, subcommand)) {
+        if EXACT_ARGV_SUBCOMMANDS.contains(&(program, subcommand)) {
             return None;
         }
         prefix.push(' ');

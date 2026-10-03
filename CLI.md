@@ -948,9 +948,12 @@ for writes (`write(<workspace>/**)`), and the exact form for everything else.
 A command whose prefix would authorise code the operator never saw keeps its
 exact form: a shell, interpreter, or launcher (`bash -c`, `python3 -c`,
 `env`, `sudo`, `xargs`, ...), a program given by path, or a name carrying shell
-metacharacters or `*`. Deny rules, including system ones, are still evaluated first. No allow rule,
+metacharacters or `*`. Git `config`, `remote`, `update-ref`, `worktree`,
+`submodule`, and `filter-branch` also keep exact argv, so remembering a query
+cannot authorize a later control-state mutation. Deny rules, including system ones, are still evaluated first. No allow rule,
 including an exact rule or one from user or project config, covers a canonical
-filesystem path containing a `.git`, `.ego`, or `.claude` component at any depth,
+filesystem path containing a `.git`, `.ego`, or `.claude` component at any depth
+(ASCII case-insensitive on every platform),
 including nested repositories. The remembered write glob stays workspace-wide;
 control paths remain uncovered and follow the existing mode/judge/human approval
 path. In default mode a control-path write still asks on each call; remembering

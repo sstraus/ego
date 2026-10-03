@@ -101,6 +101,10 @@ fn policy_control_component_guard_covers_all_filesystem_rule_heads() {
         "/workspace/.git/config",
         "/workspace/vendor/.ego/x",
         "/workspace/vendor/.claude/settings.json",
+        "/workspace/.GIT/config",
+        "/workspace/.Git/hooks/x",
+        "/workspace/vendor/.Ego/x",
+        "/workspace/vendor/.CLAUDE/settings.json",
         "/workspace/src/.gitignore",
         "/workspace/src/.ego-backup/x",
         "/workspace/src/.claude.json",
@@ -110,6 +114,10 @@ fn policy_control_component_guard_covers_all_filesystem_rule_heads() {
             "/workspace/.git/config"
                 | "/workspace/vendor/.ego/x"
                 | "/workspace/vendor/.claude/settings.json"
+                | "/workspace/.GIT/config"
+                | "/workspace/.Git/hooks/x"
+                | "/workspace/vendor/.Ego/x"
+                | "/workspace/vendor/.CLAUDE/settings.json"
         );
         for (head, op) in [
             (
