@@ -5573,9 +5573,6 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
 }
-         );
-     }
- }
 
 /// The parent a job-control test needs. `ego` is spawned as a session leader
 /// by the PTY, and a session leader's group is orphaned: the kernel discards
