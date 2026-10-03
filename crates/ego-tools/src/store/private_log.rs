@@ -6,7 +6,9 @@ use std::path::Path;
 
 use fd_lock::RwLock;
 
-pub(super) fn append(root: &Path, line: &[u8], max_bytes: u64) -> io::Result<()> {
+use super::io::StoreIo;
+
+pub(super) fn append(root: &Path, line: &[u8], max_bytes: u64, io: &dyn StoreIo) -> io::Result<()> {
     let added = u64::try_from(line.len())
         .ok()
         .and_then(|len| len.checked_add(1))
@@ -34,7 +36,16 @@ pub(super) fn append(root: &Path, line: &[u8], max_bytes: u64) -> io::Result<()>
     write_record(&mut log, line)?;
     log.sync_all()?;
     directory.sync_all()?;
+    // Sync for existing roots too: a concurrent loser can append before the
+    // initializer reaches its own barrier, but must not report weaker durability.
+    io.fsync(private_parent(root))?;
     Ok(())
+}
+
+fn private_parent(root: &Path) -> &Path {
+    root.parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn private_directory(root: &Path) -> io::Result<File> {
@@ -43,10 +54,7 @@ fn private_directory(root: &Path) -> io::Result<File> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let parent = root
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let parent = private_parent(root);
     fs::create_dir_all(parent)?;
     // Prepare off the public path: no concurrent opener or later process sees
     // a directory whose mode is still masked by the initializer's umask.
@@ -256,14 +264,45 @@ fn open_child(directory: &File, _root: &Path, name: &str, append: bool) -> io::R
     match publication {
         Ok(()) => Ok(file),
         Err(error) => {
-            rustix::fs::unlinkat(directory, staging.as_str(), rustix::fs::AtFlags::empty())
-                .map_err(io::Error::from)?;
+            let cleanup =
+                rustix::fs::unlinkat(directory, staging.as_str(), rustix::fs::AtFlags::empty())
+                    .map_err(io::Error::from);
+            if cleanup.is_err() {
+                return Err(with_cleanup_context(error, cleanup));
+            }
             if error.kind() == io::ErrorKind::AlreadyExists {
                 open_existing()
             } else {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(unix)]
+fn with_cleanup_context(original: io::Error, cleanup: io::Result<()>) -> io::Error {
+    #[derive(Debug)]
+    struct CleanupContext {
+        original: io::Error,
+        cleanup: io::Error,
+    }
+    impl std::fmt::Display for CleanupContext {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "{}; staging cleanup failed: {}",
+                self.original, self.cleanup
+            )
+        }
+    }
+    impl std::error::Error for CleanupContext {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.original)
+        }
+    }
+    match cleanup {
+        Ok(()) => original,
+        Err(cleanup) => io::Error::new(original.kind(), CleanupContext { original, cleanup }),
     }
 }
 
@@ -456,11 +495,107 @@ mod tests {
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
             .expect("writable parent outside the private-directory contract");
         let root = temp.path().join("private");
-        append(&root, b"fresh", 64).expect("first append under umask 0277");
+        append(&root, b"fresh", 64, &super::super::io::OsIo)
+            .expect("first append under umask 0277");
         assert_eq!(
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
             0o700
         );
         assert_eq!(fs::read(root.join("errors.jsonl")).unwrap(), b"fresh\n");
+    }
+
+    // Catches: failed staging unlink replacing the publication failure, losing
+    // its classification and original OS error while diagnosing the wrong step.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_failure_cannot_replace_the_original_publication_error() {
+        let original = io::Error::from_raw_os_error(13);
+        let kind = original.kind();
+        let message = original.to_string();
+        let error = with_cleanup_context(original, Err(io::Error::other("cleanup marker")));
+        assert_eq!(error.kind(), kind);
+        assert!(error.to_string().starts_with(&message));
+        assert!(
+            error
+                .to_string()
+                .contains("staging cleanup failed: cleanup marker")
+        );
+        let primary = error.get_ref().expect("context").source().expect("primary");
+        assert_eq!(
+            primary.downcast_ref::<io::Error>().unwrap().raw_os_error(),
+            Some(13)
+        );
+        assert_eq!(
+            with_cleanup_context(io::Error::from_raw_os_error(13), Ok(())).raw_os_error(),
+            Some(13)
+        );
+    }
+
+    // Catches: successful private append acknowledging only the file/root sync,
+    // leaving the canonical root's rename uncommitted in its parent directory.
+    #[test]
+    fn parent_sync_failure_cannot_acknowledge_private_root_durability() {
+        use super::super::io::OsIo;
+        use std::path::PathBuf;
+        use std::sync::Mutex;
+
+        struct ParentSync {
+            paths: Mutex<Vec<PathBuf>>,
+            fail: bool,
+        }
+        impl StoreIo for ParentSync {
+            fn fsync(&self, path: &Path) -> io::Result<()> {
+                self.paths.lock().unwrap().push(path.to_owned());
+                if self.fail {
+                    Err(io::Error::other("parent barrier failed"))
+                } else {
+                    OsIo.fsync(path)
+                }
+            }
+            fn append_line(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+                OsIo.append_line(path, bytes)
+            }
+            fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+                OsIo.read(path)
+            }
+            fn exists(&self, path: &Path) -> io::Result<bool> {
+                OsIo.exists(path)
+            }
+            fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+                OsIo.replace_atomic(path, bytes)
+            }
+            fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+                OsIo.truncate(path, len)
+            }
+            fn remove_file(&self, path: &Path) -> io::Result<()> {
+                OsIo.remove_file(path)
+            }
+            fn list_dirs(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+                OsIo.list_dirs(path)
+            }
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("private");
+        let failed = ParentSync {
+            paths: Mutex::new(Vec::new()),
+            fail: true,
+        };
+        let error = append(&root, b"first", 64, &failed).expect_err("parent barrier required");
+        assert_eq!(error.to_string(), "parent barrier failed");
+        assert_eq!(*failed.paths.lock().unwrap(), [temp.path().to_path_buf()]);
+        // The failure is after publication and complete log write, not a fixture
+        // that avoids the actual filesystem operation under test.
+        assert_eq!(fs::read(root.join("errors.jsonl")).unwrap(), b"first\n");
+
+        let durable = ParentSync {
+            paths: Mutex::new(Vec::new()),
+            fail: false,
+        };
+        append(&root, b"second", 64, &durable).expect("existing-root parent barrier");
+        assert_eq!(*durable.paths.lock().unwrap(), [temp.path().to_path_buf()]);
+        assert_eq!(
+            fs::read(root.join("errors.jsonl")).unwrap(),
+            b"first\nsecond\n"
+        );
     }
 }

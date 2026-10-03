@@ -589,7 +589,7 @@ pub struct OsIo;
 
 impl StoreIo for OsIo {
     fn append_private_log(&self, root: &Path, line: &[u8], max_bytes: u64) -> io::Result<()> {
-        super::private_log::append(root, line, max_bytes)
+        super::private_log::append(root, line, max_bytes, self)
     }
 
     fn replace_atomic_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
