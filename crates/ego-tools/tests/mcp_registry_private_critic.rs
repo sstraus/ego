@@ -1,4 +1,6 @@
 //! Round-ten critic cases for the private MCP diagnostic log adapter.
+//! Unix only: symlinks, hard links and mode bits have no Windows equivalent here.
+#![cfg(unix)]
 
 use std::fs;
 use std::io;
