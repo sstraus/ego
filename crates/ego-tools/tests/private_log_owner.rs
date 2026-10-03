@@ -216,11 +216,11 @@ mod unix {
             }
             assert!(OsIo.open_private_log(&root, CAP).is_err(), "{kind}");
             if kind == "file" {
-                assert_eq!(fs::read(root).unwrap(), b"unchanged");
+                assert_eq!(fs::read(&root).unwrap(), b"unchanged");
             }
             if kind == "wide" {
                 assert_eq!(
-                    fs::metadata(root).unwrap().permissions().mode() & 0o777,
+                    fs::metadata(&root).unwrap().permissions().mode() & 0o777,
                     0o755
                 );
             }
