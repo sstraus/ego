@@ -88,25 +88,6 @@ fn prune_removes_oldest_mtime_and_keeps_newer_closed_owners() {
     assert_eq!(private_logs::files(&root).len(), 16);
 }
 
-// Catches: an age-only policy retaining stale files below the count threshold,
-// or a legacy oversized shared log defeating the new linked-byte target.
-#[test]
-fn prune_expires_old_files_and_removes_oversized_legacy_files_without_reading_them() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("private");
-    let mut owner = OsIo.open_private_log(&root, CAP).unwrap();
-    owner.append(b"stale").unwrap();
-    drop(owner);
-    let stale = private_logs::files(&root).pop().unwrap();
-    set_age(&stale, Duration::from_secs(8 * 24 * 3600));
-    let legacy = root.join("errors.jsonl");
-    fs::write(&legacy, vec![b'x'; CAP as usize + 1]).unwrap();
-    drop(OsIo.open_private_log(&root, CAP).unwrap());
-    assert!(!stale.exists());
-    assert!(!legacy.exists());
-    assert_eq!(private_logs::files(&root).len(), 1);
-}
-
 // Catches: concurrent cleanup ENOENT becoming an owner admission error, or
 // owner names colliding and appending through another thread's handle.
 #[test]
@@ -152,6 +133,9 @@ mod unix {
         let path = private_logs::files(&root).pop().unwrap();
         let mut observer = File::open(&path).unwrap();
         set_age(&path, Duration::from_secs(8 * 24 * 3600));
+        for _ in 0..15 {
+            drop(OsIo.open_private_log(&root, 16).unwrap());
+        }
         drop(OsIo.open_private_log(&root, 16).unwrap());
         assert!(!path.exists());
         active.append(b"second").unwrap();

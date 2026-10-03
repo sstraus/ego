@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 use super::io::PrivateLogWriter;
 
 const RETAINED_FILES: usize = 16;
-const RETENTION_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 struct OwnerLog {
     directory: File,
@@ -51,7 +50,7 @@ impl PrivateLogWriter for OwnerLog {
 pub(super) fn open(root: &Path, cap: u64) -> io::Result<Box<dyn PrivateLogWriter>> {
     let directory = private_directory(root)?;
     // Cleanup failure cannot turn optional old-log retention into admission.
-    prune(&directory, root, cap, SystemTime::now());
+    prune(&directory, root);
     let mut random = [0_u8; 16];
     getrandom::fill(&mut random).map_err(|_| io::Error::other("private name unavailable"))?;
     let name = format!("owner-{:032x}.jsonl", u128::from_ne_bytes(random));
@@ -75,24 +74,13 @@ fn write_record(log: &mut impl Write, line: &[u8]) -> io::Result<()> {
 struct RetainedFile {
     name: std::ffi::OsString,
     modified: SystemTime,
-    len: u64,
 }
 
-fn prune(directory: &File, root: &Path, cap: u64, now: SystemTime) {
+fn prune(directory: &File, root: &Path) {
     let Ok(mut files) = retained_files(directory, root) else {
         return;
     };
     files.sort_by(|a, b| a.modified.cmp(&b.modified).then(a.name.cmp(&b.name)));
-    files.retain(|file| {
-        if file.len > cap
-            || now
-                .duration_since(file.modified)
-                .is_ok_and(|age| age > RETENTION_AGE)
-        {
-            return remove_retained(directory, root, &file.name).is_err();
-        }
-        true
-    });
     let mut remaining = files.len();
     for file in files {
         if remaining < RETAINED_FILES {
@@ -129,7 +117,6 @@ fn retained_files(directory: &File, _root: &Path) -> io::Result<Vec<RetainedFile
             modified: SystemTime::UNIX_EPOCH
                 .checked_add(Duration::new(seconds, nanos))
                 .unwrap_or(SystemTime::UNIX_EPOCH),
-            len: u64::try_from(stat.st_size).unwrap_or(u64::MAX),
         });
     }
     Ok(files)
@@ -159,7 +146,6 @@ fn retained_files(_directory: &File, root: &Path) -> io::Result<Vec<RetainedFile
             files.push(RetainedFile {
                 name: entry.file_name(),
                 modified: metadata.modified()?,
-                len: metadata.len(),
             });
         }
     }
