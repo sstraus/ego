@@ -116,39 +116,33 @@ fn open_directory(path: &Path, _created: bool) -> io::Result<File> {
 
 #[cfg(unix)]
 fn open_child(directory: &File, _root: &Path, name: &str, append: bool) -> io::Result<File> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
     use std::os::unix::fs::PermissionsExt;
-    let name = CString::new(name).map_err(|_| invalid())?;
-    let flags = nix::libc::O_RDWR
-        | nix::libc::O_NOFOLLOW
-        | nix::libc::O_CLOEXEC
-        | nix::libc::O_NONBLOCK
-        | if append { nix::libc::O_APPEND } else { 0 };
-    // SAFETY: the directory fd is live, name is NUL-terminated, and mode is supplied
-    // for O_CREAT. Returned descriptor ownership transfers once to File below.
-    let mut fd = unsafe {
-        nix::libc::openat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            flags | nix::libc::O_CREAT | nix::libc::O_EXCL,
-            0o600 as nix::libc::mode_t,
-        )
+    let flags = OFlag::O_RDWR
+        | OFlag::O_NOFOLLOW
+        | OFlag::O_CLOEXEC
+        | OFlag::O_NONBLOCK
+        | if append {
+            OFlag::O_APPEND
+        } else {
+            OFlag::empty()
+        };
+    let mode = Mode::S_IRUSR | Mode::S_IWUSR;
+    let (fd, created) = match openat(
+        directory,
+        name,
+        flags | OFlag::O_CREAT | OFlag::O_EXCL,
+        mode,
+    ) {
+        Ok(fd) => (fd, true),
+        Err(nix::errno::Errno::EEXIST) => (
+            openat(directory, name, flags, Mode::empty()).map_err(io::Error::from)?,
+            false,
+        ),
+        Err(error) => return Err(io::Error::from(error)),
     };
-    let created = fd >= 0;
-    if fd < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::AlreadyExists {
-            return Err(error);
-        }
-        // SAFETY: the live directory fd and CString outlive this call. No creation.
-        fd = unsafe { nix::libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    // SAFETY: fd is a fresh successful openat result exclusively owned here.
-    let file = unsafe { File::from_raw_fd(fd) };
+    let file = File::from(fd);
     if created {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
@@ -228,25 +222,17 @@ fn harden_handle(file: &mut File, directory: bool) -> io::Result<()> {
 
 #[cfg(windows)]
 fn validate(file: &File, directory: bool) -> io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
-    };
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
     use windows_permissions::utilities::current_process_sid;
     use windows_permissions::wrappers::GetSecurityInfo;
-    let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    // SAFETY: file owns a live handle; info is writable for the duration of the call.
-    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
-        .map_err(|_| invalid())?;
+    let info = winapi_util::file::information(file)?;
     let metadata = file.metadata()?;
     let kind = if directory {
         metadata.is_dir()
     } else {
-        metadata.is_file() && info.nNumberOfLinks == 1
+        metadata.is_file() && info.number_of_links() == 1
     };
-    if !kind || info.dwFileAttributes & 0x400 != 0 {
+    if !kind || info.file_attributes() & 0x400 != 0 {
         return Err(invalid());
     }
     let descriptor = GetSecurityInfo(

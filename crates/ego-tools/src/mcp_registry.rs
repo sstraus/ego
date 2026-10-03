@@ -16,7 +16,6 @@ const JOURNAL_FILE: &str = "registry.jsonl";
 const LOCK_FILE: &str = "registry.lock";
 const RECORD_VERSION: u32 = 1;
 const PRIVATE_DIRECTORY: &str = "private-diagnostics";
-const PRIVATE_LOG: &str = "errors.jsonl";
 
 #[derive(Serialize)]
 struct PrivateDiagnostic<'a> {

@@ -1393,6 +1393,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "winapi-util",
  "windows",
  "windows-permissions",
  "zeroize",

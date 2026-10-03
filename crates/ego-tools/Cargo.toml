@@ -41,7 +41,7 @@ url = "2.5.8"
 zeroize = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", features = ["process", "signal", "term", "user"] }
+nix = { version = "0.31.3", features = ["process", "signal", "term", "user", "fs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
@@ -53,8 +53,9 @@ process-wrap = { path = "../../vendor/process-wrap", default-features = false, f
     "job-object",
     "kill-on-drop",
 ] }
-windows = { version = "0.62.2", features = ["Win32_System_Threading", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
 windows-permissions = "0.2.4"
+winapi-util = "0.1.11"
 
 [features]
 # `NonDurableOsIo`: `OsIo` with the fsync barriers elided, for tests that
