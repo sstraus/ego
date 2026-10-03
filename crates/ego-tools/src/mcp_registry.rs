@@ -30,7 +30,7 @@ struct PrivateDiagnostic<'a> {
 const MAX_PRIVATE_CAUSE_BYTES: usize = 16 * 1024;
 /// Six-byte JSON escapes for each source byte fit below this record ceiling.
 const MAX_PRIVATE_RECORD_BYTES: usize = 128 * 1024;
-/// Retain one recent segment; discard the prior segment before exceeding 1 MiB.
+/// Cap each retained owner file; later diagnostics are discarded without rotation.
 const MAX_PRIVATE_LOG_BYTES: u64 = 128 * 1024;
 
 #[derive(Serialize, Deserialize)]
