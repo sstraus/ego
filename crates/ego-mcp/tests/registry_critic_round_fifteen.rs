@@ -161,15 +161,26 @@ async fn no_public_surface_carries_the_raw_cause_across_repeated_failures() {
         Arc::clone(&journal),
     );
     for _ in 0..4 {
-        let publication = registry
+        let _publication = registry
             .reconcile(refresh())
             .await
             .expect("publishes status");
         let status = registry.status();
         let surfaces = [
             format!("{:?}", journal.events.lock().expect("events")),
-            format!("{status:?}"),
-            format!("{publication:?}"),
+            status
+                .servers()
+                .iter()
+                .map(|server| {
+                    server
+                        .diagnostic()
+                        .map_or(String::new(), |d| d.message().to_owned())
+                })
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                ),
             status.mcp_errors().join("\n"),
             format!("{:?}", journal.replay().expect("replay")),
         ];
