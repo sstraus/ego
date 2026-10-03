@@ -1888,7 +1888,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 diagnostics.note(&format!(
                                     "{} after {:.1}s",
                                     repl::INTERRUPTED_RECEIPT,
-                                    turn_started.elapsed().as_secs_f64()
+                                    turn_started
+                                        .elapsed()
+                                        .saturating_sub(seat.modal_wait())
+                                        .as_secs_f64()
                                 ));
                             }
 

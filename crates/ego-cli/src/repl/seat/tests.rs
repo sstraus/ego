@@ -905,4 +905,8 @@ fn a_modal_that_outlived_its_turn_does_not_move_the_next_turn_into_the_future() 
         started <= Instant::now(),
         "a turn cannot have started in the future"
     );
+    assert!(
+        status.lock().unwrap().modal_waited < std::time::Duration::from_secs(5),
+        "only the overlap with the running turn counts as its modal wait"
+    );
 }

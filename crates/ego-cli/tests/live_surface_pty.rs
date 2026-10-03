@@ -3390,7 +3390,7 @@ fn esc_on_the_permission_modal_denies_the_call_and_leaves_one_receipt() {
             Reply::Sse(tool_call(
                 "slow-exec",
                 "exec",
-                r#"{"argv":["/bin/echo","denied-probe"],"cwd":null,"timeout_ms":15000}"#,
+                r#"{"argv":["/bin/sh","-c","echo RAN-$((6*7))"],"cwd":null,"timeout_ms":15000}"#,
             )),
             Reply::Sse(text("AFTER-DENIAL")),
         ],
@@ -3447,10 +3447,7 @@ fn esc_on_the_permission_modal_denies_the_call_and_leaves_one_receipt() {
         1,
         "one receipt: {visible:?}"
     );
-    assert!(
-        !visible.contains("denied-probe\n"),
-        "the call ran: {visible:?}"
-    );
+    assert!(!visible.contains("RAN-42"), "the call ran: {visible:?}");
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
@@ -5532,16 +5529,21 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     until_normalized(&reader, &mut output, esc_start, "permission was refused");
     until_prompt_from(&reader, &mut output, esc_start);
     drain_until_quiet(&reader, &mut output);
-    let after_esc = normalized(&output[esc_start..]);
+    // The raw stream repeats the receipt on every repaint; the screen shows
+    // what the person sees.
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
     assert_eq!(
-        after_esc.matches("Interrupted by user").count(),
+        visible.matches("Interrupted by user").count(),
         1,
-        "Esc in the edit form must leave exactly one receipt: {after_esc}"
+        "Esc in the edit form must leave exactly one receipt: {visible:?}"
     );
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit flush");
     let status = bounded_exit(child);
-    assert!(status.success(), "interactive process failed: {status:?}");
+    // A refused permission ends the session with exit 3 by design.
+    assert_eq!(status.exit_code(), 3, "unexpected exit: {status:?}");
     drop(input);
     drop(pair);
     reader_join.join().expect("reader thread panicked");

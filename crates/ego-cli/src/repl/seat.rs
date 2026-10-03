@@ -371,6 +371,8 @@ struct SurfaceStatus {
     activity_since: Option<Instant>,
     /// When the open modal began; the wait is the person's, not the turn's.
     modal_since: Option<Instant>,
+    /// The part of the current turn spent waiting on modals.
+    modal_waited: std::time::Duration,
     reply_started: Arc<AtomicBool>,
     notice: Option<String>,
     image_chips: Vec<String>,
@@ -403,6 +405,7 @@ impl SurfaceStatus {
     fn begin_activity(&mut self) {
         if !self.activity {
             self.activity_since = Some(Instant::now());
+            self.modal_waited = std::time::Duration::ZERO;
             self.reply_started.store(false, Ordering::Release);
         }
         self.activity = true;
@@ -417,6 +420,7 @@ impl Default for SurfaceStatus {
             activity: false,
             activity_since: None,
             modal_since: None,
+            modal_waited: std::time::Duration::ZERO,
             reply_started: Arc::new(AtomicBool::new(false)),
             notice: None,
             image_chips: Vec::new(),
@@ -1524,6 +1528,18 @@ impl crate::run::InteractiveSeat for Seat {
             status.begin_activity();
             drop(status);
             repaint_status(&live.status);
+        }
+    }
+
+    fn modal_wait(&self) -> std::time::Duration {
+        match &self.kind {
+            SeatKind::Live(live) => {
+                live.status
+                    .lock()
+                    .expect("surface status lock")
+                    .modal_waited
+            }
+            _ => std::time::Duration::ZERO,
         }
     }
 
