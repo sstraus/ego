@@ -81,11 +81,16 @@ impl ActiveClock {
 mod tests {
     use super::*;
 
+    /// The ledger is process-global: `cargo test` runs these on threads of one
+    /// process, so a suspension in one case would be charged to the other.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
     /// A command that finished while the process was stopped must not read as
     /// having run for the whole stop: that was the report `timed out after 20
     /// seconds` for a command that printed its result.
     #[test]
     fn a_suspension_is_not_charged_to_a_clock_that_started_before_it() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let clock = ActiveClock::start();
         let suspension = begin();
         std::thread::sleep(Duration::from_millis(120));
@@ -97,6 +102,7 @@ mod tests {
 
     #[test]
     fn time_outside_a_suspension_still_counts() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let clock = ActiveClock::start();
         std::thread::sleep(Duration::from_millis(80));
         assert!(clock.elapsed() >= Duration::from_millis(80));
