@@ -337,8 +337,8 @@ fn suggested_exec_rule_for_a_subcommand_program_keeps_the_subcommand() {
     ));
     assert_eq!(
         suggested(&exec_call(&["git", "-C", "..", "status"])),
-        vec![rule("exec(git *)")],
-        "an option is never taken for the subcommand"
+        vec![rule("exec(git -C .. status)")],
+        "an option is never taken for the subcommand, and `git *` would cover `git -c k=v`"
     );
 }
 

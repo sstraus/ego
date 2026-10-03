@@ -506,13 +506,55 @@ fn operation_subject(op: &Op, workspace: &Path) -> String {
     }
 }
 
-/// Programs that run whatever they are handed next: a shell, or a launcher
-/// that execs its arguments. `exec(bash *)` would be `exec(anything)`, so these
-/// are never offered as a prefix and keep their exact form.
+/// Programs that run whatever they are handed next: a shell, a launcher that
+/// execs its arguments, an interpreter, or a tool with an execute-this option
+/// (`find -exec`, `sed e`, `tar --to-command`). `exec(bash *)` would be
+/// `exec(anything)`, so these are never offered as a prefix and keep their
+/// exact form.
 const LAUNCHERS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "ksh", "fish", "env", "sudo", "doas", "su", "xargs", "nohup",
-    "nice", "time", "timeout", "command", "exec", "eval", "busybox", "setsid", "stdbuf", "watch",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "env",
+    "sudo",
+    "doas",
+    "su",
+    "xargs",
+    "nohup",
+    "nice",
+    "time",
+    "timeout",
+    "command",
+    "exec",
+    "eval",
+    "busybox",
+    "setsid",
+    "stdbuf",
+    "watch",
     "ssh",
+    "node",
+    "deno",
+    "bun",
+    "perl",
+    "ruby",
+    "php",
+    "lua",
+    "awk",
+    "gawk",
+    "sed",
+    "find",
+    "make",
+    "npx",
+    "uvx",
+    "pnpx",
+    "osascript",
+    "tclsh",
+    "rsync",
+    "tar",
+    "open",
 ];
 
 /// Programs whose first bare word selects what they do, so `git status *` is
@@ -521,19 +563,45 @@ const SUBCOMMAND_PROGRAMS: &[&str] = &[
     "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh",
 ];
 
+/// Subcommands that run code the operator never saw (a package, an image, a
+/// pod, a program named by argument). `exec(npm exec *)` would be
+/// `exec(anything)`, so they keep their exact form.
+const CODE_RUNNING_SUBCOMMANDS: &[(&str, &str)] = &[
+    ("npm", "exec"),
+    ("npm", "x"),
+    ("pnpm", "exec"),
+    ("pnpm", "dlx"),
+    ("yarn", "dlx"),
+    ("docker", "run"),
+    ("docker", "exec"),
+    ("kubectl", "exec"),
+    ("kubectl", "run"),
+    ("kubectl", "debug"),
+    ("go", "run"),
+    ("cargo", "run"),
+    ("cargo", "install"),
+];
+
 /// The pattern text of the prefix rule for one argv, or `None` when the exact
 /// form must be kept: the program is a launcher, is not a bare command name
-/// (a path, or a name carrying shell metacharacters or `*`), or is empty.
+/// (a path, or a name carrying shell metacharacters or `*`), is empty, or is a
+/// subcommand program with no plain subcommand next (`git -c k=v ...`,
+/// `cargo +nightly ...`: the option or selector would be covered for any
+/// value) or with a subcommand that runs arbitrary code.
 fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
     let program = argv.first()?.to_str()?;
     if !is_plain_word(program) || LAUNCHERS.contains(&program) {
         return None;
     }
     let mut prefix = program.to_owned();
-    if SUBCOMMAND_PROGRAMS.contains(&program)
-        && let Some(subcommand) = argv.get(1).and_then(|argument| argument.to_str())
-        && is_plain_word(subcommand)
-    {
+    if SUBCOMMAND_PROGRAMS.contains(&program) {
+        let subcommand = argv
+            .get(1)
+            .and_then(|argument| argument.to_str())
+            .filter(|subcommand| is_plain_word(subcommand))?;
+        if CODE_RUNNING_SUBCOMMANDS.contains(&(program, subcommand)) {
+            return None;
+        }
         prefix.push(' ');
         prefix.push_str(subcommand);
     }
@@ -543,10 +611,10 @@ fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
 
 /// A command word made only of characters no shell, glob or path syntax
 /// gives a meaning to. Leading `-` is excluded so an option is never taken for
-/// a subcommand.
+/// a subcommand, and so is a leading `+` (a `cargo +toolchain` selector).
 fn is_plain_word(word: &str) -> bool {
     !word.is_empty()
-        && !word.starts_with('-')
+        && !word.starts_with(['-', '+'])
         && word.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '+' | '-')
         })

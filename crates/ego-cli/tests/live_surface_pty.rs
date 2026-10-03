@@ -3329,7 +3329,7 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"run slow tool\r").expect("submit turn");
     input.flush().expect("submit flush");
-    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    until(&reader, &mut output, b"[d] details");
     thread::sleep(Duration::from_secs(5));
     let allowed = output.len();
     input.write_all(b"y").expect("allow");
@@ -3418,7 +3418,7 @@ fn esc_on_the_permission_modal_denies_the_call_and_leaves_one_receipt() {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"run a tool\r").expect("submit turn");
     input.flush().expect("submit flush");
-    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    until(&reader, &mut output, b"[d] details");
     drain_until_quiet(&reader, &mut output);
     let escaped = output.len();
     input.write_all(b"\x1b").expect("escape");
@@ -5503,8 +5503,8 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     ego.file("AGENTS.md", "# live surface fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows: 40,
+            cols: 100,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -5512,9 +5512,10 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
+    let (reader, reader_join) = stream_with_screen(
         pair.master.try_clone_reader().expect("reader"),
         dsr_responder,
+        Some((40, 100)),
     );
     let mut input = input;
     let mut output = Vec::new();
@@ -5526,7 +5527,7 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     until_prompt_from(&reader, &mut output, idle_start);
     input.write_all(b"initial\r").expect("initial prompt");
     input.flush().expect("initial prompt flush");
-    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    until(&reader, &mut output, b"[d] details");
     drain_until_quiet(&reader, &mut output);
     let edit_start = output.len();
     input.write_all(b"e").expect("open the edit form");
@@ -5541,7 +5542,7 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     drain_until_quiet(&reader, &mut output);
     // The raw stream repeats the receipt on every repaint; the screen shows
     // what the person sees.
-    let mut screen = vt100::Parser::new(24, 80, 0);
+    let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
     let visible = screen.screen().contents();
     assert_eq!(

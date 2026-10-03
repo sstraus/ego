@@ -1279,7 +1279,7 @@ fn settle_permission(
                 .lock()
                 .expect("surface status lock")
                 .permission_modal = false;
-            amendment(editor, surface, request)
+            amendment(editor, surface, request, notice)
         }
         PermissionWord::Remember => match remember_permission(surface.status, request) {
             Ok(receipt) => {
