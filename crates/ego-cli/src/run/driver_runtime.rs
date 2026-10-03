@@ -1691,6 +1691,7 @@ pub(super) async fn drive_execution<S: EventSink>(
 
                             // Per turn, for the reason `build` documents.
                             seat.busy();
+                            let turn_started = std::time::Instant::now();
                             let turn_cancel = CancelToken::new();
                             let (ports, observation, probe_evidence) = effect_scope(
                                 &confinement,
@@ -1881,6 +1882,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 continue;
                             };
                             between();
+                            if matches!(termination, RunTermination::Signalled(Signal::Int))
+                                && !cancel.is_cancelled()
+                            {
+                                diagnostics.note(&format!(
+                                    "{} after {:.1}s",
+                                    repl::INTERRUPTED_RECEIPT,
+                                    turn_started
+                                        .elapsed()
+                                        .saturating_sub(seat.modal_wait())
+                                        .as_secs_f64()
+                                ));
+                            }
 
                             let queue_abandoned =
                                 matches!(&termination, RunTermination::Failed { .. });

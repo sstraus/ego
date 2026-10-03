@@ -121,6 +121,10 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     ) -> crate::model_picker::PickerOutcome;
     fn busy(&self) {}
     fn idle(&self) {}
+    /// How long the current or last turn waited on a modal.
+    fn modal_wait(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
     fn set_image_chips(&self, _chips: Vec<String>) {}
     fn set_notice(&self, _notice: String) {}
     fn pasteboard_kind(&self) -> Result<PasteboardKind, String> {

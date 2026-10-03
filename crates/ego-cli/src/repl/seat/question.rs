@@ -18,6 +18,7 @@ pub(super) fn enter_modal(
     {
         let mut status = status.lock().expect("surface status lock");
         status.notice = None;
+        status.modal_since = Some(Instant::now());
         if let Some(snapshot) = status.snapshot.as_mut() {
             snapshot.set_modal(true);
         }
@@ -43,10 +44,21 @@ pub(super) fn leave_modal(
     ]);
     {
         let mut status = status.lock().expect("surface status lock");
+        let status = &mut *status;
         status.origin = saved.origin;
         status.notice = None;
         // Keys of an unfinished burst belong to the modal that is closing.
         status.picker_keys.clear();
+        // The turn's elapsed time leaves out the wait for the person, and
+        // only the part of the wait that fell inside the running turn: a modal
+        // that outlived its turn must not push the next one into the future.
+        if let Some(since) = status.modal_since.take()
+            && let Some(started) = status.activity_since.as_mut()
+        {
+            let waited = since.max(*started).elapsed();
+            *started += waited;
+            status.modal_waited += waited;
+        }
         if let Some(snapshot) = status.snapshot.as_mut() {
             snapshot.set_modal(false);
         }
@@ -256,7 +268,7 @@ pub(super) fn answer_control(
                                     .lock()
                                     .expect("surface status lock")
                                     .permission_modal = false;
-                                break amendment(editor, surface, &request);
+                                break amendment(editor, surface, &request, &mut notice);
                             }
                             Some(PermissionWord::Remember) => {
                                 match remember_permission(surface.status, &request) {
@@ -282,7 +294,7 @@ pub(super) fn answer_control(
                                 .lock()
                                 .expect("surface status lock")
                                 .permission_modal = false;
-                            break amendment(editor, surface, &request);
+                            break amendment(editor, surface, &request, &mut notice);
                         }
                         Some(PermissionWord::Remember) => {
                             match remember_permission(surface.status, &request) {
@@ -298,10 +310,12 @@ pub(super) fn answer_control(
                         }
                         None => continue,
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         break PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         break PermissionDecision::Deny;
                     }
                     Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -756,6 +770,7 @@ fn amendment(
     editor: &mut Reedline,
     surface: &mut ModalSurface<'_>,
     request: &PermissionRequest,
+    notice: &mut Option<String>,
 ) -> PermissionDecision {
     let Some(presentation) = request.presentation() else {
         surface.status.lock().expect("surface status lock").notice =
@@ -788,10 +803,12 @@ fn amendment(
                         Ok(()) => break,
                         Err(error) => inline_permission_error(surface.status, error),
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         return PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        *notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         return PermissionDecision::Deny;
                     }
                     Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -815,10 +832,12 @@ fn amendment(
                         Ok(()) => break,
                         Err(error) => inline_permission_error(surface.status, error),
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         return PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        *notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         return PermissionDecision::Deny;
                     }
                     Line::Refused(_) | Line::HostCommand(_) => continue,

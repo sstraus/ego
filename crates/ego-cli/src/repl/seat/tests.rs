@@ -816,3 +816,97 @@ fn source_target_source_activation_restores_source_drafts_in_lifo_order() {
     assert_eq!(drafts.pop_active().unwrap().text, "source-first");
     assert_eq!(drafts.active_count(), 0);
 }
+
+fn modal_after_waiting(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    waited: std::time::Duration,
+) {
+    let saved = enter_modal(editor, phase, status);
+    {
+        let mut status = status.lock().unwrap();
+        status.modal_since = Some(Instant::now().checked_sub(waited).expect("clock range"));
+    }
+    leave_modal(editor, phase, status, saved, EditPhase::Busy);
+}
+
+// catches: `modal_since` surviving `leave_modal`, so a later modal credits the
+// earlier wait to the turn a second time and the counter runs short.
+#[test]
+fn back_to_back_modals_each_leave_their_own_wait_out_of_the_counter_once() {
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Busy);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    {
+        let mut status = status.lock().unwrap();
+        status.begin_activity();
+        status.activity_since = Some(
+            Instant::now()
+                .checked_sub(std::time::Duration::from_secs(20))
+                .expect("clock range"),
+        );
+    }
+    modal_after_waiting(
+        &mut editor,
+        &phase,
+        &status,
+        std::time::Duration::from_secs(3),
+    );
+    modal_after_waiting(
+        &mut editor,
+        &phase,
+        &status,
+        std::time::Duration::from_secs(4),
+    );
+    let elapsed = status
+        .lock()
+        .unwrap()
+        .activity_since
+        .expect("turn still running")
+        .elapsed()
+        .as_secs();
+    assert!(
+        (12..=14).contains(&elapsed),
+        "20s turn minus 3s and 4s of modal waits is about 13s, got {elapsed}s"
+    );
+}
+
+// catches: a modal that outlives its turn (cancel or timeout while the
+// permission modal is still open) crediting its whole wait to the NEXT turn,
+// pushing that turn's start into the future so its counter sticks at 0s.
+#[test]
+fn a_modal_that_outlived_its_turn_does_not_move_the_next_turn_into_the_future() {
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Busy);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    status.lock().unwrap().begin_activity();
+    let saved = enter_modal(&mut editor, &phase, &status);
+    {
+        let mut status = status.lock().unwrap();
+        status.modal_since = Some(
+            Instant::now()
+                .checked_sub(std::time::Duration::from_secs(30))
+                .expect("clock range"),
+        );
+        // `Seat::idle` for the first turn, then the next turn starts while the
+        // modal is still open.
+        status.activity = false;
+        status.activity_since = None;
+        status.begin_activity();
+    }
+    leave_modal(&mut editor, &phase, &status, saved, EditPhase::Busy);
+    let started = status
+        .lock()
+        .unwrap()
+        .activity_since
+        .expect("next turn running");
+    assert!(
+        started <= Instant::now(),
+        "a turn cannot have started in the future"
+    );
+    assert!(
+        status.lock().unwrap().modal_waited < std::time::Duration::from_secs(5),
+        "only the overlap with the running turn counts as its modal wait"
+    );
+}
