@@ -302,14 +302,9 @@ const SECRET_NAME_SUFFIXES: [&str; 7] = [
     "authorization",
 ];
 
-/// Authentication schemes that precede the credential proper, as in
-/// `token=Bearer <x>`; after an `authorization` name any alphabetic word is one.
-const AUTH_SCHEMES: [&str; 6] = ["bearer", "basic", "digest", "token", "negotiate", "ntlm"];
-
-/// Replaces credentials with `***`: PEM private-key blocks, the password of
-/// URL userinfo, and the value of every `name=value` / `name: value` (also
-/// `"name": "value"`) whose name ends in a secret suffix. Expects whitespace
-/// already collapsed to single blanks.
+/// Replaces credentials with `***`: PEM private-key blocks, URL userinfo,
+/// and the rest of the normalized line after a sensitive key or record name.
+/// Value syntax is untrusted: quotes, brackets and whitespace never end a mask.
 fn mask_secrets(text: &str) -> String {
     mask_key_values(&mask_url_userinfo(&mask_pem_blocks(text)))
 }
@@ -380,66 +375,52 @@ fn mask_url_userinfo(text: &str) -> String {
 }
 
 fn mask_key_values(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut index = 0;
-    // Set after `name: "x-api-key"`: the next `value` member of the same
-    // object (same bracket depth) is the secret.
-    let mut record_depth: Option<isize> = None;
-    let mut depth: isize = 0;
-    let mut strings = StringScan::default();
-    while index < chars.len() {
-        let character = chars[index];
-        let outside_string = !strings.in_string();
-        let next = strings.step(&chars, index);
-        out.extend(&chars[index..next]);
-        index = next;
-        match character {
-            '{' | '(' | '[' if outside_string => depth += 1,
-            '}' | ')' | ']' if outside_string => {
-                depth -= 1;
-                if record_depth.is_some_and(|armed| depth < armed) {
-                    record_depth = None;
+    // A `name:` record can wrap its name in Debug calls or Python prefixes.
+    // Scan its words once; do not parse the wrapper or wait for a value member.
+    let mut record_start = None;
+    let mut word_start = None;
+    for (index, character) in text.char_indices() {
+        if is_name_char(character) {
+            word_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = word_start.take() {
+            if let Some(value_start) = record_start {
+                let word = text[start..index].to_lowercase();
+                if secret_suffix(&word).is_some() || word == "bearer" {
+                    return masked_line_tail(text, value_start);
                 }
             }
-            _ => {}
         }
-        // `,` only separates a quoted name from its value inside a tuple:
-        // `("x-api-key", "v")`; `["key", "name"]` and `"invalid token","code"` are text.
-        let is_separator = match character {
-            '=' | ':' => true,
-            ',' => opens_tuple(&out[..out.len() - 1]),
-            _ => false,
-        };
-        if !is_separator {
+        if matches!(character, ',' | '}' | ']') {
+            record_start = None;
+        }
+        let prefix = &text[..index];
+        if !matches!(character, '=' | ':') && !(character == ',' && opens_tuple(prefix)) {
             continue;
         }
-        let key = name_before(&out[..out.len() - 1]);
-        let secret = secret_suffix(&key);
-        if matches!(key.as_str(), "name" | "key") && character != ',' && names_secret(&chars, index)
-        {
-            record_depth = Some(depth);
+        let key = name_before(prefix);
+        let start = index + character.len_utf8();
+        let start = start + text[start..].len() - text[start..].trim_start_matches(' ').len();
+        if secret_suffix(&key).is_some() && start < text.len() {
+            return masked_line_tail(text, start);
         }
-        let record_value = secret.is_none() && key == "value" && record_depth == Some(depth);
-        if secret.is_none() && !record_value {
-            continue;
-        }
-        if record_value {
-            record_depth = None;
-        }
-        let blanks = chars[index..].iter().take_while(|&&c| c == ' ').count();
-        let start = index + blanks;
-        if blanks > 0 && starts_with_pair(&chars, start) {
-            // `key= mode=fast`: the value is empty and the next pair is unrelated.
-            continue;
-        }
-        let end = value_end(&chars, start, secret == Some("authorization"));
-        if end > start {
-            out.push_str(&" ".repeat(blanks));
-            out.push_str(SECRET_MASK);
-            index = end;
+        if key == "name" {
+            record_start = Some(start);
         }
     }
+    if let (Some(start), Some(value_start)) = (word_start, record_start) {
+        let word = text[start..].to_lowercase();
+        if secret_suffix(&word).is_some() || word == "bearer" {
+            return masked_line_tail(text, value_start);
+        }
+    }
+    text.to_owned()
+}
+
+fn masked_line_tail(text: &str, start: usize) -> String {
+    let mut out = text[..start].to_owned();
+    out.push_str(SECRET_MASK);
     out
 }
 
@@ -492,212 +473,6 @@ fn opens_tuple(prefix: &str) -> bool {
 
 /// Python string prefixes (`b'..'`, `r'..'`, `u'..'`).
 const STRING_PREFIXES: [char; 6] = ['b', 'r', 'u', 'B', 'R', 'U'];
-
-/// Whether the value after `name:` is itself a secret-looking single name
-/// (`"name": "x-api-key"`, `name=token`), which makes the sibling `value`
-/// member a secret. Reads only the name, never a whole value.
-fn names_secret(chars: &[char], index: usize) -> bool {
-    const MAX_NAME_CHARS: usize = 128;
-    let mut start = index + chars[index..].iter().take_while(|&&c| c == ' ').count();
-    let prefix = chars[start..]
-        .iter()
-        .take(2)
-        .take_while(|&&c| STRING_PREFIXES.contains(&c))
-        .count();
-    if matches!(chars.get(start + prefix), Some('"' | '\'' | '\\')) {
-        start += prefix;
-    }
-    start += chars[start..].iter().take_while(|&&c| c == '\\').count();
-    if matches!(chars.get(start), Some('"' | '\'')) {
-        start += 1;
-    }
-    let name: String = chars[start..]
-        .iter()
-        .take(MAX_NAME_CHARS)
-        .take_while(|&&c| is_name_char(c))
-        .collect::<String>()
-        .to_lowercase();
-    secret_suffix(&name).is_some() || name == "bearer"
-}
-
-/// Whether the word at `start` is a `name=value` pair (`mode=fast`, not the
-/// base64 padding of `YWJjZA==`).
-fn starts_with_pair(chars: &[char], start: usize) -> bool {
-    let word = &chars[start..word_end(chars, start)];
-    let Some(equals) = word.iter().position(|&c| c == '=') else {
-        return false;
-    };
-    let name = &word[..equals];
-    name.first().is_some_and(|c| c.is_alphabetic() || *c == '_')
-        && name
-            .iter()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        && word.get(equals + 1).is_some_and(|&c| c != '=')
-}
-
-/// End of a quoted value starting at `start` (`None` when it is not quoted).
-/// The quote may be JSON-escaped at any depth (`\"x\"`, `\\\"x\\\"`); then only
-/// a run of exactly the opening backslashes plus the quote closes it, longer
-/// runs are escaped quotes of the inner text. In a plain quote a backslash
-/// escapes the next character.
-fn quoted_end(chars: &[char], start: usize) -> Option<usize> {
-    let prefix = chars[start..]
-        .iter()
-        .take(2)
-        .take_while(|&&c| STRING_PREFIXES.contains(&c))
-        .count();
-    let open = start + prefix;
-    let slashes = chars[open..].iter().take_while(|&&c| c == '\\').count();
-    let quote = match chars.get(open + slashes) {
-        Some(&quote @ ('"' | '\'')) => quote,
-        _ => return None,
-    };
-    let mut index = open + slashes + 1;
-    while index < chars.len() {
-        let character = chars[index];
-        if slashes == 0 {
-            match character {
-                '\\' => index += 2,
-                c if c == quote => return Some(index + 1),
-                _ => index += 1,
-            }
-        } else if character == '\\' {
-            let run = chars[index..].iter().take_while(|&&c| c == '\\').count();
-            let after = index + run;
-            if chars.get(after) == Some(&quote) {
-                if run == slashes {
-                    return Some(after + 1);
-                }
-                index = after + 1;
-            } else {
-                index = after;
-            }
-        } else {
-            index += 1;
-        }
-    }
-    Some(chars.len())
-}
-
-/// Quote state of a left-to-right scan: `"..."`, `'...'` and their
-/// JSON-escaped forms (`\"..\"`), told apart by quote and backslash count. A
-/// plain string closes on a quote after an even run of backslashes (`"C:\\"`);
-/// an escaped one only on exactly the opening run, longer runs are the
-/// escaped quotes of the inner text.
-#[derive(Default)]
-struct StringScan(Option<(char, usize)>);
-
-impl StringScan {
-    fn in_string(&self) -> bool {
-        self.0.is_some()
-    }
-
-    /// Consumes the unit at `index` (a quote with its backslash run, or one
-    /// character) and returns the index after it.
-    fn step(&mut self, chars: &[char], index: usize) -> usize {
-        if !matches!(chars[index], '\\' | '"' | '\'') {
-            return index + 1;
-        }
-        let run = chars[index..].iter().take_while(|&&c| c == '\\').count();
-        let after = index + run;
-        let Some(&quote @ ('"' | '\'')) = chars.get(after) else {
-            return after.max(index + 1);
-        };
-        match self.0 {
-            None => self.0 = Some((quote, run)),
-            Some((open, 0)) if open == quote => {
-                if run % 2 == 0 {
-                    self.0 = None;
-                }
-            }
-            Some(open) if open == (quote, run) => self.0 = None,
-            Some(_) => {}
-        }
-        after + 1
-    }
-}
-
-/// End of the balanced `{...}` / `[...]` / `(...)` starting at `start`,
-/// brackets inside strings ignored; the end of the text when unbalanced.
-fn bracket_end(chars: &[char], start: usize) -> usize {
-    let (mut depth, mut strings, mut index) = (0usize, StringScan::default(), start);
-    while index < chars.len() {
-        let character = chars[index];
-        let outside_string = !strings.in_string();
-        index = strings.step(chars, index);
-        match character {
-            '{' | '[' | '(' if outside_string => depth += 1,
-            '}' | ']' | ')' if outside_string => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return index;
-                }
-            }
-            _ => {}
-        }
-    }
-    chars.len()
-}
-
-/// End of the value starting at `start`: a quoted value, else the end of the
-/// word, extended over the credential (and, after `authorization`, its
-/// parameters, quoted values with blanks included) that follows an
-/// authentication scheme.
-fn value_end(chars: &[char], start: usize, any_scheme: bool) -> usize {
-    // A bracketed value, or a call such as `Some("a b")` / `Token(..)`.
-    let call = chars[start..]
-        .iter()
-        .take_while(|&&c| c.is_alphanumeric() || c == '_')
-        .count();
-    if matches!(chars.get(start + call), Some('{' | '[' | '(')) {
-        return bracket_end(chars, start + call);
-    }
-    if let Some(end) = quoted_end(chars, start) {
-        return end;
-    }
-    let first_end = word_end(chars, start);
-    let word: String = chars[start..first_end]
-        .iter()
-        .collect::<String>()
-        .to_lowercase();
-    let is_scheme = AUTH_SCHEMES.contains(&word.as_str()) || (any_scheme && !word.is_empty());
-    if !is_scheme {
-        return first_end;
-    }
-    let credential = first_end + chars[first_end..].iter().take_while(|&&c| c == ' ').count();
-    let mut end = quoted_end(chars, credential).unwrap_or_else(|| word_end(chars, credential));
-    if credential == first_end || end == credential {
-        return first_end;
-    }
-    if any_scheme {
-        // `AWS4-HMAC-SHA256 Credential=a, SignedHeaders=b, Signature=c` and
-        // `Digest realm="my realm", response="c"`: keep taking `name=value`
-        // words, and every word while a quote is open.
-        let mut open = has_odd_quotes(&chars[credential..end]);
-        loop {
-            let next = end + chars[end..].iter().take_while(|&&c| c == ' ').count();
-            let next_end = word_end(chars, next);
-            let word = &chars[next..next_end];
-            if next == end || word.is_empty() || !(open || word.contains(&'=')) {
-                break;
-            }
-            open ^= has_odd_quotes(word);
-            end = next_end;
-        }
-    }
-    end
-}
-
-fn has_odd_quotes(chars: &[char]) -> bool {
-    chars.iter().filter(|&&c| c == '"').count() % 2 == 1
-}
-
-fn word_end(chars: &[char], start: usize) -> usize {
-    chars[start..]
-        .iter()
-        .position(|c| c.is_whitespace())
-        .map_or(chars.len(), |offset| start + offset)
-}
 
 /// Joiners and variation selectors that sit after a non-ASCII character are
 /// kept: emoji sequences and Persian or Indic text need them. Secret names are
@@ -3696,12 +3471,11 @@ mod candidate_detail_critic {
     }
 
     #[test]
-    fn json_escaped_inside_a_string_is_masked_with_its_structure_kept() {
-        // catches: `\"token\":\"x\"` inside a JSON string leaking, or the mask eating the
-        // text after the escaped value.
+    fn json_escaped_inside_a_string_masks_the_remaining_line() {
+        // catches: escaped JSON credentials or suffixes leaking past a guessed closing quote.
         assert_eq!(
             detail(r#"body {\"token\":\"LEAK\"} rejected"#),
-            r#"body {\"token\":***} rejected"#
+            r#"body {\"token\":***"#
         );
     }
 
@@ -3710,7 +3484,7 @@ mod candidate_detail_critic {
         // catches: the parameter loop stopping inside `realm="my realm"`, leaking `response=`.
         assert_eq!(
             detail(r#"Authorization: Digest username="u", realm="my realm", response="LEAK" end"#),
-            "Authorization: *** end"
+            "Authorization: ***"
         );
     }
 
@@ -3727,7 +3501,7 @@ mod candidate_detail_critic {
             '\u{0600}',
             '\u{115f}',
         ] {
-            assert_eq!(detail(&format!("to{mark}ken=LEAK done")), "token=*** done");
+            assert_eq!(detail(&format!("to{mark}ken=LEAK done")), "token=***");
         }
     }
 
@@ -3737,7 +3511,7 @@ mod candidate_detail_critic {
         assert_eq!(detail("params[token]=LEAK&a=1"), "params[token]=***");
         assert_eq!(
             detail(r#"header ("x-api-key", "LEAK") rejected"#),
-            r#"header ("x-api-key", ***) rejected"#
+            r#"header ("x-api-key", ***"#
         );
     }
 
@@ -3746,7 +3520,7 @@ mod candidate_detail_critic {
         // catches: the credential ending at its first blank and leaking the second word.
         assert_eq!(
             detail(r#"Authorization: Bearer "abc LEAK" rejected"#),
-            "Authorization: *** rejected"
+            "Authorization: ***"
         );
     }
 
@@ -3764,12 +3538,14 @@ mod candidate_detail_critic {
     }
 
     #[test]
-    fn empty_value_masks_nothing_after_the_blank_but_a_spaced_value_is_masked() {
-        // catches: `key= mode=fast` masking the unrelated next pair; and, in the other
-        // direction, the pair check hiding `token: YWJjZA==` (base64 padding is no pair).
-        assert_eq!(detail("empty key= mode=fast"), "empty key= mode=fast");
-        assert_eq!(detail("token: YWJjZA== end"), "token: *** end");
-        assert_eq!(detail("api_key = LEAK end"), "api_key = *** end");
+    fn a_blank_after_a_sensitive_key_never_preserves_the_next_pair() {
+        // catches: guessing an empty value at a blank and publishing the remaining line.
+        assert_eq!(detail("empty key= mode=fast"), "empty key= ***");
+        assert_eq!(detail("token: YWJjZA== end"), "token: ***");
+        assert_eq!(detail("api_key = LEAK end"), "api_key = ***");
+        // catches: treating whitespace or a later original line as a safe end of the secret.
+        assert_eq!(detail("password=first SECOND mode=fast"), "password=***");
+        assert_eq!(detail("token=first\nSECOND mode=fast"), "token=***");
     }
 
     #[test]
@@ -3788,11 +3564,11 @@ mod candidate_detail_critic {
         // catches: `{"name":"x-api-key","value":"v"}` and `Header { name, value }` leaking.
         assert_eq!(
             detail(r#"{"name":"x-api-key","value":"LEAK","k":1}"#),
-            r#"{"name":"x-api-key","value":***,"k":1}"#
+            r#"{"name":***"#
         );
         assert_eq!(
             detail(r#"Header { name: "x-api-key", value: "LEAK" }"#),
-            r#"Header { name: "x-api-key", value: *** }"#
+            r#"Header { name: ***"#
         );
         assert_eq!(
             detail(r#"{"name":"content-type","value":"json"}"#),
@@ -3801,15 +3577,15 @@ mod candidate_detail_critic {
     }
 
     #[test]
-    fn escaped_json_of_any_depth_masks_the_value_and_keeps_the_tail() {
+    fn escaped_json_of_any_depth_masks_the_remaining_line() {
         // catches: one-level-only `\"` handling and an embedded `\\\"` ending the value.
         assert_eq!(
             detail(r#"o {\\\"token\\\":\\\"LEAK\\\"} end"#),
-            r#"o {\\\"token\\\":***} end"#
+            r#"o {\\\"token\\\":***"#
         );
         assert_eq!(
             detail(r#"o {\"password\":\"pa\\\"LEAK\"} end"#),
-            r#"o {\"password\":***} end"#
+            r#"o {\"password\":***"#
         );
     }
 
@@ -3818,22 +3594,16 @@ mod candidate_detail_critic {
         // catches: only the opening brace being masked.
         assert_eq!(
             detail(r#"{ "password": { "value": "LEAK", "b": ["x"] } } ok"#),
-            r#"{ "password": *** } ok"#
+            r#"{ "password": ***"#
         );
-        assert_eq!(detail(r#"token=["a","}"] ok"#), "token=*** ok");
+        assert_eq!(detail(r#"token=["a","}"] ok"#), "token=***");
     }
 
     #[test]
-    fn call_wrapped_secret_values_are_masked_to_the_balanced_close() {
+    fn call_wrapped_secret_values_mask_the_remaining_line() {
         // catches: `token: Some("a LEAK")` masking only `Some("a` and publishing the rest.
-        assert_eq!(
-            detail(r#"token: Some("a LEAK") rejected"#),
-            "token: *** rejected"
-        );
-        assert_eq!(
-            detail(r#"password=Secret(("x", ")")) end"#),
-            "password=*** end"
-        );
+        assert_eq!(detail(r#"token: Some("a LEAK") rejected"#), "token: ***");
+        assert_eq!(detail(r#"password=Secret(("x", ")")) end"#), "password=***");
     }
 }
 
@@ -3959,7 +3729,7 @@ mod secret_mask_critic {
     fn base64_padding_in_value_is_fully_masked() {
         // catches: inner `=` padding restarts parsing and leaves part of the value visible.
         let out = detail("token=YWJjZA== done");
-        assert_eq!(out, "token=*** done");
+        assert_eq!(out, "token=***");
     }
 
     #[test]
@@ -4136,9 +3906,9 @@ mod secret_mask_critic_round_three {
     }
 
     #[test]
-    fn empty_value_does_not_mask_the_next_pair() {
-        // catches: `key= mode=fast` skips the blank and masks the unrelated next word.
-        assert_eq!(detail("empty key= mode=fast"), "empty key= mode=fast");
+    fn an_apparently_empty_value_masks_the_next_pair() {
+        // catches: treating the next pair as public after a sensitive key and a blank.
+        assert_eq!(detail("empty key= mode=fast"), "empty key= ***");
     }
 
     #[test]
@@ -4331,11 +4101,6 @@ mod secret_mask_critic_round_five {
         );
     }
 
-    fn assert_kept(cause: &str, kept: &str) {
-        let out = detail(cause);
-        assert!(out.contains(kept), "{cause:?} lost {kept:?}: {out:?}");
-    }
-
     #[test]
     fn long_inputs_are_masked_in_linear_time() {
         // catches: `name:` followed by an unclosed or nested bracket makes `names_secret` rescan
@@ -4411,21 +4176,19 @@ mod secret_mask_critic_round_five {
     }
 
     #[test]
-    fn name_value_record_hides_the_value_and_keeps_other_records() {
-        // catches: the record rule masking every `value` (or none) instead of the one that
-        // follows a secret-looking `name`.
+    fn name_value_record_hides_the_value_and_later_records() {
+        // catches: resuming publication of sibling records after a sensitive name.
         let cause = r#"[{"name":"token","value":"LEAKR1"},{"name":"mode","value":"fast"}]"#;
         assert_hidden(cause, "LEAKR1");
-        assert_kept(cause, r#""value":"fast""#);
+        assert_hidden(cause, r#""value":"fast""#);
         let escaped = r#"{\\\"name\\\":\\\"x-api-key\\\",\\\"value\\\":\\\"LEAKR2\\\"}"#;
         assert_hidden(escaped, "LEAKR2");
     }
 
     #[test]
-    fn a_name_marker_does_not_outlive_its_record() {
-        // catches: `record_secret` staying set after `{"name":"token"}` (no `value` member), so
-        // the `value` of an unrelated later object is published as `***`.
-        assert_kept(
+    fn a_sensitive_name_masks_later_records_even_without_its_value() {
+        // catches: resuming publication after a sensitive declaration with no value member.
+        assert_hidden(
             r#"[{"name":"token","type":"string"},{"id":7,"value":"public"}]"#,
             "public",
         );
@@ -4476,7 +4239,7 @@ mod secret_mask_critic_round_five {
         // so it never sees `"x}y"` as a string and closes the value at the `}` inside it.
         let cause = r#"{\"token\":{\"a\":\"x}y\",\"b\":\"LEAKBR\"},\"user\":\"bob\"} done"#;
         assert_hidden(cause, "LEAKBR");
-        assert_kept(cause, "bob");
+        assert_hidden(cause, "bob");
     }
 
     #[test]
@@ -4485,13 +4248,12 @@ mod secret_mask_critic_round_five {
         // `{'token': {'a': 'x}y', 'b': 'X'}}` closes at the `}` inside the string.
         let cause = r#"{'token': {'a': 'x}y', 'b': 'LEAKSQ'}, 'user': 'bob'} done"#;
         assert_hidden(cause, "LEAKSQ");
-        assert_kept(cause, "bob");
+        assert_hidden(cause, "bob");
     }
 
     #[test]
-    fn balanced_nested_values_are_masked_whole_and_the_text_after_them_is_kept() {
-        // catches: masking only the first brace or word of a nested value, or swallowing the
-        // siblings that follow it.
+    fn nested_secret_values_and_the_text_after_them_are_masked() {
+        // catches: stopping the mask at a closing bracket and exposing later text.
         for cause in [
             r#"{"token":{"a":{"b":"LEAKN1"},"c":["LEAKN2","LEAKN3"]},"user":"bob"} done"#,
             r#"{"token":{"a":"x}y","b":"LEAKN4"},"user":"bob"} done"#,
@@ -4500,8 +4262,8 @@ mod secret_mask_critic_round_five {
             let out = detail(cause);
             assert!(!out.contains("LEAKN"), "{cause:?} leaked: {out:?}");
             assert!(
-                out.contains("bob") && out.ends_with("done"),
-                "{cause:?} lost its siblings: {out:?}"
+                !out.contains("bob") && !out.contains("done"),
+                "{cause:?} exposed its suffix: {out:?}"
             );
         }
         assert_hidden("token: {truncated LEAKN6", "LEAKN6");
@@ -4519,7 +4281,10 @@ mod secret_mask_critic_round_five {
         ] {
             let out = detail(cause);
             assert!(!out.contains("LEAK"), "{cause:?} leaked: {out:?}");
-            assert!(out.contains("bob"), "{cause:?} lost its sibling: {out:?}");
+            assert!(
+                !out.contains("bob"),
+                "{cause:?} exposed its suffix: {out:?}"
+            );
         }
     }
 
@@ -4603,7 +4368,10 @@ mod secret_mask_critic_round_six {
                 !out.contains(secret),
                 "{cause:?} leaked {secret:?}: {out:?}"
             );
-            assert!(out.ends_with("done"), "{cause:?} lost its tail: {out:?}");
+            assert!(
+                !out.contains("done"),
+                "{cause:?} exposed its suffix: {out:?}"
+            );
         }
     }
 
@@ -4634,12 +4402,11 @@ mod secret_mask_critic_round_six {
     }
 
     #[test]
-    fn a_nested_value_member_of_a_secret_record_is_kept_and_the_record_value_is_masked() {
-        // catches: the record marker masking the first `value` it meets at any depth, which
-        // would blank `schema.value` and leave the real `value` after it public.
+    fn a_sensitive_record_name_masks_nested_members_and_its_value() {
+        // catches: nested members distracting the mask from the record's real secret value.
         assert_eq!(
             detail(r#"{"name":"x-api-key","schema":{"value":"public"},"value":"LEAK"}"#),
-            r#"{"name":"x-api-key","schema":{"value":"public"},"value":***}"#
+            r#"{"name":***"#
         );
     }
 
