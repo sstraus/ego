@@ -45,11 +45,15 @@ pub(super) fn append(root: &Path, line: &[u8], max_bytes: u64) -> io::Result<()>
         // Retain the new segment, never reread or rewrite previous records.
         log.set_len(0)?;
     }
-    log.write_all(line)?;
-    log.write_all(b"\n")?;
+    write_record(&mut log, line)?;
     log.sync_all()?;
     directory.sync_all()?;
     Ok(())
+}
+
+fn write_record(log: &mut (impl Write + Seek), line: &[u8]) -> io::Result<()> {
+    log.write_all(line)?;
+    log.write_all(b"\n")
 }
 
 fn recover_tail(log: &mut File, len: u64) -> io::Result<()> {
@@ -260,4 +264,86 @@ fn open_directory(_path: &Path, _created: bool) -> io::Result<File> {
 #[cfg(not(any(unix, windows)))]
 fn open_child(_directory: &File, _root: &Path, _name: &str, _append: bool) -> io::Result<File> {
     Err(invalid())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    // Catches: interruption between separately submitted payload and newline
+    // causes recovery to discard an otherwise complete JSON record.
+    #[test]
+    fn split_newline_write_cannot_leave_a_complete_record_uncommitted() {
+        struct InterruptAfterWrite {
+            bytes: Cursor<Vec<u8>>,
+            writes: usize,
+        }
+        impl Write for InterruptAfterWrite {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.writes != 0 {
+                    return Err(io::Error::other("interrupted after first write"));
+                }
+                self.writes += 1;
+                self.bytes.write(bytes)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Seek for InterruptAfterWrite {
+            fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+                self.bytes.seek(position)
+            }
+        }
+        let mut writer = InterruptAfterWrite {
+            bytes: Cursor::new(Vec::new()),
+            writes: 0,
+        };
+        write_record(&mut writer, br#"{"cause":"complete"}"#).expect("one complete submission");
+        assert_eq!(writer.bytes.into_inner(), b"{\"cause\":\"complete\"}\n");
+    }
+
+    // Catches: a Windows file cursor left past EOF by truncation creating a
+    // NUL hole, or a recovery seek causing an earlier record to be overwritten.
+    #[test]
+    fn stale_cursor_after_truncation_cannot_create_a_nul_hole() {
+        let mut writer = Cursor::new(b"old segment".to_vec());
+        writer.set_position(11);
+        writer.get_mut().clear();
+        write_record(&mut writer, b"fresh").expect("append after truncate");
+        assert_eq!(writer.into_inner(), b"fresh\n");
+    }
+
+    // Catches: umask removing owner-write permission from a newly created
+    // private directory and making the first private append fail admission.
+    #[cfg(unix)]
+    #[test]
+    fn restrictive_umask_cannot_reject_a_new_private_directory() {
+        const CHILD: &str = "EGO_PRIVATE_LOG_UMASK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("umask 0277; exec \"$@\"")
+                .arg("sh")
+                .arg(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "store::private_log::tests::restrictive_umask_cannot_reject_a_new_private_directory",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .expect("isolated umask process");
+            assert!(status.success(), "first append under restrictive umask");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("private");
+        append(&root, b"fresh", 64).expect("first append under umask 0277");
+        assert_eq!(fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::read(root.join("errors.jsonl")).unwrap(), b"fresh\n");
+    }
 }
