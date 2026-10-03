@@ -637,6 +637,11 @@ never an unresolvable *permission* for them to resolve. Widening what ego may
 reach is `--sandbox`'s business, which is why that clause is listed beside
 `--yolo` rather than subsumed by it.
 
+A read, list or search the boundary refuses is the one exception to exit 3: it
+changed nothing, so the refusal is returned to the model as a failed tool
+result and the turn continues (regression case). Writes and spawns outside the
+workspace still end the run.
+
 ### 4.5 Parse and lifecycle contract (normative before release)
 
 The grammar ships with: a command × flag **applicability matrix** (no flag

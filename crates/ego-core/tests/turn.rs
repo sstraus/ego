@@ -3769,6 +3769,27 @@ mod turn {
         );
     }
 
+    /// Bug regression_case: a read outside the workspace ended the whole turn with
+    /// `PermissionRequired`, so the model never saw the refusal and an AI Chat
+    /// turn died on a file its instructions referenced. The refusal is a
+    /// failed tool result and the next generation answers.
+    #[test]
+    fn a_refused_read_outside_the_workspace_does_not_end_the_turn() {
+        let fx = Fixture::new(reading("/etc/passwd")).with_read_tool();
+        fx.fs.file("/etc/passwd", "root:x:0:0");
+
+        let (reason, _, state) = run(&fx, SessionState::default(), "read /etc/passwd");
+
+        assert_eq!(reason, ExitReason::Completed);
+        let call = state
+            .items
+            .values()
+            .find(|item| item.kind == ItemKind::ToolCall)
+            .expect("the call was logged");
+        assert_eq!(call.ok, Some(false));
+        assert!(tool_result_text(call).contains("outside the workspace"));
+    }
+
     /// Everything the log recorded about permissions, in order.
     fn permission_events(fx: &Fixture) -> Vec<EventKind> {
         fx.store
@@ -3894,7 +3915,7 @@ mod turn {
         fx.fs.file("/etc/passwd", "root:x:0:0");
 
         let (reason, _, _) = run(&fx, SessionState::default(), "read /etc/passwd");
-        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert_eq!(reason, ExitReason::Completed);
 
         let recorded = permission_events(&fx);
         let [EventKind::PermissionDecided { allowed, by, .. }] = recorded.as_slice() else {
