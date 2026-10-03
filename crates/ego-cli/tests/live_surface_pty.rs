@@ -5702,7 +5702,7 @@ fn exec_permission_is_a_compact_modal_and_the_detail_sits_behind_d() {
     assert!(modal.contains("Risk: unknown - "), "{modal}");
     assert!(modal.contains("[y] yes"), "{modal}");
     assert!(
-        modal.contains("[a] yes, do not ask again for exec(seq *)"),
+        modal.contains("[a] yes, do not ask again for exec(seq 1 3)"),
         "{modal}"
     );
     assert!(modal.contains("[n] no, say what to do instead"), "{modal}");
@@ -5729,7 +5729,7 @@ fn exec_permission_is_a_compact_modal_and_the_detail_sits_behind_d() {
         "Operations:",
         "- spawn",
         "Remembering would add:",
-        "exec(seq *)",
+        "exec(seq 1 3)",
         "widening for operation 0: omits Cwd",
         "Parameters:",
         "\"argv\"",
@@ -5785,7 +5785,7 @@ fn a_stores_the_prefix_rule_and_commits_one_plain_receipt_to_the_transcript() {
     let joined = screen.join("\n");
     assert!(
         screen.iter().any(|line| {
-            line.trim_end() == "Remembered: you will not be asked again for exec(seq *)."
+            line.trim_end() == "Remembered: you will not be asked again for exec(seq 1 3)."
         }),
         "the receipt is not a transcript row of its own:\n{joined}"
     );
@@ -5799,7 +5799,7 @@ fn a_stores_the_prefix_rule_and_commits_one_plain_receipt_to_the_transcript() {
     );
     let (_, config) = session.finish();
     assert!(
-        config.contains("exec(seq *)"),
+        config.contains("exec(seq 1 3)"),
         "the prefix rule was not stored:\n{config}"
     );
 }
