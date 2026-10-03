@@ -1968,8 +1968,18 @@ async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text(
     ] {
         causes.push(format!("{name}=LEAKCONFUSABLE end"));
     }
+    let mut cases: Vec<(String, String)> = causes
+        .into_iter()
+        .enumerate()
+        .map(|(index, cause)| (format!("base-{index:02}"), cause))
+        .collect();
+    cases.extend(legacy_masker_causes());
+    cases.push((
+        "retained:status_servers_are_canonicalized_by_name_across_mixed_outcomes".to_owned(),
+        "zeta-backend-secret=zeta-value".to_owned(),
+    ));
     let mut leaks = Vec::new();
-    for (index, cause) in causes.into_iter().enumerate() {
+    for (index, (case, cause)) in cases.into_iter().enumerate() {
         let admission = Arc::new(FakeAdmission {
             state: Arc::new(Mutex::new(AdmissionState::default())),
             gate: Arc::new(Mutex::new(None)),
@@ -1992,7 +2002,7 @@ async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text(
             || diagnostic.failure() != McpFailure::InvalidValue
         {
             // Report the corpus index, never echo the raw cause into test diagnostics.
-            leaks.push(index);
+            leaks.push((index, case));
         }
         for event in journal.events() {
             if let McpRegistryEvent::RefreshFailed { cause, .. } = event {
@@ -2041,4 +2051,1160 @@ async fn allowlisted_diagnostics_private_log_failure_stops_publication_without_e
             .iter()
             .all(|event| !matches!(event, McpRegistryEvent::SnapshotPublished { .. }))
     );
+}
+
+// Recorded adversarial input generators from the retired masker tests.
+// Only their backend strings survive; each now crosses the public allowlist
+// boundary. Algorithm-output expectations and timing assertions are removed.
+fn legacy_masker_causes() -> Vec<(String, String)> {
+    let mut causes = Vec::new();
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::candidate_detail_critic::multibyte_cause_is_cut_on_a_character_boundary_at_the_bound".to_owned(), value.to_owned()));
+        };
+        let cause = "😀".repeat(300);
+        capture((&cause).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::candidate_detail_critic::cause_at_the_bound_is_kept_whole_and_one_past_it_loses_one_character".to_owned(), value.to_owned()));
+        };
+        let exact = "x".repeat(256);
+        capture((&exact).as_ref());
+        let over = "x".repeat(256 + 1);
+        capture((&over).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::candidate_detail_critic::ascii_control_characters_never_reach_the_diagnostic".to_owned(), value.to_owned()));
+        };
+        capture(("bad\nforged: line\r\u{1b}[31mred\u{0}\u{7f}\u{85}end").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::candidate_detail_critic::unicode_line_breaks_and_bidi_overrides_never_reach_the_diagnostic".to_owned(), value.to_owned()));
+        };
+        capture(("a\u{2028}b\u{2029}c\u{202e}d\u{2066}e\u{200b}f").as_ref());
+        for forbidden in ['\u{2028}', '\u{2029}', '\u{202e}', '\u{2066}'] {}
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::candidate_detail_critic::empty_or_blank_cause_adds_no_dangling_separator".to_owned(), value.to_owned()));
+        };
+        for cause in ["", "   ", "\n\n\n", "\t\r\n"] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::candidate_detail_critic::leading_control_flood_does_not_consume_the_bound".to_owned(), value.to_owned()));
+        };
+        let cause = format!("{}resources/list missing envelope", "\n".repeat(300));
+        {
+            capture((&cause).as_ref());
+            capture((&cause).as_ref());
+        };
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::candidate_detail_critic::secret_values_are_masked_in_every_form"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        for (cause, _secret) in [
+            ("backend-secret=do-not-publish", "do-not-publish"),
+            ("bad api_key=abc123 retry", "abc123"),
+            ("TOKEN=Zz9 failed", "Zz9"),
+            ("GET /x?client_secret=s3&mode=1", "s3"),
+            (
+                "auth failed: Authorization: Bearer eyJhbGci.payload.sig",
+                "eyJhbGci",
+            ),
+            ("authorization: BEARER abc", "abc"),
+            ("key=\"two words\" end", "two words"),
+        ] {
+            capture((cause).as_ref());
+        }
+        capture(("backend-secret=do-not-publish").as_ref());
+        capture(("x?a=1&api_key=k&b=2").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::candidate_detail_critic::non_secret_detail_is_kept_verbatim"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("bearer token required").as_ref());
+        for cause in [
+            "duplicate tool identity",
+            "mode=fast retries=3",
+            "empty key=",
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::candidate_detail_critic::secret_straddling_the_cut_never_leaks_a_prefix".to_owned(), value.to_owned()));
+        };
+        let cause = format!("{} api_key=SUPERSECRETVALUE", "a".repeat(240));
+        capture((&cause).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::candidate_detail_critic::unterminated_private_key_header_masks_to_the_end".to_owned(), value.to_owned()));
+        };
+        capture(("bad -----BEGIN RSA PRIVATE KEY MIIEvLEAK").as_ref());
+        capture(("see -----BEGIN CERTIFICATE----- ok").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::candidate_detail_critic::joiners_after_non_ascii_text_are_kept_but_never_split_a_secret_name".to_owned(), value.to_owned()));
+        };
+        capture(("failed 👨\u{200d}👩 ok").as_ref());
+        capture(("می\u{200c}خواهد").as_ref());
+        capture(("❤\u{fe0f} ok").as_ref());
+        capture(("to\u{200d}ken=LEAK").as_ref());
+        capture(("é\u{200d}token=LEAK").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic::json_quoted_token_value_is_hidden".to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture((r#"bad body {"token":"abc123XYZ"}"#).as_ref());
+        capture((r#"bad body {"api_key": "abc123XYZ"}"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic::colon_header_style_secret_is_hidden"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("sent x-api-key: abc123XYZ failed").as_ref());
+        capture(("token: abc123XYZ rejected").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic::password_values_are_hidden".to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("login password=hunter2 failed").as_ref());
+        capture(("login passwd=hunter2 failed").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic::url_userinfo_password_is_hidden".to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("cannot reach https://svc:hunter2@host.example/mcp").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic::blanks_around_equals_do_not_defeat_the_mask"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("bad api_key = abc123XYZ end").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic::non_bearer_authorization_schemes_are_hidden"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("Authorization: Basic dXNlcjpwYXNz").as_ref());
+        capture(("Authorization: Token abc123XYZ").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic::authorization_without_blank_before_scheme_is_hidden".to_owned(), value.to_owned()));
+        };
+        capture(("Authorization:Bearer abc123XYZ").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic::json_quoted_authorization_bearer_is_hidden"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture((r#"headers {"Authorization": "Bearer abc123XYZ"}"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic::escaped_quote_inside_quoted_value_does_not_end_the_mask".to_owned(), value.to_owned()));
+        };
+        capture((r#"token="ab\"TAILSECRET" end"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic::scheme_word_after_equals_does_not_shield_the_credential".to_owned(), value.to_owned()));
+        };
+        capture(("token=Bearer abc123XYZ").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic::zero_width_char_inside_the_name_does_not_defeat_the_mask".to_owned(), value.to_owned()));
+        };
+        capture(("to\u{200b}ken=abc123XYZ").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic::pem_private_key_body_is_hidden".to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(
+            ("bad -----BEGIN PRIVATE KEY----- MIIEvQIBADANBgkq -----END PRIVATE KEY-----").as_ref(),
+        );
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic::semicolon_inside_secret_value_does_not_leak_the_tail".to_owned(), value.to_owned()));
+        };
+        capture(("token=ab;cdTAIL").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic::bearer_secret_straddling_the_cut_never_leaks_a_prefix".to_owned(), value.to_owned()));
+        };
+        let cause = format!(
+            "{} Authorization: Bearer SUPERSECRETVALUE",
+            "a ".repeat(120)
+        );
+        capture((&cause).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic::repeated_secrets_are_all_masked".to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("a api_key=ONE b token=TWO c Authorization: Bearer THREE").as_ref());
+        for s in ["ONE", "TWO", "THREE"] {}
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_two::delimiter_characters_inside_an_unquoted_secret_do_not_leak_the_tail".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "token=ab,cdTAIL",
+            "token=ab&cdTAIL",
+            "token=ab)cdTAIL",
+            "token=ab}cdTAIL",
+            "token=ab]cdTAIL",
+            "Authorization: Bearer ab,cdTAIL",
+            "password=p@ss)cdTAIL",
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic_round_two::pgp_private_key_block_is_hidden"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("bad -----BEGIN PGP PRIVATE KEY BLOCK----- lQOYBGBODYSECRET -----END PGP PRIVATE KEY BLOCK-----").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_two::url_userinfo_without_password_is_hidden".to_owned(), value.to_owned()));
+        };
+        capture(("clone https://ghp_ABCDEF123456@github.com/x failed").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_two::bidi_mark_or_nul_inside_the_name_does_not_defeat_the_mask".to_owned(), value.to_owned()));
+        };
+        capture(("to\u{200e}ken=abc123XYZ").as_ref());
+        capture(("tok\u{0}en=abc123XYZ").as_ref());
+        capture(("to\u{2063}ken=abc123XYZ").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_two::sigv4_authorization_header_is_hidden".to_owned(), value.to_owned()));
+        };
+        capture(("Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20260101/x, Signature=deadbeef0123").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_two::colon_after_a_key_word_in_prose_is_masked_by_design".to_owned(), value.to_owned()));
+        };
+        capture(("duplicate key: command").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic_round_two::hostile_long_input_stays_bounded"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        for unit in [
+            "-----BEGIN ",
+            "a://",
+            "key:",
+            "token=\"\\",
+            "k=",
+            "authorization: a ",
+        ] {
+            capture((&unit.repeat(40_000)).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_three::json_encoded_inside_a_string_still_hides_the_value".to_owned(), value.to_owned()));
+        };
+        capture((r#"body {\"token\":\"LEAKESC\"} rejected"#).as_ref());
+        capture((r#"body {\"api_key\": \"LEAKESC\"}"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_three::digest_params_with_spaces_inside_quotes_do_not_leak_later_params".to_owned(), value.to_owned()));
+        };
+        capture(
+            (r#"Authorization: Digest username="u", realm="my realm", response="LEAKRESP""#)
+                .as_ref(),
+        );
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_three::invisible_marks_missing_from_the_drop_list_do_not_split_the_name".to_owned(), value.to_owned()));
+        };
+        for mark in ['\u{034f}', '\u{fe0f}', '\u{e0041}', '\u{180e}', '\u{3164}'] {
+            let cause = format!("to{mark}ken=LEAKINV done");
+            capture((&cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_three::bracketed_and_tuple_forms_are_hidden".to_owned(), value.to_owned()));
+        };
+        capture(("params[token]=LEAKBR&a=1").as_ref());
+        capture((r#"header ("x-api-key", "LEAKTUP") rejected"#).as_ref());
+        capture((r#"Header("authorization", "Bearer LEAKTUP")"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_three::quoted_bearer_credential_with_a_space_does_not_leak_its_tail".to_owned(), value.to_owned()));
+        };
+        capture((r#"Authorization: Bearer "abc LEAKSP" rejected"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_three::unterminated_private_key_header_does_not_publish_the_body".to_owned(), value.to_owned()));
+        };
+        capture(("-----BEGIN PRIVATE KEY MIIEvQIBADANBgkqLEAKBODY").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_three::urls_without_userinfo_are_kept_verbatim".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "GET http://localhost:8080/mcp failed",
+            "see https://example.com/a@b now",
+            "see https://example.com?x=a@b now",
+            "connect tcp://127.0.0.1:9 refused",
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_four::json_error_bodies_whose_message_ends_in_a_secret_word_are_kept".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            r#"{"error":"invalid token","code":401}"#,
+            r#"{"message":"missing api key","code":400}"#,
+            r#"{"field":"api_key","message":"required"}"#,
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_four::string_lists_that_name_a_secret_word_are_kept".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            r#"missing properties ["key", "name"]"#,
+            r#"allowed headers ["authorization", "content-type"]"#,
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_four::name_value_header_records_hide_the_value".to_owned(), value.to_owned()));
+        };
+        capture((r#"{"name":"x-api-key","value":"LEAKREC"}"#).as_ref());
+        capture((r#"Header { name: "x-api-key", value: "LEAKREC" }"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_four::json_escaped_twice_hides_the_value".to_owned(), value.to_owned()));
+        };
+        capture((r#"outer {\\\"token\\\":\\\"LEAKDEEP\\\"} rejected"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_four::escaped_quote_inside_an_escaped_value_does_not_end_it".to_owned(), value.to_owned()));
+        };
+        capture((r#"body {\"password\":\"pa\\\"LEAKTAIL\"} rejected"#).as_ref());
+        capture(
+            (r#"{\"authorization\":\"Digest username=\\\"u\\\", response=\\\"LEAKDIG\\\"\"}"#)
+                .as_ref(),
+        );
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_four::pretty_printed_object_under_a_secret_name_is_hidden".to_owned(), value.to_owned()));
+        };
+        capture((r#"{ "password": { "value": "LEAKNEST" } }"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_four::invisible_table_range_boundaries_are_all_dropped".to_owned(), value.to_owned()));
+        };
+        for mark in [
+            '\u{00ad}',
+            '\u{0605}',
+            '\u{06dd}',
+            '\u{070f}',
+            '\u{0891}',
+            '\u{08e2}',
+            '\u{1160}',
+            '\u{17b4}',
+            '\u{180b}',
+            '\u{180f}',
+            '\u{200b}',
+            '\u{200f}',
+            '\u{202a}',
+            '\u{202e}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{2066}',
+            '\u{206f}',
+            '\u{fe00}',
+            '\u{feff}',
+            '\u{ffa0}',
+            '\u{fff9}',
+            '\u{fffb}',
+            '\u{110bd}',
+            '\u{110cd}',
+            '\u{13430}',
+            '\u{1343f}',
+            '\u{1bca0}',
+            '\u{1bca3}',
+            '\u{1d173}',
+            '\u{1d17a}',
+            '\u{e0001}',
+            '\u{e0100}',
+            '\u{e01ef}',
+        ] {
+            let cause = format!("to{mark}ken=LEAKMARK done");
+            capture((&cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_four::private_key_headers_cut_at_every_point_hide_the_body".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "-----BEGIN PRIVATE KEY",
+            "-----BEGIN PRIVATE KEY--",
+            "-----BEGIN PRIVATE KEY-----",
+            "-----BEGIN PRIVATE KEY----- LEAKPEM",
+            "x -----BEGIN OPENSSH PRIVATE KEY----- LEAKPEM -----END",
+        ] {
+            capture((cause).as_ref());
+            {
+                capture((cause).as_ref());
+                capture((cause).as_ref());
+            };
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_four::separator_followed_only_by_blanks_masks_nothing_and_does_not_panic".to_owned(), value.to_owned()));
+        };
+        capture(("key= ").as_ref());
+        capture(("token: ").as_ref());
+        capture(("key= ").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_five::long_inputs_are_masked_in_linear_time".to_owned(), value.to_owned()));
+        };
+        let cases = [
+            ("unclosed objects", "name:{".repeat(10_000)),
+            ("unclosed arrays", "name:[".repeat(10_000)),
+            (
+                "nested objects",
+                format!("{}1{}", r#"{"name":"#.repeat(12_000), "}".repeat(12_000)),
+            ),
+            ("blank key pairs", "key= ".repeat(50_000)),
+            (
+                "authorization chain",
+                "authorization: Bearer ".repeat(20_000),
+            ),
+            ("tuple heads", r#"("token", "#.repeat(20_000)),
+        ];
+        for (_label, cause) in cases {
+            capture((&cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_five::every_prefix_and_suffix_of_a_dense_sample_is_masked_without_panicking".to_owned(), value.to_owned()));
+        };
+        let sample = format!(
+            "\u{e9}\u{200d}{}",
+            r#"{\"name\":\"x-api-key\",\"value\":\\\"a\\\\\"b\",\"token\":{\"a\":[\"b\"]},("key", 'v')} Authorization: Digest a="b c", d=\"e\" name: token value: [x {y 'z \\\\"#
+        );
+        let cuts = sample
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(sample.len()));
+        for cut in cuts {
+            capture((&sample[..cut]).as_ref());
+            capture((&sample[cut..]).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_five::name_value_record_with_an_auth_scheme_word_as_name_hides_the_value".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "param name=token value=LEAKREC",
+            "param name: token value: LEAKREC",
+            "param name=bearer value=LEAKREC",
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_five::key_value_records_hide_the_value_member".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            r#"{"key":"API_TOKEN","value":"LEAKKV"}"#,
+            r#"{"Key":"db_password","Value":"LEAKKV"}"#,
+            r#"[{"Key":"Environment","Value":"prod"},{"Key":"api_key","Value":"LEAKKV"}]"#,
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_five::pretty_printed_debug_tuples_hide_the_value".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "(\n    \"x-api-key\",\n    \"LEAKPT\",\n)",
+            "Header(\n    \"authorization\",\n    \"Bearer LEAKPT\",\n)",
+            "[\n    (\n        \"x-api-key\",\n        \"LEAKPT\",\n    ),\n]",
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_five::python_bytes_tuples_hide_the_value".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            r#"[(b'x-api-key', b'LEAKBT')]"#,
+            r#"[(b'authorization', b'Bearer LEAKBT')]"#,
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:registry::secret_mask_critic_round_five::debug_tuples_hide_the_value"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        for cause in [
+            r#"Some(("x-api-key", "LEAKT"))"#,
+            r#"[("accept", "*/*"), ("x-api-key", "LEAKT")]"#,
+            r#"(\"x-api-key\", \"LEAKT\")"#,
+            r#"[('Authorization', 'Bearer LEAKT')]"#,
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_five::ordinary_pairs_and_records_without_a_secret_name_are_kept".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "duplicate tool identity: search",
+            "mode=fast retries=3",
+            r#"{"name":"mode","value":"fast"}"#,
+            r#"{"name":"theme","value":"dark","extra":{"value":1}}"#,
+            "name: web value: 42",
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_six::record_marker_survives_brackets_inside_unmasked_strings".to_owned(), value.to_owned()));
+        };
+        for (cause, _secret) in [
+            (
+                r#"{"name":"x-api-key","hint":"(","value":"LEAKH1"}"#,
+                "LEAKH1",
+            ),
+            (
+                r#"{"name":"authorization","note":"see )","value":"Bearer LEAKH2"}"#,
+                "LEAKH2",
+            ),
+            (
+                r#"Header { name: "x-api-key", hint: "}", value: "LEAKH3" }"#,
+                "LEAKH3",
+            ),
+            (
+                r#"{"name":"x-api-key","hint":":)","value":"LEAKH4"}"#,
+                "LEAKH4",
+            ),
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_six::prefixed_secret_name_arms_the_value_member".to_owned(), value.to_owned()));
+        };
+        for (cause, _secret) in [
+            (r#"{'name': b'x-api-key', 'value': b'LEAKP1'}"#, "LEAKP1"),
+            (r#"{'name': u'x-api-key', 'value': u'LEAKP2'}"#, "LEAKP2"),
+            (r#"Header(name=b'x-api-key', value=b'LEAKP3')"#, "LEAKP3"),
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_six::two_letter_prefixes_and_a_blank_before_the_prefix_still_open_a_tuple".to_owned(), value.to_owned()));
+        };
+        for (cause, _secret) in [
+            (r#"[(rb'x-api-key', rb'LEAKT1')]"#, "LEAKT1"),
+            (r#"[(Rb"authorization", Rb"Bearer LEAKT2")]"#, "LEAKT2"),
+            (r#"[( b'x-api-key', b'LEAKT3' )]"#, "LEAKT3"),
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_six::every_new_rule_is_linear_on_100k_adversarial_chars".to_owned(), value.to_owned()));
+        };
+        let n = 100_000;
+        let cases = [
+            (
+                "name then backslash run",
+                format!("name:{}", "\\".repeat(n)),
+            ),
+            (
+                "key separators each followed by a backslash",
+                "key:\\".repeat(n / 5),
+            ),
+            (
+                "plain quote around backslash pairs",
+                format!("password=\"{}\"", "\\\\".repeat(n / 2)),
+            ),
+            (
+                "escaped quote runs never closed",
+                format!("password=\\\"{}", "\\\\\\\"".repeat(n / 4)),
+            ),
+            (
+                "records armed and consumed",
+                r#"{"name":"token","value":1}"#.repeat(n / 26),
+            ),
+            (
+                "records armed and never closed",
+                r#"{"name":"token","#.repeat(n / 16),
+            ),
+            ("unquoted records", "name=token value=".repeat(n / 17)),
+            ("spaced prefixed tuple heads", "( b'a', ".repeat(n / 8)),
+            ("prefixed secret tuple heads", "(b'token', ".repeat(n / 11)),
+            (
+                "long prefixed name before a comma",
+                format!("(b'{}', x", "a".repeat(n)),
+            ),
+            (
+                "bracket value with escaped quote runs",
+                format!("token=[{}", "\\\"".repeat(n / 2)),
+            ),
+            (
+                "bracket value with both quote kinds",
+                format!("token=[{}", "\"'".repeat(n / 2)),
+            ),
+            (
+                "bracket value with backslash runs in a string",
+                format!("token=[\"{}\"]", "\\\\".repeat(n / 2)),
+            ),
+            ("string prefixes", "password=bb'".repeat(n / 12)),
+            ("nested secret brackets", "token=[".repeat(n / 7)),
+        ];
+        for (_label, cause) in cases {
+            capture((&cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_seven::text_glued_to_the_closing_paren_of_a_secret_is_hidden".to_owned(), value.to_owned()));
+        };
+        capture(("password=Pass(word)LEAKA end").as_ref());
+        capture(("pwd=(abc)LEAKB end").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_seven::struct_literal_wrapped_secret_values_are_hidden".to_owned(), value.to_owned()));
+        };
+        capture((r#"config token: Wrapper { inner: "LEAKC" } rejected"#).as_ref());
+        capture((r#"password=Mutex { data: "LEAKD", poisoned: false, .. } end"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_seven::record_marker_survives_a_masked_closing_quote_before_it".to_owned(), value.to_owned()));
+        };
+        capture(
+            (r#"{ "msg": "bad token=abc", "name": "x-api-key", "note": "}", "value": "LEAKE" }"#)
+                .as_ref(),
+        );
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_seven::record_marker_survives_a_masked_closing_bracket_between_name_and_value".to_owned(), value.to_owned()));
+        };
+        capture(
+            (r#"Header { name: "x-api-key", meta: Meta(token=abc), value: "LEAKF" }"#).as_ref(),
+        );
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_seven::call_wrapped_record_name_arms_the_value_member".to_owned(), value.to_owned()));
+        };
+        capture((r#"Header { name: Some("x-api-key"), value: Some("LEAKG") }"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_seven::round_seven_adversarial_input_stays_linear".to_owned(), value.to_owned()));
+        };
+        let n = 100_000;
+        let cases = [
+            ("empty calls", "token=Some() ".repeat(n / 13)),
+            ("open calls", "token=Some(".repeat(n / 11)),
+            ("call words", "token=aaaaaaaa ".repeat(n / 15)),
+            ("escaped runs", format!("token=[\"{}\"]", "\\".repeat(n))),
+            ("even runs", "token=[\"a\\\\\" ".repeat(n / 12)),
+            ("armed records", r#"name: b"x-api-key" "#.repeat(n / 19)),
+            ("struct bodies", "token: W { ".repeat(n / 11)),
+        ];
+        for (_label, cause) in cases {
+            capture((&cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_nine::a_joiner_after_a_foreign_letter_never_splits_a_secret_name".to_owned(), value.to_owned()));
+        };
+        for joiner in ['\u{200d}', '\u{200c}', '\u{fe0f}'] {
+            capture((&format!("tok\u{0435}{joiner}n=LEAKJ1 end")).as_ref());
+            capture((&format!("pas\u{0455}{joiner}word: LEAKJ2")).as_ref());
+            capture(
+                (&format!("{{\"name\":\"x-api-k\u{0435}{joiner}y\",\"value\":\"LEAKJ3\"}}"))
+                    .as_ref(),
+            );
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_nine::non_composing_combining_marks_never_split_a_secret_name".to_owned(), value.to_owned()));
+        };
+        for mark in ['\u{20dd}', '\u{0338}', '\u{0489}'] {
+            capture((&format!("to{mark}ken=LEAKM1 end")).as_ref());
+            capture((&format!("pass{mark}word: LEAKM2 end")).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_nine::confusable_letters_of_every_suffix_are_folded".to_owned(), value.to_owned()));
+        };
+        for (name, secret) in [
+            ("\u{0422}oken", "LEAKC1"),
+            ("t\u{043e}ken", "LEAKC2"),
+            ("tok\u{0435}n", "LEAKC3"),
+            ("p\u{0430}ssword", "LEAKC4"),
+            ("\u{0455}ecret", "LEAKC5"),
+            ("passw\u{043e}r\u{0501}", "LEAKC6"),
+            ("ke\u{0443}", "LEAKC7"),
+            ("\u{041a}ey", "LEAKC8"),
+            ("pass\u{051d}d", "LEAKC9"),
+            ("author\u{0456}zat\u{0456}on", "LEAKC10"),
+            ("author\u{0406}zat\u{0406}on", "LEAKC11"),
+            ("author\u{0130}zat\u{0130}on", "LEAKC12"),
+            ("author\u{0131}zat\u{0131}on", "LEAKC13"),
+        ] {
+            capture((&format!("{name}={secret} end")).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_nine::a_pair_in_a_plain_list_hides_its_value".to_owned(), value.to_owned()));
+        };
+        capture((r#"headers: [["x-api-key","LEAKL1"]] rejected"#).as_ref());
+        capture(("headers [['Authorization', 'Basic LEAKL2']]").as_ref());
+        capture((r#"["token", "LEAKL3"]"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_nine::a_record_whose_name_field_is_prefixed_hides_the_line".to_owned(), value.to_owned()));
+        };
+        capture((r#"{"header_name":"x-api-key","header_value":"LEAKN1"}"#).as_ref());
+        capture((r#"{"headerName":"authorization","headerValue":"LEAKN2"}"#).as_ref());
+        capture(("header.name=x-api-key header.value=LEAKN3").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_nine::a_command_line_flag_hides_its_blank_separated_value".to_owned(), value.to_owned()));
+        };
+        capture(("spawn failed: mcp-server --api-key LEAKF1 --port 7").as_ref());
+        capture(("exec: tool --password LEAKF2").as_ref());
+        capture(("exec: tool --token LEAKF3").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_nine::url_userinfo_with_a_slash_query_or_hash_in_the_password_is_masked".to_owned(), value.to_owned()));
+        };
+        capture(("connect postgres://user:LEAKU1/x@db/app failed").as_ref());
+        capture(("connect postgres://user:LEAKU2?x@db/app failed").as_ref());
+        capture(("connect postgres://user:LEAKU3#x@db/app failed").as_ref());
+        capture(("connect postgres://user:a@LEAKU4/b@db/app failed").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_nine::a_scheme_word_followed_by_a_separator_hides_its_value".to_owned(), value.to_owned()));
+        };
+        capture(("auth Bearer: LEAKB1").as_ref());
+        capture(("auth bearer=LEAKB2").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:registry::secret_mask_critic_round_nine::a_bracketed_or_parenthesised_name_hides_its_value".to_owned(), value.to_owned()));
+        };
+        capture(("cfg[[token]]=LEAKP1").as_ref());
+        capture(("cfg (token)=LEAKP2").as_ref());
+        capture(("cfg <token>: LEAKP3").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:secret_mask_critic_round_eight::multiline_secret_values_do_not_resume_publication".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "token:\nLEAKMULTI",
+            "password=<<EOF\nLEAKMULTI\nEOF\nmode=fast",
+            "client_secret=first\\\nLEAKMULTI",
+            "{\"token\": {\n\"value\":\"LEAKMULTI\"\n}}",
+            "token=-----BEGIN PRIVATE KEY-----\nLEAKMULTI\n-----END PRIVATE KEY-----",
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:secret_mask_critic_round_eight::prefixed_sensitive_names_mask_the_entire_suffix".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "X-ApI-KeY=first LEAKPREFIX",
+            "AWS_SECRET_ACCESS_KEY: first LEAKPREFIX",
+            "api key = first LEAKPREFIX",
+            "client.secret=first LEAKPREFIX",
+            "DATABASE_URL=postgresql://alice:LEAKPREFIX@db/app",
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:secret_mask_critic_round_eight::comma_bearing_sensitive_name_wrappers_do_not_disarm_the_mask".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            r#"Header { name: Qualified("tenant", "x-api-key"), value: "LEAKWRAP" }"#,
+            r#"{"name":["scope","token"],"value":"LEAKWRAP"}"#,
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:secret_mask_critic_round_eight::quoted_bracket_sensitive_keys_do_not_publish_the_value".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            r#"headers["x-api-key"]=LEAKBRACKET"#,
+            r#"params['token']=LEAKBRACKET"#,
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:secret_mask_critic_round_eight::value_before_sensitive_record_name_does_not_publish_the_secret".to_owned(), value.to_owned()));
+        };
+        capture((r#"{"value":"LEAKBEFORE","name":"x-api-key"}"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:secret_mask_critic_round_eight::bare_sensitive_key_on_the_previous_line_does_not_publish_the_value".to_owned(), value.to_owned()));
+        };
+        capture(("Authorization\nBearer LEAKBARE").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:secret_mask_critic_round_eight::confusable_sensitive_key_does_not_publish_the_value".to_owned(), value.to_owned()));
+        };
+        for cause in ["ｔｏｋｅｎ=LEAKCONFUSABLE", "tоken=LEAKCONFUSABLE"] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::standalone_auth_schemes_mask_the_remaining_public_diagnostic".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "Authorization\nBearer LEAKSCHEME",
+            "failed Basic LEAKSCHEME done",
+            "failed tOkEn LEAKSCHEME done",
+            "failed Digest response=LEAKSCHEME done",
+        ] {
+            capture((cause).as_ref());
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::compatibility_and_confusable_names_mask_public_credentials".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            "ｔｏｋｅｎ＝LEAKUNICODE",
+            "𝐭𝐨𝐤𝐞𝐧=LEAKUNICODE",
+            "tоken=LEAKUNICODE",
+            "tοken=LEAKUNICODE",
+            "ｎａｍｅ: Qualified(\"scope\", \"tоken\"), value: LEAKUNICODE",
+            "{\"value\":\"LEAKUNICODE\",\"nаme\":\"token\"}",
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::json_escaped_inside_a_string_masks_the_remaining_line".to_owned(), value.to_owned()));
+        };
+        capture((r#"body {\"token\":\"LEAK\"} rejected"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::digest_quoted_params_with_blanks_are_masked_to_the_last_one".to_owned(), value.to_owned()));
+        };
+        capture(
+            (r#"Authorization: Digest username="u", realm="my realm", response="LEAK" end"#)
+                .as_ref(),
+        );
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::every_default_ignorable_or_format_mark_is_dropped_before_matching".to_owned(), value.to_owned()));
+        };
+        for mark in [
+            '\u{034f}',
+            '\u{fe0f}',
+            '\u{e0041}',
+            '\u{180e}',
+            '\u{3164}',
+            '\u{0600}',
+            '\u{115f}',
+        ] {
+            capture((&format!("to{mark}ken=LEAK done")).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:published_secret_mask_regressions::bracketed_and_tuple_names_are_masked"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("params[token]=LEAK&a=1").as_ref());
+        capture((r#"header ("x-api-key", "LEAK") rejected"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::quoted_credential_with_a_blank_after_a_scheme_is_masked_whole".to_owned(), value.to_owned()));
+        };
+        capture((r#"Authorization: Bearer "abc LEAK" rejected"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::a_blank_after_a_sensitive_key_never_preserves_the_next_pair".to_owned(), value.to_owned()));
+        };
+        capture(("empty key= mode=fast").as_ref());
+        capture(("token: YWJjZA== end").as_ref());
+        capture(("api_key = LEAK end").as_ref());
+        capture(("password=first SECOND mode=fast").as_ref());
+        capture(("token=first\nSECOND mode=fast").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::name_value_records_mask_the_value_member".to_owned(), value.to_owned()));
+        };
+        capture((r#"{"name":"x-api-key","value":"LEAK","k":1}"#).as_ref());
+        capture((r#"Header { name: "x-api-key", value: "LEAK" }"#).as_ref());
+        capture((r#"{"name":"content-type","value":"json"}"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::escaped_json_of_any_depth_masks_the_remaining_line".to_owned(), value.to_owned()));
+        };
+        capture((r#"o {\\\"token\\\":\\\"LEAK\\\"} end"#).as_ref());
+        capture((r#"o {\"password\":\"pa\\\"LEAK\"} end"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::nested_object_or_array_under_a_secret_name_is_masked_whole".to_owned(), value.to_owned()));
+        };
+        capture((r#"{ "password": { "value": "LEAK", "b": ["x"] } } ok"#).as_ref());
+        capture((r#"token=["a","}"] ok"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::call_wrapped_secret_values_mask_the_remaining_line".to_owned(), value.to_owned()));
+        };
+        capture((r#"token: Some("a LEAK") rejected"#).as_ref());
+        capture((r#"password=Secret(("x", ")")) end"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push((
+                "legacy:published_secret_mask_regressions::base64_padding_in_value_is_fully_masked"
+                    .to_owned(),
+                value.to_owned(),
+            ));
+        };
+        capture(("token=YWJjZA== done").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::an_apparently_empty_value_masks_the_next_pair".to_owned(), value.to_owned()));
+        };
+        capture(("empty key= mode=fast").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::name_value_record_hides_the_value_and_later_records".to_owned(), value.to_owned()));
+        };
+        let cause = r#"[{"name":"token","value":"LEAKR1"},{"name":"mode","value":"fast"}]"#;
+        capture((cause).as_ref());
+        capture((cause).as_ref());
+        let escaped = r#"{\\\"name\\\":\\\"x-api-key\\\",\\\"value\\\":\\\"LEAKR2\\\"}"#;
+        capture((escaped).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::a_sensitive_name_masks_later_records_even_without_its_value".to_owned(), value.to_owned()));
+        };
+        capture((r#"[{"name":"token","type":"string"},{"id":7,"value":"public"}]"#).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::brackets_inside_json_strings_of_an_escaped_nested_value_do_not_close_it".to_owned(), value.to_owned()));
+        };
+        let cause = r#"{\"token\":{\"a\":\"x}y\",\"b\":\"LEAKBR\"},\"user\":\"bob\"} done"#;
+        capture((cause).as_ref());
+        capture((cause).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::brackets_inside_single_quoted_strings_of_a_nested_value_do_not_close_it".to_owned(), value.to_owned()));
+        };
+        let cause = r#"{'token': {'a': 'x}y', 'b': 'LEAKSQ'}, 'user': 'bob'} done"#;
+        capture((cause).as_ref());
+        capture((cause).as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::nested_secret_values_and_the_text_after_them_are_masked".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            r#"{"token":{"a":{"b":"LEAKN1"},"c":["LEAKN2","LEAKN3"]},"user":"bob"} done"#,
+            r#"{"token":{"a":"x}y","b":"LEAKN4"},"user":"bob"} done"#,
+            r#"{\"token\":{\"a\":{\"b\":\"LEAKN5\"}},\"user\":\"bob\"} done"#,
+        ] {
+            capture((cause).as_ref());
+        }
+        capture(("token: {truncated LEAKN6").as_ref());
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::embedded_escaped_quotes_stay_inside_the_secret_at_every_depth".to_owned(), value.to_owned()));
+        };
+        for cause in [
+            r#"password="LEAKA\"LEAKB" user=bob"#,
+            r#"password='LEAKA\'LEAKB' user=bob"#,
+            r#"{\"password\":\"LEAKA\\\"LEAKB\",\"user\":\"bob\"}"#,
+            r#"{\\\"password\\\":\\\"LEAKA\\\\\\\"LEAKB\\\",\\\"user\\\":\\\"bob\\\"}"#,
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::bracket_value_with_a_string_ending_in_an_escaped_backslash_is_masked_whole".to_owned(), value.to_owned()));
+        };
+        for (cause, _secret) in [
+            (
+                r#"token: {"dir":"C:\\","note":"}","pw":"LEAKB1"} done"#,
+                "LEAKB1",
+            ),
+            (
+                r#"token: {'dir': 'C:\\', 'note': ']', 'pw': 'LEAKB2'} done"#,
+                "LEAKB2",
+            ),
+        ] {
+            capture((cause).as_ref());
+        }
+    }
+    {
+        let mut capture = |value: &str| {
+            causes.push(("legacy:published_secret_mask_regressions::a_sensitive_record_name_masks_nested_members_and_its_value".to_owned(), value.to_owned()));
+        };
+        capture((r#"{"name":"x-api-key","schema":{"value":"public"},"value":"LEAK"}"#).as_ref());
+    }
+    causes
 }
