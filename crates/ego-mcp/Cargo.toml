@@ -27,8 +27,6 @@ thiserror = "2"
 tokio = { version = "1", features = ["io-util", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 url = { version = "2.5.8", features = ["serde"] }
-unicode-normalization = "0.1.25"
-unicode-security = "0.1.2"
 
 [lints]
 workspace = true
