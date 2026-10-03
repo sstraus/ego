@@ -4763,6 +4763,197 @@ fn a_clean_quit_leaves_a_session_that_opens_without_a_repair() {
     );
 }
 
+/// One answered turn, then `/fork`: the text printed from the fork onwards.
+fn fork_after_a_turn() -> String {
+    const ROWS: u16 = 24;
+    const COLS: u16 = 120;
+    let stub = Stub::start(Plan {
+        installed: vec![support::MODEL.to_owned()],
+        context_length: Some(32_768),
+        completions: vec![Reply::Sse(text("FORK-RECEIPT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# fork receipt fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: ROWS,
+            cols: COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((ROWS, COLS)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    let turn_start = output.len();
+    input.write_all(b"hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(&reader, &mut output, turn_start, "FORK-RECEIPT-ANSWER");
+    until_prompt_from(&reader, &mut output, turn_start);
+    drain_until_quiet(&reader, &mut output);
+    let fork_start = output.len();
+    input.write_all(b"/fork\r").expect("fork");
+    input.flush().expect("fork flush");
+    until_normalized(&reader, &mut output, fork_start, "forked session");
+    drain_until_quiet(&reader, &mut output);
+    let receipt = normalized(&output[fork_start..]);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    receipt
+}
+
+#[test]
+fn fork_prints_a_receipt_naming_the_source_session() {
+    let receipt = fork_after_a_turn();
+    assert!(
+        receipt.contains(&format!("forked session {}", support::FIXTURE_SESSION_ID))
+            && receipt.contains("ego resume"),
+        "no fork receipt naming the parent: {receipt:?}"
+    );
+}
+
+/// Resume a stored session that already holds a context reading, `/fork` it,
+/// and return the status row left on screen.
+fn status_row_after_forking_a_session_with_a_context_reading() -> String {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, OccupancyProvenance};
+    use ego_core::event::id::{EventId, Producer, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    const ROWS: u16 = 24;
+    const COLS: u16 = 120;
+    let stub = Stub::start(Plan {
+        installed: vec![support::MODEL.to_owned()],
+        context_length: Some(32_768),
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing();
+    let root = std::fs::canonicalize(ego.workspace_path()).expect("canonical workspace");
+    let store = JsonlStore::new(
+        ego.home_path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    );
+    let source: SessionId = support::FIXTURE_SESSION_ID.parse().expect("a session id");
+    store
+        .publish_empty_session(source, &root, Timestamp::from_millis(1))
+        .expect("seed session");
+    let mut seq = ego_core::state::SessionState::replay(std::iter::empty()).last_seq;
+    seq.next();
+    store
+        .append(
+            &source,
+            &DomainEvent {
+                env: Envelope {
+                    seq,
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::from_millis(2),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::ContextWindowUpdated {
+                    used_tokens: 3_000,
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                    window: Some(32_768),
+                },
+            },
+        )
+        .expect("seed context reading");
+    let ego = ego
+        .subcommand("resume")
+        .arg(support::FIXTURE_SESSION_ID)
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# fork status fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: ROWS,
+            cols: COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((ROWS, COLS)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    drain_until_quiet(&reader, &mut output);
+    let before = screen_rows(&output, ROWS, COLS);
+    let fork_start = output.len();
+    input.write_all(b"/fork\r").expect("fork");
+    input.flush().expect("fork flush");
+    until_normalized(&reader, &mut output, fork_start, "forked session");
+    drain_until_quiet(&reader, &mut output);
+    let after = screen_rows(&output, ROWS, COLS);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    let status = |rows: &[String]| {
+        rows.iter()
+            .find(|row| row.contains("ctx"))
+            .cloned()
+            .unwrap_or_else(|| panic!("no status row on screen: {rows:?}"))
+    };
+    assert!(
+        !status(&before).contains("ctx ?"),
+        "precondition: the resumed source shows its context reading: {before:?}"
+    );
+    status(&after)
+}
+
+#[test]
+fn the_forked_session_keeps_the_context_reading_in_its_status_row() {
+    let status = status_row_after_forking_a_session_with_a_context_reading();
+    assert!(
+        !status.contains("ctx ?"),
+        "the fork lost the context reading: {status:?}"
+    );
+}
+
 #[test]
 fn quitting_after_a_turn_prints_the_resume_hint_for_that_session() {
     let after_quit = output_after_quit(Some("hello"));
