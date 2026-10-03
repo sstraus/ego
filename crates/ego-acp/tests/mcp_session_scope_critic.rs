@@ -1245,10 +1245,47 @@ async fn refused_admission_with_a_busy_writer_does_not_reappear_after_reconnect(
     );
 }
 
-/// Catches: a failed marker write falls back to connection-local hiding, so
-/// reconnect publishes a refused session whose deletion also lost the lease.
+/// Catches: a refused admission silently loses its quarantine failure when
+/// another writer also prevents deletion, leaving operators without the error.
 #[tokio::test]
-async fn refused_admission_with_failed_quarantine_cannot_reappear_after_reconnect() {
+async fn refused_admission_with_failed_quarantine_logs_the_double_fault() {
+    struct ErrorLog(Arc<Mutex<Vec<String>>>);
+
+    impl tracing::field::Visit for ErrorLog {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .lock()
+                .expect("error log")
+                .push(format!("{field}={value:?}"));
+        }
+    }
+
+    impl tracing::Subscriber for ErrorLog {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::ERROR
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                let fields = Arc::new(Mutex::new(Vec::new()));
+                event.record(&mut ErrorLog(Arc::clone(&fields)));
+                self.0
+                    .lock()
+                    .expect("error log")
+                    .push(fields.lock().expect("error fields").join(" "));
+            }
+        }
+    }
+
+    // The default current-thread runtime also covers the router's spawned tasks.
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let _logs = tracing::subscriber::set_default(ErrorLog(Arc::clone(&errors)));
     let gate = Arc::new(Gate::default());
     let world = World::new(|admitter| {
         admitter.gate = Some(Arc::clone(&gate));
@@ -1270,15 +1307,16 @@ async fn refused_admission_with_failed_quarantine_cannot_reappear_after_reconnec
     gate.release.notify_one();
     let (refused, _) = connection.response(pending).await;
     assert!(refused["error"].is_object(), "{refused}");
-    assert!(listed(&mut connection).await.is_empty());
     drop(lease);
     connection.abort().await;
 
-    let mut reconnected = world.connect().await;
-    let rows = listed(&mut reconnected).await;
-    reconnected.abort().await;
+    let errors = errors.lock().expect("error log");
     assert!(
-        rows.is_empty(),
-        "failed marker write exposes refused session after reconnect: {rows:?}"
+        errors.iter().any(|line| {
+            line.contains("a refused session could not be quarantined")
+                && line.contains("injected quarantine marker write failure")
+                && line.contains(&hidden)
+        }),
+        "the refused session's quarantine failure was not logged: {errors:?}"
     );
 }

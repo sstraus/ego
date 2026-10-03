@@ -1903,7 +1903,7 @@ impl UnadmittedSession {
     /// session that cannot be deleted (another writer holds it) is quarantined
     /// in the store, so every connection and every later server hides it; only
     /// if that fails too does it stay hidden for the life of this server. The
-    /// request fails either way, so a refused session is never left visible.
+    /// request fails either way; durable exclusion requires quarantine to succeed.
     async fn discard(
         mut self,
         lifecycle: Option<&dyn LifecycleOperations>,
@@ -1916,6 +1916,9 @@ impl UnadmittedSession {
             Ok(_) => refusal,
             Err(error) => {
                 if let Err(quarantine) = lifecycle.quarantine(self.session) {
+                    // DEFERRED (2026-10-04): maintainer accepts failed quarantine publication
+                    // plus a writer-held deletion lease. No durable write can hide the
+                    // refused id; ACP stdio reconnect starts a new process and may expose it.
                     self.hidden_for_good = true;
                     tracing::error!(%quarantine, session = %self.session, "a refused session could not be quarantined");
                 }
