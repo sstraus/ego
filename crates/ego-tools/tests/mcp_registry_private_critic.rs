@@ -47,6 +47,15 @@ impl<F: Fn(&Path) + Send + Sync> StoreIo for RacyIo<F> {
     fn replace_atomic_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         OsIo.replace_atomic_private(path, bytes)
     }
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        OsIo.truncate(path, len)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        OsIo.remove_file(path)
+    }
+    fn list_dirs(&self, path: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+        OsIo.list_dirs(path)
+    }
 }
 
 /// Catches: the log path swapped for a symlink after the check; the adapter's
@@ -228,6 +237,15 @@ fn storage_error_text_never_reaches_the_typed_error() {
             Err(io::Error::other(
                 String::from_utf8_lossy(bytes).into_owned(),
             ))
+        }
+        fn truncate(&self, _: &Path, _: u64) -> io::Result<()> {
+            Ok(())
+        }
+        fn remove_file(&self, _: &Path) -> io::Result<()> {
+            Ok(())
+        }
+        fn list_dirs(&self, _: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+            Ok(Vec::new())
         }
     }
     let dir = tempfile::tempdir().expect("dir");
