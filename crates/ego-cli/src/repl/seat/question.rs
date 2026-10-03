@@ -1,3 +1,4 @@
+use super::edit_mode::PICKER_KEYS;
 use super::*;
 use crate::render::osc::State;
 use std::io::Write as _;
@@ -17,6 +18,7 @@ pub(super) fn enter_modal(
     {
         let mut status = status.lock().expect("surface status lock");
         status.notice = None;
+        status.modal_since = Some(Instant::now());
         if let Some(snapshot) = status.snapshot.as_mut() {
             snapshot.set_modal(true);
         }
@@ -42,8 +44,21 @@ pub(super) fn leave_modal(
     ]);
     {
         let mut status = status.lock().expect("surface status lock");
+        let status = &mut *status;
         status.origin = saved.origin;
         status.notice = None;
+        // Keys of an unfinished burst belong to the modal that is closing.
+        status.picker_keys.clear();
+        // The turn's elapsed time leaves out the wait for the person, and
+        // only the part of the wait that fell inside the running turn: a modal
+        // that outlived its turn must not push the next one into the future.
+        if let Some(since) = status.modal_since.take()
+            && let Some(started) = status.activity_since.as_mut()
+        {
+            let waited = since.max(*started).elapsed();
+            *started += waited;
+            status.modal_waited += waited;
+        }
         if let Some(snapshot) = status.snapshot.as_mut() {
             snapshot.set_modal(false);
         }
@@ -253,7 +268,7 @@ pub(super) fn answer_control(
                                     .lock()
                                     .expect("surface status lock")
                                     .permission_modal = false;
-                                break amendment(editor, surface, &request);
+                                break amendment(editor, surface, &request, &mut notice);
                             }
                             Some(PermissionWord::Remember) => {
                                 match remember_permission(surface.status, &request) {
@@ -279,7 +294,7 @@ pub(super) fn answer_control(
                                 .lock()
                                 .expect("surface status lock")
                                 .permission_modal = false;
-                            break amendment(editor, surface, &request);
+                            break amendment(editor, surface, &request, &mut notice);
                         }
                         Some(PermissionWord::Remember) => {
                             match remember_permission(surface.status, &request) {
@@ -295,10 +310,12 @@ pub(super) fn answer_control(
                         }
                         None => continue,
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         break PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         break PermissionDecision::Deny;
                     }
                     Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -435,9 +452,10 @@ fn answer_question_selector(
             question_selector_prompt(request, &selector),
             Arc::clone(surface.status),
         );
-        match modal_line(editor, surface, &prompt) {
+        let queued = queued_selector_line(surface.status);
+        match queued.unwrap_or_else(|| modal_line(editor, surface, &prompt)) {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = question_selector_key(&command) else {
+                let Some(key) = next_selector_key(surface.status, &command) else {
                     continue;
                 };
                 let mut guard = selector.lock().expect("question selector lock");
@@ -529,11 +547,14 @@ fn other_text(
     surface: &mut ModalSurface<'_>,
     selector: &Arc<Mutex<Selector>>,
 ) -> OtherEntry {
-    surface
-        .status
-        .lock()
-        .expect("surface status lock")
-        .question_selector = None;
+    {
+        let mut status = surface.status.lock().expect("surface status lock");
+        status.question_selector = None;
+        // Queued keys belong to the selector this entry replaces; replayed
+        // after backing out they would act on a stale choice. Keys the editor
+        // has not read yet are typed-ahead input for the entry and stay.
+        status.picker_keys.clear();
+    }
     let prompt = Question::new(format!("{OTHER_LABEL}: "), Arc::clone(surface.status));
     let entry = loop {
         match modal_line(editor, surface, &prompt) {
@@ -559,7 +580,7 @@ fn other_text(
     entry
 }
 
-pub(super) fn question_selector_key(command: &str) -> Option<SelectorKey> {
+fn question_selector_key(command: &str) -> Option<SelectorKey> {
     match command {
         "up" => Some(SelectorKey::Up),
         "down" => Some(SelectorKey::Down),
@@ -572,6 +593,30 @@ pub(super) fn question_selector_key(command: &str) -> Option<SelectorKey> {
             .ok()
             .map(SelectorKey::Number),
     }
+}
+
+/// The selector line a burst of keys already supplied, if one is waiting.
+///
+/// The editor parses a whole burst before running its first command and drops
+/// the rest, so the edit mode queues every selector key in
+/// `SurfaceStatus::picker_keys` — the queue the model picker uses — and the
+/// loop applies them one at a time through this and [`next_selector_key`].
+pub(super) fn queued_selector_line(status: &SharedStatus) -> Option<Line> {
+    let waiting = !status
+        .lock()
+        .expect("surface status lock")
+        .picker_keys
+        .is_empty();
+    waiting.then(|| Line::HostCommand(HostCommand::QuestionSelector(PICKER_KEYS.to_owned())))
+}
+
+/// The oldest queued selector key; `command` is only the wake-up that carried it.
+pub(super) fn next_selector_key(status: &SharedStatus, _command: &str) -> Option<SelectorKey> {
+    let mut status = status.lock().expect("surface status lock");
+    if status.picker_keys.is_empty() {
+        return None;
+    }
+    question_selector_key(&status.picker_keys.remove(0))
 }
 
 pub(super) fn question_selector_prompt(
@@ -725,6 +770,7 @@ fn amendment(
     editor: &mut Reedline,
     surface: &mut ModalSurface<'_>,
     request: &PermissionRequest,
+    notice: &mut Option<String>,
 ) -> PermissionDecision {
     let Some(presentation) = request.presentation() else {
         surface.status.lock().expect("surface status lock").notice =
@@ -757,10 +803,12 @@ fn amendment(
                         Ok(()) => break,
                         Err(error) => inline_permission_error(surface.status, error),
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         return PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        *notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         return PermissionDecision::Deny;
                     }
                     Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -784,10 +832,12 @@ fn amendment(
                         Ok(()) => break,
                         Err(error) => inline_permission_error(surface.status, error),
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         return PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        *notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         return PermissionDecision::Deny;
                     }
                     Line::Refused(_) | Line::HostCommand(_) => continue,

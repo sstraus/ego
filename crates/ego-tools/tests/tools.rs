@@ -1397,6 +1397,30 @@ mod grep {
     }
 
     #[test]
+    fn grep_skips_gitignored_files_unless_the_ignored_path_is_named() {
+        // catches: ignore rules skipped by grep, and over-filtering that
+        // hides a path the caller named.
+        let ws = populated();
+        ws.file(".git/HEAD", "ref: refs/heads/main\n");
+        ws.file(".gitignore", "__pycache__/\n");
+        ws.file("src/pricing.py", "def apply_discount(): pass\n");
+        ws.file("src/__pycache__/pricing.pyc", "apply_discount\n");
+
+        let all = ws
+            .call("grep", json!({ "query": "apply_discount" }))
+            .expect("the working directory is the workspace");
+        let named = ws
+            .call(
+                "grep",
+                json!({ "query": "apply_discount", "path": "src/__pycache__" }),
+            )
+            .expect("an ignored directory inside the workspace is searchable when named");
+
+        assert_eq!(all, "src/pricing.py:1:def apply_discount(): pass");
+        assert_eq!(named, "pricing.pyc:1:apply_discount");
+    }
+
+    #[test]
     fn grep_matches_a_regular_expression_and_not_only_a_literal() {
         let ws = populated();
 

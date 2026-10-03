@@ -1011,6 +1011,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             continue;
                                         };
                                         seat.busy();
+                                        let receipt = format!(
+                                            "Model: {}{}",
+                                            request.target().0,
+                                            if request.is_persistent() {
+                                                ""
+                                            } else {
+                                                " (this session only)"
+                                            }
+                                        );
                                         let applied = owner.apply(request).await;
                                         let publication = match &applied {
                                             Ok(publication) => publication.as_ref(),
@@ -1026,9 +1035,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     "model defaults are authoritative with a durability warning: {diagnostic}"
                                 ));
                                         }
-                                        if let Err(error) = applied {
-                                            diagnostics
-                                                .note(&format!("model switch failed: {error}"));
+                                        match applied {
+                                            Ok(_) => diagnostics.note(&receipt),
+                                            Err(error) => diagnostics
+                                                .note(&format!("model switch failed: {error}")),
                                         }
                                         if let Some(status) = status.as_ref()
                                             && status.human
@@ -1239,8 +1249,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             Ok(report) => {
                                                 // `/usage` has no flags, so it
                                                 // gets the compact default.
-                                                let rendered =
-                                                    crate::usage::render_text(&report, false);
+                                                let rendered = crate::usage::render_text(
+                                                    &report,
+                                                    false,
+                                                    Some(state.context),
+                                                );
                                                 diagnostics.note(rendered.trim_end());
                                             }
                                             Err(error) => diagnostics.note(&format!(
@@ -1678,6 +1691,7 @@ pub(super) async fn drive_execution<S: EventSink>(
 
                             // Per turn, for the reason `build` documents.
                             seat.busy();
+                            let turn_started = std::time::Instant::now();
                             let turn_cancel = CancelToken::new();
                             let (ports, observation, probe_evidence) = effect_scope(
                                 &confinement,
@@ -1703,30 +1717,45 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     },
                                 ))
                                 .collect::<Vec<_>>();
-                            let images =
-                                if matches!(asked.as_ref(), Some(InteractiveTurnInput::Prompt(_)))
-                                    && (!inline.is_empty() || !specs.is_empty())
+                            let images = if matches!(
+                                asked.as_ref(),
+                                Some(InteractiveTurnInput::Prompt(_))
+                            ) && (!inline.is_empty() || !specs.is_empty())
+                            {
+                                let images = match acquire_attachments(
+                                    Attachments {
+                                        inline: &inline,
+                                        specs: &specs,
+                                    },
+                                    &source,
+                                    &ports,
+                                    &turn_cancel,
+                                    run_deadline,
+                                    &cwd,
+                                    active.evidence().blob_store(),
+                                )
+                                .await
                                 {
-                                    let images = acquire_attachments(
-                                        Attachments {
-                                            inline: &inline,
-                                            specs: &specs,
-                                        },
-                                        &source,
-                                        &ports,
-                                        &turn_cancel,
-                                        run_deadline,
-                                        &cwd,
-                                        active.evidence().blob_store(),
-                                    )
-                                    .await?;
-                                    pending_attachments.clear();
-                                    staged_images.clear();
-                                    seat.set_image_chips(Vec::new());
-                                    images
-                                } else {
-                                    Vec::new()
+                                    Ok(images) => images,
+                                    // An admission refusal of this turn's
+                                    // attachments is not a bad command line:
+                                    // the staged images stay so the user can
+                                    // remove one (Ctrl+Backspace) and resubmit.
+                                    Err(RunTermination::UsageError { message }) => {
+                                        diagnostics.note(&format!(
+                                                "{message}; the turn was not sent, remove an attachment and submit it again"
+                                            ));
+                                        continue;
+                                    }
+                                    Err(other) => return Err(other),
                                 };
+                                pending_attachments.clear();
+                                staged_images.clear();
+                                seat.set_image_chips(Vec::new());
+                                images
+                            } else {
+                                Vec::new()
+                            };
                             let loop_ = build!(
                                 active,
                                 &turn_cancel,
@@ -1853,6 +1882,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 continue;
                             };
                             between();
+                            if matches!(termination, RunTermination::Signalled(Signal::Int))
+                                && !cancel.is_cancelled()
+                            {
+                                diagnostics.note(&format!(
+                                    "{} after {:.1}s",
+                                    repl::INTERRUPTED_RECEIPT,
+                                    turn_started
+                                        .elapsed()
+                                        .saturating_sub(seat.modal_wait())
+                                        .as_secs_f64()
+                                ));
+                            }
 
                             let queue_abandoned =
                                 matches!(&termination, RunTermination::Failed { .. });

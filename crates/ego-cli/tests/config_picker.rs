@@ -731,3 +731,124 @@ fn replacing_the_snapshot_updates_picker_availability_without_a_second_catalogue
     assert!(Arc::ptr_eq(picker.snapshot(), &unavailable));
     assert!(!picker.can_select(&ModelSlug::parse("ollama/qwen3").unwrap()));
 }
+
+fn picker_on_current_openai() -> ModelPicker {
+    ModelPicker::for_selection(
+        catalogue(),
+        selection(),
+        Arc::new(RecordingUserConfigStore::new(Ok(
+            UserConfigPublication::PublishedDurably,
+        ))),
+    )
+}
+
+fn type_text(picker: &mut ModelPicker, text: &str) {
+    for character in text.chars() {
+        let input = match character.to_digit(10) {
+            Some(digit) => PickerInput::Number(digit as usize),
+            None => PickerInput::Char(character),
+        };
+        picker.input(input).expect("typed key");
+    }
+}
+
+#[test]
+fn the_model_list_opens_on_the_current_model_and_names_it() {
+    // Catches: a cursor fixed on row 1, which is `ollama/qwen3` here while the
+    // session runs `openai/gpt-5.6` on row 2.
+    let mut picker = picker_on_current_openai();
+    open_model_picker(&mut picker);
+    let view = picker.view();
+    assert_eq!(view.current_id.as_deref(), Some("openai/gpt-5.6"));
+    assert_eq!(view.current_model.as_deref(), Some("openai/gpt-5.6"));
+}
+
+#[test]
+fn the_reasoning_step_names_the_current_effort_only_for_the_current_model() {
+    // Catches: a `current` marker on the effort of a model the session is not
+    // running, which would present another model's effort as this one's.
+    let mut picker = picker_on_current_openai();
+    open_model_picker(&mut picker);
+    picker.input(PickerInput::Number(2)).unwrap();
+    picker.input(PickerInput::Enter).unwrap();
+    assert_eq!(
+        picker.view().current_reasoning,
+        Some(ThinkingLevel::Medium),
+        "the current model's effort is marked"
+    );
+    picker.input(PickerInput::Escape).unwrap();
+    open_model_picker(&mut picker);
+    picker.input(PickerInput::Number(1)).unwrap();
+    picker.input(PickerInput::Enter).unwrap();
+    assert_eq!(picker.view().current_reasoning, None);
+}
+
+#[test]
+fn typing_filters_by_substring_and_digits_select_only_while_the_filter_is_empty() {
+    // Catches: type-to-search that swallows digits before the filter exists,
+    // and digits that select a row once `gpt-5` is being typed.
+    let mut picker = picker_on_current_openai();
+    open_model_picker(&mut picker);
+    picker.input(PickerInput::Number(1)).unwrap();
+    assert_eq!(
+        picker.view().current_id.as_deref(),
+        Some("ollama/qwen3"),
+        "an empty filter keeps digits selecting by number"
+    );
+    type_text(&mut picker, "GPT-5");
+    let view = picker.view();
+    assert_eq!(view.filter, "GPT-5");
+    assert_eq!(
+        view.models
+            .iter()
+            .map(|row| row.slug.to_string())
+            .collect::<Vec<_>>(),
+        ["openai/gpt-5.6"]
+    );
+}
+
+#[test]
+fn enter_on_zero_matches_does_nothing_and_never_takes_a_row_selected_before_filtering() {
+    // Catches: Enter continuing with the row that was selected before the
+    // filter emptied the list.
+    let mut picker = picker_on_current_openai();
+    open_model_picker(&mut picker);
+    picker.input(PickerInput::Number(2)).unwrap();
+    type_text(&mut picker, "zzz");
+    assert!(picker.view().models.is_empty());
+    assert_eq!(
+        picker.input(PickerInput::Enter),
+        Err(PickerError::NoSelection)
+    );
+    assert_eq!(picker.view().focus, PickerFocus::Model);
+    for _ in 0..3 {
+        picker.input(PickerInput::Backspace).unwrap();
+    }
+    assert_eq!(picker.view().models.len(), 2);
+    assert_eq!(
+        picker.input(PickerInput::Enter).unwrap(),
+        PickerInputOutcome::FocusChanged(PickerFocus::Reasoning)
+    );
+}
+
+#[test]
+fn s_types_into_the_filter_at_the_model_step_and_means_this_session_at_the_reasoning_step() {
+    // Catches: `s` stolen from the filter, or ignored at the reasoning step
+    // where it saves for this session only.
+    let mut picker = picker_on_current_openai();
+    open_model_picker(&mut picker);
+    type_text(&mut picker, "s");
+    assert_eq!(picker.view().filter, "s");
+    picker.input(PickerInput::Escape).unwrap();
+    choose_openai_high(&mut picker);
+    assert_eq!(
+        picker.input(PickerInput::Char('x')).unwrap(),
+        PickerInputOutcome::Consumed
+    );
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::Char('s')).unwrap()
+    else {
+        panic!("s at the reasoning step stages a session-only request");
+    };
+    assert!(!request.is_persistent());
+}

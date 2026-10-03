@@ -66,6 +66,10 @@ pub enum PickerInput {
     Enter,
     SessionOnly,
     Escape,
+    /// A printable key. Filters the model list; at the reasoning step only
+    /// `s` means anything.
+    Char(char),
+    Backspace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +85,13 @@ pub struct ModelPickerView {
     pub focus: PickerFocus,
     pub current_id: Option<String>,
     pub selected_model: Option<String>,
+    /// What the operator has typed to narrow `models`.
+    pub filter: String,
+    /// The model the session is generating with right now, as opposed to the
+    /// highlighted row.
+    pub current_model: Option<String>,
+    /// The effort in force, only while the reasoning step is for that model.
+    pub current_reasoning: Option<ThinkingLevel>,
     pub models: Vec<ModelPickerRow>,
     pub reasoning: Vec<ThinkingLevel>,
     /// Startup has no active session to scope a selection to.
@@ -160,6 +171,13 @@ struct Chosen {
     thinking: ThinkingLevel,
 }
 
+/// The selection in force when the picker opened.
+#[derive(Debug, Clone)]
+struct CurrentSelection {
+    model: String,
+    thinking: ThinkingLevel,
+}
+
 #[derive(Debug, Clone)]
 enum ModalState {
     Model(Selector),
@@ -172,6 +190,8 @@ pub struct ModelPicker {
     config_store: Option<Arc<dyn UserConfigStore>>,
     startup: bool,
     chosen: Option<Chosen>,
+    current: Option<CurrentSelection>,
+    filter: String,
     open: bool,
     modal: Option<ModalState>,
     diagnostic: Option<PickerError>,
@@ -185,6 +205,8 @@ impl ModelPicker {
             config_store: None,
             startup: false,
             chosen: None,
+            current: None,
+            filter: String::new(),
             open: false,
             modal: None,
             diagnostic: None,
@@ -194,12 +216,14 @@ impl ModelPicker {
     /// An already-open picker whose result establishes the first user default.
     pub(crate) fn for_startup(snapshot: Arc<ModelCatalogueSnapshot>) -> Self {
         Self {
-            modal: Some(ModalState::Model(model_selector(&snapshot))),
+            modal: Some(ModalState::Model(model_selector(&snapshot, "", None))),
             snapshot,
             selection: None,
             config_store: None,
             startup: true,
             chosen: None,
+            current: None,
+            filter: String::new(),
             open: true,
             diagnostic: None,
         }
@@ -216,6 +240,8 @@ impl ModelPicker {
             config_store: Some(config_store),
             startup: false,
             chosen: None,
+            current: None,
+            filter: String::new(),
             open: false,
             modal: None,
             diagnostic: None,
@@ -286,7 +312,15 @@ impl ModelPicker {
             open: self.open,
             focus,
             current_id: selector.and_then(Selector::current_id).map(str::to_owned),
+            current_reasoning: selected_model.as_deref().and_then(|model| {
+                self.current
+                    .as_ref()
+                    .filter(|current| current.model == model)
+                    .map(|current| current.thinking)
+            }),
             selected_model,
+            filter: self.filter.clone(),
+            current_model: self.current.as_ref().map(|current| current.model.clone()),
             models: self
                 .ordered_rows()
                 .into_iter()
@@ -319,8 +353,40 @@ impl ModelPicker {
             self.close();
             return Ok(PickerInputOutcome::Closed(PickerOutcome::Cancelled));
         }
+        let input = match (input, &self.modal) {
+            (PickerInput::Char('s' | 'S'), Some(ModalState::Reasoning { .. })) => {
+                PickerInput::SessionOnly
+            }
+            (PickerInput::Char(_) | PickerInput::Backspace, Some(ModalState::Reasoning { .. })) => {
+                return Ok(PickerInputOutcome::Consumed);
+            }
+            (input, _) => input,
+        };
         match self.modal.take().ok_or(PickerError::Closed)? {
             ModalState::Model(mut selector) => {
+                // Digits select by number only while there is no filter: a
+                // slug such as `gpt-5.6` needs them as text once typing began.
+                let typed = match input {
+                    PickerInput::Char(character) => Some(character),
+                    PickerInput::Number(number) if !self.filter.is_empty() => {
+                        char::from_digit(u32::try_from(number).unwrap_or(u32::MAX), 10)
+                    }
+                    _ => None,
+                };
+                if let Some(character) = typed {
+                    self.filter.push(character);
+                    self.modal = Some(ModalState::Model(self.model_selector()));
+                    return Ok(PickerInputOutcome::Consumed);
+                }
+                if input == PickerInput::Backspace {
+                    // An empty filter has nothing to erase and keeps its cursor.
+                    self.modal = Some(ModalState::Model(if self.filter.pop().is_some() {
+                        self.model_selector()
+                    } else {
+                        selector
+                    }));
+                    return Ok(PickerInputOutcome::Consumed);
+                }
                 if input == PickerInput::SessionOnly {
                     self.modal = Some(ModalState::Model(selector));
                     return Err(PickerError::NoSelection);
@@ -408,7 +474,7 @@ impl ModelPicker {
         self.chosen = None;
         self.diagnostic = None;
         if self.open {
-            self.modal = Some(ModalState::Model(model_selector(&self.snapshot)));
+            self.modal = Some(ModalState::Model(self.model_selector()));
         }
         LocalActionOutcome::Completed
     }
@@ -416,6 +482,7 @@ impl ModelPicker {
     fn close(&mut self) {
         self.open = false;
         self.chosen = None;
+        self.filter.clear();
         self.modal = None;
         self.diagnostic = None;
     }
@@ -423,8 +490,25 @@ impl ModelPicker {
     fn open(&mut self) {
         self.open = true;
         self.chosen = None;
-        self.modal = Some(ModalState::Model(model_selector(&self.snapshot)));
+        self.filter.clear();
+        // An unreadable selection leaves the list without a current row
+        // rather than keeping the operator from choosing a model.
+        self.current = self.selection.as_ref().and_then(|selection| {
+            selection.snapshot().ok().map(|current| CurrentSelection {
+                model: current.identity.0,
+                thinking: current.thinking,
+            })
+        });
+        self.modal = Some(ModalState::Model(self.model_selector()));
         self.diagnostic = None;
+    }
+
+    fn model_selector(&self) -> Selector {
+        model_selector(
+            &self.snapshot,
+            &self.filter,
+            self.current.as_ref().map(|current| current.model.as_str()),
+        )
     }
 
     fn open_reasoning(&mut self) -> Result<(), PickerError> {
@@ -435,8 +519,13 @@ impl ModelPicker {
         let model = current.identity.0;
         let reasoning = self.reasoning_levels(&model)?;
         let selector = reasoning_selector(&reasoning, Some(current.thinking));
+        self.current = Some(CurrentSelection {
+            model: model.clone(),
+            thinking: current.thinking,
+        });
         self.open = true;
         self.chosen = None;
+        self.filter.clear();
         self.modal = Some(ModalState::Reasoning { model, selector });
         self.diagnostic = None;
         Ok(())
@@ -458,7 +547,7 @@ impl ModelPicker {
     }
 
     fn ordered_rows(&self) -> Vec<&ModelCatalogueEntry> {
-        ordered_rows(&self.snapshot)
+        filtered_rows(&self.snapshot, &self.filter)
     }
 }
 
@@ -555,14 +644,45 @@ const ALL_THINKING: [ThinkingLevel; 7] = [
     ThinkingLevel::Max,
 ];
 
-fn model_selector(snapshot: &ModelCatalogueSnapshot) -> Selector {
-    Selector::with_options(
+/// The rows whose slug contains every whitespace-separated word of `filter`,
+/// ignoring case, in the order the picker lists them.
+fn filtered_rows<'a>(
+    snapshot: &'a ModelCatalogueSnapshot,
+    filter: &str,
+) -> Vec<&'a ModelCatalogueEntry> {
+    let filter = filter.to_lowercase();
+    let words = filter.split_whitespace().collect::<Vec<_>>();
+    ordered_rows(snapshot)
+        .into_iter()
+        .filter(|row| {
+            let slug = row.slug.to_string().to_lowercase();
+            words.iter().all(|word| slug.contains(word))
+        })
+        .collect()
+}
+
+/// The list for `filter`, with the cursor on the current model when it is
+/// still listed and on the first row otherwise.
+fn model_selector(
+    snapshot: &ModelCatalogueSnapshot,
+    filter: &str,
+    current: Option<&str>,
+) -> Selector {
+    let slugs = filtered_rows(snapshot, filter)
+        .into_iter()
+        .map(|row| row.slug.to_string())
+        .collect::<Vec<_>>();
+    let current_row = current.and_then(|current| slugs.iter().position(|slug| slug == current));
+    let mut selector = Selector::with_options(
         SelectorKind::Single,
-        ordered_rows(snapshot).into_iter().map(|row| {
-            let slug = row.slug.to_string();
-            SelectorOption::new(slug.clone(), slug)
-        }),
-    )
+        slugs
+            .into_iter()
+            .map(|slug| SelectorOption::new(slug.clone(), slug)),
+    );
+    if let Some(row) = current_row {
+        selector.key(SelectorKey::Number(row + 1));
+    }
+    selector
 }
 
 fn ordered_rows(snapshot: &ModelCatalogueSnapshot) -> Vec<&ModelCatalogueEntry> {
@@ -605,7 +725,7 @@ fn selector_key(input: PickerInput) -> Option<SelectorKey> {
         PickerInput::Down => Some(SelectorKey::Down),
         PickerInput::Number(number) => Some(SelectorKey::Number(number)),
         PickerInput::Enter | PickerInput::SessionOnly => Some(SelectorKey::Enter),
-        PickerInput::Escape => None,
+        PickerInput::Escape | PickerInput::Char(_) | PickerInput::Backspace => None,
     }
 }
 

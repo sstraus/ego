@@ -279,8 +279,41 @@ pub struct ActionRegistration {
     description: &'static str,
     aliases: Vec<&'static str>,
     shortcuts: Vec<char>,
+    /// The word the banner puts after this action's shortcut; empty keeps the
+    /// shortcut out of the banner and in the help.
+    shortcut_hint: &'static str,
     kind: ActionKind,
     availability: Availability,
+}
+
+/// A key that is not a letter shortcut of an action: the editor and the run
+/// loop handle it, and the registry is what says so to a person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyBinding {
+    label: &'static str,
+    hint: &'static str,
+    description: &'static str,
+}
+
+impl KeyBinding {
+    /// `hint` is the banner word after `label`; empty keeps it out of the banner.
+    pub fn new(label: &'static str, hint: &'static str, description: &'static str) -> Self {
+        Self {
+            label,
+            hint,
+            description,
+        }
+    }
+}
+
+/// One key as shown to a person, whether it came from a chord binding or from
+/// an action's shortcut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyEntry {
+    pub label: String,
+    /// The banner phrase after the label; empty when the banner omits the key.
+    pub hint: &'static str,
+    pub description: &'static str,
 }
 
 impl ActionRegistration {
@@ -291,6 +324,7 @@ impl ActionRegistration {
             description: "",
             aliases: Vec::new(),
             shortcuts: Vec::new(),
+            shortcut_hint: "",
             kind,
             availability: Availability::Enabled,
         }
@@ -301,6 +335,10 @@ impl ActionRegistration {
     }
     pub fn shortcut(mut self, shortcut: char) -> Self {
         self.shortcuts.push(shortcut);
+        self
+    }
+    pub fn shortcut_hint(mut self, hint: &'static str) -> Self {
+        self.shortcut_hint = hint;
         self
     }
     pub fn description(mut self, description: &'static str) -> Self {
@@ -366,6 +404,7 @@ impl std::error::Error for RegistryError {}
 #[derive(Debug, Clone)]
 pub struct ActionRegistry {
     registrations: Vec<ActionRegistration>,
+    bindings: Vec<KeyBinding>,
     live_availability: Arc<Mutex<HashMap<ActionId, Availability>>>,
     skill_view: Arc<Mutex<Option<SkillCatalogueView>>>,
 }
@@ -401,6 +440,7 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
         }
         Ok(Self {
             registrations: value.into(),
+            bindings: Vec::new(),
             live_availability: Arc::new(Mutex::new(HashMap::new())),
             skill_view: Arc::new(Mutex::new(None)),
         })
@@ -416,7 +456,9 @@ impl ActionRegistry {
         };
         Self::try_from([
             enabled(Help, "help", "Show interactive actions and shortcuts"),
-            enabled(Model, "model", "Choose the current model").shortcut('p'),
+            enabled(Model, "model", "Choose the current model")
+                .shortcut('p')
+                .shortcut_hint("models"),
             enabled(Thinking, "thinking", "Choose reasoning effort"),
             enabled(Mode, "mode", "Inspect or change execution mode")
                 .unavailable("the interactive mode controller"),
@@ -460,6 +502,50 @@ impl ActionRegistry {
             enabled(Version, "version", "Show packaged version information"),
         ])
         .expect("the final action surface is statically unique")
+        .with_binding(KeyBinding::new(
+            "Esc",
+            "interrupts",
+            "Interrupt the running turn",
+        ))
+        .with_binding(KeyBinding::new(
+            "Enter",
+            "queues",
+            "While a turn is running, queue the line for the next safe boundary",
+        ))
+        .with_binding(KeyBinding::new(
+            "Ctrl+S",
+            "draft",
+            "Save the composer draft, or restore the last saved one",
+        ))
+        .with_binding(KeyBinding::new(
+            "Ctrl+C",
+            "",
+            "Cancel a running turn; idle, abandon the line; twice in a row, exit",
+        ))
+    }
+
+    /// Add a key the registry names but does not dispatch.
+    pub fn with_binding(mut self, binding: KeyBinding) -> Self {
+        self.bindings.push(binding);
+        self
+    }
+
+    /// Every key, chords first and then the action shortcuts, in the one order
+    /// the banner and the help both print.
+    pub fn keys(&self) -> Vec<KeyEntry> {
+        let chords = self.bindings.iter().map(|binding| KeyEntry {
+            label: binding.label.to_owned(),
+            hint: binding.hint,
+            description: binding.description,
+        });
+        let shortcuts = self.iter().flat_map(|action| {
+            action.shortcuts.iter().map(|shortcut| KeyEntry {
+                label: format!("Option+{}", shortcut.to_ascii_uppercase()),
+                hint: action.shortcut_hint,
+                description: action.description,
+            })
+        });
+        chords.chain(shortcuts).collect()
     }
 
     pub fn len(&self) -> usize {

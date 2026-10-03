@@ -240,3 +240,81 @@ fn a_path_the_command_line_never_named_is_not_put_to_the_person() {
         text(&result)
     );
 }
+
+/// An executable outside the workspace the profile does not open, and the
+/// path it is asked to run under.
+fn outside_program() -> (tempfile::TempDir, CanonPath, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, program, printed) = outside_file("#!/bin/sh\necho outside program ran\n");
+    std::fs::set_permissions(program.as_path(), std::fs::Permissions::from_mode(0o755))
+        .expect("executable mode");
+    (dir, program, printed)
+}
+
+#[test]
+fn a_program_the_sandbox_refuses_is_reported_as_the_sandbox_with_the_way_to_allow_it() {
+    // catches: a sandbox denial of the program itself reported as a bare
+    // `sandbox-exec: execvp() ... Operation not permitted` exit 71, which an
+    // allowed call makes look like a permission failure.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (_keep, program, printed) = outside_program();
+    let seat = Seat::answering(false);
+    let run = run_with(&seat, workspace.path());
+
+    let Err(ProcessError::Exit { result, .. }) = execute(&run, &spec(&run, &[&printed])) else {
+        panic!("a refused program must still fail");
+    };
+
+    let report = text(&result);
+    assert!(
+        report.contains(&format!(
+            "sandbox denied exec {}",
+            program.as_path().display()
+        )),
+        "{report}"
+    );
+    assert!(report.contains("to allow it"), "{report}");
+    assert!(
+        !report.contains("permission rule can"),
+        "the sandbox is not overridable by a permission rule: {report}"
+    );
+    assert_eq!(
+        seat.asked(),
+        vec![SandboxGrant::new(program, SandboxAccess::Exec)]
+    );
+}
+
+#[test]
+fn an_allowed_program_runs_again_under_the_widened_sandbox() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (_keep, _program, printed) = outside_program();
+    let seat = Seat::answering(true);
+    let run = run_with(&seat, workspace.path());
+
+    let result = execute(&run, &spec(&run, &[&printed])).expect("the allowed program runs");
+
+    assert!(
+        text(&result).contains("outside program ran"),
+        "{}",
+        text(&result)
+    );
+}
+
+#[test]
+fn an_ordinary_failing_exit_is_not_labelled_a_sandbox_block() {
+    // catches: false sandbox attribution of a command that merely failed.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let seat = Seat::answering(true);
+    let run = run_with(&seat, workspace.path());
+
+    let Err(ProcessError::Exit { code, result }) = execute(
+        &run,
+        &spec(&run, &["/bin/sh", "-c", "echo oops >&2; exit 3"]),
+    ) else {
+        panic!("a failing command fails");
+    };
+
+    assert_eq!(code, Some(3));
+    assert!(!text(&result).contains("sandbox"), "{}", text(&result));
+    assert!(seat.asked().is_empty());
+}

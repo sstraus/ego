@@ -53,6 +53,12 @@ pub struct ScanRequest {
     /// scope. Confusing the two would make a convenience default look like a
     /// containment guarantee.
     pub skip_dirs: Vec<String>,
+    /// Leave out what the `.gitignore` files at the root, below it and in the
+    /// enclosing repository ignore. The root itself is never judged: a caller
+    /// that names an ignored directory asked for it.
+    ///
+    /// Like `skip_dirs`, a usability device and not a security boundary.
+    pub respect_ignore: bool,
     pub limits: ScanLimits,
 }
 
@@ -62,6 +68,7 @@ impl ScanRequest {
         Self {
             root,
             skip_dirs: Vec::new(),
+            respect_ignore: false,
             limits: ScanLimits::default(),
         }
     }

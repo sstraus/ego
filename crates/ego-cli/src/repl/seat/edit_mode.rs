@@ -125,24 +125,37 @@ impl EditMode for SurfaceEditMode {
         }
 
         if picker_open {
+            let key = |command: &str| {
+                self.status
+                    .lock()
+                    .expect("surface status lock")
+                    .picker_keys
+                    .push(command.to_owned());
+                picker_command(PICKER_KEYS)
+            };
             return match &raw {
-                Event::Key(key) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
-                    match key.code {
-                        KeyCode::Up => picker_command("up"),
-                        KeyCode::Down => picker_command("down"),
-                        KeyCode::Enter => picker_command("enter"),
-                        KeyCode::Esc => picker_command("escape"),
-                        KeyCode::Char('s') => picker_command("session"),
-                        KeyCode::Char(digit @ '1'..='9') => {
-                            picker_command(&format!("number:{digit}"))
-                        }
+                Event::Key(key_event)
+                    if key_event
+                        .modifiers
+                        .difference(KeyModifiers::SHIFT)
+                        .is_empty() =>
+                {
+                    match key_event.code {
+                        KeyCode::Up => key("up"),
+                        KeyCode::Down => key("down"),
+                        KeyCode::Enter => key("enter"),
+                        KeyCode::Esc => key("escape"),
+                        KeyCode::Backspace => key("backspace"),
+                        KeyCode::Char(digit @ '1'..='9') => key(&format!("number:{digit}")),
+                        KeyCode::Char(character) => key(&format!("char:{character}")),
                         _ => ReedlineEvent::None,
                     }
                 }
-                Event::Key(key)
-                    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL =>
+                Event::Key(key_event)
+                    if key_event.code == KeyCode::Char('c')
+                        && key_event.modifiers == KeyModifiers::CONTROL =>
                 {
-                    picker_command("escape")
+                    key("escape")
                 }
                 Event::Resize(_, _) => ReedlineEvent::None,
                 _ => ReedlineEvent::None,
@@ -150,24 +163,30 @@ impl EditMode for SurfaceEditMode {
         }
 
         if question_selector_open {
+            let queued = |command: &str| {
+                self.status
+                    .lock()
+                    .expect("surface status lock")
+                    .picker_keys
+                    .push(command.to_owned());
+                question_selector_command(PICKER_KEYS)
+            };
             return match &raw {
                 Event::Key(key) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                     match key.code {
-                        KeyCode::Up => question_selector_command("up"),
-                        KeyCode::Down => question_selector_command("down"),
-                        KeyCode::Enter => question_selector_command("enter"),
-                        KeyCode::Esc => question_selector_command("escape"),
-                        KeyCode::Char(' ') => question_selector_command("space"),
-                        KeyCode::Char(digit @ '1'..='9') => {
-                            question_selector_command(&format!("number:{digit}"))
-                        }
+                        KeyCode::Up => queued("up"),
+                        KeyCode::Down => queued("down"),
+                        KeyCode::Enter => queued("enter"),
+                        KeyCode::Esc => queued("escape"),
+                        KeyCode::Char(' ') => queued("space"),
+                        KeyCode::Char(digit @ '1'..='9') => queued(&format!("number:{digit}")),
                         _ => ReedlineEvent::None,
                     }
                 }
                 Event::Key(key)
                     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL =>
                 {
-                    question_selector_command("escape")
+                    queued("escape")
                 }
                 Event::Resize(_, _) => ReedlineEvent::None,
                 _ => ReedlineEvent::None,
@@ -288,6 +307,9 @@ fn dismisses_notice(event: &Event) -> bool {
         _ => false,
     }
 }
+
+/// The one command the picker's keys travel under; see `SurfaceStatus::picker_keys`.
+pub(super) const PICKER_KEYS: &str = "keys";
 
 fn picker_command(command: &str) -> ReedlineEvent {
     ReedlineEvent::ExecuteHostCommand(format!("{MODEL_PICKER_COMMAND}{command}"))

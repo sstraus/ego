@@ -116,6 +116,38 @@ fn first_idle_publishes_a_durable_title_and_bounded_summary() {
 }
 
 #[test]
+fn a_host_that_reconnects_without_the_id_lists_a_session_whose_manifest_is_gone() {
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("The diff adds a cache and its tests."))],
+        ..Plan::default()
+    });
+    let mut initial = host(&places, &stub);
+    initial.initialize();
+    let cwd = places.workspace_path().to_str().expect("UTF-8 root");
+    let session = initial.new_session(cwd);
+    prompt(&mut initial, &session, "Explain the cache diff");
+    let summary = manifest(&places, &session)["summary"].clone();
+    initial.finish();
+
+    std::fs::remove_file(
+        places
+            .home_path()
+            .join("sessions")
+            .join(&session)
+            .join("manifest.json"),
+    )
+    .expect("remove rebuildable manifest");
+    let mut reconnected = host(&places, &stub);
+    reconnected.initialize();
+    let listed = reconnected.request("session/list", serde_json::json!({"cwd": cwd}));
+    let listed_row = row(&listed, &session);
+    assert_eq!(listed_row["title"], "Explain the cache diff");
+    assert_eq!(listed_row["_meta"]["ego"]["summary"], summary);
+    reconnected.finish();
+}
+
+#[test]
 fn compaction_checkpoint_becomes_the_target_synopsis_for_a_reconnecting_host() {
     let places = Places::new();
     let stub = Stub::start(Plan {
