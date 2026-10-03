@@ -599,3 +599,118 @@ mod tests {
         );
     }
 }
+
+// Round-fourteen critic cases for the parent barrier and cleanup context.
+#[cfg(all(test, unix))]
+mod critic_round_fourteen {
+    use super::super::io::OsIo;
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// Records each barrier with the log content visible at that moment.
+    struct Recorder {
+        seen: Mutex<Vec<(PathBuf, Vec<u8>)>>,
+        fail: bool,
+        log: PathBuf,
+    }
+    impl StoreIo for Recorder {
+        fn fsync(&self, path: &Path) -> io::Result<()> {
+            let content = fs::read(&self.log).unwrap_or_default();
+            self.seen.lock().unwrap().push((path.to_owned(), content));
+            if self.fail {
+                Err(io::Error::other("barrier failed"))
+            } else {
+                OsIo.fsync(path)
+            }
+        }
+        fn append_line(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            OsIo.append_line(path, bytes)
+        }
+        fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+            OsIo.read(path)
+        }
+        fn exists(&self, path: &Path) -> io::Result<bool> {
+            OsIo.exists(path)
+        }
+        fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            OsIo.replace_atomic(path, bytes)
+        }
+        fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+            OsIo.truncate(path, len)
+        }
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            OsIo.remove_file(path)
+        }
+        fn list_dirs(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            OsIo.list_dirs(path)
+        }
+    }
+    fn recorder(root: &Path, fail: bool) -> Recorder {
+        Recorder {
+            seen: Mutex::new(Vec::new()),
+            fail,
+            log: root.join("errors.jsonl"),
+        }
+    }
+
+    // Catches: the parent barrier running before the record is written (it
+    // would then acknowledge nothing about the record), or more than once.
+    #[test]
+    fn parent_barrier_runs_once_after_the_record_is_in_the_log() {
+        let temp = tempfile::tempdir().expect("dir");
+        let root = temp.path().join("nested/private");
+        let rec = recorder(&root, false);
+        append(&root, b"rec", 64, &rec).expect("append");
+        let seen = rec.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, temp.path().join("nested"));
+        assert_eq!(seen[0].1, b"rec\n");
+    }
+
+    // Catches: a refused record or refused existing root still reaching the
+    // barrier, or the barrier error replacing the real refusal.
+    #[test]
+    fn refusals_never_reach_the_parent_barrier_and_keep_their_own_error() {
+        let temp = tempfile::tempdir().expect("dir");
+        let root = temp.path().join("private");
+        let rec = recorder(&root, false);
+        let error = append(&root, &[b'x'; 64], 16, &rec).expect_err("oversize");
+        assert_eq!(error.to_string(), "private log record exceeds retention");
+        fs::create_dir(&root).expect("root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let error = append(&root, b"x", 64, &rec).expect_err("open root");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(rec.seen.lock().unwrap().is_empty());
+    }
+
+    // Catches: a barrier failure leaving the log or lock unusable, or the
+    // retry duplicating/losing the record that was already written.
+    #[test]
+    fn append_after_a_barrier_failure_keeps_one_copy_and_recovers() {
+        let temp = tempfile::tempdir().expect("dir");
+        let root = temp.path().join("private");
+        let failing = recorder(&root, true);
+        append(&root, b"one", 64, &failing).expect_err("barrier failure surfaces");
+        append(&root, b"two", 64, &OsIo).expect("later append");
+        assert_eq!(fs::read(root.join("errors.jsonl")).unwrap(), b"one\ntwo\n");
+        assert_eq!(
+            fs::read_dir(temp.path()).unwrap().count() + fs::read_dir(&root).unwrap().count(),
+            3
+        );
+    }
+
+    // Catches: cleanup context changing the kind or dropping the raw OS code,
+    // so callers matching on AlreadyExists/PermissionDenied misclassify it.
+    #[test]
+    fn cleanup_context_preserves_kind_and_os_code_for_every_original_kind() {
+        for code in [nix::libc::EEXIST, nix::libc::EACCES, nix::libc::ENOSPC] {
+            let original = io::Error::from_raw_os_error(code);
+            let kind = original.kind();
+            let wrapped = with_cleanup_context(original, Err(io::Error::from_raw_os_error(2)));
+            assert_eq!(wrapped.kind(), kind);
+            assert!(wrapped.to_string().contains("staging cleanup failed"));
+        }
+    }
+}
