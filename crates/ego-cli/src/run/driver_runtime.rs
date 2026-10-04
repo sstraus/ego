@@ -106,6 +106,7 @@ pub(super) async fn drive_execution<S: EventSink>(
         mode: _,
         policy_selection,
         policy_source,
+        perimeter,
         invocation,
         run_id,
         resume_plan: _,
@@ -1156,6 +1157,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         diagnostics.expand_last_tool();
                                         continue;
                                     }
+                                    repl::Line::HostCommand(repl::HostCommand::Action(
+                                        repl::actions::ActionId::Config,
+                                    )) => {
+                                        diagnostics.note(&perimeter.text());
+                                        continue;
+                                    }
                                     // The same snapshot `ego doctor` prints,
                                     // built by the same probes. Two renderings
                                     // of one value is the whole contract; two
@@ -1163,9 +1170,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Doctor,
                                     )) => {
-                                        diagnostics.note(&crate::doctor::observed_with_width(
+                                        diagnostics.note(&crate::doctor::observed_session(
                                             root.clone(),
                                             seat.width(),
+                                            &perimeter,
                                         ));
                                         continue;
                                     }

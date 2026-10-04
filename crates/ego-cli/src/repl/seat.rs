@@ -114,6 +114,7 @@ enum SurfaceActionEffect {
     Skills,
     Hooks,
     Doctor,
+    Config,
     Quit,
     Version,
 }
@@ -152,6 +153,7 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Skills => SurfaceActionEffect::Skills,
             ActionId::Hooks => SurfaceActionEffect::Hooks,
             ActionId::Doctor => SurfaceActionEffect::Doctor,
+            ActionId::Config => SurfaceActionEffect::Config,
             ActionId::Quit => SurfaceActionEffect::Quit,
             ActionId::Version => SurfaceActionEffect::Version,
             _ => {

@@ -51,6 +51,30 @@ pub fn observed_with_width(workspace: PathBuf, width: usize) -> String {
 /// the process working directory to reach this would be a test that cannot run
 /// beside another one.
 pub fn snapshot(workspace: PathBuf, home: Option<PathBuf>, roots: &VisibleRoots) -> HealthSnapshot {
+    let perimeter = crate::perimeter::observe(&workspace, home.as_deref(), None).ok();
+    snapshot_with_perimeter(workspace, home, roots, perimeter.as_ref())
+}
+
+/// Inspect an existing session without re-resolving its admitted perimeter.
+pub fn observed_session(
+    workspace: PathBuf,
+    width: usize,
+    perimeter: &crate::perimeter::Perimeter,
+) -> String {
+    let home = config::ego_home();
+    let roots = visible_roots(&workspace, home.as_ref());
+    text_with_width(
+        &snapshot_with_perimeter(workspace, home, &roots, Some(perimeter)),
+        width,
+    )
+}
+
+fn snapshot_with_perimeter(
+    workspace: PathBuf,
+    home: Option<PathBuf>,
+    roots: &VisibleRoots,
+    perimeter: Option<&crate::perimeter::Perimeter>,
+) -> HealthSnapshot {
     let configuration = Configuration;
     let credentials = Credentials { home };
     let sessions = SessionStore {
@@ -74,7 +98,33 @@ pub fn snapshot(workspace: PathBuf, home: Option<PathBuf>, roots: &VisibleRoots)
         &hooks,
         &acp,
     ];
-    HealthSnapshot::observe(&probes, roots)
+    let mut snapshot = HealthSnapshot::observe(&probes, roots);
+    let item = match perimeter {
+        Some(perimeter) => {
+            // The 2026-10-04 amendment names admitted roots only in this item.
+            // The typed constructor does not alter any probe's visible roots.
+            HealthItem::new(
+                HealthItemId::probe("sandbox.perimeter"),
+                HealthStatus::NotChecked,
+                HealthDetail::perimeter(perimeter),
+                HealthDetail::fixed("the admitted perimeter"),
+            )
+        }
+        None => HealthItem::new(
+            HealthItemId::probe("sandbox.perimeter"),
+            HealthStatus::Error,
+            HealthDetail::fixed("the effective perimeter could not be resolved or admitted"),
+            HealthDetail::fixed("configuration resolution"),
+        ),
+    };
+    if let Some(section) = snapshot
+        .sections
+        .iter_mut()
+        .find(|section| section.section == HealthSection::Sandbox)
+    {
+        section.items.push(item);
+    }
+    snapshot
 }
 
 /// Read the facts and print them.

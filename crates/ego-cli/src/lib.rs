@@ -45,6 +45,7 @@ pub mod model_picker;
 pub mod models;
 pub(crate) mod onboarding;
 pub mod output;
+pub mod perimeter;
 pub mod prompt;
 pub mod provider_http;
 pub mod reference;

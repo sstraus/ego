@@ -83,6 +83,10 @@ pub struct Effective {
     pub thinking: Option<ThinkingLevel>,
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    /// Winning layer for the selected sandbox, absent for the default.
+    pub sandbox_source: Option<Source>,
+    /// Winning layer for the active profile roots.
+    pub roots_source: Option<Source>,
     pub permissions: Ruleset,
     pub judge: Option<ModelRef>,
     pub posture: Posture,
@@ -322,6 +326,8 @@ fn resolve_inner(
     let mut thinking = None;
     let mut mode = None;
     let mut sandbox = None;
+    let mut sandbox_source = None;
+    let mut roots_source = None;
     let mut permissions = Ruleset::default();
     let mut judge = None;
     let mut ceilings = Ceilings::default();
@@ -373,6 +379,7 @@ fn resolve_inner(
             .or(sourced.value.sandbox)
         {
             sandbox = Some(value);
+            sandbox_source = Some(sourced.source);
         }
         if let Some(perm) = profile
             .and_then(|p| p.permissions.clone())
@@ -406,6 +413,7 @@ fn resolve_inner(
         }
         if let Some(profile) = profile.filter(|profile| !profile.roots.is_empty()) {
             roots = profile.roots.clone();
+            roots_source = Some(sourced.source);
         }
         if let Some(path) = profile.and_then(|profile| profile.artifact_dir.clone()) {
             artifact_dir = Some(Sourced {
@@ -524,6 +532,8 @@ fn resolve_inner(
         thinking,
         mode,
         sandbox,
+        sandbox_source,
+        roots_source,
         permissions,
         judge,
         posture,

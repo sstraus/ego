@@ -27,6 +27,7 @@ pub enum ActionId {
     Statusline,
     Export,
     Doctor,
+    Config,
     Quit,
     New,
     Name,
@@ -484,6 +485,7 @@ impl ActionRegistry {
                 "export",
                 "Export this session — /export [local|sanitized] [md|json|jsonl]",
             ),
+            enabled(Config, "config", "Inspect the effective perimeter"),
             enabled(Doctor, "doctor", "Diagnose local subsystem health"),
             enabled(Quit, "quit", "Exit the interactive session"),
             enabled(New, "new", "Create a durable session"),
@@ -816,6 +818,15 @@ impl ActionRegistry {
                 } else {
                     Dispatch::Refused {
                         reason: "export is unavailable",
+                    }
+                };
+            }
+            if name == "config" && self.resolve_slash(name) == Some(ActionId::Config) {
+                return if raw_arguments.trim() == "perimeter" {
+                    Dispatch::Action(ActionId::Config)
+                } else {
+                    Dispatch::Refused {
+                        reason: "usage: /config perimeter",
                     }
                 };
             }

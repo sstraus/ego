@@ -519,6 +519,9 @@ pub(super) enum ConfigSubcommand {
         profile: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Show the effective run perimeter instead of stored values.
+        #[arg(long)]
+        effective: bool,
     },
     /// Edit the complete user document in the selected external editor.
     Edit,

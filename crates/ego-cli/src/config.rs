@@ -101,6 +101,25 @@ async fn execute_inner(
     out: &Stdout,
     cancel: &CancelToken,
 ) -> Result<(), RunTermination> {
+    if let ConfigAction::Effective { profile, json } = &args.action {
+        let workspace = std::env::current_dir().map_err(|_| RunTermination::Failed {
+            message: "the workspace cannot be read".into(),
+        })?;
+        let perimeter =
+            crate::perimeter::observe(&workspace, ego_home().as_deref(), profile.as_deref())
+                .map_err(|error| RunTermination::Failed {
+                    message: error.to_string(),
+                })?;
+        let rendered = if *json {
+            serde_json::to_string(&perimeter).map_err(|error| RunTermination::Failed {
+                message: error.to_string(),
+            })?
+        } else {
+            perimeter.text()
+        };
+        out.line(&rendered);
+        return Ok(());
+    }
     let editor = matches!(&args.action, ConfigAction::Edit)
         .then(editor_argv)
         .transpose()?;
@@ -111,6 +130,9 @@ async fn execute_inner(
         .join("config.toml");
     let store = OsUserConfigStore::new(Arc::new(OsIo), path);
     match &args.action {
+        ConfigAction::Effective { .. } => {
+            unreachable!("effective listing returns before stored-value management")
+        }
         ConfigAction::Get { target, key, json } => {
             let snapshot = snapshot(&store, target.clone())?;
             let value = snapshot
@@ -967,12 +989,20 @@ fn project_layer_paths(workspace: &Path) -> [(Source, PathBuf); 2] {
 }
 
 fn base_layers(workspace: &Path, trust: Trust) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
+    base_layers_in(workspace, trust, ego_home().as_deref())
+}
+
+pub(crate) fn base_layers_in(
+    workspace: &Path,
+    trust: Trust,
+    home: Option<&Path>,
+) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
     // Which files this invocation is subject to, decided before any of them is
     // opened: whether a layer is *eligible* is a question about the posture and
     // the environment, and answering it separately from reading keeps the trust
     // gate below in one place instead of once per layer.
     let mut files = vec![(Source::System, PathBuf::from(SYSTEM_CONFIG))];
-    if let Some(home) = ego_home() {
+    if let Some(home) = home {
         files.push((Source::User, home.join("config.toml")));
     }
     // Open configuration only in a trusted workspace. Diagnostics may inspect

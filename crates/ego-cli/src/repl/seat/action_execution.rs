@@ -728,6 +728,9 @@ pub(super) fn apply_surface_effect(
                 return Some(Line::HostCommand(HostCommand::Hooks));
             }
         }
+        SurfaceActionEffect::Config => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Config)));
+        }
         SurfaceActionEffect::Doctor => {
             // The whole snapshot, not the MCP corner of one. `/doctor` and
             // `ego doctor` render the same value now, so an operator cannot be

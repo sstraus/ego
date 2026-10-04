@@ -665,6 +665,10 @@ pub enum ConfigAction {
         target: UserConfigTarget,
         json: bool,
     },
+    Effective {
+        profile: Option<String>,
+        json: bool,
+    },
     /// Edit the complete user document, including profiles.
     Edit,
 }
@@ -1432,10 +1436,20 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
             let key = managed_config_key(&target, &key)?;
             ConfigAction::Unset { target, key }
         }
-        ConfigSubcommand::List { profile, json } => ConfigAction::List {
-            target: config_target(profile)?,
+        ConfigSubcommand::List {
+            profile,
             json,
-        },
+            effective,
+        } => {
+            if effective {
+                ConfigAction::Effective { profile, json }
+            } else {
+                ConfigAction::List {
+                    target: config_target(profile)?,
+                    json,
+                }
+            }
+        }
         ConfigSubcommand::Edit => ConfigAction::Edit,
     };
     Ok(ConfigArgs { action })
