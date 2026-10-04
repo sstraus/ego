@@ -181,13 +181,39 @@ fn successor_accepts_next_turn(action: &str) {
     let resumed = places
         .ego(&stub)
         .subcommand("resume")
-        .args(["--sandbox", "off"])
-        .run_pty("resume prompt");
-    assert_eq!(resumed.code, Some(0), "resume failed: {resumed:?}");
-    assert!(
-        resumed.stdout.contains("REGRESSION-MARKER-ANSWER"),
-        "resume lost model: {resumed:?}"
-    );
+        .args(["--sandbox", "off"]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resume pty");
+    let child = pair
+        .slave
+        .spawn_command(resumed.pty_command())
+        .expect("resume");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    // Trust was remembered by the first process; resume must reach input
+    // without either a trust question or a model picker.
+    until_prompt_from(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"resume prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "resume failed: {status:?}");
 }
 
 // portable-pty transports bytes but does not emulate a terminal. Keep the
