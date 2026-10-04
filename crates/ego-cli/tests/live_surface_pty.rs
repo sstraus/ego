@@ -6277,3 +6277,150 @@ fn ctrl_z_reports_that_windows_cannot_suspend_it() {
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
 }
+
+// Catches: startup effort navigation or session-only selection publishes defaults before Enter.
+#[test]
+fn regression_startup_effort_navigation_and_escape_preserve_existing_config() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .without_fixture_thinking()
+        .conversing()
+        .args(["--model", "anthropic/fixture-vision", "--sandbox", "off"])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    let original = "# Keep operator settings intact until confirmation.\nmode = \"default\"\n";
+    ego.home_file("config.toml", original);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_normalized(&reader, &mut output, 0, "Select reasoning");
+    drain_until_quiet(&reader, &mut output);
+    input
+        .write_all(b"1s")
+        .expect("select without persistent confirmation");
+    input.flush().expect("selection flush");
+    drain_until_quiet(&reader, &mut output);
+    assert_eq!(
+        std::fs::read_to_string(ego.home_path().join("config.toml")).expect("existing config"),
+        original
+    );
+    assert!(stub.generations().is_empty());
+    input.write_all(b"\x1b").expect("cancel reasoning");
+    input.flush().expect("cancel flush");
+    assert_eq!(bounded_exit(child).exit_code(), 130);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+    assert_eq!(
+        std::fs::read_to_string(ego.home_path().join("config.toml")).expect("preserved config"),
+        original
+    );
+    assert!(stub.generations().is_empty());
+}
+
+// Catches: EOF repeats a provider refusal even when startup already has an explicit effort.
+#[test]
+fn regression_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Status(400)],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--thinking",
+            "off",
+            "--model",
+            "anthropic/fixture-vision",
+            "--mode",
+            "default",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    ego.file("AGENTS.md", "# effort picker fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("trust flush");
+    let trust_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, trust_start);
+    let turn_start = output.len();
+    input.write_all(b"hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        turn_start,
+        "the provider returned HTTP 400",
+    );
+    until_prompt_from(&reader, &mut output, turn_start);
+    let quit_start = output.len();
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader");
+    writer_join.join().expect("writer");
+    drain(&reader, &mut output);
+    assert!(status.success(), "interactive exit: {status:?}");
+    let after_quit = normalized(&output[quit_start..]);
+    assert!(after_quit.contains("To resume: ego resume"), "{after_quit}");
+    assert!(
+        !after_quit.contains("the provider returned HTTP 400"),
+        "{after_quit}"
+    );
+    assert!(
+        !after_quit.contains("the model does not accept"),
+        "{after_quit}"
+    );
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["thinking"]["type"], "disabled");
+}
