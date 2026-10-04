@@ -250,7 +250,15 @@ pub(super) fn answer_control(
                 .lock()
                 .expect("surface status lock")
                 .permission_modal = true;
-            let prompt = Question::new(permission_prompt(&request), Arc::clone(surface.status));
+            let capabilities = surface
+                .status
+                .lock()
+                .expect("surface status lock")
+                .permission_capabilities;
+            let prompt = Question::new(
+                permission_prompt(&request, capabilities),
+                Arc::clone(surface.status),
+            );
             tell_host(surface.status, |osc, quiet| {
                 osc.awaiting(request.tool(), !quiet)
             });
@@ -1278,9 +1286,29 @@ fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
     let _ = stdout.flush();
 }
 
-fn permission_prompt(request: &PermissionRequest) -> String {
-    let rendered = request.to_string();
-    let operations = rendered.lines().skip(1).collect::<Vec<_>>().join("\n");
+fn permission_prompt(
+    request: &PermissionRequest,
+    capabilities: crate::render::Capabilities,
+) -> String {
+    use ego_core::permit::Op;
+    let operations = request
+        .ops()
+        .iter()
+        .map(|op| match op {
+            Op::Write { path, change } => format!(
+                "- write {}\n{}",
+                serde_json::to_string(&path.to_string()).expect("a path serializes"),
+                crate::render::permission_diff::render(change, capabilities)
+            ),
+            _ => PermissionRequest::new(request.tool(), vec![op.clone()], request.why().clone())
+                .to_string()
+                .lines()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut rows = vec![
         format!(
             "Call: {}",
@@ -1307,10 +1335,23 @@ fn permission_prompt(request: &PermissionRequest) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+        let mut parameters = presentation.parameters().clone();
+        if request
+            .ops()
+            .iter()
+            .any(|op| matches!(op, Op::Write { .. }))
+            && matches!(request.tool(), "edit" | "write")
+            && let Some(fields) = parameters.as_object_mut()
+        {
+            for name in ["old_string", "new_string", "content"] {
+                if let Some(value) = fields.get_mut(name) {
+                    *value = serde_json::Value::String("[shown in bounded diff]".into());
+                }
+            }
+        }
         rows.push(format!(
             "Parameters:\n{}",
-            serde_json::to_string_pretty(presentation.parameters())
-                .expect("JSON parameters always serialize")
+            serde_json::to_string_pretty(&parameters).expect("JSON parameters always serialize")
         ));
         match presentation.remember_plan() {
             Ok(plan) => {
@@ -1577,5 +1618,107 @@ mod permission_edit_form_tests {
             form.validate().unwrap()["argv"],
             json!(["cargo", "test", "-p", "ego-core"])
         );
+    }
+}
+
+#[cfg(test)]
+mod permission_modal_diff_tests {
+    use super::*;
+    use crate::render::caps::{Capabilities, Terminal};
+    use ego_core::permit::{Change, Escalation, Op, OpName};
+
+    fn request(change: Change) -> PermissionRequest {
+        let path = CanonPath::new("/workspace/new.py");
+        PermissionRequest::new(
+            "edit",
+            vec![Op::Write {
+                path: path.clone(),
+                change,
+            }],
+            Escalation::NoRuleCovers {
+                op: OpName::Write,
+                path,
+            },
+        )
+    }
+
+    #[test]
+    fn permission_modal_edit_diff_catches_escaped_string_dump() {
+        let request = request(Change::Replace {
+            old_string: "def subtract(a, b):\n    return a - b\n".into(),
+            new_string: "def subtract(a, b):\n    return b - a\n".into(),
+        });
+        let out = permission_prompt(&request, Capabilities::plain());
+        assert!(
+            out.contains(
+                "@@ -1,2 +1,2 @@\n def subtract(a, b):\n-    return a - b\n+    return b - a"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains(r"\n"), "{out}");
+        assert!(out.contains("fragment"));
+        assert!(out.ends_with("[y] allow [n] deny [e] edit [r] remember "));
+    }
+
+    #[test]
+    fn permission_modal_colour_catches_escapes_in_plain_output() {
+        let request = request(Change::Replace {
+            old_string: "old\n".into(),
+            new_string: "new\n".into(),
+        });
+        for (tty, no_color, term, flag, coloured) in [
+            (true, None, "xterm-256color", false, true),
+            (false, None, "xterm-256color", false, false),
+            (true, Some("1"), "xterm-256color", false, false),
+            (true, Some("0"), "xterm-256color", false, false),
+            (true, None, "dumb", false, false),
+            (true, None, "xterm-256color", true, false),
+        ] {
+            let caps = Capabilities::of(&Terminal {
+                stdout_is_terminal: tty,
+                no_color,
+                term: Some(term),
+                flag_no_color: flag,
+                ..Terminal::default()
+            });
+            let out = permission_prompt(&request, caps);
+            assert_eq!(
+                out.contains("\x1b["),
+                coloured,
+                "{tty} {no_color:?} {term} {flag}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_modal_write_diff_catches_missing_additions_and_unbounded_output() {
+        let out = permission_prompt(
+            &request(Change::Whole(b"first\nsecond\n".to_vec())),
+            Capabilities::plain(),
+        );
+        assert!(out.contains("@@ -0,0 +1,2 @@\n+first\n+second"), "{out}");
+        assert!(out.contains("previous content is not read"));
+        let content = (0..100).map(|n| format!("line {n}\n")).collect::<String>();
+        let out = permission_prompt(
+            &request(Change::Whole(content.into_bytes())),
+            Capabilities::plain(),
+        );
+        // A unified diff has two headers, one hunk header and 100 addition rows.
+        assert!(out.contains("[73 diff lines omitted]"), "{out}");
+        assert!(!out.contains("+line 99"));
+        assert!(out.lines().count() < 45, "{out}");
+    }
+
+    #[test]
+    fn permission_modal_diff_catches_terminal_controls_and_overwide_lines() {
+        let out = permission_prompt(
+            &request(Change::Whole(
+                format!("\x1b[2J{}\n", "界".repeat(1000)).into_bytes(),
+            )),
+            Capabilities::plain(),
+        );
+        assert!(!out.contains('\x1b'));
+        assert!(out.contains('�'));
+        assert!(out.len() < 2000);
     }
 }

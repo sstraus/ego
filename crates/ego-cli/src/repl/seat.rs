@@ -393,6 +393,7 @@ struct SurfaceStatus {
     model_selection: Option<Arc<GenerationSelection>>,
     question_selector: Option<Arc<Mutex<Selector>>>,
     permission_modal: bool,
+    permission_capabilities: crate::render::Capabilities,
     permission_rules: Option<Arc<dyn PermissionRuleApplication>>,
     /// What the host is told around a modal wait, and whether `-q` is on.
     signals: Option<(Osc, bool)>,
@@ -438,6 +439,7 @@ impl Default for SurfaceStatus {
             model_selection: None,
             question_selector: None,
             permission_modal: false,
+            permission_capabilities: crate::render::Capabilities::plain(),
             permission_rules: None,
             signals: None,
             cursor_selectors: false,
@@ -1206,9 +1208,11 @@ impl Seat {
     }
 
     /// Let the terminal owner tell the host when it is waiting on a person.
-    pub fn announce_waits(&self, osc: Osc, quiet: bool) {
+    pub fn announce_waits(&self, capabilities: crate::render::Capabilities, quiet: bool) {
         if let SeatKind::Live(live) = &self.kind {
-            live.status.lock().expect("surface status lock").signals = Some((osc, quiet));
+            let mut status = live.status.lock().expect("surface status lock");
+            status.signals = Some((Osc::new(capabilities), quiet));
+            status.permission_capabilities = capabilities;
         }
     }
 

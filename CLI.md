@@ -959,7 +959,14 @@ typed as JSON.
 
 An unresolved permission modal separates the call, reason, canonical
 operations, risk, exact parameters, derived rule candidates, and every
-widening. `y`, `n`, `e`, and `r` act immediately. `e` edits the same prefilled
+widening. Pending `edit` changes show a unified diff of the replacement
+fragments with real line breaks. Pending `write` content appears as additions;
+the prompt does not read previous file content and states that an existing
+file is overwritten. Diffs show at most 30 lines, clipped to terminal width,
+with an explicit omitted-line count. Colour follows terminal capabilities,
+`--no-color`, and `NO_COLOR`; redirected output has no colour escapes. Binary
+whole-file content shows its byte count instead of a text diff. `y`, `n`, `e`,
+and `r` act immediately. `e` edits the same prefilled
 schema-derived form and sends the result through full preparation and policy
 classification again. `r` applies the displayed allow-rule plan through the
 single atomic config owner and then allows the current call; it never asks for
