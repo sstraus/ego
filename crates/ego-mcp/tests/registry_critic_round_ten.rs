@@ -144,10 +144,10 @@ fn controller(outcomes: Vec<Outcome>, journal: Arc<Journal>) -> Arc<McpRegistryC
     .expect("controller")
 }
 
-/// Catches: a private-log failure that is swallowed (fail-open publish) or whose
-/// error text, Display or Debug, carries the backend cause.
+/// Catches: optional private-log failure suppressing required failure evidence
+/// or leaking the backend cause through public status or journal events.
 #[tokio::test(flavor = "current_thread")]
-async fn private_log_failure_stops_reconcile_and_hides_the_cause() {
+async fn private_log_failure_preserves_failure_evidence_and_hides_the_cause() {
     let journal = Arc::new(Journal {
         fail_private: true,
         ..Journal::default()
@@ -156,22 +156,26 @@ async fn private_log_failure_stops_reconcile_and_hides_the_cause() {
         vec![Outcome::Invalid(MARKER.to_owned())],
         Arc::clone(&journal),
     );
-    let before = registry.publication().generation().to_owned();
-    let error = registry
+    registry
         .reconcile(refresh())
         .await
-        .err()
-        .expect("fail closed");
-    assert!(!format!("{error}").contains(MARKER));
-    assert!(!format!("{error:?}").contains(MARKER));
-    assert_eq!(registry.publication().generation(), before);
-    assert!(
-        registry
-            .status()
-            .mcp_errors()
-            .iter()
-            .all(|e| !e.contains(MARKER))
+        .expect("optional private logging cannot suppress failure evidence");
+    assert_eq!(
+        registry.status().mcp_errors(),
+        ["MCP server `alpha`: server configuration is invalid"]
     );
+    assert!(journal.private.lock().expect("private").is_empty());
+    let recorded = journal.events.lock().expect("events");
+    assert!(recorded.iter().any(|event| matches!(
+        event,
+        McpRegistryEvent::RefreshFailed { server, cause, .. }
+            if server == "alpha" && cause == "server configuration is invalid"
+    )));
+    assert!(recorded.iter().any(|event| matches!(
+        event,
+        McpRegistryEvent::SnapshotPublished { .. }
+    )));
+    drop(recorded);
     let events = format!("{:?}", journal.events.lock().expect("events"));
     assert!(!events.contains(MARKER), "{events}");
 }
