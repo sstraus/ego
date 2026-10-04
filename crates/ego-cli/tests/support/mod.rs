@@ -253,6 +253,8 @@ pub struct Plan {
     /// carries the operator's credential and the answer's bytes must not be
     /// relayed into what a terminal or an ACP host is shown.
     pub tags_refusal: Option<(u16, String)>,
+    /// Hold fresh model resolution after the first answer so tests can inject store I/O failure.
+    pub subsequent_resolution_gate: Option<Arc<ReleaseGate>>,
 }
 
 impl Default for Plan {
@@ -262,6 +264,7 @@ impl Default for Plan {
             context_length: Some(32_768),
             completions: vec![Reply::Sse(text("It is done."))],
             tags_refusal: None,
+            subsequent_resolution_gate: None,
         }
     }
 }
@@ -525,6 +528,11 @@ fn serve(
             json(&mut stream, &serde_json::json!({ "models": models }))
         }
         "/api/ps" => {
+            if *generation > 0
+                && let Some(gate) = plan.subsequent_resolution_gate.as_ref()
+            {
+                gate.wait();
+            }
             let models: Vec<serde_json::Value> = plan
                 .context_length
                 .map(|context| serde_json::json!({ "name": MODEL, "context_length": context }))
