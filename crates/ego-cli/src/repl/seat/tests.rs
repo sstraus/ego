@@ -390,8 +390,17 @@ fn permission_modal_decisions_are_immediate_and_only_explicit_keys_can_approve()
         ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.to_string())
     );
     assert_eq!(
-        mode.parse_event(key(KeyCode::Char('r'))),
+        mode.parse_event(key(KeyCode::Char('a'))),
         ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}remember"))
+    );
+    assert_eq!(
+        mode.parse_event(key(KeyCode::Char('d'))),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}details"))
+    );
+    assert_eq!(
+        mode.parse_event(key(KeyCode::Char('r'))),
+        ReedlineEvent::None,
+        "the retired remember key must not act"
     );
     status.lock().unwrap().permission_modal = false;
     assert_ne!(
