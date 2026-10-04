@@ -811,6 +811,7 @@ fn rejected_acp_mcp_permission_never_sends_the_tool_call() {
 }
 
 #[test]
+// Catches transport cancellation racing ahead of the run token and yielding Uncertain.
 fn cancelling_an_acp_mcp_call_cancels_the_outer_message_request() {
     let places = Places::new();
     std::fs::write(
@@ -851,7 +852,7 @@ fn cancelling_an_acp_mcp_call_cancels_the_outer_message_request() {
     loop {
         let frame = host.read_frame();
         if frame["id"].as_u64() == Some(prompt) {
-            assert!(frame["result"].is_object(), "{frame}");
+            assert_eq!(frame["result"]["stopReason"], "cancelled", "{frame}");
             break;
         }
         match frame["method"].as_str() {

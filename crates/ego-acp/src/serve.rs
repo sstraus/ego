@@ -3245,11 +3245,13 @@ where
                 async move |notification: v1::CancelNotification, _cx| {
                     match sessions.cancel(&notification.session_id) {
                         Cancellation::Admitted(key, mcp) => {
-                            if let Some(mcp) = mcp {
-                                mcp.cancel_active();
-                            }
                             if let Err(error) = controller.cancel_admitted(&key).await {
                                 tracing::warn!(%error, "ACP cancellation could not be applied");
+                            }
+                            // The run must observe cancellation before a transport
+                            // failure can finish its tool and start another generation.
+                            if let Some(mcp) = mcp {
+                                mcp.cancel_active();
                             }
                         }
                         // Recorded, not applied: there is no run to cancel
