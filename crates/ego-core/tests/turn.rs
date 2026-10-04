@@ -3769,6 +3769,27 @@ mod turn {
         );
     }
 
+    /// Bug regression_case: a read outside the workspace ended the whole turn with
+    /// `PermissionRequired`, so the model never saw the refusal and an AI Chat
+    /// turn died on a file its instructions referenced. The refusal is a
+    /// failed tool result and the next generation answers.
+    #[test]
+    fn a_refused_read_outside_the_workspace_does_not_end_the_turn() {
+        let fx = Fixture::new(reading("/etc/passwd")).with_read_tool();
+        fx.fs.file("/etc/passwd", "root:x:0:0");
+
+        let (reason, _, state) = run(&fx, SessionState::default(), "read /etc/passwd");
+
+        assert_eq!(reason, ExitReason::Completed);
+        let call = state
+            .items
+            .values()
+            .find(|item| item.kind == ItemKind::ToolCall)
+            .expect("the call was logged");
+        assert_eq!(call.ok, Some(false));
+        assert!(tool_result_text(call).contains("outside the workspace"));
+    }
+
     /// Everything the log recorded about permissions, in order.
     fn permission_events(fx: &Fixture) -> Vec<EventKind> {
         fx.store
@@ -3894,7 +3915,7 @@ mod turn {
         fx.fs.file("/etc/passwd", "root:x:0:0");
 
         let (reason, _, _) = run(&fx, SessionState::default(), "read /etc/passwd");
-        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert_eq!(reason, ExitReason::Completed);
 
         let recorded = permission_events(&fx);
         let [EventKind::PermissionDecided { allowed, by, .. }] = recorded.as_slice() else {
@@ -3902,6 +3923,194 @@ mod turn {
         };
         assert_eq!(*allowed, Some(false));
         assert_eq!(by.as_ref(), Some(&Authority::Boundary));
+    }
+
+    fn tool_calls_by_id(
+        state: &SessionState,
+    ) -> std::collections::HashMap<String, ego_core::state::ItemState> {
+        state
+            .items
+            .values()
+            .filter(|item| item.kind == ItemKind::ToolCall)
+            .map(|item| (item.call_id.clone().expect("a call id"), item.clone()))
+            .collect()
+    }
+
+    fn call_event(call_id: &str, name: &str, args: &str) -> AiEvent {
+        AiEvent::ToolCall {
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            args: args.to_string(),
+        }
+    }
+
+    /// Critic regression_case. Plausible bug: the refused read short-circuits the
+    /// batch, so the sibling that follows it is closed unstarted or never
+    /// answered.
+    #[test]
+    fn a_refused_read_does_not_stop_the_sibling_read_after_it() {
+        let fx = Fixture::new(vec![
+            vec![
+                call_event("outside", "read", r#"{"path":"/etc/passwd"}"#),
+                call_event("inside", "read", r#"{"path":"/ws/notes.md"}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_read_tool();
+        fx.fs.file("/etc/passwd", "root:x:0:0");
+        fx.fs.file("/ws/notes.md", "hello");
+
+        let (reason, _, state) = run(&fx, SessionState::default(), "read both");
+
+        assert_eq!(reason, ExitReason::Completed);
+        let calls = tool_calls_by_id(&state);
+        assert_eq!(calls["outside"].ok, Some(false));
+        assert_eq!(calls["inside"].ok, Some(true));
+        assert_eq!(tool_result_text(&calls["inside"]), "hello");
+    }
+
+    /// Critic regression_case. Plausible bug: the refused read's `continue` swallows
+    /// the next call's own denial, or lets the write run.
+    #[test]
+    fn a_write_that_needs_an_answer_after_a_refused_read_still_ends_the_turn() {
+        let mut fx = Fixture::new(vec![
+            vec![
+                call_event("outside", "read", r#"{"path":"/etc/passwd"}"#),
+                call_event(
+                    "write",
+                    "fake_write",
+                    r#"{"path":"/ws/out.txt","contents":"x"}"#,
+                ),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ]);
+        fx.registry = vec![
+            std::sync::Arc::new(Typed(FakeReadTool)),
+            std::sync::Arc::new(Typed(FakeWriteTool)),
+        ];
+        fx.fs.file("/etc/passwd", "root:x:0:0");
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "read then write");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+        assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        let calls = tool_calls_by_id(&state);
+        assert!(tool_result_text(&calls["outside"]).contains("outside the workspace"));
+    }
+
+    /// Critic regression_case. Plausible bug: the exception widens from "read the
+    /// boundary refused" to every `OutsideWorkspace`, so a write outside the
+    /// workspace is handed back to the model instead of ending the run.
+    #[test]
+    fn a_write_outside_the_workspace_still_ends_the_turn() {
+        let fx = Fixture::new(writing("/etc/ego-owned", "x")).with_write_tool();
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+        assert!(fx.fs.read(&CanonPath::new("/etc/ego-owned")).is_err());
+    }
+
+    /// Critic regression_case. Plausible bug: the exception widens to every refused
+    /// read, so an operator's deny rule no longer ends the run.
+    #[test]
+    fn a_deny_rule_on_a_read_inside_the_workspace_still_ends_the_turn() {
+        let fx = Fixture::new(reading("/ws/secret.txt"))
+            .with_read_tool()
+            .with_rules(&[], &["read(secret.txt)"]);
+        fx.fs.file("/ws/secret.txt", "hunter2");
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "read the secret");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+        let calls = tool_calls_by_id(&state);
+        assert!(!tool_result_text(&calls["call_1"]).contains("hunter2"));
+    }
+
+    /// Critic regression_case. Plausible bug: the exception is keyed on something a
+    /// spawn also satisfies, so a command nobody can approve is returned to
+    /// the model instead of ending the run.
+    #[test]
+    fn a_spawn_nobody_can_approve_still_ends_the_turn() {
+        let fx = Fixture::new(vec![
+            vec![
+                call_event("exec", "exec", r#"{"argv":["cat","/etc/passwd"]}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_exec_tool();
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "cat it");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+    }
+
+    /// Critic regression_case. Plausible bug: state left behind by the first refusal
+    /// (a call left started, a double `ToolCallCompleted`, a decision recorded
+    /// twice) breaks the next generation's refusal.
+    #[test]
+    fn repeated_refused_reads_each_complete_exactly_once() {
+        let fx = Fixture::new(vec![
+            vec![
+                call_event("a", "read", r#"{"path":"/etc/passwd"}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                call_event("b", "read", r#"{"path":"/etc/shadow"}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                call_event("c", "read", r#"{"path":"/root/.ssh/id_rsa"}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_read_tool();
+        for path in ["/etc/passwd", "/etc/shadow", "/root/.ssh/id_rsa"] {
+            fx.fs.file(path, "secret");
+        }
+
+        let (reason, _, state) = run(&fx, SessionState::default(), "read them");
+
+        assert_eq!(reason, ExitReason::Completed);
+        let calls = tool_calls_by_id(&state);
+        for (id, path) in [
+            ("a", "/etc/passwd"),
+            ("b", "/etc/shadow"),
+            ("c", "/root/.ssh/id_rsa"),
+        ] {
+            assert_eq!(calls[id].ok, Some(false));
+            let text = tool_result_text(&calls[id]);
+            assert!(text.contains(path), "{text}");
+            assert!(!text.contains("secret"), "{text}");
+        }
+        let completed = fx
+            .store
+            .events()
+            .into_iter()
+            .filter(|ev| matches!(ev.kind, EventKind::ToolCallCompleted { .. }))
+            .count();
+        assert_eq!(completed, 3, "one completion per call");
+        let decided = permission_events(&fx)
+            .into_iter()
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    EventKind::PermissionDecided {
+                        allowed: Some(false),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(decided, 3, "one boundary decision per refused call");
     }
 
     /// The mode raised a canonical question and the headless run had no final

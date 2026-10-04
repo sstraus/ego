@@ -1899,21 +1899,11 @@ mod end_to_end {
         );
     }
 
-    #[test]
-    fn a_turn_stops_when_a_tool_call_is_refused_and_names_what_was_refused() {
-        // This test used to assert the opposite ending: the denial was logged
-        // as a failed result, the model read it in the next generation, and
-        // the turn completed. `CLI.md` §4.4 is ratified and says otherwise —
-        // a run with nobody to ask does not answer a permission question on
-        // the model's behalf; it stops with the denied action in the result.
-        //
-        // What it protected is protected harder here: the denial still names
-        // what it refused, the refused *contents* still never reach the
-        // model, and now there is no second generation for them to reach.
-        // See `docs/decisions/2026-08-21-two-levels-of-ending.md` §4.
+    fn refused_call(
+        name: &str,
+        args: serde_json::Value,
+    ) -> (ego_core::turn::TurnOutcome, Arc<FakeGenerator>) {
         let ws = populated();
-        let outside = Workspace::new();
-        let secret = outside.file("secret.txt", "not yours");
         let store_dir = TempDir::new().expect("a temp directory");
         let store = JsonlStore::new(store_dir.path(), "/ws", Box::new(OsIo));
         let clock = SystemClock;
@@ -1921,14 +1911,14 @@ mod end_to_end {
             vec![
                 AiEvent::ToolCall {
                     call_id: "call_1".to_string(),
-                    name: "read".to_string(),
-                    args: json!({ "path": secret.display().to_string() }).to_string(),
+                    name: name.to_string(),
+                    args: args.to_string(),
                 },
                 AiEvent::Stop(StopReason::ToolUse),
             ],
             vec![
                 AiEvent::TextDelta {
-                    text: "I am not allowed to read that".to_string(),
+                    text: "I am not allowed to access that".to_string(),
                 },
                 AiEvent::Stop(StopReason::Stop),
             ],
@@ -1981,8 +1971,21 @@ mod end_to_end {
                 ),
             )
             .expect("budget gate is available");
-            block_on(loop_.run("read that file")).expect("the log is writable")
+            block_on(loop_.run("access that file")).expect("the log is writable")
         };
+
+        (outcome, generator)
+    }
+
+    // Catches: treating a boundary-refused write as a recoverable read refusal.
+    #[test]
+    fn a_turn_stops_when_a_tool_call_is_refused_and_names_what_was_refused() {
+        let outside = Workspace::new();
+        let secret = outside.file("secret.txt", "not yours");
+        let (outcome, generator) = refused_call(
+            "write",
+            json!({ "path": secret.display().to_string(), "contents": "overwritten" }),
+        );
 
         assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
         assert!(!outcome.ok);
@@ -1998,6 +2001,10 @@ mod end_to_end {
         assert!(
             !action.contains("not yours"),
             "and must not quote what it refused to read: {action}"
+        );
+        assert_eq!(
+            fs::read_to_string(&secret).expect("the target still exists"),
+            "not yours"
         );
         // And *who* denied it, which is the fact that picks the remedy.
         // `CLI.md` §4.4 is explicit that the boundary is not a permission at
@@ -2018,6 +2025,38 @@ mod end_to_end {
         assert!(
             !history.contains("not yours"),
             "the refused contents must not reach the model: {history}"
+        );
+    }
+
+    // Catches: a real builtin read refusal ending the turn or leaking refused contents.
+    #[test]
+    fn a_boundary_refused_read_reaches_the_model_without_the_file_contents() {
+        let outside = Workspace::new();
+        let secret = outside.file("secret.txt", "not yours");
+        let (outcome, generator) =
+            refused_call("read", json!({ "path": secret.display().to_string() }));
+
+        assert_eq!(outcome.exit_reason, ExitReason::Completed);
+        assert!(outcome.ok);
+        assert!(outcome.denied.is_none());
+        let calls = generator.calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "the model must be able to answer after the refusal"
+        );
+        let history = format!("{:?}", calls[1].messages);
+        assert!(
+            history.contains("outside the workspace") && history.contains("secret.txt"),
+            "the next generation must receive the named refusal: {history}"
+        );
+        assert!(
+            !history.contains("not yours"),
+            "the refused contents leaked: {history}"
+        );
+        assert_eq!(
+            fs::read_to_string(&secret).expect("the target still exists"),
+            "not yours"
         );
     }
 
