@@ -1942,7 +1942,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     until_from(&reader, &mut output, older_restore_start, b"older_draft");
     provider_gate.release();
     until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
-    until_with_context(&reader, &mut output, b"[y] allow [n] deny [e] edit", || {
+    until_with_context(&reader, &mut output, b"[d] details", || {
         let requests = stub.requests();
         let paths: Vec<_> = requests
             .iter()
@@ -1965,12 +1965,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             pixel_height: 0,
         })
         .expect("resize");
-    until_from(
-        &reader,
-        &mut output,
-        resize_start,
-        b"[y] allow [n] deny [e] edit",
-    );
+    until_from(&reader, &mut output, resize_start, b"[d] details");
     input.write_all(b"y").expect("immediate permission answer");
     input.flush().expect("permission answer flush");
     until(&reader, &mut output, b"NEWEST-DRAFT-RECEIVED");
@@ -2029,16 +2024,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     assert!(output.windows(8).any(|window| window == b"\x1b[?2004l"));
 
     let rendered = normalized(&output);
-    for fact in [
-        "Call: \"write\"",
-        "✓ write notes.md",
-        "Reason:",
-        "Operations:",
-        "Risk: Bounded",
-        "Parameters:",
-        "Remember would add:",
-        "widening for operation 0",
-    ] {
+    for fact in ["Allow write ", "✓ write notes.md", "Risk: limited"] {
         assert!(
             rendered.contains(fact),
             "permission presentation omitted {fact:?}: {rendered}"
@@ -2046,7 +2032,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     }
 
     let streamed = find(&output, b"STREAMED-BEFORE-TOOL");
-    let permission = find(&output, b"[y] allow [n] deny [e] edit");
+    let permission = find(&output, b"[d] details");
     let draft_received = find(&output, b"NEWEST-DRAFT-RECEIVED");
     let older_draft_received = find(&output, b"OLDER-DRAFT-RECEIVED");
     assert!(streamed < permission);
@@ -2131,7 +2117,7 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
     assert_eq!(finished.code, Some(0), "{}", finished.stdout);
     assert!(finished.stdout.contains("LOCAL-PATH-EXEC-DONE"));
     assert!(
-        !finished.stdout.contains("[y] allow"),
+        !finished.stdout.contains("[y] yes"),
         "yolo must not stop for a second confirmation: {}",
         finished.stdout
     );
@@ -3340,7 +3326,7 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"run slow tool\r").expect("submit turn");
     input.flush().expect("submit flush");
-    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    until(&reader, &mut output, b"[d] details");
     thread::sleep(Duration::from_secs(5));
     let allowed = output.len();
     input.write_all(b"y").expect("allow");
@@ -3429,7 +3415,7 @@ fn esc_on_the_permission_modal_denies_the_call_and_leaves_one_receipt() {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"run a tool\r").expect("submit turn");
     input.flush().expect("submit flush");
-    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    until(&reader, &mut output, b"[d] details");
     drain_until_quiet(&reader, &mut output);
     let escaped = output.len();
     input.write_all(b"\x1b").expect("escape");
@@ -5759,8 +5745,8 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     ego.file("AGENTS.md", "# live surface fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows: 40,
+            cols: 100,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -5768,9 +5754,10 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
+    let (reader, reader_join) = stream_with_screen(
         pair.master.try_clone_reader().expect("reader"),
         dsr_responder,
+        Some((40, 100)),
     );
     let mut input = input;
     let mut output = Vec::new();
@@ -5782,7 +5769,7 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     until_prompt_from(&reader, &mut output, idle_start);
     input.write_all(b"initial\r").expect("initial prompt");
     input.flush().expect("initial prompt flush");
-    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    until(&reader, &mut output, b"[d] details");
     drain_until_quiet(&reader, &mut output);
     let edit_start = output.len();
     input.write_all(b"e").expect("open the edit form");
@@ -5797,7 +5784,7 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     drain_until_quiet(&reader, &mut output);
     // The raw stream repeats the receipt on every repaint; the screen shows
     // what the person sees.
-    let mut screen = vt100::Parser::new(24, 80, 0);
+    let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
     let visible = screen.screen().contents();
     assert_eq!(
@@ -5814,6 +5801,281 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+}
+
+const MODAL_ROWS: u16 = 40;
+const MODAL_COLS: u16 = 120;
+
+/// One conversational session in default mode whose model asks for a single
+/// tool call and then says `TOOLS-DONE`, read back through an emulated screen.
+///
+/// The oracle is the screen and never the bytes ego wrote, for the reason
+/// `tool_turn` gives: wrapped rows and overwritten rows are visible only there.
+struct ModalSession {
+    ego: Ego,
+    stub: Stub,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    pair: portable_pty::PtyPair,
+    input: PtyWriter,
+    reader: mpsc::Receiver<Vec<u8>>,
+    output: Vec<u8>,
+    /// Where the last key was sent: waits look only after it, so a row drawn
+    /// before the key cannot satisfy them.
+    mark: usize,
+    joins: [thread::JoinHandle<()>; 2],
+}
+
+fn modal_session(call: (&str, &str)) -> ModalSession {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("call-0", call.0, call.1)),
+            Reply::Sse(text(TOOL_TURN_DONE)),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "default",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# permission modal fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: MODAL_ROWS,
+            cols: MODAL_COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((MODAL_ROWS, MODAL_COLS)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    ModalSession {
+        ego,
+        stub,
+        child,
+        pair,
+        input,
+        reader,
+        output,
+        mark: 0,
+        joins: [reader_join, writer_join],
+    }
+}
+
+impl ModalSession {
+    fn press(&mut self, keys: &[u8]) {
+        drain_until_quiet(&self.reader, &mut self.output);
+        self.mark = self.output.len();
+        self.input.write_all(keys).expect("keys");
+        self.input.flush().expect("keys flush");
+    }
+
+    fn wait(&mut self, needle: &str) {
+        until_normalized(&self.reader, &mut self.output, self.mark, needle);
+    }
+
+    fn screen(&mut self) -> Vec<String> {
+        drain_until_quiet(&self.reader, &mut self.output);
+        let mut screen = vt100::Parser::new(MODAL_ROWS, MODAL_COLS, 0);
+        screen.process(&self.output);
+        screen
+            .screen()
+            .contents()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Quit, and return what the model was sent and what the user config holds.
+    fn finish(mut self) -> (Vec<serde_json::Value>, String) {
+        self.input.write_all(b"/quit\r").expect("quit");
+        self.input.flush().expect("quit flush");
+        assert!(bounded_exit(self.child).success());
+        drop(self.input);
+        drop(self.pair);
+        for join in self.joins {
+            join.join().expect("terminal thread");
+        }
+        let config =
+            std::fs::read_to_string(self.ego.home_path().join("config.toml")).unwrap_or_default();
+        (self.stub.generations(), config)
+    }
+}
+
+const SEQ_ASK: (&str, &str) = ("exec", r#"{"argv":["seq","1","3"],"timeout_ms":5000}"#);
+
+#[test]
+fn exec_permission_is_a_compact_modal_and_the_detail_sits_behind_d() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+
+    let compact = session.screen();
+    let first = compact
+        .iter()
+        .position(|line| line.starts_with("Allow "))
+        .unwrap_or_else(|| panic!("no headline row: {compact:?}"));
+    let last = compact
+        .iter()
+        .rposition(|line| line.contains("[d] details"))
+        .expect("the key row");
+    let modal = compact[first..=last].join("\n");
+    assert!(last - first < 4, "the modal is more than 4 rows:\n{modal}");
+    assert!(modal.contains("Allow run seq 1 3?"), "{modal}");
+    assert!(modal.contains("Risk: unknown - "), "{modal}");
+    assert!(modal.contains("[y] yes"), "{modal}");
+    assert!(
+        modal.contains("[a] yes, do not ask again for exec(seq 1 3)"),
+        "{modal}"
+    );
+    assert!(modal.contains("[n] no, say what to do instead"), "{modal}");
+    assert!(modal.contains("[e] edit"), "{modal}");
+    for developer_text in [
+        "ProcessEffectsUnknown",
+        "DynamicCode",
+        "IdentityIncomplete",
+        "Parameters:",
+        "Operations:",
+        "widening",
+        "\"argv\"",
+    ] {
+        assert!(
+            !modal.contains(developer_text),
+            "{developer_text:?} is on the compact modal:\n{modal}"
+        );
+    }
+
+    session.press(b"d");
+    session.wait("Parameters:");
+    let details = session.screen().join("\n");
+    for fact in [
+        "Operations:",
+        "- spawn",
+        "Remembering would add:",
+        "exec(seq 1 3)",
+        "widening for operation 0: omits Cwd",
+        "Parameters:",
+        "\"argv\"",
+    ] {
+        assert!(
+            details.contains(fact),
+            "{fact:?} missing after d:\n{details}"
+        );
+    }
+
+    session.press(b"y");
+    session.wait(TOOL_TURN_DONE);
+    let (generations, _) = session.finish();
+    assert_eq!(generations.len(), 2, "allowing once runs the call");
+}
+
+#[test]
+fn n_asks_what_to_do_instead_and_the_words_reach_the_model_as_the_tool_result() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+    session.press(b"n");
+    session.wait("What should it do instead?");
+    session.press(b"count with a loop instead\r");
+    session.wait(TOOL_TURN_DONE);
+
+    let screen = session.screen().join("\n");
+    assert!(
+        !screen.contains("✓ $ seq"),
+        "a declined call must not run:\n{screen}"
+    );
+    let (generations, config) = session.finish();
+    assert_eq!(generations.len(), 2, "the run continues after the words");
+    assert!(
+        generations[1]
+            .to_string()
+            .contains("declined it and said: count with a loop instead"),
+        "the instruction never reached the model: {}",
+        generations[1]
+    );
+    assert!(!config.contains("exec("), "a decline stores nothing");
+}
+
+#[test]
+fn a_stores_the_prefix_rule_and_commits_one_plain_receipt_to_the_transcript() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+    session.press(b"a");
+    session.wait(TOOL_TURN_DONE);
+
+    let screen = session.screen();
+    let joined = screen.join("\n");
+    assert!(
+        screen.iter().any(|line| {
+            line.trim_end() == "Remembered: you will not be asked again for exec(seq 1 3)."
+        }),
+        "the receipt is not a transcript row of its own:\n{joined}"
+    );
+    assert!(
+        !joined.contains("RESULT") && !joined.contains("stored_changed"),
+        "the machine receipt reached the screen:\n{joined}"
+    );
+    assert!(
+        screen.iter().any(|line| line.starts_with("✓ $ seq 1 3")),
+        "remembering still allows the call:\n{joined}"
+    );
+    let (_, config) = session.finish();
+    assert!(
+        config.contains("exec(seq 1 3)"),
+        "the prefix rule was not stored:\n{config}"
+    );
+}
+
+// Catches: blind Enter retries consuming the reclassified modal before its
+// observation mark, and an edit that executes the original argv instead.
+#[test]
+fn e_edits_the_call_and_the_amended_call_is_asked_again() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+    session.press(b"e");
+    session.wait("argv: ");
+    session.press(b"\x15seq 1 4\r");
+    session.wait("cwd: ");
+    session.press(b"\r");
+    session.wait("timeout_ms: ");
+    session.press(b"\r");
+    session.wait("[d] details");
+    let amended = session.screen().join("\n");
+    assert!(amended.contains("Allow run seq 1 4?"), "{amended}");
+    assert_eq!(session.stub.generations().len(), 1, "edit must ask again");
+    session.press(b"y");
+    session.wait(TOOL_TURN_DONE);
+    let (generations, _) = session.finish();
+    assert_eq!(generations.len(), 2);
+    let result = generations[1]["messages"]
+        .as_array()
+        .expect("provider messages")
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .expect("the amended call's tool result");
+    assert!(result.contains("1\n2\n3\n4\n"), "{result}");
 }
 
 /// The parent a job-control test needs. `ego` is spawned as a session leader

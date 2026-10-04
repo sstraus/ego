@@ -169,6 +169,28 @@ impl Rule {
         }
     }
 
+    /// Allow authority excludes control paths regardless of rule provenance.
+    /// Denies use `matches` so the guard never weakens a refusal.
+    pub(crate) fn matches_allow(&self, op: &Op, root: &Path) -> bool {
+        let path = match op {
+            Op::Read { path } | Op::Write { path, .. } => Some(path.as_path()),
+            Op::List { root, .. } | Op::Search { root, .. } => Some(root.as_path()),
+            _ => None,
+        };
+        if path.is_some_and(|path| {
+            path.components().any(|part| {
+                matches!(part, std::path::Component::Normal(name)
+                    if name.to_str().is_some_and(|name|
+                        name.eq_ignore_ascii_case(".git")
+                            || name.eq_ignore_ascii_case(".ego")
+                            || name.eq_ignore_ascii_case(".claude")))
+            })
+        }) {
+            return false;
+        }
+        self.matches(op, root)
+    }
+
     /// Does this rule cover `op`?
     ///
     /// Per operation, and never per call. A call with several operations is

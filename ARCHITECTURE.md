@@ -403,7 +403,11 @@ env are what make the agent useful; permits govern effects, not knowledge.
 Env filtering is opt-in only. The narrow taint rule (secret source → network
 sink) **asks** by default, never silently blocks; secret redaction applies to
 exports, logs and telemetry, never to the working env.
-Amend-before-approve is in the `PermissionDecision` enum from day one.
+Amend-before-approve is in the `PermissionDecision` enum from day one. A
+refusal may carry the human's words (`DenyWithInstruction`): the call is then
+answered with them as a failed tool result and the run continues, while a bare
+`Deny` still ends it. The terminal modal presents the call compactly and keeps
+operations, widenings and exact parameters behind a details key (`CLI.md` §6).
 
 ### 3.5 Subagents, skills, hooks (`ego-core`)
 
