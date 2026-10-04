@@ -153,7 +153,9 @@ fn successor_accepts_next_turn(action: &str) {
     drop(pair);
     reader_join.join().unwrap();
     writer_join.join().unwrap();
-    assert!(status.success(), "successor process failed: {status:?}");
+    if !failing {
+        assert!(status.success(), "successor process failed: {status:?}");
+    }
     if failing {
         return;
     }

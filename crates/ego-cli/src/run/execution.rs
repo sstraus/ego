@@ -64,6 +64,21 @@ async fn resolve_invocation_phase(
                 });
             }
             let chosen_session = chosen(args, &settings.root, None).map_err(usage)?;
+            if matches!(args.session, crate::cli::SessionChoice::Resume(_))
+                && settings.effective.model.is_none()
+                && args.model.is_none()
+            {
+                settings.effective.model = chosen_session
+                    .store
+                    .list()
+                    .map_err(|error| RunTermination::Failed {
+                        message: format!("could not read the resumed session model: {error}"),
+                    })?
+                    .into_iter()
+                    .find(|session| session.id == chosen_session.id)
+                    .and_then(|session| session.model)
+                    .map(ModelRef);
+            }
             select_startup_model(args, &mut settings, driver, cancel, diagnostics).await?;
             let selected_mcp =
                 config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
