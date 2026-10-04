@@ -375,7 +375,9 @@ pub(super) fn surface_line(
                 }
                 match futures::executor::block_on(ingress.submit(buffer.clone())) {
                     Ok(queue) => {
-                        editor.run_edit_commands(&[EditCommand::Clear]);
+                        if editor.accept_buffer(prompt).is_err() {
+                            return (Line::Ended, true);
+                        }
                         let mut current = status.lock().expect("surface status lock");
                         current.queue = queue;
                         current.origin = InputOrigin::Typed;

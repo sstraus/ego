@@ -927,6 +927,17 @@ impl Reedline {
         self.editor.get_buffer()
     }
 
+    /// Commit externally accepted input to the transcript and history.
+    ///
+    /// The host calls this after acknowledging a suspended buffer; it does
+    /// not submit that input to the host a second time.
+    pub fn accept_buffer(&mut self, prompt: &dyn Prompt) -> Result<()> {
+        self.submit_buffer(prompt)?;
+        self.painter.move_cursor_to_end()?;
+        self.suspended_state = None;
+        Ok(())
+    }
+
     /// Writes `msg` to the terminal with a following carriage return and newline
     fn print_line(&mut self, msg: &str) -> Result<()> {
         self.painter.paint_line(msg)
