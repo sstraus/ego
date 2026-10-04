@@ -1829,6 +1829,58 @@ fn macos_seatbelt_refuses_an_unrepresentable_profile_root() {
     }
 }
 
+// Catches: Landlock drops configured exec roots or admits them with write authority.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_configured_exec_root_runs_real_binary_without_widening_writes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let tools = tempfile::tempdir().expect("external tools");
+    let outside = tempfile::tempdir().expect("unrelated directory");
+    let workspace = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+    let tools = std::fs::canonicalize(tools.path()).expect("canonical tools");
+    let program = tools.join("cp");
+    std::fs::copy("/bin/cp", &program).expect("record installed executable");
+    let source = tools.join("source");
+    std::fs::write(&source, b"original").expect("source");
+    let inside = workspace.join("copied");
+    let copy = |target: &std::path::Path| {
+        SpawnSpec::new(
+            vec![
+                program.as_os_str().to_owned(),
+                source.as_os_str().to_owned(),
+                target.as_os_str().to_owned(),
+            ],
+            Some(CanonPath::new(workspace.clone())),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .expect("copy spec")
+    };
+    let policy = run_confinement(Confinement::Workspace, false, CanonPath::new(&workspace));
+    let unlisted = open_policy(policy.clone(), 1024 * 1024, 1024).expect("unlisted run");
+    execute(&unlisted, copy(&inside)).expect_err("unlisted tool must not execute");
+    assert!(!inside.exists(), "unlisted tool copied a file");
+    let admitted = open_policy(
+        policy.with_exec_paths(vec![CanonPath::new(&tools)]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("admitted run");
+    execute(&admitted, copy(&inside)).expect("admitted tool copies into workspace");
+    assert_eq!(
+        std::fs::read(&inside).expect("copied contents"),
+        b"original"
+    );
+    for target in [tools.join("existing"), outside.path().join("existing")] {
+        std::fs::write(&target, b"preserve").expect("existing outside file");
+        execute(&admitted, copy(&target)).expect_err("exec roots must not widen writes");
+        assert_eq!(
+            std::fs::read(&target).expect("preserved contents"),
+            b"preserve"
+        );
+    }
+}
+
 /// An executable `tool.sh` in `dir`.
 #[cfg(target_os = "macos")]
 fn write_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
@@ -3169,4 +3221,91 @@ fn macos_standalone_nested_workspace_stats_every_ancestor_even_read_only() {
             assert!(!forbidden.exists(), "read-only workspace was modified");
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn homebrew_spec(program: &str, args: &[OsString], workspace: &std::path::Path) -> SpawnSpec {
+    let path = std::path::Path::new("/opt/homebrew/bin").join(program);
+    let canonical = std::fs::canonicalize(&path).expect("native acceptance requires Homebrew tool");
+    assert!(canonical.starts_with("/opt/homebrew/Cellar"));
+    // Use the installed symlink, not just the canonical binary: both paths must work.
+    let mut argv = vec![path.into_os_string()];
+    argv.extend_from_slice(args);
+    SpawnSpec::new(
+        argv,
+        Some(CanonPath::new(std::fs::canonicalize(workspace).unwrap())),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("Homebrew spec")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_default_python_catches_homebrew_prefix_missing_from_runtime_roots() {
+    let workspace = tempfile::tempdir().unwrap();
+    let run = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("default standalone workspace confinement");
+    execute(
+        &run,
+        homebrew_spec("python3", &["--version".into()], workspace.path()),
+    )
+    .expect("standalone Homebrew Python runs");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_default_git_catches_cellar_symlink_target_not_admitted() {
+    let workspace = tempfile::tempdir().unwrap();
+    let run = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("default standalone workspace confinement");
+    execute(
+        &run,
+        homebrew_spec("git", &["--version".into()], workspace.path()),
+    )
+    .expect("standalone Homebrew Git runs through its Cellar symlink");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_default_python_catches_runtime_root_widening_writes() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let run = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("default standalone workspace confinement");
+    let write = |target: &std::path::Path| {
+        execute(
+            &run,
+            homebrew_spec(
+                "python3",
+                &[
+                    "-c".into(),
+                    "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('written')".into(),
+                    target.as_os_str().to_owned(),
+                ],
+                workspace.path(),
+            ),
+        )
+    };
+    let inside = workspace.path().join("inside");
+    write(&inside).expect("control write inside workspace");
+    assert_eq!(std::fs::read_to_string(&inside).unwrap(), "written");
+    let target = outside.path().join("outside");
+    assert!(
+        write(&target).is_err(),
+        "Homebrew child wrote outside confinement"
+    );
+    assert!(!target.exists());
 }

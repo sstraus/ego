@@ -756,12 +756,28 @@ pub(super) fn finish_rooted_settings(
         ));
     }
 
+    let exec_paths = effective
+        .exec_paths
+        .iter()
+        .map(|path| {
+            std::fs::canonicalize(path)
+                .map(CanonPath::new)
+                .map_err(|error| {
+                    UsageError(format!(
+                        "cannot resolve exec root {}: {error}",
+                        path.display()
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     let confinement = RunConfinement::new(
         effective.sandbox.unwrap_or_default(),
         args.offline,
         CanonPath::new(&root),
     )
-    .map_err(|err| UsageError(err.to_string()))?;
+    .map_err(|err| UsageError(err.to_string()))?
+    .with_exec_paths(exec_paths);
 
     Ok(Settings {
         run_deadline,

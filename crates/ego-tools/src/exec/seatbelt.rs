@@ -55,9 +55,9 @@ impl SeatbeltBackend {
 
         // Every program must be able to stat the workspace ancestor chain:
         // resolving cwd and `mkdir -p` need it even without exec paths.
+        // Runtime roots also need ancestor metadata for Homebrew command lookup.
         // The renderer grants exact metadata literals, never ancestor contents.
-        let mut exec_paths = policy
-            .exec_paths()
+        let mut exec_paths = derived_runtime_roots
             .iter()
             .map(|path| path.as_path().to_path_buf())
             .collect::<Vec<_>>();
@@ -239,5 +239,45 @@ pub(crate) fn derived_runtime_roots() -> Result<Vec<CanonPath>, ProcessError> {
         })
     })
     .collect::<Result<BTreeSet<_>, _>>()
-    .map(|roots| roots.into_iter().map(CanonPath::new).collect())
+    .and_then(|mut roots| {
+        // Homebrew's stable prefix contains its symlinked binaries, Cellar
+        // targets and runtime libraries. An absent installation adds no grant.
+        match fs::canonicalize("/opt/homebrew") {
+            Ok(root) => {
+                roots.insert(root);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ProcessError::Backend(format!(
+                    "cannot resolve Homebrew runtime root /opt/homebrew: {error}"
+                )));
+            }
+        }
+        // Git reads global configuration even for `git --version`. Admit
+        // only its standard config files, not the user's home directory.
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|home| home.join(".config")));
+        for path in home
+            .as_ref()
+            .map(|home| home.join(".gitconfig"))
+            .into_iter()
+            .chain(xdg.map(|xdg| xdg.join("git/config")))
+        {
+            match fs::canonicalize(&path) {
+                Ok(root) => {
+                    roots.insert(root);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ProcessError::Backend(format!(
+                        "cannot resolve Git runtime config {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        Ok(roots.into_iter().map(CanonPath::new).collect())
+    })
 }
