@@ -33,6 +33,18 @@ use ego_core::turn::CancelToken;
 use ego_tools::store::{JsonlStore, OsIo, SessionEvidenceStore};
 use support::{AcpHost, Ego, Plan, Reply, Stub, text, tool_call};
 
+/// Host the production Landlock dispatcher when the backend re-execs this binary.
+/// Without it, libtest exits successfully without running the probe target,
+/// so allowed controls cannot demonstrate any confinement capability.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "hosts the Landlock helper; not a test of its own"]
+fn __ego_internal_landlock_exec_v1() {
+    let refused = ego_tools::exec::dispatch_landlock_helper(std::env::args_os())
+        .expect("libtest was handed the helper envelope but did not recognise it");
+    panic!("the Landlock helper refused execution: {refused:?}");
+}
+
 fn seat(ceiling: Confinement) -> AcpSessionControls {
     AcpSessionControls::seeded(
         Some(ModelRef("fixture/model".to_owned())),
@@ -103,6 +115,7 @@ async fn cli_adapter_measures_the_offer_and_preserves_typed_unsupported_rows() {
         .await
         .expect("session measurement completes");
     let (supported, unsupported) = measured_rows(&admission, session).await;
+    eprintln!("measured confinement: supported={supported:?}, unsupported={unsupported:?}");
     assert!(
         !supported.is_empty(),
         "the real backend measured no confinement under the workspace ceiling"
