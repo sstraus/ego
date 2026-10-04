@@ -122,6 +122,8 @@ pub struct ProfileLayer {
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    /// Additional read and executable roots; absence preserves lower authority.
+    pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
@@ -809,6 +811,8 @@ pub struct ConfigLayer {
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    /// Additional read and executable roots; absence preserves lower authority.
+    pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
@@ -868,6 +872,27 @@ impl ConfigLayer {
                     "profile `{name}` cannot declare `roots`; only the system and user layers may widen where a run can reach"
                 ),
             });
+        }
+        let exec_paths = value.exec_paths.iter().flatten().chain(
+            value
+                .profile
+                .values()
+                .flat_map(|profile| profile.exec_paths.iter().flatten()),
+        );
+        for path in exec_paths {
+            if !matches!(source, Source::System | Source::User | Source::Flags) {
+                return Err(ConfigError::Invalid {
+                    source,
+                    message: "`exec_paths` may be set only by system, user or flags authority"
+                        .to_owned(),
+                });
+            }
+            if !path.is_absolute() {
+                return Err(ConfigError::Invalid {
+                    source,
+                    message: format!("exec root {} is not absolute", path.display()),
+                });
+            }
         }
         if !matches!(source, Source::System | Source::User)
             && value.permission_rules().any(Rule::is_tool_wildcard)

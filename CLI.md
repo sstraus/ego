@@ -208,6 +208,21 @@ owned by their dedicated commands. `unset` is the only null operation and
 prunes empty managed tables. There are no table fragments, list indices,
 aliases, or arbitrary dotted keys.
 
+The standalone runner also accepts `exec_paths = ["/absolute/tools/root"]`
+in `~/.ego/config.toml` (or `$EGO_HOME/config.toml`), selected user/system
+profiles, and explicit `-c` overrides. Edit the TOML with `ego config edit`;
+`config set` does not manage this key. Higher layers replace the whole list;
+an explicit empty list clears configured roots. Project and project-local
+configuration cannot add exec roots. Paths must be absolute and must exist;
+the runner canonicalizes symlinks before creating the confinement policy.
+On macOS and Linux these roots add read and execute access, never write access.
+On macOS an installed `/opt/homebrew` is also a default runtime root, including
+its `bin` symlinks, Cellar targets and libraries. Other installation prefixes
+must be listed explicitly. Git can also read existing `~/.gitconfig` and
+`$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) on macOS; this
+does not grant access to the rest of the home directory. Writes remain limited by `--sandbox`: workspace
+and private scratch for `workspace`, no writes for `ro`.
+
 `config get|ls --json` emits
 `{"v":1,"scope":"user","profile":string|null,"values":{...}}`; JSON
 values preserve their types and keys use canonical dotted spelling. Text uses

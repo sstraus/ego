@@ -3170,3 +3170,90 @@ fn macos_standalone_nested_workspace_stats_every_ancestor_even_read_only() {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+fn homebrew_spec(program: &str, args: &[OsString], workspace: &std::path::Path) -> SpawnSpec {
+    let path = std::path::Path::new("/opt/homebrew/bin").join(program);
+    let canonical = std::fs::canonicalize(&path).expect("native acceptance requires Homebrew tool");
+    assert!(canonical.starts_with("/opt/homebrew/Cellar"));
+    // Use the installed symlink, not just the canonical binary: both paths must work.
+    let mut argv = vec![path.into_os_string()];
+    argv.extend_from_slice(args);
+    SpawnSpec::new(
+        argv,
+        Some(CanonPath::new(std::fs::canonicalize(workspace).unwrap())),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("Homebrew spec")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_default_python_catches_homebrew_prefix_missing_from_runtime_roots() {
+    let workspace = tempfile::tempdir().unwrap();
+    let run = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("default standalone workspace confinement");
+    execute(
+        &run,
+        homebrew_spec("python3", &["--version".into()], workspace.path()),
+    )
+    .expect("standalone Homebrew Python runs");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_default_git_catches_cellar_symlink_target_not_admitted() {
+    let workspace = tempfile::tempdir().unwrap();
+    let run = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("default standalone workspace confinement");
+    execute(
+        &run,
+        homebrew_spec("git", &["--version".into()], workspace.path()),
+    )
+    .expect("standalone Homebrew Git runs through its Cellar symlink");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_default_python_catches_runtime_root_widening_writes() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let run = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("default standalone workspace confinement");
+    let write = |target: &std::path::Path| {
+        execute(
+            &run,
+            homebrew_spec(
+                "python3",
+                &[
+                    "-c".into(),
+                    "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('written')".into(),
+                    target.as_os_str().to_owned(),
+                ],
+                workspace.path(),
+            ),
+        )
+    };
+    let inside = workspace.path().join("inside");
+    write(&inside).expect("control write inside workspace");
+    assert_eq!(std::fs::read_to_string(&inside).unwrap(), "written");
+    let target = outside.path().join("outside");
+    assert!(
+        write(&target).is_err(),
+        "Homebrew child wrote outside confinement"
+    );
+    assert!(!target.exists());
+}

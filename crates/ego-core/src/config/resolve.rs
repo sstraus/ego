@@ -83,6 +83,8 @@ pub struct Effective {
     pub thinking: Option<ThinkingLevel>,
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    /// Additional user-selected read and executable roots, before canonicalization.
+    pub exec_paths: Vec<PathBuf>,
     pub permissions: Ruleset,
     pub judge: Option<ModelRef>,
     pub posture: Posture,
@@ -158,6 +160,7 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         thinking,
         mode,
         sandbox,
+        exec_paths,
         permissions,
         budget,
         bare: _,
@@ -173,6 +176,7 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (thinking.is_some(), "thinking"),
         (mode.is_some(), "mode"),
         (sandbox.is_some(), "sandbox"),
+        (exec_paths.is_some(), "exec_paths"),
         (permissions.is_some(), "permissions"),
         (budget.is_some(), "budget"),
         (!profile.is_empty(), "profile tables"),
@@ -322,6 +326,7 @@ fn resolve_inner(
     let mut thinking = None;
     let mut mode = None;
     let mut sandbox = None;
+    let mut exec_paths = Vec::new();
     let mut permissions = Ruleset::default();
     let mut judge = None;
     let mut ceilings = Ceilings::default();
@@ -373,6 +378,12 @@ fn resolve_inner(
             .or(sourced.value.sandbox)
         {
             sandbox = Some(value);
+        }
+        if let Some(paths) = profile
+            .and_then(|profile| profile.exec_paths.as_ref())
+            .or(sourced.value.exec_paths.as_ref())
+        {
+            exec_paths = paths.clone();
         }
         if let Some(perm) = profile
             .and_then(|p| p.permissions.clone())
@@ -550,6 +561,7 @@ fn resolve_inner(
         thinking,
         mode,
         sandbox,
+        exec_paths,
         permissions,
         judge,
         posture,

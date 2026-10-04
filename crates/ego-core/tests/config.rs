@@ -1727,3 +1727,40 @@ fn config_authority_is_the_layer_not_the_arrival_order() {
         [Source::System, Source::User, Source::Project, Source::Flags]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn exec_paths_catches_profile_only_configuration_and_absent_vs_empty_precedence() {
+    let user = ConfigLayer::parse(
+        Source::User,
+        "exec_paths = ['/tools']\n[profile.custom]\nexec_paths = ['/profile-tools']",
+    )
+    .unwrap();
+    let effective = resolve(&[user.clone()], Trust::Untrusted, None).unwrap();
+    assert_eq!(
+        effective.exec_paths,
+        vec![std::path::PathBuf::from("/tools")]
+    );
+    let profiled = resolve(&[user.clone()], Trust::Untrusted, Some("custom")).unwrap();
+    assert_eq!(
+        profiled.exec_paths,
+        vec![std::path::PathBuf::from("/profile-tools")]
+    );
+    let empty = ConfigLayer::parse(Source::Flags, "exec_paths = []").unwrap();
+    assert!(
+        resolve(&[user, empty], Trust::Untrusted, None)
+            .unwrap()
+            .exec_paths
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_paths_catches_project_widening_and_relative_root_acceptance() {
+    for source in [Source::Project, Source::Local] {
+        assert!(ConfigLayer::parse(source, "exec_paths = ['/tools']").is_err());
+        assert!(ConfigLayer::parse(source, "[profile.custom]\nexec_paths = ['/tools']").is_err());
+    }
+    assert!(ConfigLayer::parse(Source::User, "exec_paths = ['relative']").is_err());
+}
