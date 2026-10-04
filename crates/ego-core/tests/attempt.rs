@@ -550,6 +550,76 @@ mod lifecycle {
         );
     }
 
+    /// Catches: missing usage erases a policy-defined zero or a provider charge;
+    /// conversely, treating every interrupted attempt as free hides real spend.
+    #[test]
+    fn cancelled_stream_usage_respects_metering_and_reported_cost() {
+        use ego_core::cost::MeteringRevision;
+        let revision = MeteringRevision("fixture-policy".into());
+        for (metering, cost, expected) in [
+            (
+                Metering::Unmetered {
+                    revision: revision.clone(),
+                },
+                None,
+                Some("0"),
+            ),
+            (
+                Metering::Subscription {
+                    revision: revision.clone(),
+                },
+                None,
+                Some("0"),
+            ),
+            (
+                Metering::Currency {
+                    settlement: SettlementSource::ProviderReported {
+                        revision: ego_core::cost::ProviderCostRevision {
+                            provider: "fixture".into(),
+                            field: "cost".into(),
+                            schema_revision: "v1".into(),
+                        },
+                    },
+                },
+                Some(usd("0.03")),
+                Some("0.03"),
+            ),
+            (metered(), None, None),
+        ] {
+            let mut gate = BudgetGate::new(usd("10"));
+            let reservation = gate
+                .reserve(&metering, Some(&quote()), &request(), &caps())
+                .expect("reserve");
+            let attempt = GenerationAttempt::new(
+                GenerationId::new(),
+                reservation,
+                &metering,
+                Some(&quote()),
+                &request(),
+                &caps(),
+            )
+            .expect("attempt");
+            let mut events = vec![AiEvent::TextDelta {
+                text: "partial".into(),
+            }];
+            if let Some(cost) = cost {
+                events.push(AiEvent::ProviderCost { cost });
+            }
+            let fake = FakeGenerator::new(vec![events]);
+            let mut stream = fake.generate(request(), attempt);
+            futures::executor::block_on(async { while stream.next().await.is_some() {} });
+            let settled = stream.settle(&mut gate).expect("settle cancellation");
+            assert_eq!(settled.outcome.stop(), StopReason::Aborted);
+            assert_eq!(settled.outcome.usage(), UsageReport::Missing);
+            assert_eq!(settled.reconciled.exact, expected.is_some(), "{metering:?}");
+            assert_eq!(
+                *gate.committed().expect("limited gate"),
+                usd(expected.unwrap_or("0.76536")),
+                "{metering:?}"
+            );
+        }
+    }
+
     // --- what it charges --------------------------------------------------
 
     #[test]
