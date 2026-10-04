@@ -3501,6 +3501,103 @@ fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
     }
 }
 
+// Catches: a later busy steer overtakes or duplicates a follow-up waiting in normal input.
+#[test]
+fn rapid_follow_ups_after_a_reply_are_durable_once_in_typed_order() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("CRITIC-FIRST-REPLY")),
+            Reply::Sse(text("CRITIC-SECOND-REPLY")),
+            Reply::Sse(text("CRITIC-THIRD-REPLY")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "critic first",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, trust_start);
+    until_normalized(&reader, &mut output, 0, "CRITIC-FIRST-REPLY");
+
+    // The user types both lines in a single burst, without waiting for the
+    // coordinator to change admission between them.
+    let follow_up_start = output.len();
+    input
+        .write_all(b"critic second\rcritic third\r")
+        .expect("rapid follow-ups");
+    input.flush().expect("follow-up flush");
+    until_normalized(&reader, &mut output, follow_up_start, "CRITIC-THIRD-REPLY");
+    until_post_trust_prompt(&reader, &mut output, follow_up_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        !normalized(&output).contains("the interactive turn coordinator is closed"),
+        "a follow-up was refused: {:?}",
+        normalized(&output)
+    );
+
+    let events = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("durable session");
+    let prompts: Vec<String> = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("event envelope"))
+        .filter(|event| event["payload"]["event"]["kind"]["kind"] == "UserPrompt")
+        .map(|event| {
+            event["payload"]["event"]["kind"]["text"]
+                .as_str()
+                .expect("prompt text")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(prompts, ["critic first", "critic second", "critic third"]);
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        3,
+        "unexpected provider turns: {generations:?}"
+    );
+    assert_eq!(count_exact_strings(&generations[2], "critic second"), 1);
+    assert_eq!(count_exact_strings(&generations[2], "critic third"), 1);
+}
+
+// Catches: closing busy admission before the UI becomes idle rejects the second typed follow-up.
 #[test]
 fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
     let seed = "argv seed";
