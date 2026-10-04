@@ -2143,6 +2143,7 @@ fn continuation_rejects_a_prepared_model_that_differs_from_persisted_identity() 
     );
 }
 
+// Catches: interruption before cancel admission, duplicate settlement, and continuation retargeting.
 #[test]
 fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_retarget() {
     let sequence = Arc::new(Mutex::new(Vec::new()));
@@ -2227,21 +2228,8 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
     let cancelling = futures::executor::block_on(controller.cancel_admitted(&cancel_key))
         .expect("cancel admission");
     assert_eq!(cancelling.status(), RunStatus::Cancelling);
-    assert_eq!(
-        sequence.lock().expect("transaction sequence").as_slice(),
-        [
-            "prepare",
-            "commit",
-            "attach",
-            "submit",
-            "commit",
-            "prepare",
-            "commit",
-            "submit",
-            "commit",
-            "interrupt"
-        ]
-    );
+    // Interrupt wakes the worker, so settlement may commit before cancel_admitted returns.
+    // Join before checking the complete order, including exactly one final settlement.
     worker.join().expect("cancelled execution");
     assert_eq!(
         sequence.lock().expect("transaction sequence").as_slice(),
