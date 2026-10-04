@@ -25,9 +25,9 @@ fn successor_compact_accepts_next_turn_and_resumes() {
     successor_accepts_next_turn("compact");
 }
 
-// Catches: a failed generation admission exits the REPL instead of returning to its prompt.
+// Catches: the shared store-write failure path used by generation admission exits the REPL.
 #[test]
-fn failed_generation_admission_keeps_repl_alive() {
+fn failed_session_log_write_keeps_repl_alive() {
     successor_accepts_next_turn("admission-failure");
 }
 
@@ -125,7 +125,8 @@ fn successor_accepts_next_turn(action: &str) {
         until_prompt_from(&reader, &mut output, start);
         let shown = normalized(&output);
         assert!(
-            shown.contains("GenerationAdmission"),
+            shown.contains("the session log could not be written")
+                && shown.contains("Is a directory"),
             "wrong failure: {shown}"
         );
         assert_eq!(
