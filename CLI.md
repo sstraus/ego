@@ -1048,6 +1048,14 @@ and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
 JSON object of replacement tool parameters, then re-runs prepare and policy
 from the beginning. Invalid answers re-prompt; Ctrl-C and EOF deny.
 
+The permission details view shows pending `edit` changes as a unified diff of
+replacement fragments with real line breaks. Pending `write` content appears
+as additions; the prompt does not read previous file content and states that
+an existing file is overwritten. Diffs show at most 30 lines, clipped to
+terminal width, with an explicit omitted-line count. Colour follows terminal
+capabilities, `--no-color`, and `NO_COLOR`; redirected output has no colour
+escapes. Binary whole-file content shows its byte count instead of a text diff.
+
 ### 6.1 Paste
 
 The input line runs in **bracketed paste** mode (`ESC[?2004h`, off on exit).

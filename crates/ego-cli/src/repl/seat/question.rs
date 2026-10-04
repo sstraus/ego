@@ -251,6 +251,11 @@ pub(super) fn answer_control(
                 .lock()
                 .expect("surface status lock")
                 .permission_modal = true;
+            let capabilities = surface
+                .status
+                .lock()
+                .expect("surface status lock")
+                .permission_capabilities;
             let mut prompt = Question::new(compact_prompt(&request), Arc::clone(surface.status));
             tell_host(surface.status, |osc, quiet| {
                 osc.awaiting(request.tool(), !quiet)
@@ -264,7 +269,7 @@ pub(super) fn answer_control(
                         match decision.as_str() {
                             "details" => {
                                 prompt = Question::new(
-                                    details_prompt(&request),
+                                    details_prompt(&request, capabilities),
                                     Arc::clone(surface.status),
                                 );
                             }
