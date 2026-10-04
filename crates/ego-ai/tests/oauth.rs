@@ -414,6 +414,11 @@ fn the_endpoint_body_is_absent_from_the_error_and_present_in_the_log() {
 
     let captured = Arc::new(Mutex::new(Captured::default()));
     let error = {
+        // tracing-core's single-dispatcher fast path registers new callsites
+        // against the emitting thread's default, which can be NoSubscriber.
+        // Keep two dispatchers alive so interest comes from the registered
+        // subscribers instead. Neither is installed as a global default.
+        let _registered = tracing::Dispatch::new(Collector(Arc::clone(&captured)));
         let _guard = tracing::subscriber::set_default(Collector(Arc::clone(&captured)));
         std::thread::spawn(|| {
             built_in("anthropic")
