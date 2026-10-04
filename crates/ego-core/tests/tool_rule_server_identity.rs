@@ -48,3 +48,25 @@ fn a_tool_rule_matches_only_its_own_server_and_exact_tool_name() {
         );
     }
 }
+
+/// Catches: `tool(tuicommander/*)` approving another server's tool, or a
+/// lookalike server, because the wildcard was matched across servers.
+#[test]
+fn a_tool_wildcard_covers_every_tool_of_its_own_server_only() {
+    let rule = Rule::load("tool(tuicommander/*)").expect("rule");
+    let root = Path::new("/work");
+    assert!(rule.is_tool_wildcard());
+    assert!(rule.matches(&opaque("tuicommander", "session"), root));
+    assert!(rule.matches(&opaque("tuicommander", "agent"), root));
+    for server in ["otherserver", "tuicommander2", "TUICommander"] {
+        assert!(
+            !rule.matches(&opaque(server, "session"), root),
+            "tool({server}/session) was approved by tool(tuicommander/*)"
+        );
+    }
+    assert!(
+        !Rule::load("tool(tuicommander/session)")
+            .unwrap()
+            .is_tool_wildcard()
+    );
+}
