@@ -171,10 +171,11 @@ async fn private_log_failure_preserves_failure_evidence_and_hides_the_cause() {
         McpRegistryEvent::RefreshFailed { server, cause, .. }
             if server == "alpha" && cause == "server configuration is invalid"
     )));
-    assert!(recorded.iter().any(|event| matches!(
-        event,
-        McpRegistryEvent::SnapshotPublished { .. }
-    )));
+    assert!(
+        recorded
+            .iter()
+            .any(|event| matches!(event, McpRegistryEvent::SnapshotPublished { .. }))
+    );
     drop(recorded);
     let events = format!("{:?}", journal.events.lock().expect("events"));
     assert!(!events.contains(MARKER), "{events}");
