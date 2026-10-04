@@ -1689,7 +1689,6 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             causes.push(("legacy:registry::candidate_detail_critic::unicode_line_breaks_and_bidi_overrides_never_reach_the_diagnostic".to_owned(), value.to_owned()));
         };
         capture(("a\u{2028}b\u{2029}c\u{202e}d\u{2066}e\u{200b}f").as_ref());
-        for forbidden in ['\u{2028}', '\u{2029}', '\u{202e}', '\u{2066}'] {}
     }
     {
         let mut capture = |value: &str| {
@@ -1905,7 +1904,6 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             ));
         };
         capture(("a api_key=ONE b token=TWO c Authorization: Bearer THREE").as_ref());
-        for s in ["ONE", "TWO", "THREE"] {}
     }
     {
         let mut capture = |value: &str| {
