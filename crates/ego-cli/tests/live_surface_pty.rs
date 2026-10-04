@@ -3958,7 +3958,7 @@ fn regression_case_terminal(provider_refuses: bool) {
         &mut output,
         turn_start,
         if provider_refuses {
-            "the model does not accept"
+            "the provider returned HTTP 400"
         } else {
             "EFFORT-CHOICE-ANSWER"
         },
@@ -3976,6 +3976,10 @@ fn regression_case_terminal(provider_refuses: bool) {
     assert!(status.success(), "interactive exit: {status:?}");
     let after_quit = normalized(&output[quit_start..]);
     assert!(after_quit.contains("To resume: ego resume"), "{after_quit}");
+    assert!(
+        !after_quit.contains("the provider returned HTTP 400"),
+        "{after_quit}"
+    );
     assert!(
         !after_quit.contains("the model does not accept"),
         "{after_quit}"
