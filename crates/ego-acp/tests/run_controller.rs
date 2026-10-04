@@ -55,6 +55,7 @@ impl McpSessionAdmitter for NoMcpAdmitter {
         &self,
         _servers: Vec<v1::McpServer>,
         _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
+        _context: ego_acp::serve::McpAdmissionContext,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
         Box::pin(future::ready(Ok(None)))

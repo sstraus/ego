@@ -10,8 +10,9 @@ use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Stdio};
 use agent_client_protocol_schema::v1;
 use ego_acp::auth::Credential;
 use ego_acp::serve::{
-    AcpRunBindingsBuilder, McpSessionAdmissionError, McpSessionAdmitter,
-    SessionConfinementAdmission, SessionMcpAdmission, SessionTrustAdmission,
+    AcpRunBindingsBuilder, McpAdmissionContext, McpSessionAdmissionError,
+    McpSessionAdmissionFuture, McpSessionAdmitter, SessionConfinementAdmission,
+    SessionMcpAdmission, SessionTrustAdmission,
 };
 use ego_core::config::{
     McpConfigProvenance, McpEnvironmentName, McpHttpAuth, McpServerConfig, McpServerName,
@@ -23,16 +24,17 @@ use ego_core::endpoint::Admitted;
 use ego_core::event::domain::CancelCause;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::mcp::McpRuntimeBinding;
-use ego_core::permit::{CanonPath, Confinement, RunConfinement};
+use ego_core::permit::{CanonPath, Confinement, ExecObservation, RunConfinement, SpawnSpec};
+use ego_core::run::RunRoot;
 use ego_core::run::{RunController, RunRetention, RunTermination};
 use ego_core::session_lifecycle::{SessionLifecycle, SessionRunLifecycle};
 use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::{AdmittedToolSource, CancelToken, CapturedToolCatalogue, ToolCatalogueError};
 use ego_mcp::{
-    MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT, McpAcpEffects,
-    McpDuplexEffectsFactory, McpEnvironmentBinding, McpHeaderBinding, McpHttpEffects,
-    McpRegistryCandidate, McpRegistryRefresh, McpRegistryRuntime, McpServerAdmission,
-    McpTransportMaterial, RegistryScope, RegistryTrigger,
+    MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT, McpAcpEffects, McpDuplexEffects,
+    McpDuplexEffectsFactory, McpEnvironmentBinding, McpError, McpFailure, McpHeaderBinding,
+    McpHttpEffects, McpRegistryCandidate, McpRegistryRefresh, McpRegistryRuntime,
+    McpServerAdmission, McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::credentials::{OsGenerationPolicyCaptureStore, SessionResumeKey};
@@ -55,8 +57,72 @@ use crate::host_ports::{CanonicalRoots, TokioExecutionSpawner, UuidIds};
 use crate::provider_http::{CommandHttpScope, ProviderHttpAdapter};
 use crate::{run, session};
 
+/// The confined effect scope one session's stdio MCP processes run in. It is
+/// cancelled when the session closes, so no process outlives its session.
+struct SessionMcpScope {
+    confinement: Confinement,
+    cancel: CancelToken,
+    _effects: CommandHttpScope,
+}
+
+impl SessionMcpScope {
+    async fn open(
+        root: &RunRoot,
+        confinement: Confinement,
+        observation: Option<&ExecObservation>,
+    ) -> Result<Self, McpSessionAdmissionError> {
+        let cancel = CancelToken::new();
+        let run_confinement =
+            RunConfinement::new(confinement, false, CanonPath::new(root.as_path()))
+                .map_err(|error| safe_mcp_error(error.to_string()))?;
+        let effects =
+            CommandHttpScope::confined(run_confinement, cancel.clone(), None, observation)
+                .await
+                .map_err(|error| {
+                    safe_mcp_error(format!(
+                        "the confined MCP effect scope could not be created: {error}"
+                    ))
+                })?;
+        Ok(Self {
+            confinement,
+            cancel,
+            _effects: effects,
+        })
+    }
+
+    fn stdio_management(&self) -> Arc<dyn McpDuplexEffectsFactory> {
+        Arc::new(RunMcpDuplexEffectsFactory::new(
+            self._effects.ports().duplex_handle(),
+        ))
+    }
+}
+
+impl Drop for SessionMcpScope {
+    fn drop(&mut self) {
+        self.cancel.cancel(CancelCause::Host);
+    }
+}
+
+/// The stdio side of a session that supplied no stdio server: every attempt
+/// to start a process is refused.
+struct NoStdioEffects;
+
+impl McpDuplexEffectsFactory for NoStdioEffects {
+    fn create(
+        &self,
+        _server: McpServerName,
+        _spec: SpawnSpec,
+    ) -> Result<Box<dyn McpDuplexEffects>, McpError> {
+        Err(McpError::new(
+            McpFailure::Authority,
+            "this session did not supply a stdio MCP server",
+        ))
+    }
+}
+
 struct AcpSessionMcpAdmission {
     runtime: Arc<McpRegistryRuntime>,
+    scope: Option<SessionMcpScope>,
     _storage: tempfile::TempDir,
     admitted_tools: Arc<dyn AdmittedToolSource>,
     mcp_errors: Vec<String>,
@@ -83,6 +149,7 @@ impl AcpSessionMcpAdmission {
         runtime: Arc<McpRegistryRuntime>,
         storage: tempfile::TempDir,
         acp_effects: Option<Arc<CliAcpMcpEffects>>,
+        scope: Option<SessionMcpScope>,
     ) -> Self {
         let controller = runtime.controller();
         let admitted_tools: Arc<dyn AdmittedToolSource> = match acp_effects.as_ref() {
@@ -95,6 +162,7 @@ impl AcpSessionMcpAdmission {
         let mcp_errors = controller.status().mcp_errors();
         Self {
             runtime,
+            scope,
             _storage: storage,
             admitted_tools,
             mcp_errors,
@@ -116,6 +184,10 @@ impl SessionMcpAdmission for AcpSessionMcpAdmission {
         self.runtime.clone()
     }
 
+    fn pinned_confinement(&self) -> Option<Confinement> {
+        self.scope.as_ref().map(|scope| scope.confinement)
+    }
+
     fn cancel_active(&self) {
         if let Some(effects) = &self.acp_effects {
             effects.cancel_active();
@@ -127,6 +199,9 @@ impl SessionMcpAdmission for AcpSessionMcpAdmission {
             if let Some(effects) = &self.acp_effects {
                 effects.close_all().await;
             }
+            if let Some(scope) = &self.scope {
+                scope.cancel.cancel(CancelCause::Host);
+            }
         })
     }
 }
@@ -134,7 +209,6 @@ impl SessionMcpAdmission for AcpSessionMcpAdmission {
 struct AcpMcpSessionAdmitter {
     private_diagnostic_root: PathBuf,
     http_management: Arc<dyn McpHttpEffects>,
-    stdio_management: Arc<dyn McpDuplexEffectsFactory>,
     max_sse_event_size: usize,
     timeout: Duration,
     failed_admissions: Arc<Mutex<HashMap<[u8; 32], AdmissionRetry>>>,
@@ -524,14 +598,12 @@ impl AcpMcpSessionAdmitter {
     fn new(
         private_diagnostic_root: PathBuf,
         http_management: Arc<dyn McpHttpEffects>,
-        stdio_management: Arc<dyn McpDuplexEffectsFactory>,
         max_sse_event_size: usize,
         timeout: Duration,
     ) -> Self {
         Self {
             private_diagnostic_root,
             http_management,
-            stdio_management,
             max_sse_event_size,
             timeout,
             failed_admissions: Arc::new(Mutex::new(HashMap::new())),
@@ -578,14 +650,13 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
         &self,
         servers: Vec<v1::McpServer>,
         connection: Option<ConnectionTo<Client>>,
-    ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
-    {
+        context: McpAdmissionContext,
+    ) -> McpSessionAdmissionFuture {
         if servers.is_empty() {
             return Box::pin(async { Ok(None) });
         }
         let private_diagnostic_root = self.private_diagnostic_root.clone();
         let http_management = Arc::clone(&self.http_management);
-        let stdio_management = Arc::clone(&self.stdio_management);
         let max_sse_event_size = self.max_sse_event_size;
         let timeout = self.timeout;
         let failed_admissions = Arc::clone(&self.failed_admissions);
@@ -594,6 +665,9 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
             let serialized = serde_json::to_vec(&servers)
                 .map_err(|_| safe_mcp_error("the supplied MCP servers could not be identified"))?;
             let key: [u8; 32] = Sha256::digest(&serialized).into();
+            let has_stdio = servers
+                .iter()
+                .any(|server| matches!(server, v1::McpServer::Stdio(_)));
             let admissions = map_mcp_servers(servers)?;
             let acp_effects = connection.map(|connection| {
                 Arc::new_cyclic(|self_ref| CliAcpMcpEffects {
@@ -634,6 +708,28 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                         safe_mcp_error("ACP MCP continuation storage could not be opened")
                     })?,
                 );
+                // Stdio discovery starts processes, so it runs in a scope
+                // confined as the session's own pick, never the online one
+                // the HTTP management shares.
+                // A session with no stdio server starts no process, so it
+                // neither measures nor pins a confinement.
+                let scope = if has_stdio {
+                    let pick = context.confinement.as_ref();
+                    Some(
+                        SessionMcpScope::open(
+                            &context.root,
+                            pick.map_or(Confinement::Off, |pick| pick.level),
+                            pick.and_then(|pick| pick.observation.as_ref()),
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let stdio_management = scope.as_ref().map_or_else(
+                    || Arc::new(NoStdioEffects) as Arc<dyn McpDuplexEffectsFactory>,
+                    SessionMcpScope::stdio_management,
+                );
                 let runtime = Arc::new(
                     McpRegistryRuntime::new_with_acp(
                         registry_journal,
@@ -671,6 +767,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                     runtime,
                     storage,
                     acp_effects,
+                    scope,
                 )) as Arc<dyn SessionMcpAdmission>))
             }
             .await;
@@ -900,13 +997,9 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     };
     let http_management: Arc<dyn McpHttpEffects> =
         Arc::new(RunMcpHttpEffects::new(Arc::clone(mcp_effects.ports())));
-    let stdio_management: Arc<dyn McpDuplexEffectsFactory> = Arc::new(
-        RunMcpDuplexEffectsFactory::new(mcp_effects.ports().duplex_handle()),
-    );
     let mcp_admitter: Arc<dyn McpSessionAdmitter> = Arc::new(AcpMcpSessionAdmitter::new(
         private_diagnostic_root,
         http_management,
-        stdio_management,
         MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
         MCP_DEFAULT_OPERATION_TIMEOUT,
     ));
@@ -989,6 +1082,21 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                 RunEffectPorts::diagnostic_capabilities(&policy, cancel, ExecLimits::default())
                     .await,
             );
+        });
+    }
+
+    // The first session of a connection should find its sandbox already
+    // measured: start every offered measurement now, while the host is still
+    // initializing, instead of when its first `session/new` arrives.
+    {
+        let cancel = mcp_cancel.clone();
+        let warm_root = root.as_path().to_path_buf();
+        tokio::spawn(async move {
+            if let Err(error) =
+                crate::acp_confinement::warm_process_cache(ceiling, cancel, &warm_root).await
+            {
+                tracing::debug!(%error, "the ACP confinement warm-up did not finish");
+            }
         });
     }
 
@@ -1188,9 +1296,11 @@ mod poisoned_active_connections_tests {
 mod admission_concurrency_tests {
     use std::sync::Arc;
 
-    use ego_acp::serve::McpSessionAdmitter;
+    use ego_acp::serve::{McpAdmissionContext, McpSessionAdmitter};
+    use ego_core::event::id::SessionId;
+    use ego_core::run::RunRoot;
     use ego_core::turn::CancelToken;
-    use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
+    use ego_tools::mcp::RunMcpHttpEffects;
 
     use super::{
         AcpMcpSessionAdmitter, CommandHttpScope, MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
@@ -1227,20 +1337,21 @@ for line in sys.stdin:
             .await
             .expect("MCP effects");
         let http = Arc::new(RunMcpHttpEffects::new(Arc::clone(effects.ports())));
-        let stdio = Arc::new(RunMcpDuplexEffectsFactory::new(
-            effects.ports().duplex_handle(),
-        ));
         let admitter = AcpMcpSessionAdmitter::new(
             directory.path().join("private-diagnostics"),
             http,
-            stdio,
             MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
             MCP_DEFAULT_OPERATION_TIMEOUT,
         );
+        let context = || McpAdmissionContext {
+            session: SessionId::new(),
+            root: RunRoot::new(std::env::current_dir().expect("workspace")).expect("root"),
+            confinement: None,
+        };
         let selection = || vec![serde_json::from_value(server.clone()).expect("ACP server")];
         let (first, second) = tokio::join!(
-            admitter.admit(selection(), None),
-            admitter.admit(selection(), None)
+            admitter.admit(selection(), None, context()),
+            admitter.admit(selection(), None, context())
         );
         if let Err(error) = first {
             panic!("first session: {error}");

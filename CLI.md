@@ -637,6 +637,11 @@ never an unresolvable *permission* for them to resolve. Widening what ego may
 reach is `--sandbox`'s business, which is why that clause is listed beside
 `--yolo` rather than subsumed by it.
 
+A read, list or search the boundary refuses is the one exception to exit 3: it
+changed nothing, so the refusal is returned to the model as a failed tool
+result and the turn continues (regression case). Writes and spawns outside the
+workspace still end the run.
+
 ### 4.5 Parse and lifecycle contract (normative before release)
 
 The grammar ships with: a command × flag **applicability matrix** (no flag
@@ -1026,6 +1031,7 @@ bounded channels.
 | Input line, history, multiline | **yes** | reedline. Active `Ctrl+C` requests cancellation and reports it immediately. Idle `Ctrl+C` abandons the line; a second idle `Ctrl+C` within 500 ms exits. `Ctrl+D` ends it |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |
+| Ctrl+Z | **yes** (Unix) | stops ego as a shell job with the terminal back in cooked mode; `fg` restores raw mode and repaints the composer or the open modal, which stays unanswered. A running `exec` keeps running in its own process group, and its timeout does not count the time ego was stopped. Windows has no job control: the key reports that it is unsupported |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
 | Slash commands | **yes** | one shared 25-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |

@@ -459,6 +459,22 @@ pub enum PolicyDenied {
 }
 
 impl PolicyDenied {
+    /// A read, list or search the workspace boundary refused.
+    ///
+    /// The one refusal the model can act on and nobody can lift mid-run: no
+    /// mode, rule or answer moves the boundary (`CLI.md` §4.4), and the call
+    /// changed nothing, so the turn has nothing to stop for. The caller
+    /// returns it to the model as a failed tool result and the turn goes on.
+    pub fn is_unreachable_read(&self) -> bool {
+        matches!(
+            self,
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::Read | OpName::List | OpName::Search,
+                ..
+            }
+        )
+    }
+
     /// Who refused, for `EventKind::PermissionDecided`.
     ///
     /// One authority in every arm, and that is the shape of a refusal rather

@@ -554,6 +554,7 @@ pub(super) async fn select_startup_model(
         settings.confinement.clone(),
         cancel.clone(),
         settings.run_deadline,
+        None,
     )
     .await
     .map_err(|error| match error {

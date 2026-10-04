@@ -42,6 +42,7 @@ struct DurableState {
     entries: Vec<(SessionId, SessionEntry)>,
     fail_meta: bool,
     inject_meta_failure: bool,
+    quarantined: Vec<SessionId>,
 }
 
 #[derive(Clone, Default)]
@@ -248,6 +249,13 @@ impl SessionLifecycleStore for FakeStore {
             session: _id,
             store: self.clone(),
         }))
+    }
+    fn quarantine(&self, id: SessionId) -> Result<(), StoreError> {
+        self.0.lock().unwrap().quarantined.push(id);
+        Ok(())
+    }
+    fn is_quarantined(&self, id: SessionId) -> Result<bool, StoreError> {
+        Ok(self.0.lock().unwrap().quarantined.contains(&id))
     }
     fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication {
         let mut state = self.0.lock().unwrap();
@@ -616,6 +624,45 @@ fn delete_only_hides_target_and_keeps_ancestor_replay_and_descendants() {
         futures::executor::block_on(service.resume(child, PathBuf::from("/workspace").as_path()))
             .is_ok()
     );
+}
+
+/// Catches a quarantine that hides a session from `list` only, or only until
+/// the next connection: every way to reach it must answer unknown, and its
+/// neighbours must stay visible.
+#[test]
+fn a_quarantined_session_is_unknown_to_every_operation_and_its_neighbours_stay() {
+    let (service, _store, _runs) = service();
+    let root = PathBuf::from("/workspace");
+    let refused = service.create(root.clone()).unwrap().id;
+    let kept = service.create(root.clone()).unwrap().id;
+    service.quarantine(refused).unwrap();
+    service.quarantine(refused).unwrap();
+
+    let listed = service.list(None, 10, Some(&root)).unwrap();
+    assert_eq!(
+        listed.items.iter().map(|meta| meta.id).collect::<Vec<_>>(),
+        vec![kept]
+    );
+    assert!(matches!(
+        service.meta(refused),
+        Err(LifecycleError::UnknownSession)
+    ));
+    assert!(matches!(
+        futures::executor::block_on(service.load(refused, &root)),
+        Err(LifecycleError::UnknownSession)
+    ));
+    assert!(matches!(
+        futures::executor::block_on(service.resume(refused, &root)),
+        Err(LifecycleError::UnknownSession)
+    ));
+    assert!(matches!(
+        futures::executor::block_on(service.fork(refused)),
+        Err(LifecycleError::UnknownSession)
+    ));
+    assert!(matches!(
+        service.hold(refused),
+        Err(LifecycleError::UnknownSession)
+    ));
 }
 
 #[test]
