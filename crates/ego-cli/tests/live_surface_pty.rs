@@ -6459,7 +6459,7 @@ fn ctrl_z_at_a_permission_modal_leaves_it_unresolved_after_resume() {
     let notes = ego.workspace_path().join("notes.md");
     let mut job = Job::start(&ego, 40, 100);
     job.send(b"write the notes\r");
-    until(&job.reader, &mut job.output, b"[y] allow [n] deny [e] edit");
+    until(&job.reader, &mut job.output, b"[d] details");
     drain_until_quiet(&job.reader, &mut job.output);
     let requests_before = stub.requests().len();
 
@@ -6467,12 +6467,7 @@ fn ctrl_z_at_a_permission_modal_leaves_it_unresolved_after_resume() {
     assert!(job.cooked(), "ego stopped at the modal with a raw terminal");
     let resume_mark = job.output.len();
     job.resume();
-    until_from(
-        &job.reader,
-        &mut job.output,
-        resume_mark,
-        b"[y] allow [n] deny [e] edit",
-    );
+    until_from(&job.reader, &mut job.output, resume_mark, b"[d] details");
     thread::sleep(Duration::from_millis(500));
     drain_until_quiet(&job.reader, &mut job.output);
     assert_eq!(
