@@ -15,7 +15,7 @@ pub(super) struct ProfileInput<'a> {
     pub(super) private_scratch: &'a Path,
     pub(super) runtime_roots: &'a [&'a Path],
     /// Paths whose ancestors are made statable: a profile's exec paths, which
-    /// are already part of `runtime_roots`, and the workspace beside them.
+    /// are already part of `runtime_roots`, and the workspace (always).
     pub(super) exec_paths: &'a [&'a Path],
     /// Paths a human allowed after the run started. Never a parent directory
     /// of the path that was refused.

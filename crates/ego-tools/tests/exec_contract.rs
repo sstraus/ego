@@ -1993,7 +1993,7 @@ fn macos_exec_paths_expose_the_metadata_of_their_ancestors_and_nothing_more() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_a_profile_makes_the_workspace_ancestors_statable_and_standalone_does_not() {
+fn macos_workspace_ancestor_metadata_allows_standalone_stat_and_mkdir() {
     // node's `realpathSync(cwd)` is how wiz-run finds its project: it lstats
     // every ancestor of the workspace.
     // The workspace sits in its own parent, which no exec path shares.
@@ -2008,8 +2008,8 @@ fn macos_a_profile_makes_the_workspace_ancestors_statable_and_standalone_does_no
         .expect("profiled workspace run");
     execute(&profiled, spec.clone()).expect("the workspace's parent can be stat'ed");
 
-    // The directory shares no ancestor chain with a script it cannot run, so a
-    // standalone run is checked with a system binary instead.
+    // Catches: standalone workspace confinement refuses ancestor lstat.
+    // Use a system binary so exec paths cannot supply the missing grant.
     let standalone = open_policy(workspace_policy(&workspace, Vec::new()), 1024 * 1024, 1024)
         .expect("standalone workspace run");
     let bare = SpawnSpec::new(
@@ -2019,10 +2019,57 @@ fn macos_a_profile_makes_the_workspace_ancestors_statable_and_standalone_does_no
         EnvPolicy::Inherited,
     )
     .expect("spec");
+    execute(&standalone, bare).expect("standalone workspace ancestors can be stat'ed");
+    let nested = workspace.join("a/b");
+    let mkdir = SpawnSpec::new(
+        vec![
+            "/bin/mkdir".into(),
+            "-p".into(),
+            nested.clone().into_os_string(),
+        ],
+        spec.cwd().cloned(),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("mkdir spec");
+    execute(&standalone, mkdir).expect("mkdir -p can walk workspace ancestors");
     assert!(
-        execute(&standalone, bare).is_err(),
-        "standalone profile text changed"
+        nested.is_dir(),
+        "mkdir -p did not create the nested directory"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_workspace_ancestor_metadata_does_not_allow_content_or_outside_writes() {
+    // Catches: ancestor metadata permission widens into listing, reads or writes.
+    let outer = tempfile::tempdir().expect("outer directory");
+    let ancestor = std::fs::canonicalize(outer.path()).expect("canonical outer");
+    let workspace = ancestor.join("ws");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let sibling = ancestor.join("secret");
+    std::fs::write(&sibling, b"secret").expect("sibling fixture");
+    let outside_write = ancestor.join("outside-write");
+    let run = open_policy(workspace_policy(&workspace, Vec::new()), 1024 * 1024, 1024)
+        .expect("standalone workspace run");
+    let call = |program: &str, path: &std::path::Path| {
+        execute(
+            &run,
+            SpawnSpec::new(
+                vec![program.into(), path.as_os_str().to_owned()],
+                Some(CanonPath::new(workspace.clone())),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .expect("spec"),
+        )
+    };
+    call("/usr/bin/stat", &ancestor).expect("metadata grant is active");
+    call("/bin/cat", &workspace.join("../secret")).expect_err("sibling content must be denied");
+    call("/bin/ls", &ancestor).expect_err("ancestor listing must be denied");
+    call("/usr/bin/touch", &outside_write).expect_err("outside write must be denied");
+    assert!(!outside_write.exists(), "outside file was created");
+    assert_eq!(std::fs::read(&sibling).expect("read sibling"), b"secret");
 }
 
 #[cfg(target_os = "macos")]
