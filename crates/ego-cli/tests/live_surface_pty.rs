@@ -6467,12 +6467,7 @@ fn ctrl_z_at_a_permission_modal_leaves_it_unresolved_after_resume() {
     assert!(job.cooked(), "ego stopped at the modal with a raw terminal");
     let resume_mark = job.output.len();
     job.resume();
-    until_from(
-        &job.reader,
-        &mut job.output,
-        resume_mark,
-        b"[d] details",
-    );
+    until_from(&job.reader, &mut job.output, resume_mark, b"[d] details");
     thread::sleep(Duration::from_millis(500));
     drain_until_quiet(&job.reader, &mut job.output);
     assert_eq!(
