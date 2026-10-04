@@ -268,6 +268,7 @@ async fn cache_key_async(
         })?
 }
 
+#[cfg(test)]
 fn cache_key_for_binary(
     policy: &RunConfinement,
     backend: &dyn Backend,

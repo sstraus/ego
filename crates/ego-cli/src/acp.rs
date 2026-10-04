@@ -630,9 +630,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
         let Some(uri @ ("tuic://workspace" | "tuic://inbox")) = uri else {
             return None;
         };
-        let Some(connection_id) = connection_id else {
-            return None;
-        };
+        let connection_id = connection_id?;
         let effects = self
             .connections
             .lock()
@@ -771,10 +769,10 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                 )) as Arc<dyn SessionMcpAdmission>))
             }
             .await;
-            if result.is_err() {
-                if let Some(effects) = cleanup_effects {
-                    effects.close_all().await;
-                }
+            if result.is_err()
+                && let Some(effects) = cleanup_effects
+            {
+                effects.close_all().await;
             }
             attempt.finish(result.as_ref().map(|_| ()).map_err(Clone::clone));
             result

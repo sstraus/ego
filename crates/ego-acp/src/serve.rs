@@ -159,10 +159,10 @@ impl AcpNotices {
                 session.clone(),
                 project_notice_v1(notice),
             ));
-        if sent.is_err() {
-            if let Some(removed) = connections.remove(session) {
-                removed.closed_watcher.abort();
-            }
+        if sent.is_err()
+            && let Some(removed) = connections.remove(session)
+        {
+            removed.closed_watcher.abort();
         }
         sent
     }
@@ -2074,15 +2074,12 @@ fn trust_question(
 /// before this function existed. Only an explicit `trusted` grants anything.
 async fn selected_trust(
     request: QuestionRequest,
-    connection: &ConnectionTo<Client>,
-    session: &v1::SessionId,
-    capabilities: CapabilityCapture,
+    elicitor: AcpQuestionAdapter,
     selections: RunSelections,
     admission: &dyn SessionTrustAdmission,
     root: &RunRoot,
     fingerprint: &str,
 ) -> RunSelections {
-    let elicitor = AcpQuestionAdapter::live(session.clone(), capabilities, connection.clone());
     let question = ItemId::new();
     let outcome = match elicitor.elicit(question, request).await {
         Ok(outcome) => outcome,
@@ -3456,9 +3453,11 @@ where
                                         let answered = {
                                             let question = std::pin::pin!(selected_trust(
                                                 request,
-                                                &connection,
-                                                &id,
-                                                capabilities,
+                                                AcpQuestionAdapter::live(
+                                                    id.clone(),
+                                                    capabilities,
+                                                    connection.clone(),
+                                                ),
                                                 selections,
                                                 trust.as_ref().expect("question needs trust admission").as_ref(),
                                                 &root,

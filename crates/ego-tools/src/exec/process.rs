@@ -38,6 +38,8 @@ const MAX_SANDBOX_QUESTIONS: usize = 3;
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
 
+type WidenedBackend = (Vec<SandboxGrant>, Arc<dyn Backend>);
+
 /// Process state captured once and shared by the run's normal and duplex
 /// process adapters.
 pub(crate) struct RunProcessContext {
@@ -50,7 +52,7 @@ pub(crate) struct RunProcessContext {
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     /// The last profile rendered for a grant list, so a run of commands under
     /// the same grants shares one private profile file.
-    widened: Mutex<Option<(Vec<SandboxGrant>, Arc<dyn Backend>)>>,
+    widened: Mutex<Option<WidenedBackend>>,
 }
 
 impl RunProcessContext {
