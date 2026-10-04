@@ -24,7 +24,8 @@ const DSR_RESPONSE: &[u8] = b"\x1b[4;1R";
 #[test]
 fn two_lines_submitted_before_composer_readiness_reach_the_session_once() {
     let discovery = ReleaseGate::new();
-    let (first, first_reply) = gated_paced_line("EARLY-FIRST-ANSWER");
+    // TERM enables Markdown rendering, which publishes complete blocks.
+    let (first, first_reply) = gated_paced_line("EARLY-FIRST-ANSWER\n");
     let stub = Stub::start(Plan {
         discovery_gate: Some(Arc::clone(&discovery)),
         completions: vec![first, Reply::Sse(text("EARLY-SECOND-ANSWER"))],
