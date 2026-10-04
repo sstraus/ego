@@ -283,7 +283,7 @@ mod tests {
 mod permission_modal_diff_tests {
     use super::*;
     use crate::render::caps::{Capabilities, Terminal};
-    use ego_core::permit::{Change, Escalation, Op, OpName};
+    use ego_core::permit::{CanonPath, Change, Escalation, Op, OpName};
 
     fn request(change: Change) -> PermissionRequest {
         let path = CanonPath::new("/workspace/new.py");
