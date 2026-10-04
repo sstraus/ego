@@ -3249,7 +3249,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     let usage_start = output.len();
     input.write_all(b"/usage\r").expect("usage command");
     input.flush().expect("usage flush");
-    until_normalized(&reader, &mut output, usage_start, "usage as of");
+    until_normalized(&reader, &mut output, usage_start, "workspace");
     drain_until_quiet(&reader, &mut output);
     let usage = normalized(&output[usage_start..]);
     assert!(usage.contains("0.0000 USD"), "known usage cost: {usage:?}");
