@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -206,6 +207,7 @@ impl SessionMcpAdmission for AcpSessionMcpAdmission {
 }
 
 struct AcpMcpSessionAdmitter {
+    private_diagnostic_root: PathBuf,
     http_management: Arc<dyn McpHttpEffects>,
     max_sse_event_size: usize,
     timeout: Duration,
@@ -594,11 +596,13 @@ impl Drop for AdmissionAttempt {
 
 impl AcpMcpSessionAdmitter {
     fn new(
+        private_diagnostic_root: PathBuf,
         http_management: Arc<dyn McpHttpEffects>,
         max_sse_event_size: usize,
         timeout: Duration,
     ) -> Self {
         Self {
+            private_diagnostic_root,
             http_management,
             max_sse_event_size,
             timeout,
@@ -651,6 +655,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
         if servers.is_empty() {
             return Box::pin(async { Ok(None) });
         }
+        let private_diagnostic_root = self.private_diagnostic_root.clone();
         let http_management = Arc::clone(&self.http_management);
         let max_sse_event_size = self.max_sse_event_size;
         let timeout = self.timeout;
@@ -693,7 +698,11 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                 let registry_root = storage.path().join("registry");
                 let continuation_root = storage.path().join("continuations");
                 let registry_journal =
-                    Arc::new(JsonlMcpRegistryJournal::new(registry_root, Box::new(OsIo)));
+                    Arc::new(JsonlMcpRegistryJournal::with_private_diagnostic_root(
+                        registry_root,
+                        private_diagnostic_root,
+                        Box::new(OsIo),
+                    ));
                 let continuation_journal: Arc<dyn ContinuationJournal> = Arc::new(
                     JsonlContinuationJournal::open(continuation_root).map_err(|_| {
                         safe_mcp_error("ACP MCP continuation storage could not be opened")
@@ -945,6 +954,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             };
         }
     };
+    let private_diagnostic_root = store_root.join("mcp-private-diagnostics");
     let store = Arc::new(session::jsonl(store_root, root.clone()));
     let executor = Arc::new(run::CliRunExecutor::for_acp(
         args.session_dir.clone(),
@@ -988,6 +998,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     let http_management: Arc<dyn McpHttpEffects> =
         Arc::new(RunMcpHttpEffects::new(Arc::clone(mcp_effects.ports())));
     let mcp_admitter: Arc<dyn McpSessionAdmitter> = Arc::new(AcpMcpSessionAdmitter::new(
+        private_diagnostic_root,
         http_management,
         MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
         MCP_DEFAULT_OPERATION_TIMEOUT,
@@ -1327,6 +1338,7 @@ for line in sys.stdin:
             .expect("MCP effects");
         let http = Arc::new(RunMcpHttpEffects::new(Arc::clone(effects.ports())));
         let admitter = AcpMcpSessionAdmitter::new(
+            directory.path().join("private-diagnostics"),
             http,
             MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
             MCP_DEFAULT_OPERATION_TIMEOUT,

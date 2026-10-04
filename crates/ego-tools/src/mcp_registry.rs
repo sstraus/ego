@@ -2,6 +2,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use ego_core::turn::{
     McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, McpRegistryJournalErrorKind,
@@ -10,11 +11,27 @@ use ego_core::turn::{
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::store::{AtomicReplacePublication, StoreIo};
+use crate::store::{AtomicReplacePublication, PrivateLogWriter, StoreIo};
 
 const JOURNAL_FILE: &str = "registry.jsonl";
 const LOCK_FILE: &str = "registry.lock";
 const RECORD_VERSION: u32 = 1;
+const PRIVATE_DIRECTORY: &str = "private-diagnostics";
+
+#[derive(Serialize)]
+struct PrivateDiagnostic<'a> {
+    server: &'a str,
+    cause: &'a str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    truncated: bool,
+}
+
+/// Bound one hostile backend cause before JSON escaping can amplify it.
+const MAX_PRIVATE_CAUSE_BYTES: usize = 16 * 1024;
+/// Six-byte JSON escapes for each source byte fit below this record ceiling.
+const MAX_PRIVATE_RECORD_BYTES: usize = 128 * 1024;
+/// Cap each retained owner file; later diagnostics are discarded without rotation.
+const MAX_PRIVATE_LOG_BYTES: u64 = 128 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,12 +50,26 @@ pub struct JsonlMcpRegistryJournal {
     path: PathBuf,
     lock_path: PathBuf,
     io: Box<dyn StoreIo>,
+    private_root: PathBuf,
+    private_writer: Mutex<Option<Box<dyn PrivateLogWriter>>>,
 }
 
 impl JsonlMcpRegistryJournal {
     pub fn new(root: impl Into<PathBuf>, io: Box<dyn StoreIo>) -> Self {
         let root = root.into();
+        Self::with_private_diagnostic_root(&root, root.join(PRIVATE_DIRECTORY), io)
+    }
+
+    /// Keep private diagnostics beyond an ephemeral registry's lifetime.
+    pub fn with_private_diagnostic_root(
+        root: impl Into<PathBuf>,
+        private_root: impl Into<PathBuf>,
+        io: Box<dyn StoreIo>,
+    ) -> Self {
+        let root = root.into();
         Self {
+            private_root: private_root.into(),
+            private_writer: Mutex::new(None),
             path: root.join(JOURNAL_FILE),
             lock_path: root.join(LOCK_FILE),
             io,
@@ -141,6 +172,41 @@ impl JsonlMcpRegistryJournal {
 }
 
 impl McpRegistryJournal for JsonlMcpRegistryJournal {
+    fn record_private_diagnostic(
+        &self,
+        server: &str,
+        cause: &str,
+    ) -> Result<(), McpRegistryJournalError> {
+        let operation = McpRegistryJournalOperation::PrivateDiagnostic;
+        let error = || Self::error(operation, McpRegistryJournalErrorKind::Unavailable);
+        let mut end = cause.len().min(MAX_PRIVATE_CAUSE_BYTES);
+        while !cause.is_char_boundary(end) {
+            end -= 1;
+        }
+        let record = serde_json::to_vec(&PrivateDiagnostic {
+            server,
+            cause: &cause[..end],
+            truncated: end != cause.len(),
+        })
+        .map_err(|_| error())?;
+        if record.len() > MAX_PRIVATE_RECORD_BYTES {
+            return Err(error());
+        }
+        let mut writer = self.private_writer.lock().map_err(|_| error())?;
+        if writer.is_none() {
+            *writer = Some(
+                self.io
+                    .open_private_log(&self.private_root, MAX_PRIVATE_LOG_BYTES)
+                    .map_err(|_| error())?,
+            );
+        }
+        writer
+            .as_mut()
+            .expect("initialized private writer")
+            .append(&record)
+            .map_err(|_| error())
+    }
+
     fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
         self.with_lock(McpRegistryJournalOperation::Append, || {
             self.append_locked(event, McpRegistryJournalOperation::Append)

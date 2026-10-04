@@ -3,6 +3,9 @@
 //! The port belongs to `ego-core`; this suite crosses the final filesystem
 //! adapter and reopens it to prove that replay does not infer settlement.
 
+#[path = "support/private_logs.rs"]
+mod private_logs;
+
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -19,6 +22,14 @@ fn journal(root: &std::path::Path) -> JsonlMcpRegistryJournal {
 struct FailingFsyncIo;
 
 impl StoreIo for FailingFsyncIo {
+    fn open_private_log(
+        &self,
+        _root: &Path,
+        _max_bytes: u64,
+    ) -> io::Result<Box<dyn ego_tools::store::PrivateLogWriter>> {
+        Ok(Box::new(private_logs::EchoingFailure))
+    }
+
     fn append_line(&self, path: &Path, line: &[u8]) -> io::Result<()> {
         OsIo.append_line(path, line)
     }
@@ -419,4 +430,194 @@ fn append_repairs_a_torn_tail_before_publishing_the_next_event() {
                 if request_id == "torn-request"
         )
     }));
+}
+
+// Catches: raw backend errors going into replayable registry evidence or a
+// publicly readable file, and normalization destroying the original bytes.
+#[test]
+fn private_diagnostics_keep_original_text_out_of_replay_and_use_owner_only_access() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let raw = "--api-key PRIVATE\n\u{0}tokе\u{200d}n=SECOND";
+    let adapter = journal(root);
+    adapter
+        .record_private_diagnostic("alpha", raw)
+        .expect("private log");
+    adapter
+        .record_private_diagnostic("beta", "second error")
+        .expect("append");
+    let path = private_logs::files(&root.join("mcp/private-diagnostics"))
+        .pop()
+        .expect("owner file");
+    let bytes = std::fs::read(&path).expect("log");
+    let records: Vec<serde_json::Value> = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("record"))
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records[0],
+        serde_json::json!({"server":"alpha","cause":raw})
+    );
+    assert_eq!(
+        records[1],
+        serde_json::json!({"server":"beta","cause":"second error"})
+    );
+    assert!(journal(root).replay().expect("reopen").is_empty());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(path.parent().expect("directory"))
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+}
+
+// Catches: an adapter that cannot create private files silently falling back to
+// ordinary append or exposing the OS failure (which may echo secret bytes).
+#[test]
+fn private_diagnostics_storage_failure_is_fixed_and_never_falls_back_to_public_append() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let adapter = JsonlMcpRegistryJournal::new(temp.path().join("mcp"), Box::new(FailingFsyncIo));
+    let error = adapter
+        .record_private_diagnostic("alpha", "PRIVATE-RAW")
+        .expect_err("no private IO");
+    assert_eq!(
+        error.operation(),
+        McpRegistryJournalOperation::PrivateDiagnostic
+    );
+    assert_eq!(error.kind(), McpRegistryJournalErrorKind::Unavailable);
+    assert_eq!(
+        error.to_string(),
+        "MCP registry journal private diagnostic failed (unavailable)"
+    );
+    assert!(private_logs::files(&temp.path().join("mcp/private-diagnostics")).is_empty());
+    assert!(!temp.path().join("mcp/registry.jsonl").exists());
+}
+
+// Catches: appending raw secrets through a shared hard link,
+// or a file/directory whose permissions were widened outside ego.
+#[cfg(unix)]
+#[test]
+fn private_diagnostics_refuse_symlinks_hardlinks_and_widened_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    for kind in ["hardlink", "file mode", "directory mode"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let adapter = journal(temp.path());
+        adapter
+            .record_private_diagnostic("alpha", "old")
+            .expect("initial private log");
+        let path = private_logs::files(&temp.path().join("mcp/private-diagnostics"))
+            .pop()
+            .expect("owner file");
+        let outside = temp.path().join("outside");
+        match kind {
+            "hardlink" => {
+                std::fs::hard_link(&path, &outside).expect("hardlink");
+            }
+            "file mode" => {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                    .expect("mode");
+            }
+            "directory mode" => {
+                std::fs::set_permissions(
+                    path.parent().expect("parent"),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .expect("mode");
+            }
+            _ => unreachable!(),
+        }
+        let before = std::fs::read(&path).expect("before");
+        let error = adapter
+            .record_private_diagnostic("alpha", "NEW-PRIVATE")
+            .expect_err("unsafe path");
+        assert_eq!(
+            error.kind(),
+            McpRegistryJournalErrorKind::Unavailable,
+            "{kind}"
+        );
+        assert_eq!(std::fs::read(&path).expect("after"), before, "{kind}");
+    }
+}
+
+// Catches: ACP's ephemeral registry deleting its raw failure log and independent
+// owner handles accidentally sharing a leaf and overwriting each other.
+#[test]
+fn private_diagnostics_outlive_ephemeral_registries_and_isolate_owner_writers() {
+    let retained = tempfile::tempdir().expect("retained log root");
+    let private_root = retained.path().join("private");
+    std::thread::scope(|scope| {
+        for index in 0..8 {
+            let private_root = &private_root;
+            scope.spawn(move || {
+                let ephemeral = tempfile::tempdir().expect("ephemeral registry");
+                let adapter = JsonlMcpRegistryJournal::with_private_diagnostic_root(
+                    ephemeral.path().join("registry"),
+                    private_root,
+                    Box::new(OsIo),
+                );
+                adapter
+                    .record_private_diagnostic("alpha", &format!("cause-{index}"))
+                    .expect("shared private write");
+            });
+        }
+    });
+    let text = String::from_utf8(private_logs::bytes(&private_root)).expect("retained owner logs");
+    let mut causes: Vec<String> = text
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("record")["cause"]
+                .as_str()
+                .expect("cause")
+                .to_owned()
+        })
+        .collect();
+    causes.sort();
+    assert_eq!(
+        causes,
+        (0..8)
+            .map(|index| format!("cause-{index}"))
+            .collect::<Vec<_>>()
+    );
+}
+
+// Catches: byte-based cause truncation splitting UTF-8, JSON escaping growing an
+// unbounded record, or truncation silently pretending the full cause survived.
+#[test]
+fn private_diagnostics_mark_utf8_cause_truncation_and_bound_escaped_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let adapter = journal(temp.path());
+    for source in [format!("x{}", "🦀".repeat(6000)), "\u{0}".repeat(20000)] {
+        adapter
+            .record_private_diagnostic("alpha", &source)
+            .expect("bounded log");
+    }
+    let bytes = private_logs::bytes(&temp.path().join("mcp/private-diagnostics"));
+    let records: Vec<serde_json::Value> = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            assert!(line.len() <= 128 * 1024);
+            serde_json::from_slice(line).expect("record")
+        })
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["cause"], format!("x{}", "🦀".repeat(4095)));
+    assert_eq!(records[1]["cause"], "\u{0}".repeat(16384));
+    assert!(records.iter().all(|record| record["truncated"] == true));
 }
