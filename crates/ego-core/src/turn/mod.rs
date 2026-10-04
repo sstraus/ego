@@ -2742,6 +2742,22 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         self.close_unstarted_siblings(turn, &pending[index + 1..])?;
                         return Ok(DriveOutcome::QuestionRequired);
                     }
+                    // A boundary refusal of a read is the model's to learn
+                    // from, not the run's to end on: the denial text is the
+                    // tool result and the batch carries on.
+                    ToolOutcome::Refused { denial } if denial.is_unreachable_read() => {
+                        let call = &pending[index];
+                        self.journal.append(
+                            turn,
+                            Some(call.item),
+                            Some(call.started),
+                            EventKind::ToolCallCompleted {
+                                ok: false,
+                                result: ToolResult::builtin(denial.to_string()),
+                            },
+                        )?;
+                        continue;
+                    }
                     ToolOutcome::Refused { denial } => Denial {
                         action: denial.to_string(),
                         // Never assembled here: `PolicyDenied::authority` is

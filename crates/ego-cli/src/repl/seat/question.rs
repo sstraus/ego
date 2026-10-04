@@ -2,7 +2,6 @@ use super::edit_mode::PICKER_KEYS;
 use super::permission_modal::{compact_prompt, details_prompt};
 use super::*;
 use crate::render::osc::State;
-use std::io::Write as _;
 
 pub(super) fn enter_modal(
     editor: &mut Reedline,

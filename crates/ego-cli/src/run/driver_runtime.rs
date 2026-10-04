@@ -821,7 +821,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     // else. Someone who pressed it to stop a turn must not
                                     // lose the session by pressing it once more.
                                     repl::Line::Interrupted => continue,
-                                    repl::Line::Ended => break 'epoch EpochTransition::Exit,
+                                    repl::Line::Ended => {
+                                        // The last turn's provider/model refusal was already shown.
+                                        // Preserve cancellation, permission, and other outcomes.
+                                        if matches!(
+                                            &last.termination,
+                                            RunTermination::Provider { .. }
+                                                | RunTermination::UsageError { .. }
+                                        ) {
+                                            last.termination = RunTermination::Done;
+                                        }
+                                        break 'epoch EpochTransition::Exit;
+                                    }
                                     repl::Line::Refused(why) => {
                                         diagnostics.note(why);
                                         continue;

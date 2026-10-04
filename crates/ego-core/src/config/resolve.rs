@@ -499,6 +499,32 @@ fn resolve_inner(
     // guarantees a `/etc/ego` entry is present in the list at all, which no
     // per-call evaluation can supply if the merge dropped it.
 
+    // A repository replacement must not inherit an operator's blanket grant.
+    // Keep denies intact: losing server authority cannot relax a restriction.
+    permissions.allow.retain(|entry| {
+        let Rule::Tool { server, .. } = entry.rule() else {
+            return true;
+        };
+        if !entry.rule().is_tool_wildcard() {
+            return true;
+        }
+        let Ok(name) = server.parse::<McpServerName>() else {
+            return false;
+        };
+        matches!(
+            mcp.entry(&name),
+            Some(ResolvedMcpEntry::Configured {
+                provenance: McpConfigProvenance::Layer {
+                    source: Source::User
+                } | McpConfigProvenance::Profile {
+                    source: Source::System | Source::User,
+                    ..
+                },
+                ..
+            })
+        )
+    });
+
     // The same construction one field over: a `system` ceiling is gathered
     // outside the ordinary merge and re-applied after it, so no
     // higher-precedence layer and no profile override can raise it. `min`

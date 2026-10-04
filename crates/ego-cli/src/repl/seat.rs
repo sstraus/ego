@@ -1840,6 +1840,7 @@ mod permission;
 mod permission_modal;
 mod picker_surface;
 mod question;
+mod suspend;
 
 #[cfg(test)]
 use action_execution::apply_surface_effect;

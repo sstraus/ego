@@ -146,15 +146,14 @@ enum LinuxBackend {
 fn linux_backend() -> Result<(LinuxBackend, String), String> {
     use std::process::Command;
 
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        if let Ok(output) = Command::new("wl-paste").arg("--list-types").output() {
-            if output.status.success() {
-                return Ok((
-                    LinuxBackend::Wayland,
-                    String::from_utf8_lossy(&output.stdout).into_owned(),
-                ));
-            }
-        }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && let Ok(output) = Command::new("wl-paste").arg("--list-types").output()
+        && output.status.success()
+    {
+        return Ok((
+            LinuxBackend::Wayland,
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ));
     }
     if std::env::var_os("DISPLAY").is_some() {
         let output = Command::new("xclip")

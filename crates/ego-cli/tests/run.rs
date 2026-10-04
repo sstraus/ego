@@ -270,8 +270,8 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
     let stub = Stub::start(Plan {
         completions: vec![Reply::Sse(tool_call(
             "call_a",
-            "read",
-            &serde_json::json!({ "path": HOSTS_PATH }).to_string(),
+            "write",
+            &serde_json::json!({ "path": HOSTS_PATH, "contents": "x" }).to_string(),
         ))],
         ..Plan::default()
     });
@@ -283,7 +283,7 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
             support::FIXTURE_SESSION_ID,
             "--output",
             "json",
-            "Read the host table",
+            "Overwrite the host table",
         ])
         .run();
 
@@ -293,7 +293,7 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
     assert_eq!(report["exit_reason"], "permission");
     let denied = report["denied"].as_str().expect("§4.4 requires the action");
     assert!(
-        denied.contains("read") && denied.contains(HOSTS_PATH),
+        denied.contains("write") && denied.contains(HOSTS_PATH),
         "a script handed exit 3 and no subject has been told nothing: {denied}"
     );
     // And *who* refused, which is what picks the remedy. §4.4 offers three
@@ -1458,7 +1458,9 @@ fn the_session_flags_are_a_mutually_exclusive_group() {
 }
 
 /// Exit 3, reached the only way a headless run can reach it: a tool asked for
-/// something the policy will not grant, and there is nobody to ask. This is
+/// something the policy will not grant, and there is nobody to ask (a write
+/// outside the workspace: a refused read goes back to the model instead,
+/// regression case). This is
 /// also §4.4's proof — the process is given no stdin at all, so a run that
 /// prompted would hang here and the test would never finish.
 #[test]
@@ -1466,8 +1468,8 @@ fn a_permission_nobody_can_grant_exits_three_without_ever_prompting() {
     let stub = Stub::start(Plan {
         completions: vec![Reply::Sse(tool_call(
             "call_a",
-            "read",
-            &serde_json::json!({ "path": HOSTS_PATH }).to_string(),
+            "write",
+            &serde_json::json!({ "path": HOSTS_PATH, "contents": "x" }).to_string(),
         ))],
         ..Plan::default()
     });
@@ -1477,7 +1479,7 @@ fn a_permission_nobody_can_grant_exits_three_without_ever_prompting() {
             "ollama/qwen3",
             "--session-id",
             support::FIXTURE_SESSION_ID,
-            "Read it",
+            "Write it",
         ])
         .run();
 

@@ -36,7 +36,7 @@ use crate::cli::{
     CompactArgs, ExportArgs, ExportFormat, ForkArgs, Output, SessionShape, UsageError,
 };
 use crate::output::{Diagnostics, Stderr, Stdout, note};
-use crate::session::{self, Opened};
+use crate::session;
 
 /// `ego ls`: the catalogue, printed (`CLI.md` §4.6).
 ///

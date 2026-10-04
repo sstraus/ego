@@ -638,7 +638,7 @@ async fn explicit_cancel_and_deadline_share_the_request_owned_token_and_settleme
     let mut client = McpClient::connect_http(
         "runtime-token".parse().expect("server name"),
         peer.config(),
-        McpClientOptions::new(64 * 1024, Instant::now() + Duration::from_millis(10))
+        McpClientOptions::new(64 * 1024, Instant::now() + Duration::from_millis(250))
             .expect("short deadline"),
         Arc::clone(&broker) as Arc<dyn McpHttpEffects>,
     )

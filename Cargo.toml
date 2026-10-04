@@ -57,3 +57,8 @@ all = { level = "deny", priority = -1 }
 # linked (a complete run reached 76 GiB); line tables finish in 487 s at 25 GiB.
 [profile.dev]
 debug = "line-tables-only"
+
+# The process capability cache hashes the running executable (tens of MB); at
+# opt-level 0 that read cost ~4.7 s per session/new in a dev build.
+[profile.dev.package.sha2]
+opt-level = 3

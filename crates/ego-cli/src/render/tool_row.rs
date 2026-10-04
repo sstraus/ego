@@ -321,10 +321,10 @@ fn output_lines(call: &Finished<'_>) -> Vec<String> {
         .lines()
         .filter(|line| !matches!(*line, "[stdout]" | "[stderr]"))
         .collect();
-    if !call.ok {
-        if let Some(index) = lines.iter().rposition(|line| !line.trim().is_empty()) {
-            lines.remove(index);
-        }
+    if !call.ok
+        && let Some(index) = lines.iter().rposition(|line| !line.trim().is_empty())
+    {
+        lines.remove(index);
     }
     lines
         .into_iter()
@@ -362,18 +362,19 @@ fn tail(call: &Finished<'_>, width: usize) -> Vec<Line> {
 /// Everything under the header, for the expanded view: the diff of an edit,
 /// the whole text of any other result.
 fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
-    if call.ok && call.name == "edit" {
-        if let (Some(old), Some(new)) = (
+    if call.ok
+        && call.name == "edit"
+        && let (Some(old), Some(new)) = (
             string_arg(args, "old_string"),
             string_arg(args, "new_string"),
-        ) {
-            return diff::render(
-                &printable_block(old),
-                &printable_block(new),
-                width,
-                &Unhighlighted,
-            );
-        }
+        )
+    {
+        return diff::render(
+            &printable_block(old),
+            &printable_block(new),
+            width,
+            &Unhighlighted,
+        );
     }
     let room = width.saturating_sub(2).max(1);
     call.result

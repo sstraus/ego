@@ -79,6 +79,15 @@ pub trait SessionLifecycleStore:
     ) -> Result<Box<dyn InactiveSessionLease + '_>, LifecycleAppendError>;
 
     fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication;
+
+    /// Hide a session from every lifecycle operation, durably and without its
+    /// writer lease. For a session a request created and then refused while
+    /// another writer holds it, so neither a delete nor an appended event can
+    /// reach it. Idempotent. The log is left as it is: a later delete may still
+    /// remove it.
+    fn quarantine(&self, id: SessionId) -> Result<(), StoreError>;
+
+    fn is_quarantined(&self, id: SessionId) -> Result<bool, StoreError>;
 }
 
 /// Session-bound authority to append a lifecycle event while its writer lease is held.
@@ -729,6 +738,9 @@ where
     }
 
     fn replay(&self, id: SessionId) -> Result<(SessionState, Vec<ReplayFrame>), LifecycleError> {
+        if self.store.is_quarantined(id)? {
+            return Err(LifecycleError::UnknownSession);
+        }
         let entries = self
             .store
             .entries(&id)?
@@ -787,6 +799,12 @@ where
         self.metadata.meta(id)
     }
 
+    /// Hide a session the caller refused to open (see
+    /// [`SessionLifecycleStore::quarantine`]).
+    pub fn quarantine(&self, id: SessionId) -> Result<(), LifecycleError> {
+        Ok(self.metadata.store.quarantine(id)?)
+    }
+
     pub fn create(&self, root: PathBuf) -> Result<CreatedSession, LifecycleError> {
         self.create_with_id(SessionId::new(), root)
     }
@@ -826,6 +844,9 @@ where
         items.retain(|meta| root.is_none_or(|root| meta.workspace_root == root));
         let mut visible = Vec::with_capacity(items.len());
         for meta in items {
+            if self.metadata.store.is_quarantined(meta.id)? {
+                continue;
+            }
             if !self.metadata.state(meta.id)?.deleted {
                 visible.push(meta);
             }
@@ -898,6 +919,11 @@ where
         if self.runs.activity(id).await? == SessionActivity::Uncertain {
             return Err(LifecycleError::EffectUncertain);
         }
+        // Another connection may have quarantined the session while activity
+        // was awaited; the check inside `replay` ran before that.
+        if self.metadata.store.is_quarantined(id)? {
+            return Err(LifecycleError::UnknownSession);
+        }
         let context_window = ManifestEvidence::rebuild(&*self.metadata.store, &id)?
             .generations()
             .last()
@@ -912,13 +938,22 @@ where
     }
 
     pub async fn fork(&self, source: SessionId) -> Result<CreatedSession, LifecycleError> {
+        self.fork_as(source, SessionId::new()).await
+    }
+
+    /// Fork under a target id the caller already holds, so it can keep the
+    /// child out of sight from the moment the fork is published.
+    pub async fn fork_as(
+        &self,
+        source: SessionId,
+        target: SessionId,
+    ) -> Result<CreatedSession, LifecycleError> {
         let _source_lease = self.require_inactive(source).await?;
         self.metadata.meta(source)?;
         let (state, _) = self.metadata.replay(source)?;
         let prepared = PreparedFork::new(source, &state, self.metadata.clock.now())?;
         ReplayContext::new(&*self.metadata.store, &*self.metadata.store)
             .replay_lineage(prepared.seed().lineage())?;
-        let target = SessionId::new();
         let publication = self.metadata.store.publish_fork(target, prepared.seed());
         if !publication.switch_target() {
             return Err(LifecycleError::NotPublished(

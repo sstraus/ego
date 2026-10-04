@@ -343,11 +343,33 @@ clicks, navigation, or other work performed behind that boundary. Running the
 same program through native shell remains an `exec(...)` operation and gains
 no tool authority by its name.
 
+`tool(server/*)` covers every tool of that one server and never another
+server's. It is accepted only in the system and user layers (including their
+profiles); a project, local, agent-file, environment or flags layer is rejected
+at load, so a repository cannot grant itself every tool of a server. A matching
+deny still wins over the wildcard. A wildcard grant applies only when the
+resolved server is defined in user config or a system/user profile. A project
+or local redefinition of the server disables that grant, including profile
+redefinitions. Missing servers and tombstones grant no wildcard authority;
+exact tool rules remain unchanged. Wildcard denies remain restrictive.
+
 Rules follow a published formal grammar matched against the *canonical* call
 (resolved paths, argv, endpoints — never rendered shell strings); the
 mode × sandbox matrix is published and contradictory combinations are
 rejected, not guessed. Every control is individually disableable; hard
 ceilings come only from an administrator's `/etc/ego`.
+
+**Launcher precondition:** a launcher of ego, or of an application that hosts
+`ego-tools`, must not leak inheritable file descriptors numbered 3 or higher.
+Close those descriptors or set close-on-exec (`FD_CLOEXEC`) before launching
+the host. Ego does not sweep or close launcher-inherited descriptors and adds
+no unsafe code to do so. With `--sandbox off`, leaked descriptors can reach
+tool children. On Linux, the Landlock helper instead refuses confined execs
+with `unexpected inherited file descriptor N`; `ro` and `workspace` execution
+can therefore fail before the command starts. In the 2026-09-29 `rb-run`
+incident (regression case), the launcher leaked lock descriptors 8 and 9 without
+close-on-exec: sandbox-off children inherited them and Landlock refused
+confined execs. The launcher was subsequently fixed.
 
 **Session**
 
@@ -636,6 +658,11 @@ lift it, and none of the three remedies above resolves it — because it was
 never an unresolvable *permission* for them to resolve. Widening what ego may
 reach is `--sandbox`'s business, which is why that clause is listed beside
 `--yolo` rather than subsumed by it.
+
+A read, list or search the boundary refuses is the one exception to exit 3: it
+changed nothing, so the refusal is returned to the model as a failed tool
+result and the turn continues (regression case). Writes and spawns outside the
+workspace still end the run.
 
 ### 4.5 Parse and lifecycle contract (normative before release)
 
@@ -1056,6 +1083,7 @@ bounded channels.
 | Input line, history, multiline | **yes** | reedline. Active `Ctrl+C` requests cancellation and reports it immediately. Idle `Ctrl+C` abandons the line; a second idle `Ctrl+C` within 500 ms exits. `Ctrl+D` ends it |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |
+| Ctrl+Z | **yes** (Unix) | stops ego as a shell job with the terminal back in cooked mode; `fg` restores raw mode and repaints the composer or the open modal, which stays unanswered. A running `exec` keeps running in its own process group, and its timeout does not count the time ego was stopped. Windows has no job control: the key reports that it is unsupported |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
 | Slash commands | **yes** | one shared 25-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
@@ -1132,7 +1160,11 @@ current effort the same way. Arrow keys navigate, a digit selects by number
 while no filter is typed, and typing narrows the list by substring (`Backspace`
 edits; no match shows an empty state and `Enter` does nothing). `Enter` at the
 reasoning step sets the default for new sessions, `s` there applies only to this
-session, and `Esc` cancels. A completed change writes a `Model: <slug>` line to
+session, and `Esc` cancels. Interactive startup with a selected model whose
+reasoning default is unknown opens the reasoning step directly. The operator
+must choose a supported effort; `Enter` saves the model and effort, and `Esc`
+cancels startup. Headless runs still require an explicit `--thinking` value.
+A completed change writes a `Model: <slug>` line to
 the transcript. A selection made while a request is in flight applies at the next
 generation boundary, never by mutating an active request.
 

@@ -229,6 +229,20 @@ impl ModelPicker {
         }
     }
 
+    /// Ask for the missing startup effort without asking for the model again.
+    pub(crate) fn for_startup_reasoning(
+        snapshot: Arc<ModelCatalogueSnapshot>,
+        model: String,
+    ) -> Result<Self, PickerError> {
+        let reasoning = reasoning_levels(&snapshot, &model)?;
+        let mut picker = Self::for_startup(snapshot);
+        picker.modal = Some(ModalState::Reasoning {
+            model,
+            selector: reasoning_selector(&reasoning, None),
+        });
+        Ok(picker)
+    }
+
     pub fn for_selection(
         snapshot: Arc<ModelCatalogueSnapshot>,
         selection: Arc<GenerationSelection>,

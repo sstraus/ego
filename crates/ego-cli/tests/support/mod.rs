@@ -127,10 +127,29 @@ pub fn windows_system_environment() -> Vec<(&'static str, OsString)> {
 }
 
 #[cfg(not(windows))]
-fn ready_prompt_count(output: &[u8]) -> usize {
+pub fn ready_prompt_count(output: &[u8]) -> usize {
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+    // A typed-line repaint also contains "> ". Only a completed, empty
+    // editor frame is ready for input; Ctrl-D during submission can be lost
+    // while Reedline leaves raw mode and starts its next cursor query.
     output
-        .windows(2)
-        .filter(|window| *window == b"> ")
+        .windows(HIDE_CURSOR.len())
+        .enumerate()
+        .filter(|(_, window)| *window == HIDE_CURSOR)
+        .filter(|(start, _)| {
+            let frame = &output[start + HIDE_CURSOR.len()..];
+            let Some(end) = frame
+                .windows(SHOW_CURSOR.len())
+                .position(|window| window == SHOW_CURSOR)
+            else {
+                return false;
+            };
+            let mut screen = vt100::Parser::new(24, 80, 0);
+            screen.process(&frame[..end]);
+            screen.screen().contents().trim() == ">"
+        })
         .count()
         .saturating_sub(1)
 }
@@ -370,25 +389,25 @@ pub struct Stub {
 
 #[derive(Debug, Clone, Copy)]
 enum StubMode {
-    ProviderOnly,
-    ProviderAndMcp,
-    ProviderAndMcpTool,
+    Provider,
+    Mcp,
+    McpTool,
 }
 
 impl Stub {
     pub fn start(plan: Plan) -> Self {
-        Self::start_mode(plan, StubMode::ProviderOnly)
+        Self::start_mode(plan, StubMode::Provider)
     }
 
     /// Start the same provider fixture with a minimal streamable MCP endpoint
     /// on the same listener, so tests can observe discovery without a second
     /// network adapter.
     pub fn start_mcp(plan: Plan) -> Self {
-        Self::start_mode(plan, StubMode::ProviderAndMcp)
+        Self::start_mode(plan, StubMode::Mcp)
     }
 
     pub fn start_mcp_tool(plan: Plan) -> Self {
-        Self::start_mode(plan, StubMode::ProviderAndMcpTool)
+        Self::start_mode(plan, StubMode::McpTool)
     }
 
     fn start_mode(plan: Plan, mode: StubMode) -> Self {
@@ -478,16 +497,8 @@ fn serve(
         body: body.clone(),
     });
 
-    if matches!(
-        mode,
-        StubMode::ProviderAndMcp | StubMode::ProviderAndMcpTool
-    ) && path == "/mcp"
-    {
-        return mcp_response(
-            &mut stream,
-            &body,
-            matches!(mode, StubMode::ProviderAndMcpTool),
-        );
+    if matches!(mode, StubMode::Mcp | StubMode::McpTool) && path == "/mcp" {
+        return mcp_response(&mut stream, &body, matches!(mode, StubMode::McpTool));
     }
 
     match path.as_str() {

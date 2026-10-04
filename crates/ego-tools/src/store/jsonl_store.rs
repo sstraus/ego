@@ -523,6 +523,11 @@ impl JsonlStore {
         self.session_dir(id).join("events.jsonl")
     }
 
+    /// Present once a refused session was hidden without its writer lease.
+    fn quarantine_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("quarantined")
+    }
+
     fn manifest_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("manifest.json")
     }
@@ -1925,6 +1930,11 @@ impl SessionStore for JsonlStore {
                 );
                 continue;
             }
+            // A quarantined session is refused for good, so no catalogue
+            // reader may see it, whichever of manifest or log named it.
+            if self.io.exists(&self.quarantine_path(&meta.id))? {
+                continue;
+            }
             if !deleted {
                 metas.push(meta);
             }
@@ -2128,6 +2138,14 @@ impl SessionLifecycleStore for JsonlStore {
 
     fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication {
         self.publish_target(&id, seed)
+    }
+
+    fn quarantine(&self, id: SessionId) -> Result<(), StoreError> {
+        Ok(self.io.replace_atomic(&self.quarantine_path(&id), b"")?)
+    }
+
+    fn is_quarantined(&self, id: SessionId) -> Result<bool, StoreError> {
+        Ok(self.io.exists(&self.quarantine_path(&id))?)
     }
 }
 

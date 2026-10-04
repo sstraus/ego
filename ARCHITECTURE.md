@@ -383,6 +383,17 @@ The transport structurally supporting an authorized opaque foreign tool is not
 a second user decision: its exact route or process remains permit-bound, while
 the tool's unobservable downstream effects are outside Ego's confinement.
 
+Launcher precondition: launchers of ego and applications that host `ego-tools`
+must not leak inheritable file descriptors numbered 3 or higher. They must
+close those descriptors or set close-on-exec (`FD_CLOEXEC`) before launching
+the host. Ego does not sweep or close launcher-inherited descriptors and adds
+no unsafe code for that purpose. The null backend can pass leaked descriptors
+to sandbox-off children; the Linux Landlock helper fails closed with
+`unexpected inherited file descriptor N`, which prevents `ro` and `workspace`
+execs from starting. In the 2026-09-29 `rb-run` incident (regression case),
+inheritable lock descriptors 8 and 9 caused both symptoms. The launcher was
+subsequently fixed. See `CLI.md` §3 for the operator requirement.
+
 Confinement boundaries (R2): in-process tools are confined by the
 permit-checking `GuardedIo`, subprocesses by the backend, and **egress policy
 is enforced at all four exits** — provider HTTP, MCP transports, hooks, and

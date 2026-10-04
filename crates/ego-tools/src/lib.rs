@@ -21,4 +21,5 @@ pub mod pricing;
 pub mod privacy;
 mod stdio;
 pub mod store;
+pub mod suspension;
 pub mod tools;

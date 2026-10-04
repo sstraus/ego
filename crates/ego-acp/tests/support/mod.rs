@@ -175,6 +175,32 @@ impl DurableAcpFixture {
         trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
         notices: AcpNotices,
     ) -> agent_client_protocol::AgentProtocolRouter {
+        let admitter = Arc::new(RejectingMcpAdmitter::with_effects(Arc::clone(
+            &self.effects,
+        )));
+        self.router_with_admitter(admitter, controls, confinement, trust, notices)
+    }
+
+    /// The durable router with a caller-supplied MCP admitter in place of the
+    /// rejecting default.
+    #[allow(dead_code)]
+    pub fn router_with_mcp_admitter(
+        &self,
+        admitter: Arc<dyn McpSessionAdmitter>,
+        controls: Option<Arc<dyn ego_core::control::SessionControls>>,
+        confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+    ) -> agent_client_protocol::AgentProtocolRouter {
+        self.router_with_admitter(admitter, controls, confinement, None, AcpNotices::default())
+    }
+
+    fn router_with_admitter(
+        &self,
+        admitter: Arc<dyn McpSessionAdmitter>,
+        controls: Option<Arc<dyn ego_core::control::SessionControls>>,
+        confinement: Option<Arc<dyn ego_acp::serve::SessionConfinementAdmission>>,
+        trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
+        notices: AcpNotices,
+    ) -> agent_client_protocol::AgentProtocolRouter {
         let clock = Arc::new(TestClock);
         let controller = Arc::new(RunController::new(
             Arc::clone(&self.store),
@@ -192,9 +218,7 @@ impl DurableAcpFixture {
             self.spawner.clone(),
             self.ids.clone(),
             Arc::new(AcpRunBindingsBuilder::default()),
-            Arc::new(RejectingMcpAdmitter::with_effects(Arc::clone(
-                &self.effects,
-            ))),
+            admitter,
             Arc::new(CompactionCommandFixture),
             controls,
             confinement,
@@ -209,6 +233,14 @@ impl DurableAcpFixture {
         for _ in 0..count {
             lifecycle.create(PathBuf::from(root)).unwrap();
         }
+    }
+
+    /// One session with a caller-chosen id, so a test can place it exactly
+    /// relative to another id in the list order.
+    pub fn seed_session_with_id(&self, root: &str, id: SessionId) {
+        let runs: Arc<dyn SessionRunLifecycle> = Arc::new(InactiveRuns);
+        let lifecycle = SessionLifecycle::new(Arc::clone(&self.store), runs, Arc::new(TestClock));
+        lifecycle.create_with_id(id, PathBuf::from(root)).unwrap();
     }
 
     pub fn seed_replay_session(
@@ -374,6 +406,11 @@ impl DurableAcpFixture {
                 .unwrap();
         }
         session.to_string()
+    }
+
+    /// Inject a store-port failure before the quarantine marker is published.
+    pub fn fail_quarantine(&self) {
+        *self.store.fail_quarantine.lock().unwrap() = true;
     }
 
     /// Hold this session's writer lease for as long as the guard lives.
@@ -636,6 +673,9 @@ pub struct Store {
     /// two writers both pass their read-decide step and both append, and the
     /// test blames the code for what the double allowed.
     leases: Arc<Mutex<BTreeSet<SessionId>>>,
+    /// Sessions hidden for good, as the real store keeps a marker beside the log.
+    quarantined: Arc<Mutex<BTreeSet<SessionId>>>,
+    fail_quarantine: Arc<Mutex<bool>>,
     uncertain_settlement: Arc<Mutex<Option<String>>>,
 }
 
@@ -646,6 +686,8 @@ impl Store {
             metadata: Arc::default(),
             effects,
             leases: Arc::default(),
+            quarantined: Arc::default(),
+            fail_quarantine: Arc::default(),
             uncertain_settlement: Arc::default(),
         }
     }
@@ -890,6 +932,27 @@ impl SessionLifecycleStore for Store {
             session: id,
             store: self.clone(),
         }))
+    }
+
+    fn quarantine(&self, id: SessionId) -> Result<(), StoreError> {
+        if *self.fail_quarantine.lock().unwrap() {
+            return Err(StoreError::Io(std::io::Error::other(
+                "injected quarantine marker write failure",
+            )));
+        }
+        self.quarantined
+            .lock()
+            .expect("support quarantine")
+            .insert(id);
+        Ok(())
+    }
+
+    fn is_quarantined(&self, id: SessionId) -> Result<bool, StoreError> {
+        Ok(self
+            .quarantined
+            .lock()
+            .expect("support quarantine")
+            .contains(&id))
     }
 
     fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication {
@@ -1392,6 +1455,7 @@ impl McpSessionAdmitter for RejectingMcpAdmitter {
         &self,
         _servers: Vec<agent_client_protocol_schema::v1::McpServer>,
         _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
+        _context: ego_acp::serve::McpAdmissionContext,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
         if let Some(effects) = &self.effects {
