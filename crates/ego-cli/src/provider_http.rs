@@ -138,7 +138,7 @@ impl CommandHttpScope {
             .map_err(|error| format!("could not resolve the command workspace: {error}"))?;
         let confinement = RunConfinement::new(Confinement::Off, false, CanonPath::new(&workspace))
             .map_err(|error| error.to_string())?;
-        Self::confined(confinement, cancel, None)
+        Self::confined(confinement, cancel, None, None)
             .await
             .map_err(|error| error.to_string())
     }
@@ -147,6 +147,7 @@ impl CommandHttpScope {
         confinement: RunConfinement,
         cancel: CancelToken,
         run_deadline: Option<Instant>,
+        admitted_observation: Option<&ExecObservation>,
     ) -> Result<Self, McpProcessScopeError> {
         let evidence_directory = tempfile::tempdir().map_err(|error| {
             McpProcessScopeError::Setup(format!("could not create the MCP evidence store: {error}"))
@@ -159,10 +160,16 @@ impl CommandHttpScope {
         .map_err(|error| {
             McpProcessScopeError::Setup(format!("could not open the MCP evidence store: {error}"))
         })?;
-        let (ports, _, _) =
-            run_effect_ports(confinement, evidence, cancel, run_deadline, None, None)
-                .await
-                .map_err(McpProcessScopeError::Effects)?;
+        let (ports, _, _) = run_effect_ports(
+            confinement,
+            evidence,
+            cancel,
+            run_deadline,
+            admitted_observation,
+            None,
+        )
+        .await
+        .map_err(McpProcessScopeError::Effects)?;
         let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn Http>;
         Ok(Self {
             _evidence_directory: evidence_directory,
@@ -215,7 +222,7 @@ impl McpProcessScope {
         cancel: CancelToken,
         run_deadline: Option<Instant>,
     ) -> Result<Self, McpProcessScopeError> {
-        let effects = CommandHttpScope::confined(confinement, cancel, run_deadline).await?;
+        let effects = CommandHttpScope::confined(confinement, cancel, run_deadline, None).await?;
         Self::from_effects(effects).map_err(McpProcessScopeError::Setup)
     }
 

@@ -24,6 +24,11 @@ use tokio::sync::Notify;
 
 mod support;
 
+#[cfg(not(windows))]
+const MCP_COMMAND: &str = "/bin/true";
+#[cfg(windows)]
+const MCP_COMMAND: &str = r"C:\Windows\System32\cmd.exe";
+
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
 
 #[derive(Debug, Default)]
@@ -687,5 +692,221 @@ async fn unsupported_selected_confinement_refuses_before_executor_admission() {
         admission.observed(),
         vec![(session.parse().unwrap(), Confinement::Workspace)]
     );
+    connection.abort().await;
+}
+
+/// What one MCP admission was told, and whether the session's confinement had
+/// been measured by the time it was asked.
+struct Seen {
+    session: SessionId,
+    root: PathBuf,
+    measured_first: bool,
+    level: Option<Confinement>,
+    observation: Option<ExecObservation>,
+}
+
+/// Records every admission and refuses it, so a test sees the context without
+/// building a live MCP runtime.
+struct RefusingMcpAdmitter {
+    admission: Arc<Admission>,
+    seen: Mutex<Vec<Seen>>,
+}
+
+impl RefusingMcpAdmitter {
+    fn new(admission: Arc<Admission>) -> Arc<Self> {
+        Arc::new(Self {
+            admission,
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+impl ego_acp::serve::McpSessionAdmitter for RefusingMcpAdmitter {
+    fn admit(
+        &self,
+        _servers: Vec<agent_client_protocol_schema::v1::McpServer>,
+        _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
+        context: ego_acp::serve::McpAdmissionContext,
+    ) -> ego_acp::serve::McpSessionAdmissionFuture {
+        let measured_first = self
+            .admission
+            .initialized()
+            .iter()
+            .any(|(session, _)| *session == context.session);
+        self.seen.lock().expect("seen admissions").push(Seen {
+            session: context.session,
+            root: context.root.as_path().to_path_buf(),
+            measured_first,
+            level: context.confinement.as_ref().map(|pick| pick.level),
+            observation: context.confinement.and_then(|pick| pick.observation),
+        });
+        Box::pin(std::future::ready(Err(
+            ego_acp::serve::McpSessionAdmissionError::new("refused by the fixture"),
+        )))
+    }
+}
+
+fn mcp_server() -> serde_json::Value {
+    serde_json::json!([{
+        "name": "files",
+        "command": MCP_COMMAND,
+        "args": [],
+        "env": [],
+    }])
+}
+
+fn mcp_router(
+    fixture: &support::DurableAcpFixture,
+    admitter: &Arc<RefusingMcpAdmitter>,
+    admission: &Arc<Admission>,
+) -> agent_client_protocol::AgentProtocolRouter {
+    let controls: Arc<dyn SessionControls> = Arc::new(Seat::new(Confinement::Ro));
+    fixture.router_with_mcp_admitter(
+        Arc::clone(admitter) as Arc<dyn ego_acp::serve::McpSessionAdmitter>,
+        Some(controls),
+        Some(Arc::clone(admission) as Arc<dyn ego_acp::serve::SessionConfinementAdmission>),
+    )
+}
+
+async fn listed(connection: &mut support::Connected) -> Vec<String> {
+    let (listed, _) = connection
+        .request("session/list", serde_json::json!({"cwd": ROOT}))
+        .await;
+    listed["result"]["sessions"]
+        .as_array()
+        .expect("session/list rows")
+        .iter()
+        .map(|row| row["sessionId"].as_str().expect("row id").to_owned())
+        .collect()
+}
+
+/// Catches: servers admitted (their processes started) before the session's
+/// confinement was measured, or without the sandbox the session picked.
+#[tokio::test]
+async fn every_entry_path_admits_mcp_after_measurement_under_the_picked_sandbox() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut opener =
+        support::Connected::new(router(&fixture, None, Arc::new(Admission::default())));
+    let source = open(&mut opener, ROOT).await;
+    opener.abort().await;
+
+    for method in [
+        "session/new",
+        "session/load",
+        "session/resume",
+        "session/fork",
+    ] {
+        let admission = Arc::new(Admission::default());
+        let admitter = RefusingMcpAdmitter::new(Arc::clone(&admission));
+        let mut connection = support::Connected::new(mcp_router(&fixture, &admitter, &admission));
+        connection.initialize().await;
+        let params = if method == "session/new" {
+            serde_json::json!({"cwd": ROOT, "mcpServers": mcp_server()})
+        } else {
+            serde_json::json!({"sessionId": source, "cwd": ROOT, "mcpServers": mcp_server()})
+        };
+        let (response, _) = connection.request(method, params).await;
+        assert!(response["error"].is_object(), "{method}: {response}");
+        let seen = admitter.seen.lock().expect("seen admissions");
+        assert_eq!(seen.len(), 1, "{method} admission count");
+        let seen = &seen[0];
+        assert!(seen.measured_first, "{method} admitted before measurement");
+        assert_eq!(seen.level, Some(Confinement::Ro), "{method} sandbox pick");
+        assert_eq!(
+            seen.observation,
+            Some(observation(Confinement::Ro)),
+            "{method} observation"
+        );
+        assert_eq!(seen.root, PathBuf::from(ROOT), "{method} root");
+        if method == "session/load" || method == "session/resume" {
+            assert_eq!(seen.session, source.parse().unwrap(), "{method} session");
+        } else {
+            assert_ne!(
+                seen.session,
+                source.parse().unwrap(),
+                "{method} reused the source id"
+            );
+        }
+        connection.abort().await;
+    }
+}
+
+/// Catches: a refused `session/new` leaving an empty published session the
+/// host can list.
+#[tokio::test]
+async fn refused_mcp_admission_on_session_new_leaves_no_listed_session() {
+    let fixture = support::DurableAcpFixture::new();
+    let admission = Arc::new(Admission::default());
+    let admitter = RefusingMcpAdmitter::new(Arc::clone(&admission));
+    let mut connection = support::Connected::new(mcp_router(&fixture, &admitter, &admission));
+    connection.initialize().await;
+    let (response, _) = connection
+        .request(
+            "session/new",
+            serde_json::json!({"cwd": ROOT, "mcpServers": mcp_server()}),
+        )
+        .await;
+    assert!(response["error"].is_object(), "{response}");
+    assert_eq!(listed(&mut connection).await, Vec::<String>::new());
+    connection.abort().await;
+}
+
+/// Catches: a refused `session/fork` leaving its child listed next to the
+/// source.
+#[tokio::test]
+async fn refused_mcp_admission_on_session_fork_lists_only_the_source() {
+    let fixture = support::DurableAcpFixture::new();
+    let admission = Arc::new(Admission::default());
+    let admitter = RefusingMcpAdmitter::new(Arc::clone(&admission));
+    let mut connection = support::Connected::new(mcp_router(&fixture, &admitter, &admission));
+    let source = open(&mut connection, ROOT).await;
+    let (response, _) = connection
+        .request(
+            "session/fork",
+            serde_json::json!({"sessionId": source, "cwd": ROOT, "mcpServers": mcp_server()}),
+        )
+        .await;
+    assert!(response["error"].is_object(), "{response}");
+    assert_eq!(listed(&mut connection).await, vec![source]);
+    connection.abort().await;
+}
+
+/// Catches: `session/new` waiting for the sandbox measurement before it
+/// admits servers that start no process (an ACP-channel server is what a host
+/// chat sends), so every new chat pays the probe for nothing.
+#[tokio::test]
+async fn a_session_with_no_process_server_is_admitted_without_waiting_for_measurement() {
+    let fixture = support::DurableAcpFixture::new();
+    let admission = Arc::new(Admission::default());
+    admission.blocks();
+    let admitter = RefusingMcpAdmitter::new(Arc::clone(&admission));
+    let mut connection = support::Connected::new(mcp_router(&fixture, &admitter, &admission));
+    connection.initialize().await;
+    let (response, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        connection.request(
+            "session/new",
+            serde_json::json!({
+                "cwd": ROOT,
+                "mcpServers": [{"type": "acp", "name": "tuic", "serverId": "tuic"}],
+            }),
+        ),
+    )
+    .await
+    .expect("session/new waited for a measurement an ACP-channel server does not need");
+    assert!(response["error"].is_object(), "{response}");
+    {
+        let seen = admitter.seen.lock().expect("seen admissions");
+        assert_eq!(seen.len(), 1);
+        assert!(
+            !seen[0].measured_first,
+            "the ACP server waited for the probe"
+        );
+        assert!(
+            seen[0].level.is_none(),
+            "an ACP server was given a sandbox pick"
+        );
+    }
+    admission.release();
     connection.abort().await;
 }

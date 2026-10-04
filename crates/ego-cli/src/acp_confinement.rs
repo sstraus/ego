@@ -188,6 +188,35 @@ impl SessionConfinementAdmission for CliSessionConfinementAdmission {
     }
 }
 
+/// Measure every confinement a session under `ceiling` may be offered, into
+/// the process-wide capability cache. Safe to run ahead of any session: the
+/// cache holds measurement facts only, and single-flights concurrent callers.
+pub(crate) async fn warm_process_cache(
+    ceiling: Confinement,
+    cancel: CancelToken,
+    root: &std::path::Path,
+) -> Result<(), ControlError> {
+    for confinement in Confinement::ALL
+        .into_iter()
+        .filter(|candidate| candidate.within(ceiling))
+    {
+        let policy =
+            RunConfinement::new(confinement, false, CanonPath::new(root)).map_err(|error| {
+                ControlError::Internal(format!(
+                    "the ACP confinement policy could not be constructed: {error}"
+                ))
+            })?;
+        RunEffectPorts::diagnostic_capabilities(&policy, cancel.clone(), ExecLimits::default())
+            .await
+            .map_err(|error| {
+                ControlError::Internal(format!(
+                    "the `{confinement}` ACP confinement could not be measured: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
 async fn initialize_once(
     store: Arc<JsonlStore>,
     controls: Arc<AcpSessionControls>,
@@ -201,24 +230,7 @@ async fn initialize_once(
     // the host may pause or close the newly returned session while measuring.
     // Warm the process cache first, then replay its transcript into this
     // session's ordinary evidence store under the short writer lease.
-    for confinement in Confinement::ALL
-        .into_iter()
-        .filter(|candidate| candidate.within(ceiling))
-    {
-        let policy = RunConfinement::new(confinement, false, CanonPath::new(root.as_path()))
-            .map_err(|error| {
-                ControlError::Internal(format!(
-                    "the ACP confinement policy could not be constructed: {error}"
-                ))
-            })?;
-        RunEffectPorts::diagnostic_capabilities(&policy, cancel.clone(), ExecLimits::default())
-            .await
-            .map_err(|error| {
-                ControlError::Internal(format!(
-                    "the `{confinement}` ACP confinement could not be measured: {error}"
-                ))
-            })?;
-    }
+    warm_process_cache(ceiling, cancel.clone(), root.as_path()).await?;
 
     let clock = SystemClock;
     let opened = crate::session::open(store.as_ref(), &session, &clock).map_err(|error| {
