@@ -888,3 +888,109 @@ fn cancelling_an_acp_mcp_call_cancels_the_outer_message_request() {
         "the ACP host never received cancellation of its mcp/message request"
     );
 }
+
+#[test]
+// Catches cancellation poisoning a subsequent tool call or leaking the channel at close.
+fn cancelled_mcp_call_does_not_poison_the_next_prompt_or_leak_at_close() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[permissions]\nallow = [\"tool(tuicommander/search_tools)\"]\n\n[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\nmode = \"default\"\n",
+    )
+    .expect("isolated profile configuration");
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("held", "search_tools", "{}")),
+            Reply::Sse(tool_call("followup", "search_tools", "{}")),
+            Reply::Sse(text("followup done")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let mut mcp = McpHost::default();
+    let opened = host.send_request(
+        "session/new",
+        serde_json::json!({
+            "cwd": places.workspace_path(),
+            "mcpServers": [{"type":"acp","name":"tuicommander","serverId":"tuicommander"}]
+        }),
+    );
+    let opened = mcp.until(&mut host, opened);
+    let session = opened["result"]["sessionId"].as_str().expect("ACP session");
+    eprintln!("cancel fixture: session opened");
+    let prompt = host.send_request(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session, "prompt": [{"type":"text","text":"Search"}]
+        }),
+    );
+    let mut held = None;
+    let mut cancelled = false;
+    loop {
+        let frame = host.read_frame();
+        if frame["id"].as_u64() == Some(prompt) {
+            assert_eq!(frame["result"]["stopReason"], "cancelled", "{frame}");
+            break;
+        }
+        match frame["method"].as_str() {
+            Some("mcp/message") if frame["params"]["method"] == "tools/call" => {
+                eprintln!("cancel fixture: tool call held");
+                held = Some(frame["id"].clone());
+                host.write_frame(serde_json::json!({
+                    "jsonrpc":"2.0", "method":"session/cancel", "params":{"sessionId":session}
+                }));
+            }
+            Some("$/cancel_request") => {
+                eprintln!("cancel fixture: outer cancellation received");
+                assert_eq!(
+                    frame["params"]["requestId"],
+                    held.clone().expect("held MCP request")
+                );
+                cancelled = true;
+                host.write_frame(serde_json::json!({
+                    "jsonrpc":"2.0", "id":held, "error":{"code":-32800,"message":"cancelled"}
+                }));
+            }
+            Some("mcp/message") if frame["params"]["method"] == "notifications/cancelled" => {
+                panic!(
+                    "cancellation was sent as an inner MCP notification instead of cancelling the outer ACP request: {frame}"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        cancelled,
+        "the ACP host never received cancellation of its mcp/message request"
+    );
+    let followup = host.send_request(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session, "prompt": [{"type":"text","text":"Search again"}]
+        }),
+    );
+    let finished = mcp.until(&mut host, followup);
+    assert_eq!(finished["result"]["stopReason"], "end_turn", "{finished}");
+    assert_eq!(
+        mcp.calls, 1,
+        "the subsequent authorized tool did not complete"
+    );
+    assert_eq!(
+        mcp.connects, 1,
+        "cancellation discarded the session channel"
+    );
+    let closed = host.send_request("session/close", serde_json::json!({"sessionId": session}));
+    let closed = mcp.until(&mut host, closed);
+    assert!(closed["result"].is_object(), "{closed}");
+    assert_eq!(
+        mcp.disconnects, 1,
+        "the cancelled session leaked its MCP channel"
+    );
+    host.finish();
+}
