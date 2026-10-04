@@ -869,7 +869,24 @@ impl ConfigLayer {
                 ),
             });
         }
+        if !matches!(source, Source::System | Source::User)
+            && value.permission_rules().any(Rule::is_tool_wildcard)
+        {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "a `tool(<server>/*)` rule is allowed only in the system and user layers; name each tool in this layer"
+                    .to_string(),
+            });
+        }
         Ok(Sourced { source, value })
+    }
+
+    /// Every permission rule this layer declares, in its own list and in each profile.
+    fn permission_rules(&self) -> impl Iterator<Item = &Rule> {
+        self.permissions
+            .iter()
+            .chain(self.profile.values().filter_map(|p| p.permissions.as_ref()))
+            .flat_map(|perm| perm.allow.iter().chain(&perm.deny))
     }
 }
 

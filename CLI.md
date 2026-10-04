@@ -343,6 +343,12 @@ clicks, navigation, or other work performed behind that boundary. Running the
 same program through native shell remains an `exec(...)` operation and gains
 no tool authority by its name.
 
+`tool(server/*)` covers every tool of that one server and never another
+server's. It is accepted only in the system and user layers (including their
+profiles); a project, local, agent-file, environment or flags layer is rejected
+at load, so a repository cannot grant itself every tool of a server. A matching
+deny still wins over the wildcard.
+
 Rules follow a published formal grammar matched against the *canonical* call
 (resolved paths, argv, endpoints — never rendered shell strings); the
 mode × sandbox matrix is published and contradictory combinations are
