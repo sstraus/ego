@@ -1276,7 +1276,26 @@ impl PolicyEngine {
             if delegated_support == Some(index) {
                 continue;
             }
-            let Some(entry) = self.matching(&self.allow, op) else {
+            // A conditional replacement reads the same file it writes. Its
+            // matching write allow covers that supporting read, but the first
+            // pass still checks read denies and boundaries independently.
+            let supporting_write = match (call.ops(), op) {
+                (
+                    [
+                        Op::Read { path: read },
+                        write @ Op::Write {
+                            path,
+                            change: Change::Replace { .. },
+                        },
+                    ],
+                    Op::Read { .. },
+                ) if read == path => Some(write),
+                _ => None,
+            };
+            let Some(entry) = self
+                .matching(&self.allow, op)
+                .or_else(|| supporting_write.and_then(|write| self.matching(&self.allow, write)))
+            else {
                 if self.mode == Mode::Yolo && matches!(op, Op::SecretEgress { .. }) {
                     yolo_authorized_secret_egress = true;
                     continue;
