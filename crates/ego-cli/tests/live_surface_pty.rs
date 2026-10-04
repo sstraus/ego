@@ -3209,11 +3209,13 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     input.write_all(b"cancel check\r").expect("submit turn");
     input.flush().expect("submit flush");
     until_normalized(&reader, &mut output, turn_start, "PARTIAL-REPLY");
+    drain_until_quiet(&reader, &mut output);
     let mut streaming_screen = vt100::Parser::new(40, 100, 0);
     streaming_screen.process(&output);
     assert!(
         streaming_screen.screen().contents().contains("Esc cancels"),
-        "reply must still be streaming when Esc is sent"
+        "reply must still be streaming when Esc is sent: {:?}",
+        streaming_screen.screen().contents()
     );
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
