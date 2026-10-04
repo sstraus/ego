@@ -3120,3 +3120,53 @@ fn macos_seatbelt_offline_controls_cover_tcp_udp_and_both_address_classes() {
     // capability refusal; it may not silently run the child unconfined.
     assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls();
 }
+
+// Catches: granting metadata only to the immediate workspace parent, or only in workspace mode.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_standalone_nested_workspace_stats_every_ancestor_even_read_only() {
+    let outer = tempfile::tempdir().expect("outer directory");
+    let workspace = outer.path().join("parent with spaces/child/workspace");
+    std::fs::create_dir_all(&workspace).expect("nested workspace");
+    let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
+    let mut argv = vec![OsString::from("/usr/bin/stat")];
+    argv.extend(
+        workspace
+            .ancestors()
+            .map(|path| path.as_os_str().to_owned()),
+    );
+    for level in [Confinement::Workspace, Confinement::Ro] {
+        let run = open_policy(
+            run_confinement(level, false, CanonPath::new(workspace.clone())),
+            1024 * 1024,
+            1024,
+        )
+        .expect("standalone run");
+        execute(
+            &run,
+            SpawnSpec::new(
+                argv.clone(),
+                Some(CanonPath::new(workspace.clone())),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .expect("stat spec"),
+        )
+        .expect("every workspace ancestor must be statable");
+        if level == Confinement::Ro {
+            let forbidden = workspace.join("read-only-write");
+            execute(
+                &run,
+                SpawnSpec::new(
+                    vec!["/usr/bin/touch".into(), forbidden.clone().into_os_string()],
+                    Some(CanonPath::new(workspace.clone())),
+                    None,
+                    EnvPolicy::Inherited,
+                )
+                .expect("touch spec"),
+            )
+            .expect_err("metadata permission must not grant read-only writes");
+            assert!(!forbidden.exists(), "read-only workspace was modified");
+        }
+    }
+}
