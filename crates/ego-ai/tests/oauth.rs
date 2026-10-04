@@ -367,6 +367,9 @@ fn no_token_refusal_renders_the_endpoint_body_yet_all_keep_provider_and_status()
 /// installs a subscriber today, so nothing consumes this event yet. What is
 /// proven here is that `ego-ai` emits it — the library half — which is the same
 /// contract `ego-acp`'s existing `tracing::warn!` sites rely on.
+///
+/// Catches: a refusal's body/status event is lost when an unsubscribed thread
+/// first registers the shared OAuth warning callsite.
 #[test]
 fn the_endpoint_body_is_absent_from_the_error_and_present_in_the_log() {
     use std::sync::{Arc, Mutex};
@@ -412,6 +415,14 @@ fn the_endpoint_body_is_absent_from_the_error_and_present_in_the_log() {
     let captured = Arc::new(Mutex::new(Captured::default()));
     let error = {
         let _guard = tracing::subscriber::set_default(Collector(Arc::clone(&captured)));
+        std::thread::spawn(|| {
+            built_in("anthropic")
+                .unwrap()
+                .read_token(TokenStatus::new(503, b"unsubscribed-thread"), NOW_MS, None)
+                .unwrap_err()
+        })
+        .join()
+        .expect("the unsubscribed first emitter does not panic");
         built_in("anthropic")
             .unwrap()
             .read_token(
@@ -423,6 +434,7 @@ fn the_endpoint_body_is_absent_from_the_error_and_present_in_the_log() {
     };
 
     assert!(leaks(&error.to_string()).is_none(), "{error}");
+    assert!(leaks(&format!("{error:?}")).is_none(), "{error:?}");
     let captured = captured.lock().expect("no writer panics");
     assert!(
         captured
@@ -439,6 +451,36 @@ fn the_endpoint_body_is_absent_from_the_error_and_present_in_the_log() {
             .any(|status| status.contains("400")),
         "the log does not carry the status beside the body: {:?}",
         captured.statuses
+    );
+    assert_eq!(
+        captured.bodies.len(),
+        1,
+        "only the local refusal is captured"
+    );
+    assert_eq!(captured.statuses, ["400"]);
+}
+
+// Catches: parallel tests hide the cold-callsite loss by registering the OAuth
+// warning before the capture subscriber is installed.
+#[test]
+fn oauth_capture_survives_first_refusal_on_an_unsubscribed_thread() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "the_endpoint_body_is_absent_from_the_error_and_present_in_the_log",
+            "--test-threads=1",
+        ])
+        .output()
+        .expect("the OAuth test binary can start with a cold callsite cache");
+    assert!(
+        output.status.success(),
+        "cold-callsite capture failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "the cold-process capture assertion must actually run"
     );
 }
 
