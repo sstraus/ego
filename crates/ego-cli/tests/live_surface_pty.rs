@@ -5804,6 +5804,8 @@ fn a_stores_the_prefix_rule_and_commits_one_plain_receipt_to_the_transcript() {
     );
 }
 
+// Catches: blind Enter retries consuming the reclassified modal before its
+// observation mark, and an edit that executes the original argv instead.
 #[test]
 fn e_edits_the_call_and_the_amended_call_is_asked_again() {
     let mut session = modal_session(SEQ_ASK);
@@ -5811,18 +5813,25 @@ fn e_edits_the_call_and_the_amended_call_is_asked_again() {
     session.wait("[d] details");
     session.press(b"e");
     session.wait("argv: ");
-    // One Enter accepts each prefilled field; the modal returns once the form
-    // is complete, because an amended call is classified from scratch.
-    for _ in 0..8 {
-        session.press(b"\r");
-        drain_until_quiet(&session.reader, &mut session.output);
-        if normalized(&session.output[session.mark..]).contains("[d] details") {
-            break;
-        }
-    }
+    session.press(b"\x15seq 1 4\r");
+    session.wait("cwd: ");
+    session.press(b"\r");
+    session.wait("timeout_ms: ");
+    session.press(b"\r");
     session.wait("[d] details");
+    let amended = session.screen().join("\n");
+    assert!(amended.contains("Allow run seq 1 4?"), "{amended}");
+    assert_eq!(session.stub.generations().len(), 1, "edit must ask again");
     session.press(b"y");
     session.wait(TOOL_TURN_DONE);
     let (generations, _) = session.finish();
     assert_eq!(generations.len(), 2);
+    let result = generations[1]["messages"]
+        .as_array()
+        .expect("provider messages")
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .expect("the amended call's tool result");
+    assert!(result.contains("1\n2\n3\n4\n"), "{result}");
 }
