@@ -3161,7 +3161,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(text("KNOWN-USAGE")),
-            paced("PARTIAL-REPLY", Duration::from_secs(5)),
+            paced("PARTIAL-REPLY\n", Duration::from_secs(5)),
         ],
         ..Plan::default()
     });
