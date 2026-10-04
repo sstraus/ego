@@ -1,4 +1,5 @@
 use super::edit_mode::PICKER_KEYS;
+use super::permission_modal::{compact_prompt, details_prompt};
 use super::*;
 use crate::render::osc::State;
 
@@ -255,65 +256,41 @@ pub(super) fn answer_control(
                 .lock()
                 .expect("surface status lock")
                 .permission_capabilities;
-            let prompt = Question::new(
-                permission_prompt(&request, capabilities),
-                Arc::clone(surface.status),
-            );
+            let mut prompt = Question::new(compact_prompt(&request), Arc::clone(surface.status));
             tell_host(surface.status, |osc, quiet| {
                 osc.awaiting(request.tool(), !quiet)
             });
             let mut notice = None;
             let decision = loop {
                 match modal_line(editor, surface, &prompt) {
+                    // The keys: `n` asks what to do instead; typed words below
+                    // are the plain prompt and stay a bare refusal.
                     Line::HostCommand(HostCommand::PermissionDecision(decision)) => {
-                        match parse_permission(&decision) {
-                            Some(PermissionWord::Allow) => break PermissionDecision::Allow,
-                            Some(PermissionWord::Deny) => break PermissionDecision::Deny,
-                            Some(PermissionWord::Amend) => {
-                                surface
-                                    .status
-                                    .lock()
-                                    .expect("surface status lock")
-                                    .permission_modal = false;
-                                break amendment(editor, surface, &request, &mut notice);
+                        match decision.as_str() {
+                            "details" => {
+                                prompt = Question::new(
+                                    details_prompt(&request, capabilities),
+                                    Arc::clone(surface.status),
+                                );
                             }
-                            Some(PermissionWord::Remember) => {
-                                match remember_permission(surface.status, &request) {
-                                    Ok(receipt) => {
-                                        notice = Some(receipt);
-                                        break PermissionDecision::Allow;
-                                    }
-                                    Err(error) => {
-                                        notice = Some(format!("remember failed: {error}"));
-                                        break PermissionDecision::Deny;
-                                    }
+                            "deny" => break decline(editor, surface),
+                            _ => match parse_permission(&decision) {
+                                Some(word) => {
+                                    break settle_permission(
+                                        editor,
+                                        surface,
+                                        &request,
+                                        word,
+                                        &mut notice,
+                                    );
                                 }
-                            }
-                            None => continue,
+                                None => continue,
+                            },
                         }
                     }
                     Line::Submitted(answer) => match parse_permission(&answer) {
-                        Some(PermissionWord::Allow) => break PermissionDecision::Allow,
-                        Some(PermissionWord::Deny) => break PermissionDecision::Deny,
-                        Some(PermissionWord::Amend) => {
-                            surface
-                                .status
-                                .lock()
-                                .expect("surface status lock")
-                                .permission_modal = false;
-                            break amendment(editor, surface, &request, &mut notice);
-                        }
-                        Some(PermissionWord::Remember) => {
-                            match remember_permission(surface.status, &request) {
-                                Ok(receipt) => {
-                                    notice = Some(receipt);
-                                    break PermissionDecision::Allow;
-                                }
-                                Err(error) => {
-                                    notice = Some(format!("remember failed: {error}"));
-                                    break PermissionDecision::Deny;
-                                }
-                            }
+                        Some(word) => {
+                            break settle_permission(editor, surface, &request, word, &mut notice);
                         }
                         None => continue,
                     },
@@ -380,9 +357,8 @@ pub(super) fn answer_control(
             let _ = sender.send(accepted);
         }
         Reply::Permission(sender, decision, notice) => {
-            if let Some(notice) = notice {
-                surface.status.lock().expect("surface status lock").notice = Some(notice);
-                repaint_status(surface.status);
+            if let Some(receipt) = notice {
+                commit_to_transcript(surface.status, &receipt);
             }
             let _ = sender.send(decision);
         }
@@ -1255,7 +1231,10 @@ fn remember_permission(
     let presentation = request
         .presentation()
         .ok_or_else(|| "this permission request has no presentation facts".to_owned())?;
-    let plan = presentation.remember_plan().map_err(str::to_owned)?.clone();
+    let plan = presentation
+        .suggested_remember_plan()
+        .map_err(str::to_owned)?
+        .clone();
     let application = status
         .lock()
         .map_err(|_| "the permission surface is unavailable".to_owned())?
@@ -1286,91 +1265,71 @@ fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
     let _ = stdout.flush();
 }
 
-fn permission_prompt(
+/// Resolve one answered key or word. `notice` receives the receipt that goes
+/// to the transcript.
+fn settle_permission(
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
     request: &PermissionRequest,
-    capabilities: crate::render::Capabilities,
-) -> String {
-    use ego_core::permit::Op;
-    let operations = request
-        .ops()
-        .iter()
-        .map(|op| match op {
-            Op::Write { path, change } => format!(
-                "- write {}\n{}",
-                serde_json::to_string(&path.to_string()).expect("a path serializes"),
-                crate::render::permission_diff::render(change, capabilities)
-            ),
-            _ => PermissionRequest::new(request.tool(), vec![op.clone()], request.why().clone())
-                .to_string()
-                .lines()
-                .skip(1)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut rows = vec![
-        format!(
-            "Call: {}",
-            serde_json::to_string(request.tool()).expect("a tool name always serializes")
-        ),
-        format!(
-            "Reason: {}",
-            serde_json::to_string(&request.why().to_string())
-                .expect("a permission reason always serializes")
-        ),
-    ];
-    if !operations.is_empty() {
-        rows.push(format!("Operations:\n{operations}"));
+    word: PermissionWord,
+    notice: &mut Option<String>,
+) -> PermissionDecision {
+    match word {
+        PermissionWord::Allow => PermissionDecision::Allow,
+        PermissionWord::Deny => PermissionDecision::Deny,
+        PermissionWord::Amend => {
+            surface
+                .status
+                .lock()
+                .expect("surface status lock")
+                .permission_modal = false;
+            amendment(editor, surface, request, notice)
+        }
+        PermissionWord::Remember => match remember_permission(surface.status, request) {
+            Ok(receipt) => {
+                *notice = Some(receipt);
+                PermissionDecision::Allow
+            }
+            Err(error) => {
+                *notice = Some(format!("Not remembered, and the call was refused: {error}"));
+                PermissionDecision::Deny
+            }
+        },
     }
-    if let Some(presentation) = request.presentation() {
-        rows.push(format!(
-            "Risk: {:?} ({})",
-            presentation.risk().class,
-            presentation
-                .risk()
-                .reasons
-                .iter()
-                .map(|reason| format!("{reason:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        let mut parameters = presentation.parameters().clone();
-        if request
-            .ops()
-            .iter()
-            .any(|op| matches!(op, Op::Write { .. }))
-            && matches!(request.tool(), "edit" | "write")
-            && let Some(fields) = parameters.as_object_mut()
-        {
-            for name in ["old_string", "new_string", "content"] {
-                if let Some(value) = fields.get_mut(name) {
-                    *value = serde_json::Value::String("[shown in bounded diff]".into());
-                }
+}
+
+/// `n`: ask what to do instead. An empty answer is a plain refusal; words go
+/// back to the model as the tool result.
+fn decline(editor: &mut Reedline, surface: &mut ModalSurface<'_>) -> PermissionDecision {
+    surface
+        .status
+        .lock()
+        .expect("surface status lock")
+        .permission_modal = false;
+    let prompt = Question::new(
+        "What should it do instead? (Enter alone just says no) ".to_owned(),
+        Arc::clone(surface.status),
+    );
+    match modal_line(editor, surface, &prompt) {
+        Line::Submitted(text) if !text.trim().is_empty() => {
+            PermissionDecision::DenyWithInstruction {
+                instruction: text.trim().to_owned(),
             }
         }
-        rows.push(format!(
-            "Parameters:\n{}",
-            serde_json::to_string_pretty(&parameters).expect("JSON parameters always serialize")
-        ));
-        match presentation.remember_plan() {
-            Ok(plan) => {
-                rows.push("Remember would add:".into());
-                rows.extend(
-                    plan.candidate_rows()
-                        .map(|(operation, rule)| format!("- operation {operation}: {rule}")),
-                );
-                for (operation, dimension) in plan.omission_rows() {
-                    rows.push(format!(
-                        "- widening for operation {operation}: omits {dimension:?}"
-                    ));
-                }
-            }
-            Err(error) => rows.push(format!("Remember unavailable: {error}")),
-        }
+        _ => PermissionDecision::Deny,
     }
-    rows.push("[y] allow [n] deny [e] edit [r] remember ".into());
-    rows.join("\n")
+}
+
+/// One row into the transcript, through the same printer the run output uses.
+fn commit_to_transcript(status: &SharedStatus, row: &str) {
+    let transcript = status
+        .lock()
+        .expect("surface status lock")
+        .transcript
+        .clone();
+    if let Some(transcript) = transcript {
+        let _ = transcript.send(format!("{row}\n"));
+    }
 }
 
 /// The prompt: two characters and nothing else.
@@ -1618,107 +1577,5 @@ mod permission_edit_form_tests {
             form.validate().unwrap()["argv"],
             json!(["cargo", "test", "-p", "ego-core"])
         );
-    }
-}
-
-#[cfg(test)]
-mod permission_modal_diff_tests {
-    use super::*;
-    use crate::render::caps::{Capabilities, Terminal};
-    use ego_core::permit::{Change, Escalation, Op, OpName};
-
-    fn request(change: Change) -> PermissionRequest {
-        let path = CanonPath::new("/workspace/new.py");
-        PermissionRequest::new(
-            "edit",
-            vec![Op::Write {
-                path: path.clone(),
-                change,
-            }],
-            Escalation::NoRuleCovers {
-                op: OpName::Write,
-                path,
-            },
-        )
-    }
-
-    #[test]
-    fn permission_modal_edit_diff_catches_escaped_string_dump() {
-        let request = request(Change::Replace {
-            old_string: "def subtract(a, b):\n    return a - b\n".into(),
-            new_string: "def subtract(a, b):\n    return b - a\n".into(),
-        });
-        let out = permission_prompt(&request, Capabilities::plain());
-        assert!(
-            out.contains(
-                "@@ -1,2 +1,2 @@\n def subtract(a, b):\n-    return a - b\n+    return b - a"
-            ),
-            "{out}"
-        );
-        assert!(!out.contains(r"\n"), "{out}");
-        assert!(out.contains("fragment"));
-        assert!(out.ends_with("[y] allow [n] deny [e] edit [r] remember "));
-    }
-
-    #[test]
-    fn permission_modal_colour_catches_escapes_in_plain_output() {
-        let request = request(Change::Replace {
-            old_string: "old\n".into(),
-            new_string: "new\n".into(),
-        });
-        for (tty, no_color, term, flag, coloured) in [
-            (true, None, "xterm-256color", false, true),
-            (false, None, "xterm-256color", false, false),
-            (true, Some("1"), "xterm-256color", false, false),
-            (true, Some("0"), "xterm-256color", false, false),
-            (true, None, "dumb", false, false),
-            (true, None, "xterm-256color", true, false),
-        ] {
-            let caps = Capabilities::of(&Terminal {
-                stdout_is_terminal: tty,
-                no_color,
-                term: Some(term),
-                flag_no_color: flag,
-                ..Terminal::default()
-            });
-            let out = permission_prompt(&request, caps);
-            assert_eq!(
-                out.contains("\x1b["),
-                coloured,
-                "{tty} {no_color:?} {term} {flag}: {out:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn permission_modal_write_diff_catches_missing_additions_and_unbounded_output() {
-        let out = permission_prompt(
-            &request(Change::Whole(b"first\nsecond\n".to_vec())),
-            Capabilities::plain(),
-        );
-        assert!(out.contains("@@ -0,0 +1,2 @@\n+first\n+second"), "{out}");
-        assert!(out.contains("previous content is not read"));
-        let content = (0..100).map(|n| format!("line {n}\n")).collect::<String>();
-        let out = permission_prompt(
-            &request(Change::Whole(content.into_bytes())),
-            Capabilities::plain(),
-        );
-        // A unified diff has two headers, one hunk header and 100 addition rows.
-        assert!(out.contains("[73 diff lines omitted]"), "{out}");
-        assert!(!out.contains("+line 99"));
-        assert!(out.lines().count() < 45, "{out}");
-    }
-
-    #[test]
-    fn permission_modal_diff_catches_terminal_controls_and_overwide_lines() {
-        let out = permission_prompt(
-            &request(Change::Whole(
-                format!("\x1b[2J{}\n", "界".repeat(1000)).into_bytes(),
-            )),
-            Capabilities::plain(),
-        );
-        assert!(!out.contains('\x1b'));
-        assert!(out.contains('�'));
-        assert!(out.len() < 2000);
     }
 }
