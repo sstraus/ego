@@ -821,7 +821,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     // else. Someone who pressed it to stop a turn must not
                                     // lose the session by pressing it once more.
                                     repl::Line::Interrupted => continue,
-                                    repl::Line::Ended => break 'epoch EpochTransition::Exit,
+                                    repl::Line::Ended => {
+                                        // The last turn's refusal was already shown. Idle EOF
+                                        // ends the session; session-end failures still replace Done.
+                                        last.termination = RunTermination::Done;
+                                        break 'epoch EpochTransition::Exit;
+                                    }
                                     repl::Line::Refused(why) => {
                                         diagnostics.note(why);
                                         continue;

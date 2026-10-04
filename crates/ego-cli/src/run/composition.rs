@@ -1196,20 +1196,8 @@ pub(super) async fn generation_preflight_inner(
 
     let mode = effective.mode.unwrap_or(Mode::Default);
     let judge_identity = effective.judge.clone();
-    let source = Arc::new(model::CliGenerationModelSource::new(
-        ego_core::config::ModelRef(slug),
-        effective.thinking,
-        judge_identity,
-        effective.ceilings.clone(),
-        effective.auth.clone(),
-    ));
-    let selection = source.selection();
-    let bound = source.bind(Arc::clone(&http), cancel.clone(), run_deadline);
-    let main = bound
-        .resolve(GenerationModelRequest::new(GenerationRole::Main))
-        .await
-        .map_err(generation_refusal)?;
-    if status.as_ref().is_some_and(|status| status.human) {
+    let mut thinking = effective.thinking;
+    let human_picker = if status.as_ref().is_some_and(|status| status.human) {
         let catalogue_snapshot = Arc::new(
             models::build_catalogue_snapshot(
                 &ModelsArgs {
@@ -1228,6 +1216,66 @@ pub(super) async fn generation_preflight_inner(
             Arc::new(OsIo),
             home.join("config.toml"),
         ));
+        if thinking.is_none()
+            && crate::model_picker::available_entry(&catalogue_snapshot, &slug)
+                .is_ok_and(|row| row.capabilities.default_reasoning_effort.is_none())
+        {
+            let picker =
+                ModelPicker::for_startup_reasoning(Arc::clone(&catalogue_snapshot), slug.clone())
+                    .map_err(|error| RunTermination::UsageError {
+                    message: error.to_string(),
+                })?;
+            match status
+                .as_ref()
+                .expect("a human interactive status was checked above")
+                .seat
+                .read_startup_model(Arc::new(Mutex::new(picker)), None)
+            {
+                crate::model_picker::PickerOutcome::ModelSwitch(request) => {
+                    let publication = crate::onboarding::persist_startup_selection(
+                        config_store.as_ref(),
+                        &request,
+                    )
+                    .map_err(|error| RunTermination::UsageError {
+                        message: format!("could not persist the startup reasoning choice: {error}"),
+                    })?;
+                    if let UserConfigPublication::PublishedDurabilityUncertain { diagnostic } =
+                        publication
+                    {
+                        status
+                            .as_ref()
+                            .expect("a human interactive status was checked above")
+                            .seat
+                            .set_notice(format!(
+                                "model defaults are authoritative with a durability warning: {diagnostic}"
+                            ));
+                    }
+                    thinking = Some(request.thinking());
+                }
+                crate::model_picker::PickerOutcome::Cancelled => {
+                    cancel.cancel(CancelCause::User);
+                    return Err(cancelled_termination(cancel));
+                }
+            }
+        }
+        Some((catalogue_snapshot, config_store))
+    } else {
+        None
+    };
+    let source = Arc::new(model::CliGenerationModelSource::new(
+        ego_core::config::ModelRef(slug),
+        thinking,
+        judge_identity,
+        effective.ceilings.clone(),
+        effective.auth.clone(),
+    ));
+    let selection = source.selection();
+    let bound = source.bind(Arc::clone(&http), cancel.clone(), run_deadline);
+    let main = bound
+        .resolve(GenerationModelRequest::new(GenerationRole::Main))
+        .await
+        .map_err(generation_refusal)?;
+    if let Some((catalogue_snapshot, config_store)) = human_picker {
         let picker = Arc::new(Mutex::new(ModelPicker::for_selection(
             Arc::clone(&catalogue_snapshot),
             Arc::clone(&selection),

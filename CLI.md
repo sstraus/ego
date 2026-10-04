@@ -1108,7 +1108,11 @@ current effort the same way. Arrow keys navigate, a digit selects by number
 while no filter is typed, and typing narrows the list by substring (`Backspace`
 edits; no match shows an empty state and `Enter` does nothing). `Enter` at the
 reasoning step sets the default for new sessions, `s` there applies only to this
-session, and `Esc` cancels. A completed change writes a `Model: <slug>` line to
+session, and `Esc` cancels. Interactive startup with a selected model whose
+reasoning default is unknown opens the reasoning step directly. The operator
+must choose a supported effort; `Enter` saves the model and effort, and `Esc`
+cancels startup. Headless runs still require an explicit `--thinking` value.
+A completed change writes a `Model: <slug>` line to
 the transcript. A selection made while a request is in flight applies at the next
 generation boundary, never by mutating an active request.
 

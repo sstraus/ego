@@ -3881,6 +3881,150 @@ fn bounded_exit(mut child: Box<dyn portable_pty::Child + Send + Sync>) -> portab
     status
 }
 
+// Catches: a missing model default terminating interactive startup before the
+// existing reasoning picker can obtain a real operator choice.
+#[test]
+fn regression_case_missing_default_opens_effort_picker_and_generates_with_choice() {
+    regression_case_terminal(false);
+}
+
+// Catches: a displayed provider refusal surviving idle EOF as a second error
+// after the resume hint, and incorrectly making an ordinary exit fail.
+#[test]
+fn regression_case_provider_refusal_is_not_repeated_after_idle_eof() {
+    regression_case_terminal(true);
+}
+
+fn regression_case_terminal(provider_refuses: bool) {
+    let stub = Stub::start(Plan {
+        completions: vec![if provider_refuses {
+            Reply::Status(400)
+        } else {
+            Reply::Sse(text("EFFORT-CHOICE-ANSWER"))
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .without_fixture_thinking()
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--mode",
+            "default",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    ego.file("AGENTS.md", "# effort picker fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("trust flush");
+    until_normalized(&reader, &mut output, 0, "Select reasoning for");
+    assert!(!normalized(&output).contains("Select model"));
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"1\r").expect("choose off explicitly");
+    input.flush().expect("choice flush");
+    let choice_start = output.len();
+    until_prompt_from(&reader, &mut output, choice_start);
+    let turn_start = output.len();
+    input.write_all(b"hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        turn_start,
+        if provider_refuses {
+            "the model does not accept"
+        } else {
+            "EFFORT-CHOICE-ANSWER"
+        },
+    );
+    until_prompt_from(&reader, &mut output, turn_start);
+    let quit_start = output.len();
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader");
+    writer_join.join().expect("writer");
+    drain(&reader, &mut output);
+    assert!(status.success(), "interactive exit: {status:?}");
+    let after_quit = normalized(&output[quit_start..]);
+    assert!(after_quit.contains("To resume: ego resume"), "{after_quit}");
+    assert!(
+        !after_quit.contains("the model does not accept"),
+        "{after_quit}"
+    );
+    let config =
+        std::fs::read_to_string(ego.home_path().join("config.toml")).expect("saved choice");
+    assert!(config.contains("thinking = \"off\""), "{config}");
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["thinking"]["type"], "disabled");
+}
+
+// Catches: headless startup reaching a human picker or silently inventing Off
+// when the selected row states accepted efforts but no default.
+#[test]
+fn regression_case_headless_missing_default_keeps_thinking_remedy() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .without_fixture_thinking()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--sandbox",
+            "off",
+            "hello",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    let finished = ego.run();
+    assert_eq!(finished.code, Some(2), "{}", finished.stderr);
+    assert!(
+        finished
+            .stderr
+            .contains("does not state a default reasoning effort"),
+        "{}",
+        finished.stderr
+    );
+    assert!(
+        finished.stderr.contains("--thinking"),
+        "{}",
+        finished.stderr
+    );
+    assert!(stub.generations().is_empty());
+}
+
 #[test]
 fn startup_picker_escape_exits_without_saving_a_model() {
     let stub = Stub::start(Plan::default());
