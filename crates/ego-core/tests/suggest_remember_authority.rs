@@ -130,7 +130,8 @@ fn programs_that_execute_their_arguments_are_not_offered_as_a_prefix() {
 // subcommand and silently authorizing every action of the program.
 #[test]
 fn supported_subcommand_prefixes_cover_named_actions_but_not_other_actions() {
-    let cases: Vec<(&[&str], &[&str], &[&str], &str)> = vec![
+    type PrefixCase<'a> = (&'a [&'a str], &'a [&'a str], &'a [&'a str], &'a str);
+    let cases: Vec<PrefixCase<'_>> = vec![
         (
             &["npm", "run", "build"],
             &["npm", "run", "test"],
