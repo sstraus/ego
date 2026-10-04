@@ -1794,6 +1794,7 @@ fn submit_local_action(
     command: &str,
     expected: Option<&str>,
 ) {
+    let generation_count = stub.generations().len();
     let start = output.len();
     input
         .write_all(format!("/{command}\r").as_bytes())
@@ -1808,15 +1809,16 @@ fn submit_local_action(
             start,
             expected,
             stub,
-            0,
+            generation_count,
             (SLASH_ACTION_DEADLINE, &format!("/{command} action output")),
         );
     }
     if expected.is_none() {
         until_local_action_completed(receiver, output, start, command, SLASH_ACTION_DEADLINE);
     }
-    assert!(
-        stub.generations().is_empty(),
+    assert_eq!(
+        stub.generations().len(),
+        generation_count,
         "/{command} leaked into a provider generation"
     );
     if expected.is_none() {
@@ -4497,6 +4499,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
     waiter.join().expect("waiter thread");
 }
 
+// Catches: a local slash action falls through to chat, or failed compact leaves input stuck.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
     const COMMANDS: [&str; 25] = [
@@ -4597,7 +4600,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("mcp", Some("mcp:")),
         ("sessions", Some("UPDATED")),
         ("fork", None),
-        // This empty fixture cannot prepare compaction; wait for its outcome.
+        // The inherited model permits a checkpoint request; its empty reply must fail.
         ("compact", Some("compaction failed")),
         ("clear", None),
         ("usage", Some("usage as of")),
@@ -4612,7 +4615,31 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("hooks", Some("no hooks are admitted")),
         ("version", Some("ego 0.1.0")),
     ] {
-        submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
+        if command == "compact" {
+            let start = output.len();
+            input.write_all(b"/compact\r").expect("compact command");
+            input.flush().expect("compact command flush");
+            until_normalized(
+                &reader,
+                &mut output,
+                start,
+                "compaction failed: compaction preparation failed: checkpoint must start with # Objective",
+            );
+            until_local_action_completed(
+                &reader,
+                &mut output,
+                start,
+                command,
+                SLASH_ACTION_DEADLINE,
+            );
+            assert_eq!(
+                stub.generations().len(),
+                1,
+                "compact must send one checkpoint"
+            );
+        } else {
+            submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
+        }
     }
 
     let quit_start = output.len();
@@ -4625,7 +4652,28 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         normalized(&output[quit_start..]).contains("unsent drafts"),
         "/quit did not render its explicit exit accounting"
     );
-    assert!(stub.generations().is_empty());
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        1,
+        "local actions must not submit chat prompts"
+    );
+    let messages = generations[0]["messages"]
+        .as_array()
+        .expect("checkpoint messages");
+    assert!(
+        messages.iter().any(|message| {
+            message["role"] == "system"
+                && message["content"].as_str().is_some_and(|content| {
+                    content.contains("Produce one self-contained context checkpoint")
+                })
+        }),
+        "compact must request a checkpoint"
+    );
+    assert!(
+        messages.iter().all(|message| message["role"] != "user"),
+        "slash commands must not become chat prompts"
+    );
     drop(input);
     drop(pair);
     reader_join.join().expect("reader thread panicked");
