@@ -2086,7 +2086,6 @@ fn offline_http_refuses_before_dns_or_socket() {
         }
         assert!(resolver.calls.lock().expect("calls").is_empty());
         assert!(server.finish().is_empty(), "offline opened no socket");
-        return;
     }
     #[cfg(not(target_os = "linux"))]
     {

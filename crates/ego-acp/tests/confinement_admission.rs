@@ -807,25 +807,27 @@ async fn every_entry_path_admits_mcp_after_measurement_under_the_picked_sandbox(
         };
         let (response, _) = connection.request(method, params).await;
         assert!(response["error"].is_object(), "{method}: {response}");
-        let seen = admitter.seen.lock().expect("seen admissions");
-        assert_eq!(seen.len(), 1, "{method} admission count");
-        let seen = &seen[0];
-        assert!(seen.measured_first, "{method} admitted before measurement");
-        assert_eq!(seen.level, Some(Confinement::Ro), "{method} sandbox pick");
-        assert_eq!(
-            seen.observation,
-            Some(observation(Confinement::Ro)),
-            "{method} observation"
-        );
-        assert_eq!(seen.root, PathBuf::from(ROOT), "{method} root");
-        if method == "session/load" || method == "session/resume" {
-            assert_eq!(seen.session, source.parse().unwrap(), "{method} session");
-        } else {
-            assert_ne!(
-                seen.session,
-                source.parse().unwrap(),
-                "{method} reused the source id"
+        {
+            let seen = admitter.seen.lock().expect("seen admissions");
+            assert_eq!(seen.len(), 1, "{method} admission count");
+            let seen = &seen[0];
+            assert!(seen.measured_first, "{method} admitted before measurement");
+            assert_eq!(seen.level, Some(Confinement::Ro), "{method} sandbox pick");
+            assert_eq!(
+                seen.observation,
+                Some(observation(Confinement::Ro)),
+                "{method} observation"
             );
+            assert_eq!(seen.root, PathBuf::from(ROOT), "{method} root");
+            if method == "session/load" || method == "session/resume" {
+                assert_eq!(seen.session, source.parse().unwrap(), "{method} session");
+            } else {
+                assert_ne!(
+                    seen.session,
+                    source.parse().unwrap(),
+                    "{method} reused the source id"
+                );
+            }
         }
         connection.abort().await;
     }

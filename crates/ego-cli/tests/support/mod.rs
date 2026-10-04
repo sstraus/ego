@@ -389,25 +389,25 @@ pub struct Stub {
 
 #[derive(Debug, Clone, Copy)]
 enum StubMode {
-    ProviderOnly,
-    ProviderAndMcp,
-    ProviderAndMcpTool,
+    Provider,
+    Mcp,
+    McpTool,
 }
 
 impl Stub {
     pub fn start(plan: Plan) -> Self {
-        Self::start_mode(plan, StubMode::ProviderOnly)
+        Self::start_mode(plan, StubMode::Provider)
     }
 
     /// Start the same provider fixture with a minimal streamable MCP endpoint
     /// on the same listener, so tests can observe discovery without a second
     /// network adapter.
     pub fn start_mcp(plan: Plan) -> Self {
-        Self::start_mode(plan, StubMode::ProviderAndMcp)
+        Self::start_mode(plan, StubMode::Mcp)
     }
 
     pub fn start_mcp_tool(plan: Plan) -> Self {
-        Self::start_mode(plan, StubMode::ProviderAndMcpTool)
+        Self::start_mode(plan, StubMode::McpTool)
     }
 
     fn start_mode(plan: Plan, mode: StubMode) -> Self {
@@ -497,16 +497,8 @@ fn serve(
         body: body.clone(),
     });
 
-    if matches!(
-        mode,
-        StubMode::ProviderAndMcp | StubMode::ProviderAndMcpTool
-    ) && path == "/mcp"
-    {
-        return mcp_response(
-            &mut stream,
-            &body,
-            matches!(mode, StubMode::ProviderAndMcpTool),
-        );
+    if matches!(mode, StubMode::Mcp | StubMode::McpTool) && path == "/mcp" {
+        return mcp_response(&mut stream, &body, matches!(mode, StubMode::McpTool));
     }
 
     match path.as_str() {

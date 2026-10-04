@@ -176,6 +176,7 @@ struct ProbeSuite<'a> {
     root: &'a std::path::Path,
 }
 
+#[cfg(target_os = "macos")]
 impl<'a> ProbeSuite<'a> {
     /// The unconfined half of a pair. A refusal under the backend proves
     /// nothing until the same command has been seen to work without it.
@@ -316,6 +317,7 @@ fn cache_key_with_hash(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn private_scratch() -> Result<tempfile::TempDir, ProcessError> {
     let scratch = tempfile::tempdir().map_err(|error| {
         ProcessError::Backend(format!("cannot create process scratch: {error}"))
@@ -349,6 +351,7 @@ fn clear_scratch(path: &std::path::Path) -> Result<(), ProcessError> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn canonical_scratch(scratch: &tempfile::TempDir) -> Result<CanonPath, ProcessError> {
     fs::canonicalize(scratch.path())
         .map(CanonPath::new)
