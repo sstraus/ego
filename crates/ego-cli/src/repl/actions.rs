@@ -485,7 +485,11 @@ impl ActionRegistry {
                 "export",
                 "Export this session — /export [local|sanitized] [md|json|jsonl]",
             ),
-            enabled(Config, "config", "Inspect the effective perimeter"),
+            enabled(
+                Config,
+                "config",
+                "Inspect the effective perimeter — /config perimeter",
+            ),
             enabled(Doctor, "doctor", "Diagnose local subsystem health"),
             enabled(Quit, "quit", "Exit the interactive session"),
             enabled(New, "new", "Create a durable session"),

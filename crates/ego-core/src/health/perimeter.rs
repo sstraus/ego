@@ -44,7 +44,9 @@ impl Perimeter {
                 .collect(),
             sandbox: confinement.level().to_string(),
             sandbox_source: origin(effective.sandbox_source),
-            backend: if confinement.level() == crate::permit::Confinement::Off {
+            backend: if confinement.level() == crate::permit::Confinement::Off
+                && !(cfg!(target_os = "macos") && confinement.offline())
+            {
                 "none"
             } else if cfg!(target_os = "macos") {
                 "seatbelt"
