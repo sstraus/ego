@@ -3,7 +3,7 @@
 //! `crates/ego-core/tests/permit.rs` proves the *seam* refuses what it should.
 //! What is proved here is that each tool asks for the authority it actually
 //! needs and no more — `glob` cannot read what it listed, `grep` cannot read
-//! what it searched, `edit` cannot be authorised by a `write(...)` rule alone —
+//! what it searched, `edit` keeps separate read and write capabilities —
 //! and that a denial comes back named rather than as a panic or an empty
 //! result.
 //!
@@ -891,6 +891,29 @@ mod edit {
     }
 
     #[test]
+    fn write_allow_does_not_edit_a_symlink_target_outside_its_glob() {
+        // Catches: matching the input spelling lets a src/** write edit other/**.
+        let ws = Workspace::with_rules(Mode::Default, allowing(&["write(src/**)"]));
+        let target = ws.file("other/pricing.py", "apple = 1\n");
+        fs::create_dir_all(ws.root.join("src")).unwrap();
+        std::os::unix::fs::symlink(&target, ws.root.join("src/pricing.py")).unwrap();
+        let call = ws
+            .prepare(
+                "edit",
+                json!({ "path": "src/pricing.py", "old_string": "apple = 1", "new_string": "apple = 2" }),
+            )
+            .unwrap();
+        let Classification::Ask(pending) = ws.policy.classify(call) else {
+            panic!("the symlink target must not inherit the input path's write allow");
+        };
+        assert!(matches!(
+            block_on(ws.policy.settle(pending)),
+            Resolution::Ask(_)
+        ));
+        assert_eq!(fs::read_to_string(target).unwrap(), "apple = 1\n");
+    }
+
+    #[test]
     fn edit_replaces_the_text_it_names_and_leaves_the_rest_of_the_file() {
         let ws = editable();
 
@@ -998,38 +1021,31 @@ mod edit {
         );
     }
 
+    // Catches: a same-file edit needs a separate read allow despite its write rule.
     #[test]
-    fn an_edit_is_not_authorised_by_a_write_rule_alone() {
-        // `docs/13-effect-tools.md` Step C, second invariant, and the first
-        // time the four separate path lists pay for themselves outside the
-        // glob case. `edits` is the mode that approves everything at step 5,
-        // so what is under test here is step 3 and nothing else: a rule that
-        // covers the write leaves the read uncovered, and an uncovered
-        // operation stops the call however permissive the mode is.
-        let ws = Workspace::with_rules(Mode::Edits, allowing(&["write(src/**)"]));
-        ws.file("src/main.rs", "fn main() {\n    todo!()\n}\n");
-
-        let call = ws
-            .prepare(
-                "edit",
-                json!({ "path": "src/main.rs", "old_string": "todo!()", "new_string": "ok()" }),
-            )
-            .unwrap();
-
-        let Classification::Ask(pending) = ws.policy.classify(call) else {
-            panic!("a write rule covered an operation that is not a write");
-        };
-        assert!(
-            matches!(
-                pending.request().why(),
-                Escalation::NoRuleCovers {
-                    op: OpName::Read,
-                    ..
-                }
-            ),
-            "the question has to be about the half the rule did not cover: {}",
-            pending.request()
+    fn an_edit_is_authorised_by_its_matching_write_rule_alone() {
+        let ws = Workspace::with_rules(Mode::Default, allowing(&["write(src/**)"]));
+        ws.file("src/main.rs", "fn main() { todo!() }\n");
+        ws.call(
+            "edit",
+            json!({ "path": "src/main.rs", "old_string": "todo!()", "new_string": "ok()" }),
+        )
+        .expect("write covers the read needed by this same-file edit");
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() { ok() }\n"
         );
+    }
+
+    // Catches: a write rule accidentally becomes a grant for autonomous reads.
+    #[test]
+    fn write_allow_does_not_cover_a_standalone_read() {
+        let ws = Workspace::with_rules(Mode::Default, allowing(&["write(src/**)"]));
+        ws.file("src/main.rs", "private text");
+        let call = ws
+            .prepare("read", json!({ "path": "src/main.rs" }))
+            .unwrap();
+        assert!(matches!(ws.policy.classify(call), Classification::Ask(_)));
     }
 
     #[test]
