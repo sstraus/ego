@@ -3501,6 +3501,7 @@ fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
     }
 }
 
+// Catches: closing busy admission before the UI becomes idle rejects the second typed follow-up.
 #[test]
 fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
     let seed = "argv seed";

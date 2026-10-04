@@ -373,7 +373,7 @@ pub(super) fn surface_line(
                     }
                     Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
                 }
-                match futures::executor::block_on(ingress.submit(buffer)) {
+                match futures::executor::block_on(ingress.submit(buffer.clone())) {
                     Ok(queue) => {
                         editor.run_edit_commands(&[EditCommand::Clear]);
                         let mut current = status.lock().expect("surface status lock");
@@ -387,6 +387,14 @@ pub(super) fn surface_line(
                         if !restore_latest_draft(editor, status, drafts) {
                             repaint_status(status);
                         }
+                    }
+                    Err(ego_core::turn::ControlError::Closed) => {
+                        // Busy admission can close before the terminal observes idle.
+                        // Hand this submission to the next turn through normal input.
+                        editor.run_edit_commands(&[EditCommand::Clear]);
+                        status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+                        restore_latest_draft(editor, status, drafts);
+                        return (Line::Submitted(buffer), false);
                     }
                     Err(error) => {
                         status.lock().expect("surface status lock").notice =
