@@ -347,7 +347,11 @@ no tool authority by its name.
 server's. It is accepted only in the system and user layers (including their
 profiles); a project, local, agent-file, environment or flags layer is rejected
 at load, so a repository cannot grant itself every tool of a server. A matching
-deny still wins over the wildcard.
+deny still wins over the wildcard. A wildcard grant applies only when the
+resolved server is defined in user config or a system/user profile. A project
+or local redefinition of the server disables that grant, including profile
+redefinitions. Missing servers and tombstones grant no wildcard authority;
+exact tool rules remain unchanged. Wildcard denies remain restrictive.
 
 Rules follow a published formal grammar matched against the *canonical* call
 (resolved paths, argv, endpoints — never rendered shell strings); the

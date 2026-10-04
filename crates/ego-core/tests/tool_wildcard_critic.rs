@@ -308,15 +308,6 @@ fn wildcard_grants_follow_the_effective_server_authority() {
         let user = ConfigLayer::parse(Source::User,
             "[permissions]\nallow=['tool(srv/*)']\n[mcp.servers.srv]\ntransport='stdio'\ncommand='operator-server'")
             .expect("user");
-        // Missing and inactive-profile cases intentionally have no base server.
-        let user = if body.is_empty()
-            || (source == Source::User && profile.is_none() && body == profile_definition)
-        {
-            ConfigLayer::parse(Source::User, "[permissions]\nallow=['tool(srv/*)']")
-                .expect("permissions")
-        } else {
-            user
-        };
         let layers = if source == Source::User {
             let permissions = "[permissions]\nallow=['tool(srv/*)']\n";
             vec![
@@ -351,4 +342,50 @@ fn wildcard_grants_follow_the_effective_server_authority() {
             );
         }
     }
+}
+
+/// Catches: filtering inactive wildcard grants also drops exact grants or denies.
+#[test]
+fn project_redefinition_preserves_exact_grants_and_wildcard_denies() {
+    let user = ConfigLayer::parse(Source::User,
+        "[permissions]\nallow=['tool(srv/*)', 'tool(srv/session)']\ndeny=['tool(srv/agent)', 'tool(blocked/*)']\n[mcp.servers.srv]\ntransport='stdio'\ncommand='operator-server'").expect("user");
+    let project = ConfigLayer::parse(
+        Source::Project,
+        "[mcp.servers.srv]\ntransport='stdio'\ncommand='./project-server'",
+    )
+    .expect("project");
+    let effective = resolve(&[user, project], Trust::Trusted, None).expect("resolve");
+    let engine = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        effective.permissions,
+    );
+    assert!(settled_ok(engine.classify(http_call("srv", "session"))));
+    assert!(settled_err(engine.classify(http_call("srv", "agent"))));
+    assert!(settled_err(
+        engine.classify(http_call("blocked", "new_tool"))
+    ));
+    assert!(matches!(
+        engine.classify(http_call("srv", "new_tool")),
+        Classification::Ask(_)
+    ));
+}
+
+/// Catches: a selected user profile's wildcard grant failing to reach the engine.
+#[test]
+fn a_user_profile_grants_its_server_wildcard_with_deny_priority() {
+    let user = ConfigLayer::parse(Source::User,
+        "[profile.p.permissions]\nallow=['tool(srv/*)']\ndeny=['tool(srv/agent)']\n[profile.p.mcp.servers.srv]\ntransport='stdio'\ncommand='operator-server'").expect("user profile");
+    let effective = resolve(&[user], Trust::Trusted, Some("p")).expect("resolve");
+    let engine = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        effective.permissions,
+    );
+    assert!(settled_ok(engine.classify(http_call("srv", "new_tool"))));
+    assert!(settled_err(engine.classify(http_call("srv", "agent"))));
+    assert!(matches!(
+        engine.classify(http_call("other", "new_tool")),
+        Classification::Ask(_)
+    ));
 }
