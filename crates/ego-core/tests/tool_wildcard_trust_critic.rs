@@ -2,19 +2,22 @@
 
 use ego_core::config::{ConfigLayer, Mode, Source, Trust, resolve};
 use ego_core::permit::{
-    CanonPath, Classification, ForeignToolId, ForeignTransportTarget, HttpRequest, HttpRoute, HttpScheme, InvocationDigest, NetworkTarget, PolicyEngine, PreparedCall,
+    CanonPath, Classification, ForeignToolId, ForeignTransportTarget, HttpRequest, HttpRoute,
+    HttpScheme, InvocationDigest, NetworkTarget, PolicyEngine, PreparedCall,
 };
 
 fn session_call() -> PreparedCall {
     let route = HttpRoute::new(
         HttpScheme::Https,
         NetworkTarget::parse("api.example.test:443").expect("target"),
-    ).expect("route");
+    )
+    .expect("route");
     PreparedCall::foreign_http(
         ForeignToolId::new("tuicommander", "session").expect("identity"),
         InvocationDigest::parse(
             "sha256:0000000000000000000000000000000000000000000000000000000000000001",
-        ).expect("digest"),
+        )
+        .expect("digest"),
         ForeignTransportTarget::http(route),
         &HttpRequest::new("GET", "/", vec![], vec![]).expect("request"),
     )
