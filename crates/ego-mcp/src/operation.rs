@@ -2147,6 +2147,75 @@ fn cancellation_from_duplex(
     }
 }
 
+fn admission_headers(admission: &McpServerAdmission) -> Result<Vec<HttpHeader>, McpError> {
+    admission
+        .http_headers()
+        .ok_or_else(|| authority("HTTP MCP admission has no header material"))?
+        .iter()
+        .map(|binding| {
+            HttpHeader::secret(
+                binding.name(),
+                ego_core::credentials::SecretMaterial::new(
+                    binding.value().expose_secret_bytes().to_vec(),
+                ),
+            )
+            .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))
+        })
+        .collect()
+}
+
+fn server_name(value: &str) -> Result<McpServerName, McpError> {
+    value
+        .parse()
+        .map_err(|error: ego_core::config::McpValueError| {
+            McpError::new(McpFailure::InvalidValue, error.to_string())
+        })
+}
+
+fn prepare_error(message: impl Into<String>) -> ToolError {
+    ToolError::InvalidParams(message.into())
+}
+
+fn execution_error(message: impl Into<String>) -> ToolError {
+    ToolError::foreign(
+        format!("MCP execution failed: {}", message.into()),
+        DeliveryCertainty::DefinitelyUnsent,
+    )
+}
+
+fn mcp_prepare_error(error: McpError) -> ToolError {
+    prepare_error(error.to_string())
+}
+
+fn mcp_execution_error(error: McpError) -> ToolError {
+    let delivery = error.delivery().unwrap_or(DeliveryCertainty::PossiblySent);
+    ToolError::foreign(format!("MCP execution failed: {error}"), delivery)
+}
+
+fn continuation(error: ContinuationError) -> McpError {
+    McpError::new(McpFailure::Authority, error.to_string())
+}
+
+fn settlement_failure(delivery: DeliveryCertainty) -> McpError {
+    McpError::with_delivery(
+        McpFailure::Authority,
+        "MCP continuation terminal state could not be durably recorded",
+        delivery,
+    )
+}
+
+fn hook_failure(message: impl Into<String>) -> McpError {
+    McpError::new(McpFailure::Authority, message)
+}
+
+fn authority(message: impl Into<String>) -> McpError {
+    McpError::new(McpFailure::Authority, message)
+}
+
+fn protocol(message: impl Into<String>) -> McpError {
+    McpError::new(McpFailure::Protocol, message)
+}
+
 #[cfg(test)]
 mod stdio_fingerprint_tests {
     use super::*;
@@ -2464,73 +2533,4 @@ mod stdio_fingerprint_tests {
             );
         }
     }
-}
-
-fn admission_headers(admission: &McpServerAdmission) -> Result<Vec<HttpHeader>, McpError> {
-    admission
-        .http_headers()
-        .ok_or_else(|| authority("HTTP MCP admission has no header material"))?
-        .iter()
-        .map(|binding| {
-            HttpHeader::secret(
-                binding.name(),
-                ego_core::credentials::SecretMaterial::new(
-                    binding.value().expose_secret_bytes().to_vec(),
-                ),
-            )
-            .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))
-        })
-        .collect()
-}
-
-fn server_name(value: &str) -> Result<McpServerName, McpError> {
-    value
-        .parse()
-        .map_err(|error: ego_core::config::McpValueError| {
-            McpError::new(McpFailure::InvalidValue, error.to_string())
-        })
-}
-
-fn prepare_error(message: impl Into<String>) -> ToolError {
-    ToolError::InvalidParams(message.into())
-}
-
-fn execution_error(message: impl Into<String>) -> ToolError {
-    ToolError::foreign(
-        format!("MCP execution failed: {}", message.into()),
-        DeliveryCertainty::DefinitelyUnsent,
-    )
-}
-
-fn mcp_prepare_error(error: McpError) -> ToolError {
-    prepare_error(error.to_string())
-}
-
-fn mcp_execution_error(error: McpError) -> ToolError {
-    let delivery = error.delivery().unwrap_or(DeliveryCertainty::PossiblySent);
-    ToolError::foreign(format!("MCP execution failed: {error}"), delivery)
-}
-
-fn continuation(error: ContinuationError) -> McpError {
-    McpError::new(McpFailure::Authority, error.to_string())
-}
-
-fn settlement_failure(delivery: DeliveryCertainty) -> McpError {
-    McpError::with_delivery(
-        McpFailure::Authority,
-        "MCP continuation terminal state could not be durably recorded",
-        delivery,
-    )
-}
-
-fn hook_failure(message: impl Into<String>) -> McpError {
-    McpError::new(McpFailure::Authority, message)
-}
-
-fn authority(message: impl Into<String>) -> McpError {
-    McpError::new(McpFailure::Authority, message)
-}
-
-fn protocol(message: impl Into<String>) -> McpError {
-    McpError::new(McpFailure::Protocol, message)
 }

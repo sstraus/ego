@@ -191,58 +191,6 @@ fn create_owner(_directory: &File, root: &Path, name: &str) -> io::Result<File> 
     Ok(file)
 }
 
-#[cfg(test)]
-mod owner_tests {
-    use super::*;
-
-    // Catches: splitting a record into separate payload/newline submissions.
-    #[test]
-    fn owner_record_uses_one_buffer() {
-        struct Once(Vec<u8>);
-        impl Write for Once {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                if !self.0.is_empty() {
-                    return Err(io::Error::other("second submission"));
-                }
-                self.0.extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut writer = Once(Vec::new());
-        write_record(&mut writer, b"payload").unwrap();
-        assert_eq!(writer.0, b"payload\n");
-    }
-
-    // Catches: create-new accidentally falling back to opening a collision,
-    // including a symlink/FIFO/regular leaf selected before creation.
-    #[cfg(unix)]
-    #[test]
-    fn exclusive_owner_creation_never_opens_a_colliding_leaf() {
-        use std::os::unix::fs::symlink;
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("private");
-        let directory = private_directory(&root).unwrap();
-        let victim = temp.path().join("victim");
-        fs::write(&victim, b"unchanged").unwrap();
-        for kind in ["regular", "symlink", "fifo", "directory"] {
-            let path = root.join(kind);
-            match kind {
-                "regular" => fs::write(&path, b"unchanged").unwrap(),
-                "symlink" => symlink(&victim, &path).unwrap(),
-                "fifo" => nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRUSR).unwrap(),
-                "directory" => fs::create_dir(&path).unwrap(),
-                _ => unreachable!(),
-            }
-            assert!(create_owner(&directory, &root, kind).is_err());
-        }
-        assert_eq!(fs::read(victim).unwrap(), b"unchanged");
-        assert_eq!(fs::read(root.join("regular")).unwrap(), b"unchanged");
-    }
-}
-
 fn private_parent(root: &Path) -> &Path {
     root.parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -383,4 +331,56 @@ fn validate(file: &File, directory: bool) -> io::Result<()> {
         return Err(invalid());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+
+    // Catches: splitting a record into separate payload/newline submissions.
+    #[test]
+    fn owner_record_uses_one_buffer() {
+        struct Once(Vec<u8>);
+        impl Write for Once {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if !self.0.is_empty() {
+                    return Err(io::Error::other("second submission"));
+                }
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = Once(Vec::new());
+        write_record(&mut writer, b"payload").unwrap();
+        assert_eq!(writer.0, b"payload\n");
+    }
+
+    // Catches: create-new accidentally falling back to opening a collision,
+    // including a symlink/FIFO/regular leaf selected before creation.
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_owner_creation_never_opens_a_colliding_leaf() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("private");
+        let directory = private_directory(&root).unwrap();
+        let victim = temp.path().join("victim");
+        fs::write(&victim, b"unchanged").unwrap();
+        for kind in ["regular", "symlink", "fifo", "directory"] {
+            let path = root.join(kind);
+            match kind {
+                "regular" => fs::write(&path, b"unchanged").unwrap(),
+                "symlink" => symlink(&victim, &path).unwrap(),
+                "fifo" => nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRUSR).unwrap(),
+                "directory" => fs::create_dir(&path).unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(create_owner(&directory, &root, kind).is_err());
+        }
+        assert_eq!(fs::read(victim).unwrap(), b"unchanged");
+        assert_eq!(fs::read(root.join("regular")).unwrap(), b"unchanged");
+    }
 }

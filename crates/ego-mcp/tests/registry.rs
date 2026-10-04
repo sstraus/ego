@@ -1667,35 +1667,35 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             causes.push(("legacy:registry::candidate_detail_critic::multibyte_cause_is_cut_on_a_character_boundary_at_the_bound".to_owned(), value.to_owned()));
         };
         let cause = "😀".repeat(300);
-        capture((&cause).as_ref());
+        capture(&cause);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::candidate_detail_critic::cause_at_the_bound_is_kept_whole_and_one_past_it_loses_one_character".to_owned(), value.to_owned()));
         };
         let exact = "x".repeat(256);
-        capture((&exact).as_ref());
+        capture(&exact);
         let over = "x".repeat(256 + 1);
-        capture((&over).as_ref());
+        capture(&over);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::candidate_detail_critic::ascii_control_characters_never_reach_the_diagnostic".to_owned(), value.to_owned()));
         };
-        capture(("bad\nforged: line\r\u{1b}[31mred\u{0}\u{7f}\u{85}end").as_ref());
+        capture("bad\nforged: line\r\u{1b}[31mred\u{0}\u{7f}\u{85}end");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::candidate_detail_critic::unicode_line_breaks_and_bidi_overrides_never_reach_the_diagnostic".to_owned(), value.to_owned()));
         };
-        capture(("a\u{2028}b\u{2029}c\u{202e}d\u{2066}e\u{200b}f").as_ref());
+        capture("a\u{2028}b\u{2029}c\u{202e}d\u{2066}e\u{200b}f");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::candidate_detail_critic::empty_or_blank_cause_adds_no_dangling_separator".to_owned(), value.to_owned()));
         };
         for cause in ["", "   ", "\n\n\n", "\t\r\n"] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -1704,8 +1704,8 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
         };
         let cause = format!("{}resources/list missing envelope", "\n".repeat(300));
         {
-            capture((&cause).as_ref());
-            capture((&cause).as_ref());
+            capture(&cause);
+            capture(&cause);
         };
     }
     {
@@ -1728,10 +1728,10 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             ("authorization: BEARER abc", "abc"),
             ("key=\"two words\" end", "two words"),
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
-        capture(("backend-secret=do-not-publish").as_ref());
-        capture(("x?a=1&api_key=k&b=2").as_ref());
+        capture("backend-secret=do-not-publish");
+        capture("x?a=1&api_key=k&b=2");
     }
     {
         let mut capture = |value: &str| {
@@ -1741,13 +1741,13 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("bearer token required").as_ref());
+        capture("bearer token required");
         for cause in [
             "duplicate tool identity",
             "mode=fast retries=3",
             "empty key=",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -1755,24 +1755,24 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             causes.push(("legacy:registry::candidate_detail_critic::secret_straddling_the_cut_never_leaks_a_prefix".to_owned(), value.to_owned()));
         };
         let cause = format!("{} api_key=SUPERSECRETVALUE", "a".repeat(240));
-        capture((&cause).as_ref());
+        capture(&cause);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::candidate_detail_critic::unterminated_private_key_header_masks_to_the_end".to_owned(), value.to_owned()));
         };
-        capture(("bad -----BEGIN RSA PRIVATE KEY MIIEvLEAK").as_ref());
-        capture(("see -----BEGIN CERTIFICATE----- ok").as_ref());
+        capture("bad -----BEGIN RSA PRIVATE KEY MIIEvLEAK");
+        capture("see -----BEGIN CERTIFICATE----- ok");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::candidate_detail_critic::joiners_after_non_ascii_text_are_kept_but_never_split_a_secret_name".to_owned(), value.to_owned()));
         };
-        capture(("failed 👨\u{200d}👩 ok").as_ref());
-        capture(("می\u{200c}خواهد").as_ref());
-        capture(("❤\u{fe0f} ok").as_ref());
-        capture(("to\u{200d}ken=LEAK").as_ref());
-        capture(("é\u{200d}token=LEAK").as_ref());
+        capture("failed 👨\u{200d}👩 ok");
+        capture("می\u{200c}خواهد");
+        capture("❤\u{fe0f} ok");
+        capture("to\u{200d}ken=LEAK");
+        capture("é\u{200d}token=LEAK");
     }
     {
         let mut capture = |value: &str| {
@@ -1781,8 +1781,8 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture((r#"bad body {"token":"abc123XYZ"}"#).as_ref());
-        capture((r#"bad body {"api_key": "abc123XYZ"}"#).as_ref());
+        capture(r#"bad body {"token":"abc123XYZ"}"#);
+        capture(r#"bad body {"api_key": "abc123XYZ"}"#);
     }
     {
         let mut capture = |value: &str| {
@@ -1792,8 +1792,8 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("sent x-api-key: abc123XYZ failed").as_ref());
-        capture(("token: abc123XYZ rejected").as_ref());
+        capture("sent x-api-key: abc123XYZ failed");
+        capture("token: abc123XYZ rejected");
     }
     {
         let mut capture = |value: &str| {
@@ -1802,8 +1802,8 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("login password=hunter2 failed").as_ref());
-        capture(("login passwd=hunter2 failed").as_ref());
+        capture("login password=hunter2 failed");
+        capture("login passwd=hunter2 failed");
     }
     {
         let mut capture = |value: &str| {
@@ -1812,7 +1812,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("cannot reach https://svc:hunter2@host.example/mcp").as_ref());
+        capture("cannot reach https://svc:hunter2@host.example/mcp");
     }
     {
         let mut capture = |value: &str| {
@@ -1822,7 +1822,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("bad api_key = abc123XYZ end").as_ref());
+        capture("bad api_key = abc123XYZ end");
     }
     {
         let mut capture = |value: &str| {
@@ -1832,14 +1832,14 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("Authorization: Basic dXNlcjpwYXNz").as_ref());
-        capture(("Authorization: Token abc123XYZ").as_ref());
+        capture("Authorization: Basic dXNlcjpwYXNz");
+        capture("Authorization: Token abc123XYZ");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic::authorization_without_blank_before_scheme_is_hidden".to_owned(), value.to_owned()));
         };
-        capture(("Authorization:Bearer abc123XYZ").as_ref());
+        capture("Authorization:Bearer abc123XYZ");
     }
     {
         let mut capture = |value: &str| {
@@ -1849,25 +1849,25 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture((r#"headers {"Authorization": "Bearer abc123XYZ"}"#).as_ref());
+        capture(r#"headers {"Authorization": "Bearer abc123XYZ"}"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic::escaped_quote_inside_quoted_value_does_not_end_the_mask".to_owned(), value.to_owned()));
         };
-        capture((r#"token="ab\"TAILSECRET" end"#).as_ref());
+        capture(r#"token="ab\"TAILSECRET" end"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic::scheme_word_after_equals_does_not_shield_the_credential".to_owned(), value.to_owned()));
         };
-        capture(("token=Bearer abc123XYZ").as_ref());
+        capture("token=Bearer abc123XYZ");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic::zero_width_char_inside_the_name_does_not_defeat_the_mask".to_owned(), value.to_owned()));
         };
-        capture(("to\u{200b}ken=abc123XYZ").as_ref());
+        capture("to\u{200b}ken=abc123XYZ");
     }
     {
         let mut capture = |value: &str| {
@@ -1876,15 +1876,13 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(
-            ("bad -----BEGIN PRIVATE KEY----- MIIEvQIBADANBgkq -----END PRIVATE KEY-----").as_ref(),
-        );
+        capture("bad -----BEGIN PRIVATE KEY----- MIIEvQIBADANBgkq -----END PRIVATE KEY-----");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic::semicolon_inside_secret_value_does_not_leak_the_tail".to_owned(), value.to_owned()));
         };
-        capture(("token=ab;cdTAIL").as_ref());
+        capture("token=ab;cdTAIL");
     }
     {
         let mut capture = |value: &str| {
@@ -1894,7 +1892,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "{} Authorization: Bearer SUPERSECRETVALUE",
             "a ".repeat(120)
         );
-        capture((&cause).as_ref());
+        capture(&cause);
     }
     {
         let mut capture = |value: &str| {
@@ -1903,7 +1901,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("a api_key=ONE b token=TWO c Authorization: Bearer THREE").as_ref());
+        capture("a api_key=ONE b token=TWO c Authorization: Bearer THREE");
     }
     {
         let mut capture = |value: &str| {
@@ -1918,7 +1916,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "Authorization: Bearer ab,cdTAIL",
             "password=p@ss)cdTAIL",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -1929,33 +1927,37 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("bad -----BEGIN PGP PRIVATE KEY BLOCK----- lQOYBGBODYSECRET -----END PGP PRIVATE KEY BLOCK-----").as_ref());
+        capture(
+            "bad -----BEGIN PGP PRIVATE KEY BLOCK----- lQOYBGBODYSECRET -----END PGP PRIVATE KEY BLOCK-----",
+        );
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_two::url_userinfo_without_password_is_hidden".to_owned(), value.to_owned()));
         };
-        capture(("clone https://ghp_ABCDEF123456@github.com/x failed").as_ref());
+        capture("clone https://ghp_ABCDEF123456@github.com/x failed");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_two::bidi_mark_or_nul_inside_the_name_does_not_defeat_the_mask".to_owned(), value.to_owned()));
         };
-        capture(("to\u{200e}ken=abc123XYZ").as_ref());
-        capture(("tok\u{0}en=abc123XYZ").as_ref());
-        capture(("to\u{2063}ken=abc123XYZ").as_ref());
+        capture("to\u{200e}ken=abc123XYZ");
+        capture("tok\u{0}en=abc123XYZ");
+        capture("to\u{2063}ken=abc123XYZ");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_two::sigv4_authorization_header_is_hidden".to_owned(), value.to_owned()));
         };
-        capture(("Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20260101/x, Signature=deadbeef0123").as_ref());
+        capture(
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20260101/x, Signature=deadbeef0123",
+        );
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_two::colon_after_a_key_word_in_prose_is_masked_by_design".to_owned(), value.to_owned()));
         };
-        capture(("duplicate key: command").as_ref());
+        capture("duplicate key: command");
     }
     {
         let mut capture = |value: &str| {
@@ -1973,24 +1975,21 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "k=",
             "authorization: a ",
         ] {
-            capture((&unit.repeat(40_000)).as_ref());
+            capture(&unit.repeat(40_000));
         }
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_three::json_encoded_inside_a_string_still_hides_the_value".to_owned(), value.to_owned()));
         };
-        capture((r#"body {\"token\":\"LEAKESC\"} rejected"#).as_ref());
-        capture((r#"body {\"api_key\": \"LEAKESC\"}"#).as_ref());
+        capture(r#"body {\"token\":\"LEAKESC\"} rejected"#);
+        capture(r#"body {\"api_key\": \"LEAKESC\"}"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_three::digest_params_with_spaces_inside_quotes_do_not_leak_later_params".to_owned(), value.to_owned()));
         };
-        capture(
-            (r#"Authorization: Digest username="u", realm="my realm", response="LEAKRESP""#)
-                .as_ref(),
-        );
+        capture(r#"Authorization: Digest username="u", realm="my realm", response="LEAKRESP""#);
     }
     {
         let mut capture = |value: &str| {
@@ -1998,28 +1997,28 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
         };
         for mark in ['\u{034f}', '\u{fe0f}', '\u{e0041}', '\u{180e}', '\u{3164}'] {
             let cause = format!("to{mark}ken=LEAKINV done");
-            capture((&cause).as_ref());
+            capture(&cause);
         }
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_three::bracketed_and_tuple_forms_are_hidden".to_owned(), value.to_owned()));
         };
-        capture(("params[token]=LEAKBR&a=1").as_ref());
-        capture((r#"header ("x-api-key", "LEAKTUP") rejected"#).as_ref());
-        capture((r#"Header("authorization", "Bearer LEAKTUP")"#).as_ref());
+        capture("params[token]=LEAKBR&a=1");
+        capture(r#"header ("x-api-key", "LEAKTUP") rejected"#);
+        capture(r#"Header("authorization", "Bearer LEAKTUP")"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_three::quoted_bearer_credential_with_a_space_does_not_leak_its_tail".to_owned(), value.to_owned()));
         };
-        capture((r#"Authorization: Bearer "abc LEAKSP" rejected"#).as_ref());
+        capture(r#"Authorization: Bearer "abc LEAKSP" rejected"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_three::unterminated_private_key_header_does_not_publish_the_body".to_owned(), value.to_owned()));
         };
-        capture(("-----BEGIN PRIVATE KEY MIIEvQIBADANBgkqLEAKBODY").as_ref());
+        capture("-----BEGIN PRIVATE KEY MIIEvQIBADANBgkqLEAKBODY");
     }
     {
         let mut capture = |value: &str| {
@@ -2031,7 +2030,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "see https://example.com?x=a@b now",
             "connect tcp://127.0.0.1:9 refused",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2043,7 +2042,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"{"message":"missing api key","code":400}"#,
             r#"{"field":"api_key","message":"required"}"#,
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2054,37 +2053,34 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"missing properties ["key", "name"]"#,
             r#"allowed headers ["authorization", "content-type"]"#,
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_four::name_value_header_records_hide_the_value".to_owned(), value.to_owned()));
         };
-        capture((r#"{"name":"x-api-key","value":"LEAKREC"}"#).as_ref());
-        capture((r#"Header { name: "x-api-key", value: "LEAKREC" }"#).as_ref());
+        capture(r#"{"name":"x-api-key","value":"LEAKREC"}"#);
+        capture(r#"Header { name: "x-api-key", value: "LEAKREC" }"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_four::json_escaped_twice_hides_the_value".to_owned(), value.to_owned()));
         };
-        capture((r#"outer {\\\"token\\\":\\\"LEAKDEEP\\\"} rejected"#).as_ref());
+        capture(r#"outer {\\\"token\\\":\\\"LEAKDEEP\\\"} rejected"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_four::escaped_quote_inside_an_escaped_value_does_not_end_it".to_owned(), value.to_owned()));
         };
-        capture((r#"body {\"password\":\"pa\\\"LEAKTAIL\"} rejected"#).as_ref());
-        capture(
-            (r#"{\"authorization\":\"Digest username=\\\"u\\\", response=\\\"LEAKDIG\\\"\"}"#)
-                .as_ref(),
-        );
+        capture(r#"body {\"password\":\"pa\\\"LEAKTAIL\"} rejected"#);
+        capture(r#"{\"authorization\":\"Digest username=\\\"u\\\", response=\\\"LEAKDIG\\\"\"}"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_four::pretty_printed_object_under_a_secret_name_is_hidden".to_owned(), value.to_owned()));
         };
-        capture((r#"{ "password": { "value": "LEAKNEST" } }"#).as_ref());
+        capture(r#"{ "password": { "value": "LEAKNEST" } }"#);
     }
     {
         let mut capture = |value: &str| {
@@ -2127,7 +2123,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             '\u{e01ef}',
         ] {
             let cause = format!("to{mark}ken=LEAKMARK done");
-            capture((&cause).as_ref());
+            capture(&cause);
         }
     }
     {
@@ -2141,10 +2137,10 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "-----BEGIN PRIVATE KEY----- LEAKPEM",
             "x -----BEGIN OPENSSH PRIVATE KEY----- LEAKPEM -----END",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
             {
-                capture((cause).as_ref());
-                capture((cause).as_ref());
+                capture(cause);
+                capture(cause);
             };
         }
     }
@@ -2152,9 +2148,9 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_four::separator_followed_only_by_blanks_masks_nothing_and_does_not_panic".to_owned(), value.to_owned()));
         };
-        capture(("key= ").as_ref());
-        capture(("token: ").as_ref());
-        capture(("key= ").as_ref());
+        capture("key= ");
+        capture("token: ");
+        capture("key= ");
     }
     {
         let mut capture = |value: &str| {
@@ -2175,7 +2171,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             ("tuple heads", r#"("token", "#.repeat(20_000)),
         ];
         for (_label, cause) in cases {
-            capture((&cause).as_ref());
+            capture(&cause);
         }
     }
     {
@@ -2191,8 +2187,8 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             .map(|(index, _)| index)
             .chain(std::iter::once(sample.len()));
         for cut in cuts {
-            capture((&sample[..cut]).as_ref());
-            capture((&sample[cut..]).as_ref());
+            capture(&sample[..cut]);
+            capture(&sample[cut..]);
         }
     }
     {
@@ -2204,7 +2200,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "param name: token value: LEAKREC",
             "param name=bearer value=LEAKREC",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2216,7 +2212,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"{"Key":"db_password","Value":"LEAKKV"}"#,
             r#"[{"Key":"Environment","Value":"prod"},{"Key":"api_key","Value":"LEAKKV"}]"#,
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2228,7 +2224,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "Header(\n    \"authorization\",\n    \"Bearer LEAKPT\",\n)",
             "[\n    (\n        \"x-api-key\",\n        \"LEAKPT\",\n    ),\n]",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2239,7 +2235,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"[(b'x-api-key', b'LEAKBT')]"#,
             r#"[(b'authorization', b'Bearer LEAKBT')]"#,
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2256,7 +2252,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"(\"x-api-key\", \"LEAKT\")"#,
             r#"[('Authorization', 'Bearer LEAKT')]"#,
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2270,7 +2266,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"{"name":"theme","value":"dark","extra":{"value":1}}"#,
             "name: web value: 42",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2295,7 +2291,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 "LEAKH4",
             ),
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2307,7 +2303,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             (r#"{'name': u'x-api-key', 'value': u'LEAKP2'}"#, "LEAKP2"),
             (r#"Header(name=b'x-api-key', value=b'LEAKP3')"#, "LEAKP3"),
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2319,7 +2315,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             (r#"[(Rb"authorization", Rb"Bearer LEAKT2")]"#, "LEAKT2"),
             (r#"[( b'x-api-key', b'LEAKT3' )]"#, "LEAKT3"),
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2375,45 +2371,42 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             ("nested secret brackets", "token=[".repeat(n / 7)),
         ];
         for (_label, cause) in cases {
-            capture((&cause).as_ref());
+            capture(&cause);
         }
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_seven::text_glued_to_the_closing_paren_of_a_secret_is_hidden".to_owned(), value.to_owned()));
         };
-        capture(("password=Pass(word)LEAKA end").as_ref());
-        capture(("pwd=(abc)LEAKB end").as_ref());
+        capture("password=Pass(word)LEAKA end");
+        capture("pwd=(abc)LEAKB end");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_seven::struct_literal_wrapped_secret_values_are_hidden".to_owned(), value.to_owned()));
         };
-        capture((r#"config token: Wrapper { inner: "LEAKC" } rejected"#).as_ref());
-        capture((r#"password=Mutex { data: "LEAKD", poisoned: false, .. } end"#).as_ref());
+        capture(r#"config token: Wrapper { inner: "LEAKC" } rejected"#);
+        capture(r#"password=Mutex { data: "LEAKD", poisoned: false, .. } end"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_seven::record_marker_survives_a_masked_closing_quote_before_it".to_owned(), value.to_owned()));
         };
         capture(
-            (r#"{ "msg": "bad token=abc", "name": "x-api-key", "note": "}", "value": "LEAKE" }"#)
-                .as_ref(),
+            r#"{ "msg": "bad token=abc", "name": "x-api-key", "note": "}", "value": "LEAKE" }"#,
         );
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_seven::record_marker_survives_a_masked_closing_bracket_between_name_and_value".to_owned(), value.to_owned()));
         };
-        capture(
-            (r#"Header { name: "x-api-key", meta: Meta(token=abc), value: "LEAKF" }"#).as_ref(),
-        );
+        capture(r#"Header { name: "x-api-key", meta: Meta(token=abc), value: "LEAKF" }"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_seven::call_wrapped_record_name_arms_the_value_member".to_owned(), value.to_owned()));
         };
-        capture((r#"Header { name: Some("x-api-key"), value: Some("LEAKG") }"#).as_ref());
+        capture(r#"Header { name: Some("x-api-key"), value: Some("LEAKG") }"#);
     }
     {
         let mut capture = |value: &str| {
@@ -2430,7 +2423,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             ("struct bodies", "token: W { ".repeat(n / 11)),
         ];
         for (_label, cause) in cases {
-            capture((&cause).as_ref());
+            capture(&cause);
         }
     }
     {
@@ -2438,12 +2431,11 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             causes.push(("legacy:registry::secret_mask_critic_round_nine::a_joiner_after_a_foreign_letter_never_splits_a_secret_name".to_owned(), value.to_owned()));
         };
         for joiner in ['\u{200d}', '\u{200c}', '\u{fe0f}'] {
-            capture((&format!("tok\u{0435}{joiner}n=LEAKJ1 end")).as_ref());
-            capture((&format!("pas\u{0455}{joiner}word: LEAKJ2")).as_ref());
-            capture(
-                (&format!("{{\"name\":\"x-api-k\u{0435}{joiner}y\",\"value\":\"LEAKJ3\"}}"))
-                    .as_ref(),
-            );
+            capture(&format!("tok\u{0435}{joiner}n=LEAKJ1 end"));
+            capture(&format!("pas\u{0455}{joiner}word: LEAKJ2"));
+            capture(&format!(
+                "{{\"name\":\"x-api-k\u{0435}{joiner}y\",\"value\":\"LEAKJ3\"}}"
+            ));
         }
     }
     {
@@ -2451,8 +2443,8 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             causes.push(("legacy:registry::secret_mask_critic_round_nine::non_composing_combining_marks_never_split_a_secret_name".to_owned(), value.to_owned()));
         };
         for mark in ['\u{20dd}', '\u{0338}', '\u{0489}'] {
-            capture((&format!("to{mark}ken=LEAKM1 end")).as_ref());
-            capture((&format!("pass{mark}word: LEAKM2 end")).as_ref());
+            capture(&format!("to{mark}ken=LEAKM1 end"));
+            capture(&format!("pass{mark}word: LEAKM2 end"));
         }
     }
     {
@@ -2474,56 +2466,56 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             ("author\u{0130}zat\u{0130}on", "LEAKC12"),
             ("author\u{0131}zat\u{0131}on", "LEAKC13"),
         ] {
-            capture((&format!("{name}={secret} end")).as_ref());
+            capture(&format!("{name}={secret} end"));
         }
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_nine::a_pair_in_a_plain_list_hides_its_value".to_owned(), value.to_owned()));
         };
-        capture((r#"headers: [["x-api-key","LEAKL1"]] rejected"#).as_ref());
-        capture(("headers [['Authorization', 'Basic LEAKL2']]").as_ref());
-        capture((r#"["token", "LEAKL3"]"#).as_ref());
+        capture(r#"headers: [["x-api-key","LEAKL1"]] rejected"#);
+        capture("headers [['Authorization', 'Basic LEAKL2']]");
+        capture(r#"["token", "LEAKL3"]"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_nine::a_record_whose_name_field_is_prefixed_hides_the_line".to_owned(), value.to_owned()));
         };
-        capture((r#"{"header_name":"x-api-key","header_value":"LEAKN1"}"#).as_ref());
-        capture((r#"{"headerName":"authorization","headerValue":"LEAKN2"}"#).as_ref());
-        capture(("header.name=x-api-key header.value=LEAKN3").as_ref());
+        capture(r#"{"header_name":"x-api-key","header_value":"LEAKN1"}"#);
+        capture(r#"{"headerName":"authorization","headerValue":"LEAKN2"}"#);
+        capture("header.name=x-api-key header.value=LEAKN3");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_nine::a_command_line_flag_hides_its_blank_separated_value".to_owned(), value.to_owned()));
         };
-        capture(("spawn failed: mcp-server --api-key LEAKF1 --port 7").as_ref());
-        capture(("exec: tool --password LEAKF2").as_ref());
-        capture(("exec: tool --token LEAKF3").as_ref());
+        capture("spawn failed: mcp-server --api-key LEAKF1 --port 7");
+        capture("exec: tool --password LEAKF2");
+        capture("exec: tool --token LEAKF3");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_nine::url_userinfo_with_a_slash_query_or_hash_in_the_password_is_masked".to_owned(), value.to_owned()));
         };
-        capture(("connect postgres://user:LEAKU1/x@db/app failed").as_ref());
-        capture(("connect postgres://user:LEAKU2?x@db/app failed").as_ref());
-        capture(("connect postgres://user:LEAKU3#x@db/app failed").as_ref());
-        capture(("connect postgres://user:a@LEAKU4/b@db/app failed").as_ref());
+        capture("connect postgres://user:LEAKU1/x@db/app failed");
+        capture("connect postgres://user:LEAKU2?x@db/app failed");
+        capture("connect postgres://user:LEAKU3#x@db/app failed");
+        capture("connect postgres://user:a@LEAKU4/b@db/app failed");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_nine::a_scheme_word_followed_by_a_separator_hides_its_value".to_owned(), value.to_owned()));
         };
-        capture(("auth Bearer: LEAKB1").as_ref());
-        capture(("auth bearer=LEAKB2").as_ref());
+        capture("auth Bearer: LEAKB1");
+        capture("auth bearer=LEAKB2");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:registry::secret_mask_critic_round_nine::a_bracketed_or_parenthesised_name_hides_its_value".to_owned(), value.to_owned()));
         };
-        capture(("cfg[[token]]=LEAKP1").as_ref());
-        capture(("cfg (token)=LEAKP2").as_ref());
-        capture(("cfg <token>: LEAKP3").as_ref());
+        capture("cfg[[token]]=LEAKP1");
+        capture("cfg (token)=LEAKP2");
+        capture("cfg <token>: LEAKP3");
     }
     {
         let mut capture = |value: &str| {
@@ -2536,7 +2528,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "{\"token\": {\n\"value\":\"LEAKMULTI\"\n}}",
             "token=-----BEGIN PRIVATE KEY-----\nLEAKMULTI\n-----END PRIVATE KEY-----",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2550,7 +2542,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "client.secret=first LEAKPREFIX",
             "DATABASE_URL=postgresql://alice:LEAKPREFIX@db/app",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2561,7 +2553,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"Header { name: Qualified("tenant", "x-api-key"), value: "LEAKWRAP" }"#,
             r#"{"name":["scope","token"],"value":"LEAKWRAP"}"#,
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2572,27 +2564,27 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"headers["x-api-key"]=LEAKBRACKET"#,
             r#"params['token']=LEAKBRACKET"#,
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:secret_mask_critic_round_eight::value_before_sensitive_record_name_does_not_publish_the_secret".to_owned(), value.to_owned()));
         };
-        capture((r#"{"value":"LEAKBEFORE","name":"x-api-key"}"#).as_ref());
+        capture(r#"{"value":"LEAKBEFORE","name":"x-api-key"}"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:secret_mask_critic_round_eight::bare_sensitive_key_on_the_previous_line_does_not_publish_the_value".to_owned(), value.to_owned()));
         };
-        capture(("Authorization\nBearer LEAKBARE").as_ref());
+        capture("Authorization\nBearer LEAKBARE");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:secret_mask_critic_round_eight::confusable_sensitive_key_does_not_publish_the_value".to_owned(), value.to_owned()));
         };
         for cause in ["ｔｏｋｅｎ=LEAKCONFUSABLE", "tоken=LEAKCONFUSABLE"] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2605,8 +2597,8 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "failed tOkEn LEAKSCHEME done",
             "failed Digest response=LEAKSCHEME done",
         ] {
-            capture((cause).as_ref());
-            capture((cause).as_ref());
+            capture(cause);
+            capture(cause);
         }
     }
     {
@@ -2621,23 +2613,20 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             "ｎａｍｅ: Qualified(\"scope\", \"tоken\"), value: LEAKUNICODE",
             "{\"value\":\"LEAKUNICODE\",\"nаme\":\"token\"}",
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::json_escaped_inside_a_string_masks_the_remaining_line".to_owned(), value.to_owned()));
         };
-        capture((r#"body {\"token\":\"LEAK\"} rejected"#).as_ref());
+        capture(r#"body {\"token\":\"LEAK\"} rejected"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::digest_quoted_params_with_blanks_are_masked_to_the_last_one".to_owned(), value.to_owned()));
         };
-        capture(
-            (r#"Authorization: Digest username="u", realm="my realm", response="LEAK" end"#)
-                .as_ref(),
-        );
+        capture(r#"Authorization: Digest username="u", realm="my realm", response="LEAK" end"#);
     }
     {
         let mut capture = |value: &str| {
@@ -2652,7 +2641,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             '\u{0600}',
             '\u{115f}',
         ] {
-            capture((&format!("to{mark}ken=LEAK done")).as_ref());
+            capture(&format!("to{mark}ken=LEAK done"));
         }
     }
     {
@@ -2663,53 +2652,53 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("params[token]=LEAK&a=1").as_ref());
-        capture((r#"header ("x-api-key", "LEAK") rejected"#).as_ref());
+        capture("params[token]=LEAK&a=1");
+        capture(r#"header ("x-api-key", "LEAK") rejected"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::quoted_credential_with_a_blank_after_a_scheme_is_masked_whole".to_owned(), value.to_owned()));
         };
-        capture((r#"Authorization: Bearer "abc LEAK" rejected"#).as_ref());
+        capture(r#"Authorization: Bearer "abc LEAK" rejected"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::a_blank_after_a_sensitive_key_never_preserves_the_next_pair".to_owned(), value.to_owned()));
         };
-        capture(("empty key= mode=fast").as_ref());
-        capture(("token: YWJjZA== end").as_ref());
-        capture(("api_key = LEAK end").as_ref());
-        capture(("password=first SECOND mode=fast").as_ref());
-        capture(("token=first\nSECOND mode=fast").as_ref());
+        capture("empty key= mode=fast");
+        capture("token: YWJjZA== end");
+        capture("api_key = LEAK end");
+        capture("password=first SECOND mode=fast");
+        capture("token=first\nSECOND mode=fast");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::name_value_records_mask_the_value_member".to_owned(), value.to_owned()));
         };
-        capture((r#"{"name":"x-api-key","value":"LEAK","k":1}"#).as_ref());
-        capture((r#"Header { name: "x-api-key", value: "LEAK" }"#).as_ref());
-        capture((r#"{"name":"content-type","value":"json"}"#).as_ref());
+        capture(r#"{"name":"x-api-key","value":"LEAK","k":1}"#);
+        capture(r#"Header { name: "x-api-key", value: "LEAK" }"#);
+        capture(r#"{"name":"content-type","value":"json"}"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::escaped_json_of_any_depth_masks_the_remaining_line".to_owned(), value.to_owned()));
         };
-        capture((r#"o {\\\"token\\\":\\\"LEAK\\\"} end"#).as_ref());
-        capture((r#"o {\"password\":\"pa\\\"LEAK\"} end"#).as_ref());
+        capture(r#"o {\\\"token\\\":\\\"LEAK\\\"} end"#);
+        capture(r#"o {\"password\":\"pa\\\"LEAK\"} end"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::nested_object_or_array_under_a_secret_name_is_masked_whole".to_owned(), value.to_owned()));
         };
-        capture((r#"{ "password": { "value": "LEAK", "b": ["x"] } } ok"#).as_ref());
-        capture((r#"token=["a","}"] ok"#).as_ref());
+        capture(r#"{ "password": { "value": "LEAK", "b": ["x"] } } ok"#);
+        capture(r#"token=["a","}"] ok"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::call_wrapped_secret_values_mask_the_remaining_line".to_owned(), value.to_owned()));
         };
-        capture((r#"token: Some("a LEAK") rejected"#).as_ref());
-        capture((r#"password=Secret(("x", ")")) end"#).as_ref());
+        capture(r#"token: Some("a LEAK") rejected"#);
+        capture(r#"password=Secret(("x", ")")) end"#);
     }
     {
         let mut capture = |value: &str| {
@@ -2719,45 +2708,45 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 value.to_owned(),
             ));
         };
-        capture(("token=YWJjZA== done").as_ref());
+        capture("token=YWJjZA== done");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::an_apparently_empty_value_masks_the_next_pair".to_owned(), value.to_owned()));
         };
-        capture(("empty key= mode=fast").as_ref());
+        capture("empty key= mode=fast");
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::name_value_record_hides_the_value_and_later_records".to_owned(), value.to_owned()));
         };
         let cause = r#"[{"name":"token","value":"LEAKR1"},{"name":"mode","value":"fast"}]"#;
-        capture((cause).as_ref());
-        capture((cause).as_ref());
+        capture(cause);
+        capture(cause);
         let escaped = r#"{\\\"name\\\":\\\"x-api-key\\\",\\\"value\\\":\\\"LEAKR2\\\"}"#;
-        capture((escaped).as_ref());
+        capture(escaped);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::a_sensitive_name_masks_later_records_even_without_its_value".to_owned(), value.to_owned()));
         };
-        capture((r#"[{"name":"token","type":"string"},{"id":7,"value":"public"}]"#).as_ref());
+        capture(r#"[{"name":"token","type":"string"},{"id":7,"value":"public"}]"#);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::brackets_inside_json_strings_of_an_escaped_nested_value_do_not_close_it".to_owned(), value.to_owned()));
         };
         let cause = r#"{\"token\":{\"a\":\"x}y\",\"b\":\"LEAKBR\"},\"user\":\"bob\"} done"#;
-        capture((cause).as_ref());
-        capture((cause).as_ref());
+        capture(cause);
+        capture(cause);
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::brackets_inside_single_quoted_strings_of_a_nested_value_do_not_close_it".to_owned(), value.to_owned()));
         };
         let cause = r#"{'token': {'a': 'x}y', 'b': 'LEAKSQ'}, 'user': 'bob'} done"#;
-        capture((cause).as_ref());
-        capture((cause).as_ref());
+        capture(cause);
+        capture(cause);
     }
     {
         let mut capture = |value: &str| {
@@ -2768,9 +2757,9 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"{"token":{"a":"x}y","b":"LEAKN4"},"user":"bob"} done"#,
             r#"{\"token\":{\"a\":{\"b\":\"LEAKN5\"}},\"user\":\"bob\"} done"#,
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
-        capture(("token: {truncated LEAKN6").as_ref());
+        capture("token: {truncated LEAKN6");
     }
     {
         let mut capture = |value: &str| {
@@ -2782,7 +2771,7 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
             r#"{\"password\":\"LEAKA\\\"LEAKB\",\"user\":\"bob\"}"#,
             r#"{\\\"password\\\":\\\"LEAKA\\\\\\\"LEAKB\\\",\\\"user\\\":\\\"bob\\\"}"#,
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
@@ -2799,14 +2788,14 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
                 "LEAKB2",
             ),
         ] {
-            capture((cause).as_ref());
+            capture(cause);
         }
     }
     {
         let mut capture = |value: &str| {
             causes.push(("legacy:published_secret_mask_regressions::a_sensitive_record_name_masks_nested_members_and_its_value".to_owned(), value.to_owned()));
         };
-        capture((r#"{"name":"x-api-key","schema":{"value":"public"},"value":"LEAK"}"#).as_ref());
+        capture(r#"{"name":"x-api-key","schema":{"value":"public"},"value":"LEAK"}"#);
     }
     causes
 }

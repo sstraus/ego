@@ -177,6 +177,7 @@ fn config_fixture_for(policy: RunConfinement, hard_cap: u64, preview: usize) -> 
     }
 }
 
+#[cfg(target_os = "macos")]
 fn attempt_run(
     level: Confinement,
     offline: bool,

@@ -1545,8 +1545,7 @@ fn until_normalized_without_new_generation(
         needle,
         stub,
         generation_count,
-        PROGRESS_DEADLINE,
-        "PTY output",
+        (PROGRESS_DEADLINE, "PTY output"),
     );
 }
 
@@ -1557,8 +1556,7 @@ fn until_normalized_without_new_generation_with_context(
     needle: &str,
     stub: &Stub,
     generation_count: usize,
-    budget: Duration,
-    context: &str,
+    (budget, context): (Duration, &str),
 ) {
     while !normalized(&output[start..]).contains(needle) {
         let generations = stub.generations();
@@ -1608,8 +1606,7 @@ fn submit_local_action(
             expected,
             stub,
             0,
-            SLASH_ACTION_DEADLINE,
-            &format!("/{command} action output"),
+            (SLASH_ACTION_DEADLINE, &format!("/{command} action output")),
         );
     }
     if expected.is_none() {
