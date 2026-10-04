@@ -53,18 +53,15 @@ impl SeatbeltBackend {
         prerequisite()?;
         validate_private_scratch(private_scratch.as_path())?;
 
-        // The paths a program must be able to walk: its exec paths and, once a
-        // profile has any, the workspace it starts in (`realpath` of the cwd
-        // lstats every ancestor, and fails without them). Without a profile
-        // the profile text is what it always was.
+        // Every program must be able to stat the workspace ancestor chain:
+        // resolving cwd and `mkdir -p` need it even without exec paths.
+        // The renderer grants exact metadata literals, never ancestor contents.
         let mut exec_paths = policy
             .exec_paths()
             .iter()
             .map(|path| path.as_path().to_path_buf())
             .collect::<Vec<_>>();
-        if !exec_paths.is_empty() {
-            exec_paths.push(policy.workspace().as_path().to_path_buf());
-        }
+        exec_paths.push(policy.workspace().as_path().to_path_buf());
         let base = ProfileBase {
             level: policy.level(),
             offline: policy.offline(),
@@ -83,13 +80,7 @@ impl SeatbeltBackend {
     /// stays the one the measured backend owns, so the caller keeps that
     /// backend alive for as long as it uses the result.
     pub(crate) fn widened(&self, grants: &[SandboxGrant]) -> Result<Self, ProcessError> {
-        let mut base = self.base.clone();
-        if !grants.is_empty() && !base.exec_paths.contains(&base.workspace) {
-            // A granted program resolves its working directory the way an
-            // exec path does.
-            base.exec_paths.push(base.workspace.clone());
-        }
-        Self::render_to_file(base, grants, self.maximum_caps)
+        Self::render_to_file(self.base.clone(), grants, self.maximum_caps)
     }
 
     fn render_to_file(
