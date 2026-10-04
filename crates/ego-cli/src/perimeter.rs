@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use ego_core::config::{Source, Trust, resolve_selected};
-use ego_core::permit::{CanonPath, PathResolver, RunConfinement};
+use ego_core::permit::{PathResolver, RunConfinement};
 use ego_tools::fs::OsFs;
 
 use crate::{cli::UsageError, config};
@@ -21,7 +21,7 @@ pub fn observe(
     let workspace = OsFs
         .canonicalize(workspace)
         .map_err(|_| UsageError("the perimeter workspace cannot be resolved".into()))?;
-    let layers = config::base_layers_in(&workspace, Trust::Untrusted, home)?;
+    let layers = config::base_layers_in(workspace.as_path(), Trust::Untrusted, home)?;
     let env_profile = std::env::var("EGO_PROFILE").ok();
     let selected = profile
         .map(|name| (name, Source::Flags))
@@ -30,11 +30,7 @@ pub fn observe(
         .map_err(|error| UsageError(error.to_string()))?;
     let roots = crate::run::profile_roots::admit(&effective)
         .map_err(|_| UsageError("the profile roots could not be admitted".into()))?;
-    let confinement = RunConfinement::new(
-        effective.sandbox.unwrap_or_default(),
-        false,
-        CanonPath::new(&workspace),
-    )
-    .map_err(|error| UsageError(error.to_string()))?;
+    let confinement = RunConfinement::new(effective.sandbox.unwrap_or_default(), false, workspace)
+        .map_err(|error| UsageError(error.to_string()))?;
     Ok(Perimeter::session(&confinement, &effective, &roots))
 }
