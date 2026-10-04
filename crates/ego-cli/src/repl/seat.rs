@@ -1035,6 +1035,7 @@ impl Seat {
                     Dispatch::Export(selection) => {
                         Line::HostCommand(HostCommand::Export(selection))
                     }
+                    Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Refused { reason } => Line::Refused(reason),
                     Dispatch::Action(_)

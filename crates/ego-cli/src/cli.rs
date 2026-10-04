@@ -69,7 +69,7 @@ pub enum Invocation {
     Ls(Box<LsArgs>),
     /// `ego usage` — one versioned report for this workspace.
     Usage(Box<UsageArgs>),
-    /// `ego fork ID` — create a target at the source's latest durable idle boundary.
+    /// `ego fork ID [--at ITEM_ID]` — branch at the tip or after a completed turn.
     Fork(Box<ForkArgs>),
     /// `ego compact ID [--request-id UUID]` — publish one deterministic successor.
     Compact(Box<CompactArgs>),
@@ -438,10 +438,11 @@ pub struct UsageArgs {
     pub all_roles: bool,
 }
 
-/// The exact `ego fork ID` request and its shared store/workspace/output flags.
+/// The exact fork request and its shared store/workspace/output flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkArgs {
     pub source: SessionId,
+    pub at: Option<ItemId>,
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
     pub output: Output,
@@ -1078,7 +1079,7 @@ fn overview(program: &str) -> String {
         let about = match *name {
             "run" => "Run an agent from a prompt, headless",
             "resume" => "Continue a session; no ID = latest in this workspace",
-            "fork" => "Fork a session at its latest durable idle boundary",
+            "fork" => "Fork a session at its tip or after a completed turn",
             "ls" => "List sessions (this workspace; --all for every one)",
             "usage" => "Report usage, context and cost for this workspace",
             "compact" => "Compact a session into its deterministic successor",
@@ -1288,8 +1289,17 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 let source = SessionId::from_str(&parsed.source).map_err(|error| {
                     UsageError(format!("`{}` is not a session id: {error}", parsed.source))
                 })?;
+                let at = parsed
+                    .at
+                    .map(|id| {
+                        ItemId::from_str(&id).map_err(|error| {
+                            UsageError(format!("`{id}` is not a message id: {error}"))
+                        })
+                    })
+                    .transpose()?;
                 Ok(Invocation::Fork(Box::new(ForkArgs {
                     source,
+                    at,
                     session_dir: parsed.common.places.session_dir,
                     directory: parsed.common.places.directory,
                     output: parsed.common.output,
