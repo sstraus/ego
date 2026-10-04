@@ -94,11 +94,22 @@ fn two_lines_submitted_before_composer_readiness_reach_the_session_once() {
             ),
         }
     }
-    until_normalized(
-        &reader,
-        &mut output,
-        0,
-        "Messages to be submitted after next tool call",
+    // The native status omits the textual queue banner. The durable event is
+    // the queue acknowledgement, independent of the chosen presentation.
+    let queued_before_settlement = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("live journal");
+    assert!(
+        queued_before_settlement.lines().any(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).expect("event envelope");
+            event["payload"]["event"]["kind"]["kind"] == "PromptQueued"
+                && event["payload"]["event"]["kind"]["text"] == "early beta"
+        }),
+        "second input was not durably queued before provider settlement: {queued_before_settlement}"
     );
     first_reply.release();
     until_normalized(&reader, &mut output, 0, "EARLY-SECOND-ANSWER");
