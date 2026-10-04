@@ -79,6 +79,7 @@ pub enum Dispatch {
     Skill(AdmittedSkillOperation),
     Skills(SkillSurfaceAction),
     Export(ExportSelection),
+    Fork(ego_core::event::id::ItemId),
     Hooks,
     Prompt,
     Immediate,
@@ -807,6 +808,17 @@ impl ActionRegistry {
                         None => Dispatch::Refused {
                             reason: "usage: /skills [list|diagnose|rescan|invoke <name> [arguments]]",
                         },
+                    },
+                };
+            }
+            if name == "fork"
+                && self.resolve_slash(name) == Some(ActionId::Fork)
+                && !raw_arguments.is_empty()
+            {
+                return match raw_arguments.parse::<ego_core::event::id::ItemId>() {
+                    Ok(item) => Dispatch::Fork(item),
+                    Err(_) => Dispatch::Refused {
+                        reason: "usage: /fork [message-id]",
                     },
                 };
             }

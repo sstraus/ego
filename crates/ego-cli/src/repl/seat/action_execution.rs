@@ -213,6 +213,16 @@ pub(super) fn surface_line(
                     }
                     return (Line::HostCommand(HostCommand::Export(selection)), failed);
                 }
+                Dispatch::Fork(item) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice = Some(
+                            "switching forks is unavailable while a turn is running".to_owned(),
+                        );
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::Fork(item)), failed);
+                }
                 Dispatch::Hooks => {
                     if phase.get() == EditPhase::Busy {
                         status.lock().expect("surface status lock").notice = Some(
@@ -355,6 +365,13 @@ pub(super) fn surface_line(
                         // conversation that is still moving.
                         status.lock().expect("surface status lock").notice =
                             Some("export is unavailable while a turn is running".to_owned());
+                        repaint_status(status);
+                        continue;
+                    }
+                    Dispatch::Fork(_) => {
+                        status.lock().expect("surface status lock").notice = Some(
+                            "switching forks is unavailable while a turn is running".to_owned(),
+                        );
                         repaint_status(status);
                         continue;
                     }

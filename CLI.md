@@ -33,7 +33,7 @@ ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspa
                               --answer QUESTION_ID=JSON answers pending input;
                               --name and --goal are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
-ego fork <ID>                 branch a session
+ego fork <ID> [--at ITEM_ID]   branch after a completed turn
 ego compact <ID> [--request-id UUID]
                               publish one idempotent checkpoint target
 ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
@@ -147,7 +147,7 @@ omitted when empty: two states, identical bytes.
 | `ego [PROMPT]` | **yes** | asks once whether to trust project files before ambient reads, then runs the line-oriented session. Permission questions accept `allow`, `deny`, or `amend`; amended raw JSON parameters are prepared and classified again from the beginning |
 | `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
-| `ego fork` | **yes** | creates a durable lineage branch at an explicit valid source boundary without copying source spend or run state |
+| `ego fork` | **yes** | creates a durable lineage branch at the idle tip or after the completed turn containing `--at ITEM_ID`, without copying source spend or run state |
 | `ego compact` | **yes** | a required request ID derives one idempotent clean target from the existing idle compaction operation and supports later continuation |
 | `ego export` | **yes** | local transcript export plus the producer-only version-1 structural bundle under `--sanitize`; Markdown, JSON, JSONL, stdout, and atomic file publication follow §2.1 |
 | `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME` is typed but refuses before network access until the product CIMD origin and loopback redirect are published |
@@ -889,7 +889,7 @@ use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /fork /compact /clear /usage /statusline /export /doctor /quit /new
+/sessions /fork [message-id] /compact /clear /usage /statusline /export /doctor /quit /new
 /name /goal /tools /expand /skills /hooks /version`. These 25 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
@@ -1273,6 +1273,17 @@ MCP `isError: true`; published uncertainty is a successful non-retryable tool
 result, and `status` projects the durable `context_overflow` settlement. The
 source session owns every compaction generation's usage and cost,
 and the target receives no copied ledger or run state.
+
+### 6.7 Conversation forks
+
+`ego fork ID --at ITEM_ID` and `/fork [message-id]` branch after the successful
+completed turn containing that durable user or assistant message. The full answer
+is included. Unknown or foreign items, non-message items, failed or incomplete
+turns, and compaction checkpoints are refused without creating a target. Messages
+hidden behind a compaction checkpoint cannot be selected. An inherited message
+branches its owning ancestor at that ancestor's completion sequence. Title and
+active goal come from the selected boundary. An explicit completed boundary can
+be read while the source writer runs; a tip fork requires an inactive source.
 
 ## 7. Configuration
 

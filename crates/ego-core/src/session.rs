@@ -12,7 +12,7 @@ use crate::event::time::Timestamp;
 use crate::generator::history::conversation_from_with_blob_reader;
 use crate::generator::types::Conversation;
 use crate::goal::{GoalRecord, GoalState};
-use crate::state::SessionState;
+use crate::state::{ItemKind, SessionState};
 use crate::store::blob::{BlobError, BlobRef};
 use crate::store::session_store::{SessionEntry, SessionStore};
 
@@ -543,7 +543,7 @@ pub trait TargetStore: SessionStore {
     fn publish_target(&self, seed: &TargetSeed) -> TargetPublication;
 }
 
-/// An idle source bound to one canonical fork seed. The seed carries the
+/// A settled source prefix bound to one canonical fork seed. The seed carries the
 /// source's title and active goal, so no entry point can publish a fork
 /// without them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -556,6 +556,11 @@ pub enum ForkError {
     AcceptedPrompt,
     PendingQuestion,
     LiveAttempt,
+    UnansweredToolCall,
+    UnknownItem,
+    NotMessage,
+    UnsettledTurn,
+    CompactionBoundary,
 }
 
 impl fmt::Display for ForkError {
@@ -564,6 +569,11 @@ impl fmt::Display for ForkError {
             Self::AcceptedPrompt => "the source session has accepted prompt work",
             Self::PendingQuestion => "the source session has a pending question",
             Self::LiveAttempt => "the source session has a live generation attempt",
+            Self::UnansweredToolCall => "the source boundary has an unanswered tool call",
+            Self::UnknownItem => "the message id is not in the visible source conversation",
+            Self::NotMessage => "the item id does not identify a user or assistant message",
+            Self::UnsettledTurn => "the message belongs to an incomplete or failed turn",
+            Self::CompactionBoundary => "a compaction checkpoint is not a message fork point",
         })
     }
 }
@@ -581,11 +591,50 @@ impl PreparedFork {
         if !state.live_attempts.is_empty() {
             return Err(ForkError::LiveAttempt);
         }
+        if state
+            .items
+            .values()
+            .any(|item| item.kind == ItemKind::ToolCall && !item.completed)
+        {
+            return Err(ForkError::UnansweredToolCall);
+        }
         Ok(Self {
             seed: TargetSeed::fork(source, state.last_seq, at)
                 .with_title(state.title.clone())
                 .with_goal(state.goal.as_ref()),
         })
+    }
+
+    /// Prepare the completed turn containing a message in this session's visible prefix.
+    pub fn after_message(
+        source: SessionId,
+        events: &[DomainEvent],
+        message: ItemId,
+        at: Timestamp,
+    ) -> Result<Self, ForkError> {
+        let state = SessionState::replay(events.iter().cloned());
+        let item = state.items.get(&message).ok_or(ForkError::UnknownItem)?;
+        match item.kind {
+            ItemKind::ContextCheckpoint => return Err(ForkError::CompactionBoundary),
+            ItemKind::UserPrompt | ItemKind::Assistant => {}
+            _ => return Err(ForkError::NotMessage),
+        }
+        let turn = state
+            .turns
+            .get(&item.turn)
+            .ok_or(ForkError::UnsettledTurn)?;
+        if !turn.completed || !turn.ok {
+            return Err(ForkError::UnsettledTurn);
+        }
+        let boundary = events
+            .iter()
+            .rposition(|event| {
+                event.env.turn == item.turn
+                    && matches!(event.kind, EventKind::TurnCompleted { ok: true, .. })
+            })
+            .ok_or(ForkError::UnsettledTurn)?;
+        let prefix = SessionState::replay(events[..=boundary].iter().cloned());
+        Self::new(source, &prefix, at)
     }
 
     pub fn seed(&self) -> &TargetSeed {

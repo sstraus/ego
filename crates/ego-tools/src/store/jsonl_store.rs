@@ -2198,6 +2198,27 @@ impl ReplaySource for JsonlStore {
     }
 
     fn entries(&self, session: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
+        if !self.io.exists(&self.log_path(session)).map_err(|error| {
+            ReplaySourceError::Unavailable {
+                session: *session,
+                reason: error.to_string(),
+            }
+        })? {
+            return Ok(None);
+        }
+        // Share the short append lock, never the long-lived source writer lease.
+        let lock =
+            self.open_events_lock(session)
+                .map_err(|error| ReplaySourceError::Unavailable {
+                    session: *session,
+                    reason: error.to_string(),
+                })?;
+        let _guard = lock
+            .read()
+            .map_err(|error| ReplaySourceError::Unavailable {
+                session: *session,
+                reason: error.to_string(),
+            })?;
         let bytes = self.io.read(&self.log_path(session)).map_err(|error| {
             ReplaySourceError::Unavailable {
                 session: *session,

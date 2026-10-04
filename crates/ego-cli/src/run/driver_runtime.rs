@@ -1308,20 +1308,36 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             target: target_owner,
                                         };
                                     }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Fork,
-                                    )) => {
+                                    repl::Line::HostCommand(
+                                        command @ (repl::HostCommand::Action(
+                                            repl::actions::ActionId::Fork,
+                                        )
+                                        | repl::HostCommand::Fork(_)),
+                                    ) => {
                                         if pending_work {
-                                            diagnostics.note(
-                                    "the session cannot be forked while source work is pending",
-                                );
+                                            diagnostics.note("the session cannot switch forks while source work is pending");
                                             continue;
                                         }
-                                        let prepared = match ego_core::session::PreparedFork::new(
-                                            active.id(),
-                                            &state,
-                                            session::now(&clock),
-                                        ) {
+                                        let lifecycle =
+                                            ego_core::session_lifecycle::SessionLifecycle::new(
+                                                Arc::clone(jsonl_store),
+                                                Arc::new(super::session_commands::NoLiveRuns),
+                                                Arc::new(SystemClock),
+                                            );
+                                        let prepared = match command {
+                                            repl::HostCommand::Fork(item) => {
+                                                lifecycle.prepare_fork_at(active.id(), item)
+                                            }
+                                            _ => ego_core::session::PreparedFork::new(
+                                                active.id(),
+                                                &state,
+                                                session::now(&clock),
+                                            )
+                                            .map_err(
+                                                ego_core::session_lifecycle::LifecycleError::from,
+                                            ),
+                                        };
+                                        let prepared = match prepared {
                                             Ok(prepared) => prepared,
                                             Err(error) => {
                                                 diagnostics.note(&format!(
@@ -1330,16 +1346,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 continue;
                                             }
                                         };
-                                        let replayed = match active.replay_seed(prepared.seed()) {
-                                            Ok(replayed) => replayed,
+                                        let target = SessionId::new();
+                                        let publication = match lifecycle
+                                            .publish_prepared_fork(target, &prepared)
+                                        {
+                                            Ok(publication) => publication,
                                             Err(error) => {
                                                 diagnostics.note(&format!(
-                                        "the fork source context could not be replayed: {error}"
-                                    ));
+                                                    "the fork target was not published: {error}"
+                                                ));
                                                 continue;
                                             }
                                         };
-                                        let target = SessionId::new();
                                         let target_opened = match session::open(
                                             jsonl_store.as_ref(),
                                             &target,
@@ -1347,44 +1365,25 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         ) {
                                             Ok(opened) => opened,
                                             Err(error) => {
-                                                diagnostics.note(&format!(
-                                                    "the fork target could not be opened: {error}"
-                                                ));
+                                                diagnostics.note(&format!("the published fork target {target} could not be opened: {error}"));
                                                 continue;
                                             }
                                         };
                                         let target_state =
                                             SessionState::replay(prepared.seed().events().cloned());
-                                        let mut target_owner = match ActiveSession::durable(
+                                        let target_owner = match ActiveSession::durable(
                                             target_opened,
                                             target_state,
                                             EVIDENCE_CAP,
                                         ) {
                                             Ok(owner) => owner,
                                             Err(error) => {
-                                                diagnostics.note(&format!(
-                                        "the fork target evidence could not be opened: {error}"
-                                    ));
+                                                diagnostics.note(&format!("the published fork target {target} could not be replayed: {error}"));
                                                 continue;
                                             }
                                         };
-                                        target_owner.replace_replayed(replayed);
-                                        let publication =
-                                            target_owner.publish_target(prepared.seed());
                                         let diagnostic =
                                             publication.diagnostic().map(str::to_string);
-                                        if matches!(
-                                            &publication,
-                                            ego_core::session::TargetPublication::NotPublished { .. }
-                                        ) {
-                                            diagnostics.note(&format!(
-                                                "the fork target was not published: {}",
-                                                diagnostic
-                                                    .as_deref()
-                                                    .unwrap_or("publication was refused")
-                                            ));
-                                            continue;
-                                        }
                                         break 'epoch EpochTransition::Fork {
                                             target: target_owner,
                                             publication,
