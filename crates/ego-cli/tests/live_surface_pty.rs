@@ -3161,7 +3161,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(text("KNOWN-USAGE")),
-            paced("PARTIAL-REPLY\n", Duration::from_secs(5)),
+            paced_line("PARTIAL-REPLY\n", Duration::from_secs(5)),
         ],
         ..Plan::default()
     });
@@ -3209,6 +3209,12 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     input.write_all(b"cancel check\r").expect("submit turn");
     input.flush().expect("submit flush");
     until_normalized(&reader, &mut output, turn_start, "PARTIAL-REPLY");
+    let mut streaming_screen = vt100::Parser::new(40, 100, 0);
+    streaming_screen.process(&output);
+    assert!(
+        streaming_screen.screen().contents().contains("Esc cancels"),
+        "reply must still be streaming when Esc is sent"
+    );
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
