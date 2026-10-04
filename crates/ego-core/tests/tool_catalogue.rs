@@ -23,8 +23,8 @@ use ego_core::generator::types::GenRequest;
 use ego_core::generator::types::{ContentBlock, Role, StopReason};
 use ego_core::mcp::McpServerInstructions;
 use ego_core::permit::{
-    CanonPath, DuplexSpawner, OneHop, OneHopResponse, ProcessError, ProcessExecutor, Resolver,
-    Tool, ToolError, ToolResult, Typed, TypedTool,
+    CanonPath, Confinement, DuplexSpawner, OneHop, OneHopResponse, ProcessError, ProcessExecutor,
+    Resolver, Tool, ToolError, ToolResult, Typed, TypedTool,
 };
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
@@ -34,8 +34,8 @@ use ego_core::store::evidence::{
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::suspension::McpCapturePin;
 use ego_core::turn::{
-    AdmittedToolSource, CapturedToolCatalogue, GenerationRuntime, RegisteredTool, Session,
-    ToolCatalogueError, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
+    AdmittedToolSource, AgentIdentity, CapturedToolCatalogue, GenerationRuntime, HostClient,
+    RegisteredTool, Session, ToolCatalogueError, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
 };
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -335,6 +335,7 @@ fn loop_with_policy(
     source: Arc<dyn AdmittedToolSource>,
     policy_source: Arc<dyn ego_core::turn::GenerationPolicySource>,
     system: Option<SystemPrompt>,
+    identity: Option<AgentIdentity>,
 ) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
     let store: &'static MemoryStore = Box::leak(Box::new(MemoryStore::default()));
     let clock = Box::leak(Box::new(FixedClock));
@@ -360,6 +361,7 @@ fn loop_with_policy(
         gate,
         config: TurnConfig {
             system,
+            identity,
             token_ceiling: None,
             retry: 0,
             fallbacks: Vec::new(),
@@ -393,6 +395,7 @@ fn loop_with(
         source,
         common::default_policy_source(),
         None,
+        None,
     )
 }
 
@@ -410,6 +413,7 @@ fn loop_with_system(
         source,
         common::default_policy_source(),
         Some(system),
+        None,
     )
 }
 
@@ -423,6 +427,7 @@ fn loop_with_yolo(
         static_tools,
         source,
         common::policy_source_with_root("/workspace", Mode::Yolo, Ruleset::default()),
+        None,
         None,
     )
 }
@@ -701,6 +706,7 @@ fn sibling_calls_keep_old_arcs_after_refresh_and_removal_then_next_generation_se
 /// about the instructions and not about which registry produced them.
 struct InstructingPin {
     instructions: Vec<McpServerInstructions>,
+    servers: Vec<String>,
 }
 
 impl McpCapturePin for InstructingPin {
@@ -711,6 +717,69 @@ impl McpCapturePin for InstructingPin {
     fn instructions(&self) -> &[McpServerInstructions] {
         &self.instructions
     }
+
+    fn server_names(&self) -> Vec<String> {
+        self.servers.clone()
+    }
+}
+
+/// The identity block opens every generation and names what this capture
+/// admitted — including a server that said nothing about itself, which the
+/// instruction blocks alone would leave invisible.
+#[test]
+fn the_runtime_identity_names_the_model_workspace_posture_tools_and_every_mcp_server() {
+    let pin = InstructingPin {
+        instructions: vec![McpServerInstructions::new("alpha", "Prefer alpha_tool.")],
+        servers: vec!["alpha".to_owned(), "silent".to_owned()],
+    };
+    let state = Arc::new(Mutex::new(SourceState {
+        captures: 0,
+        order: None,
+        trace: None,
+        catalogues: VecDeque::from([CapturedToolCatalogue::new_mcp(
+            "g1",
+            vec![RegisteredTool::from(TaggedTool::new("dynamic-a"))],
+            pin,
+        )
+        .expect("distinct dynamic tools")]),
+    }));
+    let source: Arc<dyn AdmittedToolSource> = Arc::new(SequencedSource {
+        state: Arc::clone(&state),
+    });
+    let generator = Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+    let (mut turn, _store) = loop_with_policy(
+        generator.clone(),
+        &[],
+        source,
+        common::policy_source_with_root("/workspace", Mode::Plan, Ruleset::default()),
+        Some(SystemPrompt::verbatim("the workspace speaks second")),
+        Some(AgentIdentity {
+            version: "9.9.9".to_owned(),
+            sandbox: Confinement::Ro,
+            offline: true,
+            host: Some(HostClient {
+                name: "tuicommander".to_owned(),
+                version: "1.7.7".to_owned(),
+            }),
+        }),
+    )
+    .expect("valid catalogue");
+    futures::executor::block_on(turn.run("which model?")).expect("first turn");
+
+    let systems = system_texts(&generator.calls()[0]);
+    let identity = &systems[0];
+    for line in [
+        "You are ego 9.9.9",
+        "- Model: catalogue-test (reasoning effort: off)",
+        "- Workspace root: /workspace",
+        "- Posture: permission mode: plan; sandbox: ro; network: offline",
+        "- Host: tuicommander 1.7.7 over ACP",
+        "- Tools: `dynamic-a`",
+        "- MCP servers: `alpha`, `silent`",
+    ] {
+        assert!(identity.contains(line), "missing {line:?} in:\n{identity}");
+    }
+    assert_eq!(systems[1], "the workspace speaks second");
 }
 
 #[test]
@@ -722,6 +791,7 @@ fn server_instructions_reach_the_model_after_the_sessions_own_prompt() {
             McpServerInstructions::new("alpha", "Prefer alpha_tool for live lookups."),
             McpServerInstructions::new("zulu", "Prefer zulu_tool for archival lookups."),
         ],
+        servers: Vec::new(),
     };
     let state = Arc::new(Mutex::new(SourceState {
         captures: 0,
@@ -768,6 +838,7 @@ fn a_silent_server_adds_no_block_and_a_cut_one_says_it_was_cut() {
             McpServerInstructions::new("quiet", ""),
             McpServerInstructions::new("verbose", &long),
         ],
+        servers: Vec::new(),
     };
     assert!(
         pin.instructions()[1].truncated(),

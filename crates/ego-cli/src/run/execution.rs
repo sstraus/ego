@@ -125,7 +125,8 @@ async fn open_scope_phase(
         .as_ref()
         .expect("the resolved invocation owns its settings until materialization");
     if !args.quiet
-        && matches!(&host.driver, Driver::Interactive { seat, .. } if seat.has_human())
+        && let Driver::Interactive { seat, .. } = &host.driver
+        && seat.has_human()
         && let Some(model) = args.model.as_deref().or_else(|| {
             settings
                 .effective
@@ -135,8 +136,9 @@ async fn open_scope_phase(
         })
     {
         host.diagnostics.note(&format!(
-            "ego {} · {model}\n     /help commands · Option+P models",
-            env!("CARGO_PKG_VERSION")
+            "ego {} · {model}\n{}",
+            env!("CARGO_PKG_VERSION"),
+            seat.key_hints()
         ));
     }
     let mcp_scope = crate::provider_http::McpProcessScope::for_run(

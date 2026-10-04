@@ -325,6 +325,46 @@ mod permit {
         assert!(denied.to_string().contains("/etc/passwd"));
     }
 
+    /// Critic regression_case. Plausible bug: the exception for a refused read drops
+    /// `list` or `search` (a model listing `~/.codex` still ends the run), or
+    /// widens to a mutating or spawning op outside the workspace.
+    #[test]
+    fn only_a_boundary_refusal_of_a_read_list_or_search_goes_back_to_the_model() {
+        let outside = |op| PolicyDenied::OutsideWorkspace {
+            tool: "t".to_string(),
+            op,
+            path: CanonPath::new("/etc"),
+        };
+        for op in [OpName::Read, OpName::List, OpName::Search] {
+            assert!(outside(op).is_unreachable_read(), "{op} is a read");
+        }
+        for op in [
+            OpName::Write,
+            OpName::Spawn,
+            OpName::ReadEvidence,
+            OpName::Opaque,
+            OpName::Connect,
+            OpName::SecretEgress,
+        ] {
+            assert!(!outside(op).is_unreachable_read(), "{op} is not a read");
+        }
+        // A read refused for any other reason is somebody's decision, not
+        // the boundary's.
+        let mode = PolicyDenied::ModeForbids {
+            tool: "t".to_string(),
+            mode: Mode::Plan,
+            op: OpName::Read,
+            path: CanonPath::new("/ws/a"),
+        };
+        assert!(!mode.is_unreachable_read());
+        let root = PolicyDenied::ReadOnlyRoot {
+            tool: "t".to_string(),
+            op: OpName::Read,
+            path: CanonPath::new("/ws/a"),
+        };
+        assert!(!root.is_unreachable_read());
+    }
+
     // --- the evaluation order ---------------------------------------------
     //
     // `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6. The order
@@ -1125,6 +1165,7 @@ mod permit {
         let capped = ScanRequest {
             root: CanonPath::new("/ws/src"),
             skip_dirs: Vec::new(),
+            respect_ignore: false,
             limits: ScanLimits {
                 max_entries: 1,
                 ..ScanLimits::default()
@@ -1146,6 +1187,7 @@ mod permit {
         let shallow = ScanRequest {
             root: CanonPath::new("/ws/src"),
             skip_dirs: Vec::new(),
+            respect_ignore: false,
             limits: ScanLimits {
                 max_depth: 0,
                 ..ScanLimits::default()
@@ -1178,6 +1220,7 @@ mod permit {
         let skipping = ScanRequest {
             root: CanonPath::new("/ws/src"),
             skip_dirs: vec!["target".to_string()],
+            respect_ignore: false,
             limits: ScanLimits::default(),
         };
         let scan = guarded.list(&skipping).expect("the root is authorised");
@@ -1355,6 +1398,7 @@ mod permit {
         let starved = ScanRequest {
             root: CanonPath::new("/ws/src"),
             skip_dirs: Vec::new(),
+            respect_ignore: false,
             limits: ScanLimits {
                 max_bytes: 1,
                 ..ScanLimits::default()

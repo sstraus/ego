@@ -390,8 +390,17 @@ fn permission_modal_decisions_are_immediate_and_only_explicit_keys_can_approve()
         ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.to_string())
     );
     assert_eq!(
-        mode.parse_event(key(KeyCode::Char('r'))),
+        mode.parse_event(key(KeyCode::Char('a'))),
         ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}remember"))
+    );
+    assert_eq!(
+        mode.parse_event(key(KeyCode::Char('d'))),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}details"))
+    );
+    assert_eq!(
+        mode.parse_event(key(KeyCode::Char('r'))),
+        ReedlineEvent::None,
+        "the retired remember key must not act"
     );
     status.lock().unwrap().permission_modal = false;
     assert_ne!(
@@ -474,6 +483,74 @@ fn help_uses_registry_rows_and_preserves_them_at_narrow_widths() {
             );
         }
     }
+}
+
+#[test]
+fn help_lists_a_keys_section_with_every_registry_key_at_every_width() {
+    // Catches: a hand-written key list that drifts from the registry.
+    let registry = ActionRegistry::final_surface().with_binding(
+        crate::repl::actions::KeyBinding::new("Ctrl+Q", "quits", "Leave without asking"),
+    );
+    let keys = registry.keys();
+    assert!(keys.len() >= 5, "Esc, Enter, Ctrl+S, Ctrl+C and Option+P");
+    for width in [120, 80, 60, 40] {
+        let rendered = render_action_help(&registry, width);
+        let section = rendered
+            .split_once("\nKeys\n")
+            .unwrap_or_else(|| panic!("no Keys section at {width}:\n{rendered}"))
+            .1;
+        let compact = |text: &str| text.split_whitespace().collect::<String>();
+        let section = compact(section);
+        for key in &keys {
+            assert!(
+                section.contains(&compact(&key.label))
+                    && section.contains(&compact(key.description)),
+                "{:?} was lost at {width}:\n{rendered}",
+                key.label
+            );
+        }
+    }
+}
+
+#[test]
+fn banner_hints_list_the_hinted_keys_and_fit_without_dropping_one() {
+    let registry = ActionRegistry::final_surface();
+    for width in [120, 80, 60, 40] {
+        let rendered = render_key_hints(&registry, width);
+        assert!(
+            rendered
+                .lines()
+                .all(|line| crate::render::line::cells(line) <= width),
+            "banner exceeded {width} cells:\n{rendered}"
+        );
+        let rows = rendered.lines().map(str::trim).collect::<Vec<_>>();
+        for item in [
+            "Esc interrupts",
+            "Enter queues",
+            "Ctrl+S draft",
+            "Option+P models",
+            "/help",
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|row| row.split(" · ").any(|part| part == item)),
+                "{item:?} missing or split at {width}:\n{rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn adding_a_registry_key_changes_the_banner_and_the_help_without_editing_either() {
+    // Catches: the banner and the help each keeping their own key table.
+    let registry = ActionRegistry::final_surface().with_binding(
+        crate::repl::actions::KeyBinding::new("Ctrl+Q", "quits", "Leave without asking"),
+    );
+    assert!(render_key_hints(&registry, 120).contains("Ctrl+Q quits"));
+    assert!(render_action_help(&registry, 120).contains("Ctrl+Q  Leave without asking"));
+    let plain = ActionRegistry::final_surface();
+    assert!(!render_key_hints(&plain, 120).contains("Ctrl+Q"));
+    assert!(!render_action_help(&plain, 120).contains("Ctrl+Q"));
 }
 
 #[test]
@@ -747,4 +824,98 @@ fn source_target_source_activation_restores_source_drafts_in_lifo_order() {
     assert_eq!(drafts.pop_active().unwrap().text, "source-second");
     assert_eq!(drafts.pop_active().unwrap().text, "source-first");
     assert_eq!(drafts.active_count(), 0);
+}
+
+fn modal_after_waiting(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    waited: std::time::Duration,
+) {
+    let saved = enter_modal(editor, phase, status);
+    {
+        let mut status = status.lock().unwrap();
+        status.modal_since = Some(Instant::now().checked_sub(waited).expect("clock range"));
+    }
+    leave_modal(editor, phase, status, saved, EditPhase::Busy);
+}
+
+// catches: `modal_since` surviving `leave_modal`, so a later modal credits the
+// earlier wait to the turn a second time and the counter runs short.
+#[test]
+fn back_to_back_modals_each_leave_their_own_wait_out_of_the_counter_once() {
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Busy);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    {
+        let mut status = status.lock().unwrap();
+        status.begin_activity();
+        status.activity_since = Some(
+            Instant::now()
+                .checked_sub(std::time::Duration::from_secs(20))
+                .expect("clock range"),
+        );
+    }
+    modal_after_waiting(
+        &mut editor,
+        &phase,
+        &status,
+        std::time::Duration::from_secs(3),
+    );
+    modal_after_waiting(
+        &mut editor,
+        &phase,
+        &status,
+        std::time::Duration::from_secs(4),
+    );
+    let elapsed = status
+        .lock()
+        .unwrap()
+        .activity_since
+        .expect("turn still running")
+        .elapsed()
+        .as_secs();
+    assert!(
+        (12..=14).contains(&elapsed),
+        "20s turn minus 3s and 4s of modal waits is about 13s, got {elapsed}s"
+    );
+}
+
+// catches: a modal that outlives its turn (cancel or timeout while the
+// permission modal is still open) crediting its whole wait to the NEXT turn,
+// pushing that turn's start into the future so its counter sticks at 0s.
+#[test]
+fn a_modal_that_outlived_its_turn_does_not_move_the_next_turn_into_the_future() {
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Busy);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    status.lock().unwrap().begin_activity();
+    let saved = enter_modal(&mut editor, &phase, &status);
+    {
+        let mut status = status.lock().unwrap();
+        status.modal_since = Some(
+            Instant::now()
+                .checked_sub(std::time::Duration::from_secs(30))
+                .expect("clock range"),
+        );
+        // `Seat::idle` for the first turn, then the next turn starts while the
+        // modal is still open.
+        status.activity = false;
+        status.activity_since = None;
+        status.begin_activity();
+    }
+    leave_modal(&mut editor, &phase, &status, saved, EditPhase::Busy);
+    let started = status
+        .lock()
+        .unwrap()
+        .activity_since
+        .expect("next turn running");
+    assert!(
+        started <= Instant::now(),
+        "a turn cannot have started in the future"
+    );
+    assert!(
+        status.lock().unwrap().modal_waited < std::time::Duration::from_secs(5),
+        "only the overlap with the running turn counts as its modal wait"
+    );
 }

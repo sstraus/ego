@@ -176,6 +176,7 @@ struct ProbeSuite<'a> {
     root: &'a std::path::Path,
 }
 
+#[cfg(target_os = "macos")]
 impl<'a> ProbeSuite<'a> {
     /// The unconfined half of a pair. A refusal under the backend proves
     /// nothing until the same command has been seen to work without it.
@@ -242,10 +243,18 @@ fn cache_key(
     backend: &dyn Backend,
     runtime_roots: &[CanonPath],
 ) -> Result<CapabilityCacheKey, ProcessError> {
-    let binary = std::env::current_exe().map_err(|error| {
-        ProcessError::Backend(format!("cannot locate the current executable: {error}"))
-    })?;
-    cache_key_for_binary(policy, backend, runtime_roots, &binary)
+    // The running image cannot change under a process, so its identity is
+    // read once: the hash is a full read of a binary tens of megabytes large.
+    static IMAGE_HASH: OnceLock<Result<[u8; 32], String>> = OnceLock::new();
+    let binary_hash = IMAGE_HASH
+        .get_or_init(|| {
+            let binary = std::env::current_exe()
+                .map_err(|error| format!("cannot locate the current executable: {error}"))?;
+            binary_hash(&binary).map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(ProcessError::Backend)?;
+    cache_key_with_hash(policy, backend, runtime_roots, binary_hash)
 }
 
 async fn cache_key_async(
@@ -260,20 +269,33 @@ async fn cache_key_async(
         })?
 }
 
+#[cfg(test)]
 fn cache_key_for_binary(
     policy: &RunConfinement,
     backend: &dyn Backend,
     runtime_roots: &[CanonPath],
     binary: &Path,
 ) -> Result<CapabilityCacheKey, ProcessError> {
-    let identity = backend.identity();
-    let digest = super::policy_digest_with_runtime_roots(policy, backend, runtime_roots)?;
+    cache_key_with_hash(policy, backend, runtime_roots, binary_hash(binary)?)
+}
+
+fn binary_hash(binary: &Path) -> Result<[u8; 32], ProcessError> {
     let binary = fs::read(binary).map_err(|error| {
         ProcessError::Backend(format!(
             "cannot read the current executable for cache identity: {error}"
         ))
     })?;
-    let binary_hash = Sha256::digest(&binary).into();
+    Ok(Sha256::digest(&binary).into())
+}
+
+fn cache_key_with_hash(
+    policy: &RunConfinement,
+    backend: &dyn Backend,
+    runtime_roots: &[CanonPath],
+    binary_hash: [u8; 32],
+) -> Result<CapabilityCacheKey, ProcessError> {
+    let identity = backend.identity();
+    let digest = super::policy_digest_with_runtime_roots(policy, backend, runtime_roots)?;
     #[cfg(target_os = "linux")]
     let build_identity = fs::read("/proc/sys/kernel/osrelease").map_err(|error| {
         ProcessError::Backend(format!("cannot read Linux build identity: {error}"))
@@ -295,6 +317,7 @@ fn cache_key_for_binary(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn private_scratch() -> Result<tempfile::TempDir, ProcessError> {
     let scratch = tempfile::tempdir().map_err(|error| {
         ProcessError::Backend(format!("cannot create process scratch: {error}"))
@@ -328,6 +351,7 @@ fn clear_scratch(path: &std::path::Path) -> Result<(), ProcessError> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn canonical_scratch(scratch: &tempfile::TempDir) -> Result<CanonPath, ProcessError> {
     fs::canonicalize(scratch.path())
         .map(CanonPath::new)
@@ -1380,6 +1404,23 @@ mod tests {
         std::fs::write(&binary, b"binary version two").unwrap();
         let changed = cache_key_for_binary(&policy(), &backend, &roots, &binary).unwrap();
         assert_ne!(first, changed, "an upgraded binary must re-probe");
+    }
+
+    #[test]
+    fn the_once_read_process_image_hash_is_the_full_hash_of_the_running_binary() {
+        let backend = CacheBackend {
+            identity: BackendIdentity::new("backend", "revision"),
+        };
+        let roots = [CanonPath::new("/runtime/root")];
+        let image = std::env::current_exe().unwrap();
+        let once = cache_key(&policy(), &backend, &roots).unwrap();
+        let again = cache_key(&policy(), &backend, &roots).unwrap();
+        let full = cache_key_for_binary(&policy(), &backend, &roots, &image).unwrap();
+        assert_eq!(once, again);
+        assert_eq!(
+            once, full,
+            "the memoized image hash must be the file's hash"
+        );
     }
 
     fn cached_fact(cell: &CachedCapabilities) -> Option<ExecCaps> {

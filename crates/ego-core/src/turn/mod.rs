@@ -12,6 +12,7 @@
 
 mod catalogue;
 mod control;
+mod identity;
 mod journal;
 mod mcp_registry;
 mod policy;
@@ -85,6 +86,7 @@ use control::{BoundaryIntent, ControlIntent};
 pub use control::{
     ControlError, InteractiveControl, InteractiveIngress, QueueStatus, interactive_control,
 };
+pub use identity::{AgentIdentity, HostClient};
 pub use journal::{Journal, SharedJournal, SharedJournalError};
 pub use mcp_registry::{
     McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, McpRegistryJournalErrorKind,
@@ -324,6 +326,9 @@ pub struct TurnConfig {
     /// with one origin. A bare string would let a harness send one thing and
     /// publish the digest of another, and nothing could check it.
     pub system: Option<SystemPrompt>,
+    /// Who the agent is, for the block every generation opens with. `None`
+    /// sends no such block; every production harness supplies one.
+    pub identity: Option<AgentIdentity>,
     /// A ceiling on this session's cumulative billed tokens.
     pub token_ceiling: Option<u64>,
     /// Additional delivery-safe attempts allowed for each model candidate.
@@ -2737,6 +2742,22 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         self.close_unstarted_siblings(turn, &pending[index + 1..])?;
                         return Ok(DriveOutcome::QuestionRequired);
                     }
+                    // A boundary refusal of a read is the model's to learn
+                    // from, not the run's to end on: the denial text is the
+                    // tool result and the batch carries on.
+                    ToolOutcome::Refused { denial } if denial.is_unreachable_read() => {
+                        let call = &pending[index];
+                        self.journal.append(
+                            turn,
+                            Some(call.item),
+                            Some(call.started),
+                            EventKind::ToolCallCompleted {
+                                ok: false,
+                                result: ToolResult::builtin(denial.to_string()),
+                            },
+                        )?;
+                        continue;
+                    }
                     ToolOutcome::Refused { denial } => Denial {
                         action: denial.to_string(),
                         // Never assembled here: `PolicyDenied::authority` is
@@ -3020,6 +3041,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         // not have.
         let conversation = Self::with_mcp_instructions(conversation, catalogue.instructions());
         let conversation = Self::with_host_context(conversation, self.tools.context_notes());
+        let policy_snapshot = capture.snapshot();
+        let descriptors = catalogue.descriptors();
+        let mcp_servers = catalogue.mcp_servers();
 
         let source = Arc::clone(&self.source);
         let first = AttemptRef::first(GenerationId::new());
@@ -3112,10 +3136,24 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     Controlled::Failed(cause) => return Err(cause),
                 };
 
+                // Per candidate: a fallback runs on a different model, and the
+                // model must be told the one actually answering.
+                let identity = self.config.identity.as_ref().map(|identity| {
+                    identity.render(
+                        &profile.identity,
+                        profile.thinking,
+                        &policy_snapshot,
+                        &descriptors,
+                        &mcp_servers,
+                    )
+                });
                 let mut request = GenRequest {
                     model: profile.request_model.clone(),
-                    messages: candidate_conversation.clone(),
-                    tools: catalogue.descriptors(),
+                    messages: Self::with_identity(
+                        candidate_conversation.clone(),
+                        identity.as_deref(),
+                    ),
+                    tools: descriptors.clone(),
                     thinking: profile.thinking,
                     max_output_tokens: profile.output_ceiling(),
                     parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
@@ -3148,7 +3186,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             },
                         },
                     )?;
-                    request.messages = candidate_conversation.clone();
+                    request.messages =
+                        Self::with_identity(candidate_conversation.clone(), identity.as_deref());
                     gaps = primary_capabilities
                         .as_ref()
                         .unwrap_or(&profile.capabilities)
@@ -3535,6 +3574,18 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         messages.splice(after_system..after_system, blocks);
         Conversation::new(messages)
             .expect("a text message adds no call and answers none, so a valid history stays valid")
+    }
+
+    /// The runtime identity as the first system message, ahead of the
+    /// workspace's instructions: it states facts, and nothing a workspace or a
+    /// server says should read as if it came before them.
+    fn with_identity(history: Conversation, identity: Option<&str>) -> Conversation {
+        let Some(identity) = identity else {
+            return history;
+        };
+        let mut messages: Vec<Message> = history.into();
+        messages.insert(0, Message::text(Role::System, identity));
+        Conversation::new(messages).expect("an identity block adds no tool call or answer")
     }
 
     fn with_host_context(history: Conversation, notes: Vec<String>) -> Conversation {
@@ -4740,7 +4791,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                                 denial.authority(),
                                             )
                                             .await?;
-                                            return Ok(ToolOutcome::Refused { denial });
+                                            return Ok(match denial {
+                                                PolicyDenied::Redirected { .. } => {
+                                                    answered(false, denial.to_string())
+                                                }
+                                                denial => ToolOutcome::Refused { denial },
+                                            });
                                         }
                                     },
                                     Resolution::Reclassify { request, params } => {
@@ -4806,7 +4862,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                         denial.authority(),
                                     )
                                     .await?;
-                                    return Ok(ToolOutcome::Refused { denial });
+                                    return Ok(match denial {
+                                        PolicyDenied::Redirected { .. } => {
+                                            answered(false, denial.to_string())
+                                        }
+                                        denial => ToolOutcome::Refused { denial },
+                                    });
                                 }
                             },
                             Resolution::Reclassify { request, params } => {

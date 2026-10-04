@@ -387,6 +387,14 @@ struct HookJournal {
 }
 
 impl McpRegistryJournal for HookJournal {
+    fn record_private_diagnostic(
+        &self,
+        _server: &str,
+        _cause: &str,
+    ) -> Result<(), McpRegistryJournalError> {
+        Ok(())
+    }
+
     fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
         self.events.lock().expect("journal").push(event);
         Ok(())

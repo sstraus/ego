@@ -722,6 +722,7 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
             gate,
             config: TurnConfig {
                 system: None,
+                identity: None,
                 token_ceiling: None,
                 retry: 0,
                 fallbacks: Vec::new(),

@@ -295,6 +295,7 @@ impl McpSessionAdmitter for NoMcpAdmitter {
         &self,
         _servers: Vec<v1::McpServer>,
         _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
+        _context: ego_acp::serve::McpAdmissionContext,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
         Box::pin(future::ready(Ok(None)))
@@ -416,6 +417,7 @@ impl McpSessionAdmitter for RecordingMcpAdmitter {
         &self,
         servers: Vec<v1::McpServer>,
         _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
+        _context: ego_acp::serve::McpAdmissionContext,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
         self.requests
@@ -439,6 +441,7 @@ impl McpSessionAdmitter for FailingMcpAdmitter {
         &self,
         _servers: Vec<v1::McpServer>,
         _connection: Option<agent_client_protocol::ConnectionTo<agent_client_protocol::Client>>,
+        _context: ego_acp::serve::McpAdmissionContext,
     ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
     {
         Box::pin(future::ready(Err(McpSessionAdmissionError::new(

@@ -43,6 +43,7 @@ use crate::model::{GenerationSelection, GenerationSelectionSnapshot};
 use crate::model_picker::{
     ModelPicker, ModelPickerView, PickerFocus, PickerInput, PickerInputOutcome, PickerOutcome,
 };
+use crate::render::osc::Osc;
 use crate::rules::{RememberRequest, prepare_from_catalogue};
 use ego_core::config::{
     ManagedRuleEffect, Mode, RuleMutation, Trust, UserConfigMutation, UserConfigPublication,
@@ -368,6 +369,10 @@ struct SurfaceStatus {
     drafts: usize,
     activity: bool,
     activity_since: Option<Instant>,
+    /// When the open modal began; the wait is the person's, not the turn's.
+    modal_since: Option<Instant>,
+    /// The part of the current turn spent waiting on modals.
+    modal_waited: std::time::Duration,
     reply_started: Arc<AtomicBool>,
     notice: Option<String>,
     image_chips: Vec<String>,
@@ -381,10 +386,21 @@ struct SurfaceStatus {
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
+    /// Keys the picker has been sent and not yet applied. The editor parses a
+    /// whole burst of input before running its first command and drops the
+    /// rest, so typed keys wait here instead of riding on that command.
+    picker_keys: Vec<String>,
     model_selection: Option<Arc<GenerationSelection>>,
     question_selector: Option<Arc<Mutex<Selector>>>,
     permission_modal: bool,
+    permission_capabilities: crate::render::Capabilities,
     permission_rules: Option<Arc<dyn PermissionRuleApplication>>,
+    /// Rows committed straight to the transcript by the terminal owner, for
+    /// receipts that have no run output to travel with. `None` without a live
+    /// terminal.
+    transcript: Option<Sender<String>>,
+    /// What the host is told around a modal wait, and whether `-q` is on.
+    signals: Option<(Osc, bool)>,
     cursor_selectors: bool,
     mcp_actions: Option<McpSurfaceActions>,
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
@@ -394,6 +410,7 @@ impl SurfaceStatus {
     fn begin_activity(&mut self) {
         if !self.activity {
             self.activity_since = Some(Instant::now());
+            self.modal_waited = std::time::Duration::ZERO;
             self.reply_started.store(false, Ordering::Release);
         }
         self.activity = true;
@@ -407,6 +424,8 @@ impl Default for SurfaceStatus {
             drafts: 0,
             activity: false,
             activity_since: None,
+            modal_since: None,
+            modal_waited: std::time::Duration::ZERO,
             reply_started: Arc::new(AtomicBool::new(false)),
             notice: None,
             image_chips: Vec::new(),
@@ -420,10 +439,14 @@ impl Default for SurfaceStatus {
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             model_picker: None,
+            picker_keys: Vec::new(),
             model_selection: None,
             question_selector: None,
             permission_modal: false,
+            permission_capabilities: crate::render::Capabilities::plain(),
             permission_rules: None,
+            transcript: None,
+            signals: None,
             cursor_selectors: false,
             mcp_actions: None,
             surface_effect: Arc::new(Mutex::new(None)),
@@ -903,6 +926,7 @@ impl Seat {
             status.cursor_selectors = true;
         }
         let printer = ExternalPrinter::new(CHANNEL_CAPACITY);
+        status.lock().expect("surface status lock").transcript = Some(printer.sender());
         let reply_started = Arc::clone(&status.lock().expect("surface status lock").reply_started);
         let (output, output_owner) =
             SurfaceOutput::pumped(printer.sender(), cancel.clone(), reply_started);
@@ -1186,6 +1210,15 @@ impl Seat {
             .set_availability(ActionId::Compact, availability);
         if let SeatKind::Live(live) = &self.kind {
             repaint_status(&live.status);
+        }
+    }
+
+    /// Let the terminal owner tell the host when it is waiting on a person.
+    pub fn announce_waits(&self, capabilities: crate::render::Capabilities, quiet: bool) {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            status.signals = Some((Osc::new(capabilities), quiet));
+            status.permission_capabilities = capabilities;
         }
     }
 
@@ -1484,6 +1517,10 @@ impl crate::run::InteractiveSeat for Seat {
         render_action_help(&self.registry, self.width().saturating_sub(4))
     }
 
+    fn key_hints(&self) -> String {
+        render_key_hints(&self.registry, self.width())
+    }
+
     fn read_startup_model(
         &self,
         picker: Arc<Mutex<ModelPicker>>,
@@ -1501,6 +1538,18 @@ impl crate::run::InteractiveSeat for Seat {
             status.begin_activity();
             drop(status);
             repaint_status(&live.status);
+        }
+    }
+
+    fn modal_wait(&self) -> std::time::Duration {
+        match &self.kind {
+            SeatKind::Live(live) => {
+                live.status
+                    .lock()
+                    .expect("surface status lock")
+                    .modal_waited
+            }
+            _ => std::time::Duration::ZERO,
         }
     }
 
@@ -1792,13 +1841,15 @@ fn own_terminal(
 mod action_execution;
 mod edit_mode;
 mod permission;
+mod permission_modal;
 mod picker_surface;
 mod question;
+mod suspend;
 
 #[cfg(test)]
 use action_execution::apply_surface_effect;
-pub(crate) use action_execution::render_action_help;
 use action_execution::surface_line;
+pub(crate) use action_execution::{render_action_help, render_key_hints};
 pub use edit_mode::SurfaceEditMode;
 pub(crate) use permission::Confirmation;
 #[cfg(test)]
@@ -1810,7 +1861,8 @@ use permission::{
 use picker_surface::run_model_picker;
 use question::{
     PermissionEditOutcome, Question, Waiting, answer_control, edit_permission_parameters,
-    enter_modal, leave_modal, parse_trust, question_selector_key, question_selector_prompt,
+    enter_modal, leave_modal, next_selector_key, parse_trust, question_selector_prompt,
+    queued_selector_line,
 };
 #[cfg(test)]
 use question::{PermissionWord, parse_permission};

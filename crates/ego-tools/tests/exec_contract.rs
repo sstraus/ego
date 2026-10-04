@@ -177,6 +177,7 @@ fn config_fixture_for(policy: RunConfinement, hard_cap: u64, preview: usize) -> 
     }
 }
 
+#[cfg(target_os = "macos")]
 fn attempt_run(
     level: Confinement,
     offline: bool,
@@ -1992,7 +1993,7 @@ fn macos_exec_paths_expose_the_metadata_of_their_ancestors_and_nothing_more() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_a_profile_makes_the_workspace_ancestors_statable_and_standalone_does_not() {
+fn macos_workspace_ancestor_metadata_allows_standalone_stat_and_mkdir() {
     // node's `realpathSync(cwd)` is how wiz-run finds its project: it lstats
     // every ancestor of the workspace.
     // The workspace sits in its own parent, which no exec path shares.
@@ -2007,8 +2008,8 @@ fn macos_a_profile_makes_the_workspace_ancestors_statable_and_standalone_does_no
         .expect("profiled workspace run");
     execute(&profiled, spec.clone()).expect("the workspace's parent can be stat'ed");
 
-    // The directory shares no ancestor chain with a script it cannot run, so a
-    // standalone run is checked with a system binary instead.
+    // Catches: standalone workspace confinement refuses ancestor lstat.
+    // Use a system binary so exec paths cannot supply the missing grant.
     let standalone = open_policy(workspace_policy(&workspace, Vec::new()), 1024 * 1024, 1024)
         .expect("standalone workspace run");
     let bare = SpawnSpec::new(
@@ -2018,10 +2019,57 @@ fn macos_a_profile_makes_the_workspace_ancestors_statable_and_standalone_does_no
         EnvPolicy::Inherited,
     )
     .expect("spec");
+    execute(&standalone, bare).expect("standalone workspace ancestors can be stat'ed");
+    let nested = workspace.join("a/b");
+    let mkdir = SpawnSpec::new(
+        vec![
+            "/bin/mkdir".into(),
+            "-p".into(),
+            nested.clone().into_os_string(),
+        ],
+        spec.cwd().cloned(),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("mkdir spec");
+    execute(&standalone, mkdir).expect("mkdir -p can walk workspace ancestors");
     assert!(
-        execute(&standalone, bare).is_err(),
-        "standalone profile text changed"
+        nested.is_dir(),
+        "mkdir -p did not create the nested directory"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_workspace_ancestor_metadata_does_not_allow_content_or_outside_writes() {
+    // Catches: ancestor metadata permission widens into listing, reads or writes.
+    let outer = tempfile::tempdir().expect("outer directory");
+    let ancestor = std::fs::canonicalize(outer.path()).expect("canonical outer");
+    let workspace = ancestor.join("ws");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let sibling = ancestor.join("secret");
+    std::fs::write(&sibling, b"secret").expect("sibling fixture");
+    let outside_write = ancestor.join("outside-write");
+    let run = open_policy(workspace_policy(&workspace, Vec::new()), 1024 * 1024, 1024)
+        .expect("standalone workspace run");
+    let call = |program: &str, path: &std::path::Path| {
+        execute(
+            &run,
+            SpawnSpec::new(
+                vec![program.into(), path.as_os_str().to_owned()],
+                Some(CanonPath::new(workspace.clone())),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .expect("spec"),
+        )
+    };
+    call("/usr/bin/stat", &ancestor).expect("metadata grant is active");
+    call("/bin/cat", &workspace.join("../secret")).expect_err("sibling content must be denied");
+    call("/bin/ls", &ancestor).expect_err("ancestor listing must be denied");
+    call("/usr/bin/touch", &outside_write).expect_err("outside write must be denied");
+    assert!(!outside_write.exists(), "outside file was created");
+    assert_eq!(std::fs::read(&sibling).expect("read sibling"), b"secret");
 }
 
 #[cfg(target_os = "macos")]
@@ -2886,13 +2934,22 @@ fn udp_control(ip: std::net::IpAddr) -> (String, NetworkControl) {
 }
 
 #[cfg(target_os = "macos")]
-fn open_offline_control_run(workspace: CanonPath, nonloopback: std::net::IpAddr) -> Option<Run> {
+fn open_offline_control_run(
+    workspace: CanonPath,
+    nonloopback: Option<std::net::IpAddr>,
+) -> Option<Run> {
     let attempt = attempt_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
     if let Err(ProcessError::MissingCapabilities(missing)) = &attempt.outcome {
         assert_eq!(missing.required(), ExecCaps::NO_IP_NETWORK);
+        assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
         if std::env::var_os(BACKEND_ABSENT).is_some() {
             return None;
         }
+        let Some(nonloopback) = nonloopback else {
+            // Non-loopback coverage is unavailable, but the caller must still
+            // run every loopback baseline and check any admitted offline child.
+            return None;
+        };
         let reference = missing
             .probe_evidence()
             .expect("measured refusal has evidence");
@@ -2938,7 +2995,6 @@ fn open_offline_control_run(workspace: CanonPath, nonloopback: std::net::IpAddr)
             !independent_control_pairs,
             "independent host control still works; confinement must be demonstrated: {transcript}"
         );
-        assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
         eprintln!(
             "note: non-loopback pairing became unavailable during measurement; verified precise refusal against a fresh independent control"
         );
@@ -2963,29 +3019,39 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
         ("tcp", tcp_control("127.0.0.1".parse().unwrap())),
         ("udp", udp_control("127.0.0.1".parse().unwrap())),
     ];
-    let Some(nonloopback) = local_non_loopback().filter(|ip| non_loopback_control_pairs(*ip))
-    else {
-        // A host that cannot pair on a non-loopback address cannot provide the
-        // paired address-class control. It must still refuse the requested
-        // offline guarantee rather than silently treating the missing probe as
-        // proof. Said out loud, because a silent skip of the strong path is
-        // indistinguishable from having run it.
+    let nonloopback = local_non_loopback().filter(|ip| non_loopback_control_pairs(*ip));
+    #[cfg(target_os = "macos")]
+    let nonloopback = nonloopback.or_else(|| {
+        eprintln!("note: initial non-loopback TCP control unavailable; re-pairing a fresh control");
+        local_non_loopback().filter(|ip| non_loopback_control_pairs(*ip))
+    });
+    if let Some(nonloopback) = nonloopback {
+        endpoints.extend([
+            ("tcp", tcp_control(nonloopback)),
+            ("udp", udp_control(nonloopback)),
+        ]);
+    } else {
+        #[cfg(target_os = "macos")]
         eprintln!(
-            "note: no pairable non-loopback address on this host; asserting the refusal is \
-             precise rather than the guarantee is demonstrated"
+            "not-verifiable: no pairable non-loopback control after a fresh measurement; \
+             non-loopback offline coverage is unavailable; checking loopback controls"
         );
-        let missing = match open_run(Confinement::Off, true, root, 1024 * 1024, 1024) {
-            Err(ProcessError::MissingCapabilities(missing)) => missing,
-            Err(err) => panic!("offline failed without precise capability refusal: {err:?}"),
-            Ok(_) => panic!("offline proceeded without a non-loopback probe prerequisite"),
-        };
-        assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
-        return;
-    };
-    endpoints.extend([
-        ("tcp", tcp_control(nonloopback)),
-        ("udp", udp_control(nonloopback)),
-    ]);
+        #[cfg(not(target_os = "macos"))]
+        {
+            // A missing host prerequisite must cause a precise refusal.
+            eprintln!(
+                "note: no pairable non-loopback address on this host; asserting the refusal is \
+                 precise rather than the guarantee is demonstrated"
+            );
+            let missing = match open_run(Confinement::Off, true, root, 1024 * 1024, 1024) {
+                Err(ProcessError::MissingCapabilities(missing)) => missing,
+                Err(err) => panic!("offline failed without precise capability refusal: {err:?}"),
+                Ok(_) => panic!("offline proceeded without a non-loopback probe prerequisite"),
+            };
+            assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+            return;
+        }
+    }
 
     for (protocol, (endpoint, control)) in endpoints {
         let workspace = root.clone();
@@ -3005,8 +3071,8 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
         );
         execute(&baseline, network_spec.clone()).expect("paired network control must work");
 
-        // A refusal alone never passes. macOS additionally checks whether
-        // the independent network prerequisite changed during measurement.
+        // Check every admitted offline child. macOS accepts a precise refusal
+        // only when independent non-loopback coverage is unavailable.
         #[cfg(target_os = "macos")]
         let offline = open_offline_control_run(workspace, nonloopback);
         // Linux never demonstrates offline (ADR 2026-08-21 §5): Landlock's
@@ -3034,7 +3100,7 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
                 execute(&offline, network_spec).is_err(),
                 "offline child reached an IP endpoint"
             );
-        } else if cfg!(not(target_os = "linux")) {
+        } else if cfg!(not(any(target_os = "linux", target_os = "macos"))) {
             return;
         }
         match control {
@@ -3047,8 +3113,60 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_seatbelt_offline_controls_cover_tcp_udp_and_both_address_classes() {
+    // Catches: an admitted offline child reaches a live loopback endpoint,
+    // including when independent non-loopback coverage is unavailable.
     // The same paired controls are intentionally run under the Seatbelt-only
     // target gate. A missing profile compiler/backend must return a precise
     // capability refusal; it may not silently run the child unconfined.
     assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls();
+}
+
+// Catches: granting metadata only to the immediate workspace parent, or only in workspace mode.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_standalone_nested_workspace_stats_every_ancestor_even_read_only() {
+    let outer = tempfile::tempdir().expect("outer directory");
+    let workspace = outer.path().join("parent with spaces/child/workspace");
+    std::fs::create_dir_all(&workspace).expect("nested workspace");
+    let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
+    let mut argv = vec![OsString::from("/usr/bin/stat")];
+    argv.extend(
+        workspace
+            .ancestors()
+            .map(|path| path.as_os_str().to_owned()),
+    );
+    for level in [Confinement::Workspace, Confinement::Ro] {
+        let run = open_policy(
+            run_confinement(level, false, CanonPath::new(workspace.clone())),
+            1024 * 1024,
+            1024,
+        )
+        .expect("standalone run");
+        execute(
+            &run,
+            SpawnSpec::new(
+                argv.clone(),
+                Some(CanonPath::new(workspace.clone())),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .expect("stat spec"),
+        )
+        .expect("every workspace ancestor must be statable");
+        if level == Confinement::Ro {
+            let forbidden = workspace.join("read-only-write");
+            execute(
+                &run,
+                SpawnSpec::new(
+                    vec!["/usr/bin/touch".into(), forbidden.clone().into_os_string()],
+                    Some(CanonPath::new(workspace.clone())),
+                    None,
+                    EnvPolicy::Inherited,
+                )
+                .expect("touch spec"),
+            )
+            .expect_err("metadata permission must not grant read-only writes");
+            assert!(!forbidden.exists(), "read-only workspace was modified");
+        }
+    }
 }

@@ -85,11 +85,48 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 .map(&render),
         );
     }
+    logical.push("Keys".to_owned());
+    logical.extend(
+        registry
+            .keys()
+            .into_iter()
+            .map(|key| format!("  {}  {}", key.label, key.description)),
+    );
     logical.push("─".repeat(limit));
     logical
         .into_iter()
         .flat_map(|row| crate::render::Line::plain(row).wrap(limit))
         .map(|row| row.text())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The banner's key line: every key the registry gives a hint, then the help
+/// command, packed onto rows no wider than `width` without splitting a key.
+pub(crate) fn render_key_hints(registry: &ActionRegistry, width: usize) -> String {
+    const INDENT: &str = "     ";
+    // A seat that has not measured a terminal reports 0, which means "wide
+    // enough", not "narrower than any terminal".
+    let width = if width == 0 { 80 } else { width.max(40) };
+    let limit = width.saturating_sub(INDENT.len());
+    let items = registry
+        .keys()
+        .into_iter()
+        .filter(|key| !key.hint.is_empty())
+        .map(|key| format!("{} {}", key.label, key.hint))
+        .chain([format!("/{}", registry.help(ActionId::Help).name())]);
+    let mut rows: Vec<String> = Vec::new();
+    for item in items {
+        match rows.last_mut() {
+            Some(row) if crate::render::Line::plain(format!("{row} · {item}")).width() <= limit => {
+                row.push_str(" · ");
+                row.push_str(&item);
+            }
+            _ => rows.push(item),
+        }
+    }
+    rows.iter()
+        .map(|row| format!("{INDENT}{row}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -336,7 +373,7 @@ pub(super) fn surface_line(
                     }
                     Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
                 }
-                match futures::executor::block_on(ingress.submit(buffer)) {
+                match futures::executor::block_on(ingress.submit(buffer.clone())) {
                     Ok(queue) => {
                         editor.run_edit_commands(&[EditCommand::Clear]);
                         let mut current = status.lock().expect("surface status lock");
@@ -350,6 +387,14 @@ pub(super) fn surface_line(
                         if !restore_latest_draft(editor, status, drafts) {
                             repaint_status(status);
                         }
+                    }
+                    Err(ego_core::turn::ControlError::Closed) => {
+                        // Busy admission can close before the terminal observes idle.
+                        // Hand this submission to the next turn through normal input.
+                        editor.run_edit_commands(&[EditCommand::Clear]);
+                        status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+                        restore_latest_draft(editor, status, drafts);
+                        return (Line::Submitted(buffer), false);
                     }
                     Err(error) => {
                         status.lock().expect("surface status lock").notice =

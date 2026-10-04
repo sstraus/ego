@@ -136,6 +136,7 @@ fn scan_of(root: CanonPath) -> ScanRequest {
     ScanRequest {
         root,
         skip_dirs: SKIP_DIRS.iter().map(|name| name.to_string()).collect(),
+        respect_ignore: true,
         limits: ScanLimits::default(),
     }
 }

@@ -807,6 +807,7 @@ fn compaction_turn_with_state(
             gate,
             config: TurnConfig {
                 system: None,
+                identity: None,
                 token_ceiling: None,
                 retry: 0,
                 fallbacks: Vec::new(),

@@ -29,6 +29,14 @@ impl ToolCaptureAuthority {
         }
     }
 
+    /// The MCP servers behind this authority; none for a static capture.
+    pub(crate) fn server_names(&self) -> Vec<String> {
+        match self {
+            Self::Static => Vec::new(),
+            Self::Mcp(authority) => authority.server_names(),
+        }
+    }
+
     pub(crate) fn resume_context<'s>(
         &self,
         runtime: Option<&SessionHookRuntime<'s>>,

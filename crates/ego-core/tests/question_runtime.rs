@@ -666,6 +666,7 @@ fn with_foreign_turn<R>(
             gate,
             config: TurnConfig {
                 system: None,
+                identity: None,
                 token_ceiling: None,
                 retry: 0,
                 fallbacks: Vec::new(),
@@ -791,6 +792,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
             gate,
             config: TurnConfig {
                 system: None,
+                identity: None,
                 token_ceiling: None,
                 retry: 0,
                 fallbacks: Vec::new(),
@@ -1079,6 +1081,7 @@ fn reconstructed_resume_without_captured_policy_fails_closed_before_settlement()
                 gate,
                 config: TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: Vec::new(),

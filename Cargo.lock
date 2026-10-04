@@ -1262,6 +1262,7 @@ dependencies = [
  "arboard",
  "async-tungstenite",
  "bytes",
+ "chrono",
  "clap",
  "clap_complete",
  "clipboard-win",
@@ -1277,6 +1278,7 @@ dependencies = [
  "fd-lock",
  "futures",
  "jsonschema",
+ "nix 0.31.3",
  "objc2-app-kit",
  "objc2-foundation",
  "png",
@@ -1372,12 +1374,14 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "globset",
+ "ignore",
  "keyring",
  "landlock",
  "nix 0.31.3",
  "process-wrap",
  "regex",
  "reqwest",
+ "rustix",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -1389,6 +1393,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "winapi-util",
  "windows",
  "windows-permissions",
  "zeroize",
@@ -2151,6 +2156,22 @@ checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "ignore"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b69833ed729dc5aa7d19541d96d6cf8e9137194207a04916d658e43168402f"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
 ]
 
 [[package]]

@@ -578,6 +578,7 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         Ok(ScanRequest {
             root: fresh,
             skip_dirs: req.skip_dirs.clone(),
+            respect_ignore: req.respect_ignore,
             limits: req.limits.clone(),
         })
     }

@@ -12,7 +12,9 @@ use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use ego_core::permit::{BackendIdentity, CanonPath, ExecCaps, ProcessError, RunConfinement};
+use ego_core::permit::{
+    BackendIdentity, CanonPath, Confinement, ExecCaps, ProcessError, RunConfinement, SandboxGrant,
+};
 use tempfile::{Builder, NamedTempFile};
 
 use super::backend::LaunchPrefix;
@@ -26,6 +28,19 @@ const BACKEND_REVISION: &str = "seatbelt-private-profile-v1";
 pub(crate) struct SeatbeltBackend {
     profile: NamedTempFile,
     maximum_caps: ExecCaps,
+    base: ProfileBase,
+}
+
+/// Everything the profile text is rendered from except the human grants, kept
+/// so the same profile can be rendered again with more of them.
+#[derive(Clone)]
+struct ProfileBase {
+    level: Confinement,
+    offline: bool,
+    workspace: PathBuf,
+    private_scratch: PathBuf,
+    runtime_roots: Vec<PathBuf>,
+    exec_paths: Vec<PathBuf>,
 }
 
 impl SeatbeltBackend {
@@ -38,29 +53,59 @@ impl SeatbeltBackend {
         prerequisite()?;
         validate_private_scratch(private_scratch.as_path())?;
 
-        let runtime_roots = derived_runtime_roots
-            .iter()
-            .map(CanonPath::as_path)
-            .collect::<Vec<_>>();
-        // The paths a program must be able to walk: its exec paths and, once a
-        // profile has any, the workspace it starts in (`realpath` of the cwd
-        // lstats every ancestor, and fails without them). Without a profile
-        // the profile text is what it always was.
+        // Every program must be able to stat the workspace ancestor chain:
+        // resolving cwd and `mkdir -p` need it even without exec paths.
+        // The renderer grants exact metadata literals, never ancestor contents.
         let mut exec_paths = policy
             .exec_paths()
             .iter()
-            .map(CanonPath::as_path)
+            .map(|path| path.as_path().to_path_buf())
             .collect::<Vec<_>>();
-        if !exec_paths.is_empty() {
-            exec_paths.push(policy.workspace().as_path());
-        }
-        let rendered = profile::render(&ProfileInput {
+        exec_paths.push(policy.workspace().as_path().to_path_buf());
+        let base = ProfileBase {
             level: policy.level(),
             offline: policy.offline(),
-            workspace: policy.workspace().as_path(),
-            private_scratch: private_scratch.as_path(),
+            workspace: policy.workspace().as_path().to_path_buf(),
+            private_scratch: private_scratch.as_path().to_path_buf(),
+            runtime_roots: derived_runtime_roots
+                .iter()
+                .map(|root| root.as_path().to_path_buf())
+                .collect(),
+            exec_paths,
+        };
+        Self::render_to_file(base, &[], policy.requirements().required())
+    }
+
+    /// The same backend with `grants` added to its profile. The scratch root
+    /// stays the one the measured backend owns, so the caller keeps that
+    /// backend alive for as long as it uses the result.
+    pub(crate) fn widened(&self, grants: &[SandboxGrant]) -> Result<Self, ProcessError> {
+        Self::render_to_file(self.base.clone(), grants, self.maximum_caps)
+    }
+
+    fn render_to_file(
+        base: ProfileBase,
+        grants: &[SandboxGrant],
+        maximum_caps: ExecCaps,
+    ) -> Result<Self, ProcessError> {
+        let runtime_roots = base
+            .runtime_roots
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let exec_paths = base
+            .exec_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let rendered = profile::render(&ProfileInput {
+            level: base.level,
+            offline: base.offline,
+            workspace: &base.workspace,
+            private_scratch: &base.private_scratch,
             runtime_roots: &runtime_roots,
             exec_paths: &exec_paths,
+            grants,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
 
@@ -83,7 +128,8 @@ impl SeatbeltBackend {
 
         Ok(Self {
             profile,
-            maximum_caps: policy.requirements().required(),
+            maximum_caps,
+            base,
         })
     }
 

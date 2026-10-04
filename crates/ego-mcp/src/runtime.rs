@@ -252,12 +252,12 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
             .await;
             match result {
                 Err(error) => {
-                    if let Some((connection_id, effects)) = acp_session {
-                        if effects.disconnect(connection_id).await.is_err() {
-                            return Err(invalid_candidate(
-                                "ACP MCP candidate failed and its host connection could not be closed",
-                            ));
-                        }
+                    if let Some((connection_id, effects)) = acp_session
+                        && effects.disconnect(connection_id).await.is_err()
+                    {
+                        return Err(invalid_candidate(
+                            "ACP MCP candidate failed and its host connection could not be closed",
+                        ));
                     }
                     Err(error)
                 }

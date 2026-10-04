@@ -343,11 +343,33 @@ clicks, navigation, or other work performed behind that boundary. Running the
 same program through native shell remains an `exec(...)` operation and gains
 no tool authority by its name.
 
+`tool(server/*)` covers every tool of that one server and never another
+server's. It is accepted only in the system and user layers (including their
+profiles); a project, local, agent-file, environment or flags layer is rejected
+at load, so a repository cannot grant itself every tool of a server. A matching
+deny still wins over the wildcard. A wildcard grant applies only when the
+resolved server is defined in user config or a system/user profile. A project
+or local redefinition of the server disables that grant, including profile
+redefinitions. Missing servers and tombstones grant no wildcard authority;
+exact tool rules remain unchanged. Wildcard denies remain restrictive.
+
 Rules follow a published formal grammar matched against the *canonical* call
 (resolved paths, argv, endpoints — never rendered shell strings); the
 mode × sandbox matrix is published and contradictory combinations are
 rejected, not guessed. Every control is individually disableable; hard
 ceilings come only from an administrator's `/etc/ego`.
+
+**Launcher precondition:** a launcher of ego, or of an application that hosts
+`ego-tools`, must not leak inheritable file descriptors numbered 3 or higher.
+Close those descriptors or set close-on-exec (`FD_CLOEXEC`) before launching
+the host. Ego does not sweep or close launcher-inherited descriptors and adds
+no unsafe code to do so. With `--sandbox off`, leaked descriptors can reach
+tool children. On Linux, the Landlock helper instead refuses confined execs
+with `unexpected inherited file descriptor N`; `ro` and `workspace` execution
+can therefore fail before the command starts. In the 2026-09-29 `rb-run`
+incident (regression case), the launcher leaked lock descriptors 8 and 9 without
+close-on-exec: sandbox-off children inherited them and Landlock refused
+confined execs. The launcher was subsequently fixed.
 
 **Session**
 
@@ -636,6 +658,11 @@ lift it, and none of the three remedies above resolves it — because it was
 never an unresolvable *permission* for them to resolve. Widening what ego may
 reach is `--sandbox`'s business, which is why that clause is listed beside
 `--yolo` rather than subsumed by it.
+
+A read, list or search the boundary refuses is the one exception to exit 3: it
+changed nothing, so the refusal is returned to the model as a failed tool
+result and the turn continues (regression case). Writes and spawns outside the
+workspace still end the run.
 
 ### 4.5 Parse and lifecycle contract (normative before release)
 
@@ -930,14 +957,44 @@ then edit its schema-derived fields with exact values prefilled; nested shapes
 remain in one prefilled JSON fallback instead of requiring a whole call to be
 typed as JSON.
 
-An unresolved permission modal separates the call, reason, canonical
-operations, risk, exact parameters, derived rule candidates, and every
-widening. `y`, `n`, `e`, and `r` act immediately. `e` edits the same prefilled
-schema-derived form and sends the result through full preparation and policy
-classification again. `r` applies the displayed allow-rule plan through the
-single atomic config owner and then allows the current call; it never asks for
-the tool, JSON, or a second confirmation. A write or staging failure is shown
-and denies the call.
+An unresolved permission modal is at most four rows: the call as a readable
+command, its risk in plain words, and the keys `[y] yes`, `[a] yes, do not ask
+again for <rules>`, `[n] no, say what to do instead`, `[e] edit`, `[d]
+details`. The risk row never shows an internal name; a limited risk (changes
+inside the workspace) and an unknown one (a program ego cannot inspect) read
+differently. `d` shows the rest: the reason, the canonical operations, the exact
+parameters, and what `a` would store with every widening. `y`, `a`, `n`, `e`,
+and `d` act at once. `e` edits the same prefilled schema-derived form and sends
+the result through full preparation and policy classification again. `a`
+applies the displayed allow-rule plan through the single atomic config owner and
+then allows the current call; it never asks for the tool, JSON, or a second
+confirmation. Its rules are the narrowest the grammar can express that still
+match the next call: a program-plus-subcommand prefix for recognized `exec`
+programs (`exec(git commit *)`, `exec(npm run *)`), the workspace glob
+for writes (`write(<workspace>/**)`), and the exact form for everything else.
+A command whose prefix would authorise code the operator never saw keeps its
+exact form: a shell, interpreter, or launcher (`bash -c`, `python3 -c`,
+`env`, `sudo`, `xargs`, ...), a program given by path, or a name carrying shell
+metacharacters or `*`. A bare program, a leading option or toolchain selector,
+and programs without recognized subcommands also keep exact argv. Suggestions
+never offer a generic `exec(program *)` rule. The named subcommand prefix
+allows later arguments to that action, as displayed before storage; it does
+not infer whether those arguments mutate configuration or run another program.
+Deny rules, including system ones, are still evaluated first. No allow rule,
+including an exact rule or one from user or project config, covers a canonical
+filesystem path containing a `.git`, `.ego`, or `.claude` component at any depth
+(ASCII case-insensitive on every platform),
+including nested repositories. The remembered write glob stays workspace-wide;
+control paths remain uncovered and follow the existing mode/judge/human approval
+path. In default mode a control-path write still asks on each call; remembering
+cannot suppress that question. Other modes keep their existing settlement
+semantics. The receipt is one sentence naming each stored rule, committed to
+the transcript. A write or
+staging failure is shown there and denies the call. `n` asks `What should it do
+instead?`: words typed there answer the call as a failed tool result, so the
+model reads them and the run continues; an empty answer is a plain refusal,
+which ends the run as before. The plain non-terminal prompt (`allow`, `deny`,
+`amend`) is unchanged.
 
 A mode or rule change takes effect only at the next generation boundary,
 after the preceding provider attempt, complete sibling tool batch, permission
@@ -991,6 +1048,14 @@ and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
 JSON object of replacement tool parameters, then re-runs prepare and policy
 from the beginning. Invalid answers re-prompt; Ctrl-C and EOF deny.
 
+The permission details view shows pending `edit` changes as a unified diff of
+replacement fragments with real line breaks. Pending `write` content appears
+as additions; the prompt does not read previous file content and states that
+an existing file is overwritten. Diffs show at most 30 lines, clipped to
+terminal width, with an explicit omitted-line count. Colour follows terminal
+capabilities, `--no-color`, and `NO_COLOR`; redirected output has no colour
+escapes. Binary whole-file content shows its byte count instead of a text diff.
+
 ### 6.1 Paste
 
 The input line runs in **bracketed paste** mode (`ESC[?2004h`, off on exit).
@@ -1026,6 +1091,7 @@ bounded channels.
 | Input line, history, multiline | **yes** | reedline. Active `Ctrl+C` requests cancellation and reports it immediately. Idle `Ctrl+C` abandons the line; a second idle `Ctrl+C` within 500 ms exits. `Ctrl+D` ends it |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |
+| Ctrl+Z | **yes** (Unix) | stops ego as a shell job with the terminal back in cooked mode; `fg` restores raw mode and repaints the composer or the open modal, which stays unanswered. A running `exec` keeps running in its own process group, and its timeout does not count the time ego was stopped. Windows has no job control: the key reports that it is unsupported |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
 | Slash commands | **yes** | one shared 25-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
@@ -1096,9 +1162,18 @@ settlement, usage, cost, or tool-result accounting.
 open the same action as `/model`. On macOS, a terminal that emits the composed
 `π` character for Option-P opens that action too. `/model` remains the exact
 keyboard-independent equivalent. The picker shows provider,
-model, context capability, and reasoning effort. Arrow keys navigate; `Enter`
-sets the default for new sessions, `s` applies only to this session, and `Esc`
-cancels. A selection made while a request is in flight applies at the next
+model, context capability, and reasoning effort. The cursor starts on the
+current model, which carries a `✓ current` marker; the reasoning step marks the
+current effort the same way. Arrow keys navigate, a digit selects by number
+while no filter is typed, and typing narrows the list by substring (`Backspace`
+edits; no match shows an empty state and `Enter` does nothing). `Enter` at the
+reasoning step sets the default for new sessions, `s` there applies only to this
+session, and `Esc` cancels. Interactive startup with a selected model whose
+reasoning default is unknown opens the reasoning step directly. The operator
+must choose a supported effort; `Enter` saves the model and effort, and `Esc`
+cancels startup. Headless runs still require an explicit `--thinking` value.
+A completed change writes a `Model: <slug>` line to
+the transcript. A selection made while a request is in flight applies at the next
 generation boundary, never by mutating an active request.
 
 The picker owns no rows. regression case brings the final shared catalogue into

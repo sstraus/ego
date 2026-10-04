@@ -102,6 +102,15 @@ fn printable(text: &str) -> String {
         .collect()
 }
 
+/// [`printable`] for text that spans lines: the line breaks stay, the rest of
+/// each line is made safe.
+fn printable_block(text: &str) -> String {
+    text.split('\n')
+        .map(printable)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `12ms`, `0.4s`, `1m05s`.
 pub fn duration(elapsed: Duration) -> String {
     let millis = elapsed.as_millis();
@@ -312,10 +321,10 @@ fn output_lines(call: &Finished<'_>) -> Vec<String> {
         .lines()
         .filter(|line| !matches!(*line, "[stdout]" | "[stderr]"))
         .collect();
-    if !call.ok {
-        if let Some(index) = lines.iter().rposition(|line| !line.trim().is_empty()) {
-            lines.remove(index);
-        }
+    if !call.ok
+        && let Some(index) = lines.iter().rposition(|line| !line.trim().is_empty())
+    {
+        lines.remove(index);
     }
     lines
         .into_iter()
@@ -353,13 +362,19 @@ fn tail(call: &Finished<'_>, width: usize) -> Vec<Line> {
 /// Everything under the header, for the expanded view: the diff of an edit,
 /// the whole text of any other result.
 fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
-    if call.ok && call.name == "edit" {
-        if let (Some(old), Some(new)) = (
+    if call.ok
+        && call.name == "edit"
+        && let (Some(old), Some(new)) = (
             string_arg(args, "old_string"),
             string_arg(args, "new_string"),
-        ) {
-            return diff::render(&printable(old), &printable(new), width, &Unhighlighted);
-        }
+        )
+    {
+        return diff::render(
+            &printable_block(old),
+            &printable_block(new),
+            width,
+            &Unhighlighted,
+        );
     }
     let room = width.saturating_sub(2).max(1);
     call.result
@@ -491,6 +506,23 @@ mod tests {
         let record = record(&call("exec", r#"{"argv":["x"]}"#, true, hostile), at(80));
         for text in [&record.rows, &record.detail] {
             assert!(!text.contains('\x1b') && !text.contains('\x07'), "{text:?}");
+        }
+    }
+
+    /// A replaced text of two lines is two removed rows and two added rows,
+    /// and no line break is turned into a replacement character.
+    #[test]
+    fn an_expanded_multi_line_edit_keeps_one_row_per_line() {
+        let args =
+            r##"{"path":"p.py","old_string":"# a\nreturn 1\n","new_string":"# b\nreturn 2\n"}"##;
+        let record = record(&call("edit", args, true, "ok"), at(80));
+        assert!(!record.detail.contains('\u{FFFD}'), "{:?}", record.detail);
+        let rows: Vec<&str> = record.detail.lines().map(str::trim_end).collect();
+        for expected in [" 1 -# a", " 2 -return 1", " 1 +# b", " 2 +return 2"] {
+            assert!(
+                rows.iter().any(|row| row.ends_with(expected)),
+                "{expected:?} is not a row of {rows:?}"
+            );
         }
     }
 

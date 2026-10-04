@@ -20,6 +20,7 @@ pub mod acp;
 pub mod acp_confinement;
 pub mod acp_controls;
 pub mod acp_permission;
+pub mod acp_sandbox_grants;
 pub mod acp_trust;
 pub(crate) mod agent_file;
 pub(crate) mod attachment;

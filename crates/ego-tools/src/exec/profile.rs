@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeSet, error::Error, fmt, path::Path};
 
-use ego_core::permit::Confinement;
+use ego_core::permit::{Confinement, SandboxAccess, SandboxGrant};
 
 /// Inputs owned by the execution backend, rather than by a model call.
 pub(super) struct ProfileInput<'a> {
@@ -15,8 +15,11 @@ pub(super) struct ProfileInput<'a> {
     pub(super) private_scratch: &'a Path,
     pub(super) runtime_roots: &'a [&'a Path],
     /// Paths whose ancestors are made statable: a profile's exec paths, which
-    /// are already part of `runtime_roots`, and the workspace beside them.
+    /// are already part of `runtime_roots`, and the workspace (always).
     pub(super) exec_paths: &'a [&'a Path],
+    /// Paths a human allowed after the run started. Never a parent directory
+    /// of the path that was refused.
+    pub(super) grants: &'a [SandboxGrant],
 }
 
 #[derive(Debug)]
@@ -49,6 +52,25 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
         .map(path_literal)
         .collect::<Result<BTreeSet<_>, _>>()?;
     readable.insert(workspace.clone());
+    // A read grant is not an exec grant: `process-exec*` is rendered from
+    // `readable`, so only an exec or write-then-run decision may enter it.
+    let mut extra_read = BTreeSet::new();
+    let mut extra_write = BTreeSet::new();
+    for grant in input.grants {
+        let literal = path_literal(grant.path.as_path())?;
+        match grant.access {
+            SandboxAccess::Read => {
+                extra_read.insert(literal);
+            }
+            SandboxAccess::Exec => {
+                readable.insert(literal);
+            }
+            SandboxAccess::Write => {
+                extra_read.insert(literal.clone());
+                extra_write.insert(literal);
+            }
+        }
+    }
 
     let mut profile = String::from(
         "(version 1)\n\
@@ -79,7 +101,7 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
             }
 
             profile.push_str("(allow file-read* file-test-existence\n");
-            for root in readable {
+            for root in readable.into_iter().chain(extra_read) {
                 profile.push_str("  (subpath ");
                 profile.push_str(&root);
                 profile.push_str(")\n");
@@ -92,6 +114,8 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
             let ancestors = input
                 .exec_paths
                 .iter()
+                .copied()
+                .chain(input.grants.iter().map(|grant| grant.path.as_path()))
                 .flat_map(|path| path.ancestors().skip(1))
                 .filter(|ancestor| *ancestor != Path::new("/"))
                 .map(path_literal)
@@ -106,27 +130,33 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
                 profile.push_str(")\n");
             }
 
-            match input.level {
-                Confinement::Ro => profile.push_str("(deny file-write*)\n"),
-                Confinement::Workspace => {
-                    // `system.sb` contains a small platform runtime baseline.
-                    // Narrow its write grants back to the two policy roots.
-                    profile.push_str("(deny file-write*\n  (require-not (require-any\n");
-                    for root in [&workspace, &scratch] {
-                        profile.push_str("    (subpath ");
-                        profile.push_str(root);
-                        profile.push_str(")\n");
-                    }
-                    profile.push_str("  )))\n");
-                    profile.push_str("(allow file-write*\n");
-                    for root in [&workspace, &scratch] {
-                        profile.push_str("  (subpath ");
-                        profile.push_str(root);
-                        profile.push_str(")\n");
-                    }
+            // The roots a child may write: none under `ro`, the workspace and
+            // scratch under `workspace`, and in both cases whatever a human
+            // allowed for writing. `system.sb` contains a small platform
+            // runtime baseline, so the grant list narrows its writes back.
+            let mut writable = Vec::new();
+            if matches!(input.level, Confinement::Workspace) {
+                writable.push(workspace.clone());
+                writable.push(scratch.clone());
+            }
+            writable.extend(extra_write);
+            if writable.is_empty() {
+                profile.push_str("(deny file-write*)\n");
+            } else {
+                profile.push_str("(deny file-write*\n  (require-not (require-any\n");
+                for root in &writable {
+                    profile.push_str("    (subpath ");
+                    profile.push_str(root);
                     profile.push_str(")\n");
                 }
-                Confinement::Off => unreachable!("handled above"),
+                profile.push_str("  )))\n");
+                profile.push_str("(allow file-write*\n");
+                for root in &writable {
+                    profile.push_str("  (subpath ");
+                    profile.push_str(root);
+                    profile.push_str(")\n");
+                }
+                profile.push_str(")\n");
             }
         }
     }
@@ -170,6 +200,11 @@ fn path_literal(path: &Path) -> Result<String, ProfileError> {
     Ok(encoded)
 }
 
+/// Whether [`render`] can express `path`; the one place that rule lives.
+pub(super) fn renderable(path: &Path) -> bool {
+    path_literal(path).is_ok()
+}
+
 fn path_label(path: &Path) -> String {
     format!("{:?}", path.as_os_str())
 }
@@ -177,6 +212,8 @@ fn path_label(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    use ego_core::permit::{CanonPath, SandboxAccess, SandboxGrant};
 
     use super::{Confinement, ProfileInput, render};
 
@@ -189,6 +226,7 @@ mod tests {
             private_scratch: Path::new("/scratch"),
             runtime_roots: RUNTIME,
             exec_paths: RUNTIME,
+            grants: &[],
         }
     }
 
@@ -253,5 +291,100 @@ mod tests {
         // an unused read grant would still be reach the level does not promise.
         let profile = render(&input(Confinement::Ro)).expect("ro profile");
         assert!(!profile.contains("/scratch"), "{profile}");
+    }
+
+    fn grant(path: &str, access: SandboxAccess) -> SandboxGrant {
+        SandboxGrant::new(CanonPath::new(path), access)
+    }
+
+    #[test]
+    fn a_read_grant_opens_reads_of_one_path_and_never_exec_or_write() {
+        let grants = [grant("/data/notes.txt", SandboxAccess::Read)];
+        let profile = render(&ProfileInput {
+            grants: &grants,
+            ..input(Confinement::Workspace)
+        })
+        .expect("profile");
+        let exec = profile
+            .split("(allow file-read*")
+            .next()
+            .expect("exec rules come first");
+        assert!(!exec.contains("/data/notes.txt"), "{profile}");
+        assert!(
+            profile.contains("(allow file-read* file-test-existence\n  (subpath \"/scratch\")\n  (subpath \"/work\")\n  (subpath \"/data/notes.txt\")\n)"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains("(allow file-read-metadata\n  (literal \"/data\")\n)"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains(concat!(
+                "(deny file-write*\n  (require-not (require-any\n",
+                "    (subpath \"/work\")\n    (subpath \"/scratch\")\n  )))\n"
+            )),
+            "{profile}"
+        );
+        assert_eq!(profile.matches("/data/notes.txt").count(), 1, "{profile}");
+    }
+
+    #[test]
+    fn an_exec_grant_joins_the_exec_and_read_sets() {
+        let grants = [grant("/opt/tool", SandboxAccess::Exec)];
+        let profile = render(&ProfileInput {
+            grants: &grants,
+            ..input(Confinement::Workspace)
+        })
+        .expect("profile");
+        assert!(
+            profile.starts_with(&format!(
+                "{}(allow process-exec*\n  (subpath \"/opt/tool\")\n  (subpath \"/work\")\n)\n",
+                "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n"
+            )),
+            "{profile}"
+        );
+        assert!(
+            profile.contains(concat!(
+                "(deny file-write*\n  (require-not (require-any\n",
+                "    (subpath \"/work\")\n    (subpath \"/scratch\")\n  )))\n"
+            )),
+            "{profile}"
+        );
+    }
+
+    #[test]
+    fn a_write_grant_extends_the_write_roots_under_workspace_and_ro() {
+        let grants = [grant("/out", SandboxAccess::Write)];
+        let workspace = render(&ProfileInput {
+            grants: &grants,
+            ..input(Confinement::Workspace)
+        })
+        .expect("workspace profile");
+        assert!(
+            workspace.contains(concat!(
+                "(deny file-write*\n",
+                "  (require-not (require-any\n",
+                "    (subpath \"/work\")\n",
+                "    (subpath \"/scratch\")\n",
+                "    (subpath \"/out\")\n",
+                "  )))\n",
+            )),
+            "{workspace}"
+        );
+        let ro = render(&ProfileInput {
+            grants: &grants,
+            ..input(Confinement::Ro)
+        })
+        .expect("ro profile");
+        assert!(
+            ro.contains("(allow file-write*\n  (subpath \"/out\")\n)"),
+            "{ro}"
+        );
+        assert!(
+            ro.contains(
+                "(deny file-write*\n  (require-not (require-any\n    (subpath \"/out\")\n  )))\n"
+            ),
+            "{ro}"
+        );
     }
 }
