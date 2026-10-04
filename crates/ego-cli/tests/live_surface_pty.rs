@@ -6858,3 +6858,89 @@ fn regression_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["thinking"]["type"], "disabled");
 }
+
+// Catches: a fork only acquires its catalogue model after its first generation.
+#[test]
+fn critic_fork_model_is_present_before_first_successor_prompt() {
+    critic_successor_model_before_generation("fork");
+}
+
+// Catches: quitting directly after compaction leaves resume without a model.
+#[test]
+fn critic_compact_model_is_present_before_first_successor_prompt() {
+    critic_successor_model_before_generation("compact");
+}
+
+fn critic_successor_model_before_generation(action: &str) {
+    let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
+    let mut replies = vec![Reply::Sse(text("CRITIC-SOURCE-ANSWER"))];
+    if action == "compact" {
+        replies.push(Reply::Sse(text(checkpoint)));
+    }
+    let stub = Stub::start(Plan {
+        completions: replies,
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# critic successor fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"first prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "CRITIC-SOURCE-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(format!("/{action}\r").as_bytes()).unwrap();
+    input.flush().unwrap();
+    until_local_action_completed(&reader, &mut output, start, action, PROGRESS_DEADLINE);
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "successor process failed: {status:?}");
+    let listing = places
+        .ego(&stub)
+        .subcommand("ls")
+        .args(["--output", "json"])
+        .run()
+        .report();
+    let target = listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] != support::FIXTURE_SESSION_ID)
+        .expect("successor catalogue row");
+    assert_eq!(
+        target["model"], "ollama/qwen3",
+        "{action} successor lost its model before its first prompt: {listing}"
+    );
+}
