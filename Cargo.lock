@@ -1278,6 +1278,7 @@ dependencies = [
  "fd-lock",
  "futures",
  "jsonschema",
+ "nix 0.31.3",
  "objc2-app-kit",
  "objc2-foundation",
  "png",

@@ -23,6 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::store::SessionEvidenceStore;
+use crate::suspension::ActiveClock;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
 use super::ExecLimits;
@@ -327,7 +328,7 @@ pub(crate) async fn execute(
         // helper a descriptor for a filesystem device.
         drop(stdin);
     }
-    let started = Instant::now();
+    let started = ActiveClock::start();
     let mut status = None;
     let mut descendants_cleaned = false;
     let mut stdout_pending = None;
@@ -572,7 +573,7 @@ async fn spawn_duplex(
     };
 
     let delivery = Arc::new(AtomicBool::new(false));
-    let started = tokio::time::Instant::now();
+    let started = ActiveClock::start();
     let supervisor = start_duplex_supervisor(
         child,
         context.cancel.clone(),
@@ -756,7 +757,7 @@ fn start_duplex_supervisor(
     child: ManagedChild,
     cancel: CancelToken,
     timeout: Option<Duration>,
-    started: tokio::time::Instant,
+    started: ActiveClock,
     grace: Duration,
 ) -> DuplexSupervisor {
     let (control, receiver) = mpsc::unbounded_channel();
@@ -771,7 +772,7 @@ async fn supervise_duplex_child(
     mut control: mpsc::UnboundedReceiver<DuplexControl>,
     cancel: CancelToken,
     timeout: Option<Duration>,
-    started: tokio::time::Instant,
+    started: ActiveClock,
     grace: Duration,
 ) -> (DuplexEnd, CleanupCertainty) {
     loop {
