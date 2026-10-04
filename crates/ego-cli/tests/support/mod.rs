@@ -236,6 +236,8 @@ impl ReleaseGate {
 /// What the fake daemon knows.
 #[derive(Debug, Clone)]
 pub struct Plan {
+    /// Hold discovery so a PTY can submit input before the composer opens.
+    pub discovery_gate: Option<Arc<ReleaseGate>>,
     /// The names `/api/tags` reports as installed.
     pub installed: Vec<String>,
     /// The context `/api/ps` reports as served. `None` makes the model look
@@ -258,6 +260,7 @@ pub struct Plan {
 impl Default for Plan {
     fn default() -> Self {
         Plan {
+            discovery_gate: None,
             installed: vec![MODEL.to_string()],
             context_length: Some(32_768),
             completions: vec![Reply::Sse(text("It is done."))],
@@ -512,6 +515,9 @@ fn serve(
             stream.flush()
         }
         "/api/tags" => {
+            if let Some(gate) = &plan.discovery_gate {
+                gate.wait();
+            }
             let models: Vec<serde_json::Value> = plan
                 .installed
                 .iter()
