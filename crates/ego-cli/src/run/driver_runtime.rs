@@ -1925,8 +1925,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 ));
                             }
 
-                            let queue_abandoned =
-                                matches!(&termination, RunTermination::Failed { .. });
+                            if let RunTermination::Failed { message } = &termination {
+                                diagnostics.note(&format!(
+                                    "{message}; fix the error and retry, or use /quit"
+                                ));
+                            }
                             last = Ended {
                                 termination,
                                 session: active.id(),
@@ -1939,9 +1942,6 @@ pub(super) async fn drive_execution<S: EventSink>(
                             // the process. A broken stdout or a SIGTERM is not a turn to
                             // return to a prompt from.
                             if cancel.is_cancelled() {
-                                break 'epoch EpochTransition::Exit;
-                            }
-                            if queue_abandoned {
                                 break 'epoch EpochTransition::Exit;
                             }
                         }

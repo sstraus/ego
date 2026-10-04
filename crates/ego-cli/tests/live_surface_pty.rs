@@ -25,7 +25,15 @@ fn successor_compact_accepts_next_turn_and_resumes() {
     successor_accepts_next_turn("compact");
 }
 
+// Catches: a failed generation admission exits the REPL instead of returning to its prompt.
+#[test]
+fn failed_generation_admission_keeps_repl_alive() {
+    successor_accepts_next_turn("admission-failure");
+}
+
 fn successor_accepts_next_turn(action: &str) {
+    let failing = action == "admission-failure";
+    let gate = support::ReleaseGate::new();
     let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
     let mut replies = vec![Reply::Sse(text("REGRESSION-MARKER-ANSWER"))];
     if action == "compact" {
@@ -37,6 +45,7 @@ fn successor_accepts_next_turn(action: &str) {
     ]);
     let stub = Stub::start(Plan {
         completions: replies,
+        subsequent_resolution_gate: failing.then(|| gate.clone()),
         ..Plan::default()
     });
     let places = support::Places::new();
@@ -72,17 +81,71 @@ fn successor_accepts_next_turn(action: &str) {
     let start = output.len();
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
-    let start = output.len();
-    input.write_all(format!("/{action}\r").as_bytes()).unwrap();
-    input.flush().unwrap();
-    until_prompt_from(&reader, &mut output, start);
-    drain_until_quiet(&reader, &mut output);
+    if !failing {
+        let start = output.len();
+        input.write_all(format!("/{action}\r").as_bytes()).unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, start);
+        drain_until_quiet(&reader, &mut output);
+    }
+    let requests_before = stub.requests().len();
     let start = output.len();
     input.write_all(b"second prompt\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
-    let start = output.len();
-    until_prompt_from(&reader, &mut output, start);
+    if failing {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !stub.requests()[requests_before..]
+            .iter()
+            .any(|request| request.path == "/api/ps")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "second turn did not resolve its model"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let session = std::fs::read_dir(places.home_path().join("sessions"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let log = session.join("events.jsonl");
+        let saved = session.join("events.saved");
+        std::fs::rename(&log, &saved).unwrap();
+        std::fs::create_dir(&log).unwrap();
+        gate.release();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "fix the error and retry, or use /quit",
+        );
+        let start = output.len();
+        until_prompt_from(&reader, &mut output, start);
+        let shown = normalized(&output);
+        assert!(
+            shown.contains("GenerationAdmission"),
+            "wrong failure: {shown}"
+        );
+        assert_eq!(
+            shown
+                .matches("fix the error and retry, or use /quit")
+                .count(),
+            1
+        );
+        assert_eq!(
+            stub.generations().len(),
+            1,
+            "failed admission sent a generation"
+        );
+        std::fs::remove_dir(&log).unwrap();
+        std::fs::rename(&saved, &log).unwrap();
+    } else {
+        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+        let start = output.len();
+        until_prompt_from(&reader, &mut output, start);
+    }
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     let status = bounded_exit(child);
@@ -91,6 +154,9 @@ fn successor_accepts_next_turn(action: &str) {
     reader_join.join().unwrap();
     writer_join.join().unwrap();
     assert!(status.success(), "successor process failed: {status:?}");
+    if failing {
+        return;
+    }
     let listing = places
         .ego(&stub)
         .subcommand("ls")
@@ -107,7 +173,7 @@ fn successor_accepts_next_turn(action: &str) {
     let resumed = places
         .ego(&stub)
         .subcommand("resume")
-        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .args(["--sandbox", "off"])
         .run_pty("resume prompt");
     assert_eq!(resumed.code, Some(0), "resume failed: {resumed:?}");
     assert!(
