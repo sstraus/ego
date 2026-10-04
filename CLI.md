@@ -349,6 +349,18 @@ mode × sandbox matrix is published and contradictory combinations are
 rejected, not guessed. Every control is individually disableable; hard
 ceilings come only from an administrator's `/etc/ego`.
 
+**Launcher precondition:** a launcher of ego, or of an application that hosts
+`ego-tools`, must not leak inheritable file descriptors numbered 3 or higher.
+Close those descriptors or set close-on-exec (`FD_CLOEXEC`) before launching
+the host. Ego does not sweep or close launcher-inherited descriptors and adds
+no unsafe code to do so. With `--sandbox off`, leaked descriptors can reach
+tool children. On Linux, the Landlock helper instead refuses confined execs
+with `unexpected inherited file descriptor N`; `ro` and `workspace` execution
+can therefore fail before the command starts. In the 2026-09-29 `rb-run`
+incident (regression case), the launcher leaked lock descriptors 8 and 9 without
+close-on-exec: sandbox-off children inherited them and Landlock refused
+confined execs. The launcher was subsequently fixed.
+
 **Session**
 
 ```
