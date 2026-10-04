@@ -891,6 +891,29 @@ mod edit {
     }
 
     #[test]
+    fn write_allow_does_not_edit_a_symlink_target_outside_its_glob() {
+        // Catches: matching the input spelling lets a src/** write edit other/**.
+        let ws = Workspace::with_rules(Mode::Default, allowing(&["write(src/**)"]));
+        let target = ws.file("other/pricing.py", "apple = 1\n");
+        fs::create_dir_all(ws.root.join("src")).unwrap();
+        std::os::unix::fs::symlink(&target, ws.root.join("src/pricing.py")).unwrap();
+        let call = ws
+            .prepare(
+                "edit",
+                json!({ "path": "src/pricing.py", "old_string": "apple = 1", "new_string": "apple = 2" }),
+            )
+            .unwrap();
+        let Classification::Ask(pending) = ws.policy.classify(call) else {
+            panic!("the symlink target must not inherit the input path's write allow");
+        };
+        assert!(matches!(
+            block_on(ws.policy.settle(pending)),
+            Resolution::Ask(_)
+        ));
+        assert_eq!(fs::read_to_string(target).unwrap(), "apple = 1\n");
+    }
+
+    #[test]
     fn edit_replaces_the_text_it_names_and_leaves_the_rest_of_the_file() {
         let ws = editable();
 
