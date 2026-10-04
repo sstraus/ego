@@ -22,7 +22,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --help 'Print help'
             cand run 'Run an agent from a prompt, headless.'
             cand resume 'Continue a session; no ID = latest in this workspace.'
-            cand fork 'Fork a session at its latest durable idle boundary.'
+            cand fork 'Fork a session at its tip or after the completed turn containing a message.'
             cand compact 'Compact a session into its deterministic successor.'
             cand export 'Export a session locally or as a structurally sanitized bundle.'
             cand ls 'List sessions (this workspace; --all for every one).'
@@ -130,6 +130,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --help 'Print help'
         }
         &'ego;fork'= {
+            cand --at 'at'
             cand --session-dir 'Override the store location'
             cand -C 'Run as if started in DIR'
             cand --output 'text|json|jsonl'

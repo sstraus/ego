@@ -98,8 +98,9 @@ Continue a session; no ID = latest in this workspace.
 
 ## `ego fork`
 
-Fork a session at its latest durable idle boundary.
+Fork a session at its tip or after the completed turn containing a message.
 
+- `--at <ITEM_ID>` — (undocumented)
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help
 - `--output <OUTPUT>` — text|json|jsonl

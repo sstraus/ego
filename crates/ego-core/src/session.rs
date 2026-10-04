@@ -634,7 +634,11 @@ impl PreparedFork {
             })
             .ok_or(ForkError::UnsettledTurn)?;
         let prefix = SessionState::replay(events[..=boundary].iter().cloned());
-        Self::new(source, &prefix, at)
+        Ok(Self {
+            seed: TargetSeed::fork(source, prefix.last_seq, at)
+                .with_title(prefix.title.clone())
+                .with_goal(prefix.goal.as_ref()),
+        })
     }
 
     pub fn seed(&self) -> &TargetSeed {

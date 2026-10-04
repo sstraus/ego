@@ -330,19 +330,124 @@ fn cli_fork_at_live_source_ignores_the_writer_lease_and_concurrent_appends_do_no
         )
         .unwrap();
     let before = store.entries(&id).unwrap().unwrap();
-    let attempt = SessionState::replay(before.iter().filter_map(|entry| match entry {
+    let live_state = SessionState::replay(before.iter().filter_map(|entry| match entry {
         SessionEntry::Event(event) => Some(event.clone()),
         _ => None,
-    }))
-    .generations
-    .values()
-    .next()
-    .copied()
-    .unwrap();
+    }));
+    let attempt = *live_state.generations.values().next().unwrap();
+    let live_turn = before
+        .iter()
+        .find_map(|entry| match entry {
+            SessionEntry::Event(event)
+                if matches!(event.kind, EventKind::GenerationStarted { .. }) =>
+            {
+                Some(event.env.turn)
+            }
+            _ => None,
+        })
+        .unwrap();
+    // Catches: concurrent append tears the journal read used by fork preparation.
+    let (reading_tx, reading_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let reading_store = std::sync::Arc::new(JsonlStore::new(
+        fixture.sessions.path(),
+        fixture.root(),
+        Box::new(ForkReadHandshake {
+            log: fixture
+                .sessions
+                .path()
+                .join(serde_json::to_value(id).unwrap().as_str().unwrap())
+                .join("events.jsonl"),
+            reading: reading_tx,
+            release: std::sync::Mutex::new(release_rx),
+            armed: std::sync::atomic::AtomicBool::new(true),
+        }),
+    ));
+    let service = ego_core::session_lifecycle::SessionLifecycle::new(
+        reading_store,
+        std::sync::Arc::new(ForkNoRuns),
+        std::sync::Arc::new(ForkClock),
+    );
+    std::thread::scope(|scope| {
+        let read = scope.spawn(|| service.prepare_fork_at(id, item).unwrap());
+        reading_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let (appending_tx, appending_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let store = &store;
+        let last_seq = opened.state.last_seq;
+        let fixture = &fixture;
+        let append = scope.spawn(move || {
+            let lock_path = fixture
+                .sessions
+                .path()
+                .join(serde_json::to_value(id).unwrap().as_str().unwrap())
+                .join("events.lock");
+            let mut lock = fd_lock::RwLock::new(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(lock_path)
+                    .unwrap(),
+            );
+            assert_eq!(
+                lock.try_write().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "append lock attempt did not overlap the fork read"
+            );
+            appending_tx.send(()).unwrap();
+            store
+                .append(
+                    &id,
+                    &DomainEvent {
+                        env: Envelope {
+                            seq: {
+                                let mut seq = last_seq;
+                                seq.next()
+                            },
+                            id: EventId::new(),
+                            turn: live_turn,
+                            item: None,
+                            parent: None,
+                            ts: Timestamp::from_millis(100),
+                            producer: Producer::Main,
+                        },
+                        kind: EventKind::SessionTitleChanged {
+                            title: Some("concurrent append".into()),
+                        },
+                    },
+                )
+                .unwrap();
+            done_tx.send(()).unwrap();
+        });
+        appending_rx.recv().unwrap();
+        assert!(
+            matches!(
+                done_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "append escaped the fork read lock"
+        );
+        release_tx.send(()).unwrap();
+        let prepared = read.join().unwrap();
+        append.join().unwrap();
+        let child = SessionId::new();
+        assert!(matches!(
+            fixture.store().publish_fork(child, prepared.seed()),
+            ego_core::session::TargetPublication::PublishedDurably { .. }
+        ));
+        assert!(fixture.replay_bytes(child).contains("answer settled"));
+        fixture.assert_carries_source_metadata(&child.to_string());
+    });
     std::thread::scope(|scope| {
         let append = scope.spawn(|| {
             // Append real journal records while the fork process reads it.
-            let mut seq = opened.state.last_seq;
+            let mut seq = {
+                let mut seq = opened.state.last_seq;
+                seq.next();
+                seq
+            };
             for n in 0..32 {
                 store
                     .append(
@@ -364,30 +469,6 @@ fn cli_fork_at_live_source_ignores_the_writer_lease_and_concurrent_appends_do_no
                     )
                     .unwrap();
             }
-            store
-                .append(
-                    &id,
-                    &DomainEvent {
-                        env: Envelope {
-                            seq: seq.next(),
-                            id: EventId::new(),
-                            turn: TurnId::new(),
-                            item: None,
-                            parent: None,
-                            ts: Timestamp::from_millis(101),
-                            producer: Producer::Main,
-                        },
-                        kind: EventKind::AttemptSettled {
-                            attempt,
-                            outcome: ego_core::generator::attempt::Outcome::new(
-                                ego_core::generator::types::StopReason::Stop,
-                                ego_core::generator::attempt::DeliveryCertainty::DefinitelySent,
-                                ego_core::generator::attempt::UsageReport::Missing,
-                            ),
-                        },
-                    },
-                )
-                .unwrap();
         });
         let result = fixture.fork_at(item);
         assert_eq!(result.code, Some(0), "{}", result.stderr);
@@ -395,6 +476,58 @@ fn cli_fork_at_live_source_ignores_the_writer_lease_and_concurrent_appends_do_no
         assert!(fixture.replay_bytes(child).contains("answer settled"));
         fixture.assert_carries_source_metadata(result.stdout.trim());
         append.join().unwrap();
+        let mut seq =
+            SessionState::replay(store.entries(&id).unwrap().unwrap().into_iter().filter_map(
+                |entry| match entry {
+                    SessionEntry::Event(event) => Some(event),
+                    _ => None,
+                },
+            ))
+            .last_seq;
+        store
+            .append(
+                &id,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: seq.next(),
+                        id: EventId::new(),
+                        turn: live_turn,
+                        item: None,
+                        parent: None,
+                        ts: Timestamp::from_millis(101),
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::AttemptSettled {
+                        attempt,
+                        outcome: ego_core::generator::attempt::Outcome::new(
+                            ego_core::generator::types::StopReason::Stop,
+                            ego_core::generator::attempt::DeliveryCertainty::DefinitelySent,
+                            ego_core::generator::attempt::UsageReport::Missing,
+                        ),
+                    },
+                },
+            )
+            .unwrap();
+        store
+            .append(
+                &id,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: seq.next(),
+                        id: EventId::new(),
+                        turn: live_turn,
+                        item: None,
+                        parent: None,
+                        ts: Timestamp::from_millis(102),
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ego_core::event::domain::ExitReason::Completed,
+                    },
+                },
+            )
+            .unwrap();
     });
     let after = store.entries(&id).unwrap().unwrap();
     assert_eq!(
@@ -409,6 +542,10 @@ fn cli_fork_at_live_source_ignores_the_writer_lease_and_concurrent_appends_do_no
     assert!(
         state.live_attempts.is_empty(),
         "source settlement was not preserved"
+    );
+    assert!(
+        state.turns[&live_turn].completed && state.turns[&live_turn].ok,
+        "source turn did not complete successfully"
     );
 }
 
@@ -508,5 +645,88 @@ fn cli_fork_rejects_raw_sequences_and_foreign_items_without_tip_fallback() {
             "invalid item {item} became a tip fork"
         );
         assert_eq!(fixture.sessions_listing().len(), before);
+    }
+}
+
+/// Pause the real journal read under its append lock; all bytes remain OS-owned.
+struct ForkReadHandshake {
+    log: std::path::PathBuf,
+    reading: std::sync::mpsc::Sender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    armed: std::sync::atomic::AtomicBool,
+}
+impl ego_tools::store::StoreIo for ForkReadHandshake {
+    fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+        let bytes = ego_tools::store::StoreIo::read(&OsIo, path)?;
+        if path == self.log && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let mut lock = fd_lock::RwLock::new(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path.with_file_name("events.lock"))?,
+            );
+            assert_eq!(
+                lock.try_write().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "fork journal read has no shared append lock"
+            );
+            self.reading.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }
+        Ok(bytes)
+    }
+    fn append_line(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        ego_tools::store::StoreIo::append_line(&OsIo, path, bytes)
+    }
+    fn fsync(&self, path: &Path) -> std::io::Result<()> {
+        ego_tools::store::StoreIo::fsync(&OsIo, path)
+    }
+    fn exists(&self, path: &Path) -> std::io::Result<bool> {
+        ego_tools::store::StoreIo::exists(&OsIo, path)
+    }
+    fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        ego_tools::store::StoreIo::replace_atomic(&OsIo, path, bytes)
+    }
+    fn truncate(&self, path: &Path, len: u64) -> std::io::Result<()> {
+        ego_tools::store::StoreIo::truncate(&OsIo, path, len)
+    }
+    fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        ego_tools::store::StoreIo::remove_file(&OsIo, path)
+    }
+    fn list_dirs(&self, path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+        ego_tools::store::StoreIo::list_dirs(&OsIo, path)
+    }
+}
+struct ForkNoRuns;
+impl ego_core::session_lifecycle::SessionRunLifecycle for ForkNoRuns {
+    fn activity(&self, _: SessionId) -> ego_core::session_lifecycle::ActivityFuture<'_> {
+        Box::pin(std::future::ready(Ok(
+            ego_core::session_lifecycle::SessionActivity::Inactive,
+        )))
+    }
+    fn cancel_and_settle(&self, id: SessionId) -> ego_core::session_lifecycle::CloseFuture<'_> {
+        Box::pin(std::future::ready(Ok(
+            ego_core::session_lifecycle::ClosedSession {
+                id,
+                cancelled: true,
+            },
+        )))
+    }
+    fn hold(
+        &self,
+        _: SessionId,
+        _: ego_core::run::RequestId,
+    ) -> ego_core::session_lifecycle::HoldSignalFuture<'_> {
+        Box::pin(std::future::ready(Ok(false)))
+    }
+}
+struct ForkClock;
+impl ego_core::event::time::Clock for ForkClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::from_millis(100)
     }
 }

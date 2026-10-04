@@ -2228,75 +2228,81 @@ impl ReplaySource for JsonlStore {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        let (header, start) = decoded_header(&bytes)
-            .map_err(|error| ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: error.to_string(),
-            })?
-            .ok_or_else(|| ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: "session log has no complete header".to_string(),
-            })?;
-        if header.v != CODEC_VERSION || header.session != *session {
-            return Err(ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: "session log header has the wrong codec or identity".to_string(),
-            });
-        }
-        let (valid_len, _) = valid_prefix(&bytes, start);
-        if valid_len != bytes.len() {
-            return Err(ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: "session log has a corrupt or torn tail".to_owned(),
-            });
-        }
-
-        let mut entries = Vec::new();
-        let mut expected = Seq::ZERO;
-        for line in split_lines(&bytes[start..]) {
-            let position = expected.next();
-            let record = match decode_line(line) {
-                Ok(StoreLine::Record(record)) if record.seq == position => record,
-                Ok(StoreLine::Record(record)) => {
-                    return Err(ReplaySourceError::CorruptSession {
-                        session: *session,
-                        reason: format!(
-                            "physical position {} followed {}, so the session \
-                             file is out of order",
-                            record.seq, expected
-                        ),
-                    });
-                }
-                Ok(StoreLine::Unknown(_)) => {
-                    return Err(ReplaySourceError::UnknownEntry {
-                        session: *session,
-                        position,
-                    });
-                }
-                Ok(StoreLine::Header(_)) => {
-                    return Err(ReplaySourceError::CorruptSession {
-                        session: *session,
-                        reason: "session log contains a second header".to_string(),
-                    });
-                }
-                Err(error) => {
-                    return Err(ReplaySourceError::CorruptSession {
-                        session: *session,
-                        reason: error.to_string(),
-                    });
-                }
-            };
-            let entry =
-                serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
-                    ReplaySourceError::UnknownEntry {
-                        session: *session,
-                        position: record.seq,
-                    }
-                })?;
-            entries.push(entry);
-        }
-        Ok(Some(entries))
+        decode_session_entries(session, &bytes).map(Some)
     }
+}
+
+fn decode_session_entries(
+    session: &SessionId,
+    bytes: &[u8],
+) -> Result<Vec<SessionEntry>, ReplaySourceError> {
+    let (header, start) = decoded_header(bytes)
+        .map_err(|error| ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: error.to_string(),
+        })?
+        .ok_or_else(|| ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: "session log has no complete header".to_string(),
+        })?;
+    if header.v != CODEC_VERSION || header.session != *session {
+        return Err(ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: "session log header has the wrong codec or identity".to_string(),
+        });
+    }
+    let (valid_len, _) = valid_prefix(bytes, start);
+    if valid_len != bytes.len() {
+        return Err(ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: "session log has a corrupt or torn tail".to_owned(),
+        });
+    }
+
+    let mut entries = Vec::new();
+    let mut expected = Seq::ZERO;
+    for line in split_lines(&bytes[start..]) {
+        let position = expected.next();
+        let record = match decode_line(line) {
+            Ok(StoreLine::Record(record)) if record.seq == position => record,
+            Ok(StoreLine::Record(record)) => {
+                return Err(ReplaySourceError::CorruptSession {
+                    session: *session,
+                    reason: format!(
+                        "physical position {} followed {}, so the session \
+                             file is out of order",
+                        record.seq, expected
+                    ),
+                });
+            }
+            Ok(StoreLine::Unknown(_)) => {
+                return Err(ReplaySourceError::UnknownEntry {
+                    session: *session,
+                    position,
+                });
+            }
+            Ok(StoreLine::Header(_)) => {
+                return Err(ReplaySourceError::CorruptSession {
+                    session: *session,
+                    reason: "session log contains a second header".to_string(),
+                });
+            }
+            Err(error) => {
+                return Err(ReplaySourceError::CorruptSession {
+                    session: *session,
+                    reason: error.to_string(),
+                });
+            }
+        };
+        let entry = serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
+            ReplaySourceError::UnknownEntry {
+                session: *session,
+                position: record.seq,
+            }
+        })?;
+        entries.push(entry);
+    }
+    Ok(entries)
 }
 
 impl CompactionTargetPort for JsonlStore {
@@ -2387,14 +2393,11 @@ impl JsonlStore {
             ));
         }
 
-        let entries = ReplaySource::entries(self, target).map_err(|error| {
+        let entries = decode_session_entries(target, &bytes).map_err(|error| {
             invalid_log(format!(
                 "the deterministic compaction target could not be decoded: {error}"
             ))
         })?;
-        let Some(entries) = entries else {
-            return Ok(CompactionTargetInspection::Missing);
-        };
         let Some(SessionEntry::Event(first_event)) = entries.first() else {
             return Ok(CompactionTargetInspection::Occupied);
         };
