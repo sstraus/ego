@@ -3578,9 +3578,9 @@ fn rapid_follow_ups_after_a_reply_are_durable_once_in_typed_order() {
     let prompts: Vec<String> = events
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("event envelope"))
-        .filter(|event| event["payload"]["kind"] == "UserPrompt")
+        .filter(|event| event["payload"]["event"]["kind"]["kind"] == "UserPrompt")
         .map(|event| {
-            event["payload"]["text"]
+            event["payload"]["event"]["kind"]["text"]
                 .as_str()
                 .expect("prompt text")
                 .to_owned()
