@@ -3212,12 +3212,23 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
-    until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    until_prompt_from(&reader, &mut output, cancel_start);
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
     let visible = screen.screen().contents();
 
+    let log = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("session log");
+    assert!(
+        log.contains(r#""exit_reason":{"Cancelled":"User"}"#),
+        "Esc must cancel the streamed turn: {log}"
+    );
     let status = visible
         .lines()
         .rev()
