@@ -822,9 +822,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     // lose the session by pressing it once more.
                                     repl::Line::Interrupted => continue,
                                     repl::Line::Ended => {
-                                        // The last turn's refusal was already shown. Idle EOF
-                                        // ends the session; session-end failures still replace Done.
-                                        last.termination = RunTermination::Done;
+                                        // The last turn's provider/model refusal was already shown.
+                                        // Preserve cancellation, permission, and other outcomes.
+                                        if matches!(
+                                            &last.termination,
+                                            RunTermination::Provider { .. }
+                                                | RunTermination::UsageError { .. }
+                                        ) {
+                                            last.termination = RunTermination::Done;
+                                        }
                                         break 'epoch EpochTransition::Exit;
                                     }
                                     repl::Line::Refused(why) => {
