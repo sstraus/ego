@@ -1736,12 +1736,17 @@ fn exec_paths_catches_profile_only_configuration_and_absent_vs_empty_precedence(
         "exec_paths = ['/tools']\n[profile.custom]\nexec_paths = ['/profile-tools']",
     )
     .unwrap();
-    let effective = resolve(&[user.clone()], Trust::Untrusted, None).unwrap();
+    let effective = resolve(std::slice::from_ref(&user), Trust::Untrusted, None).unwrap();
     assert_eq!(
         effective.exec_paths,
         vec![std::path::PathBuf::from("/tools")]
     );
-    let profiled = resolve(&[user.clone()], Trust::Untrusted, Some("custom")).unwrap();
+    let profiled = resolve(
+        std::slice::from_ref(&user),
+        Trust::Untrusted,
+        Some("custom"),
+    )
+    .unwrap();
     assert_eq!(
         profiled.exec_paths,
         vec![std::path::PathBuf::from("/profile-tools")]
