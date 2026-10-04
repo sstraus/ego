@@ -76,7 +76,23 @@ fn two_lines_submitted_before_composer_readiness_reach_the_session_once() {
     drain(&reader, &mut output);
     assert_eq!(rendered_prompt_count(&output), 0, "composer already opened");
     discovery.release();
-    until_normalized(&reader, &mut output, 0, "EARLY-FIRST-ANSWER");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !normalized(&output).contains("EARLY-FIRST-ANSWER") {
+        match reader.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(chunk) => output.extend(chunk),
+            Err(error) => panic!(
+                "first answer wait failed: {error}; requests: {:?}; journal: {}",
+                stub.requests(),
+                std::fs::read_to_string(
+                    ego.home_path()
+                        .join("sessions")
+                        .join(support::FIXTURE_SESSION_ID)
+                        .join("events.jsonl")
+                )
+                .unwrap_or_default(),
+            ),
+        }
+    }
     until_normalized(
         &reader,
         &mut output,
