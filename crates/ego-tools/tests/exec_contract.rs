@@ -2887,13 +2887,22 @@ fn udp_control(ip: std::net::IpAddr) -> (String, NetworkControl) {
 }
 
 #[cfg(target_os = "macos")]
-fn open_offline_control_run(workspace: CanonPath, nonloopback: std::net::IpAddr) -> Option<Run> {
+fn open_offline_control_run(
+    workspace: CanonPath,
+    nonloopback: Option<std::net::IpAddr>,
+) -> Option<Run> {
     let attempt = attempt_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
     if let Err(ProcessError::MissingCapabilities(missing)) = &attempt.outcome {
         assert_eq!(missing.required(), ExecCaps::NO_IP_NETWORK);
+        assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
         if std::env::var_os(BACKEND_ABSENT).is_some() {
             return None;
         }
+        let Some(nonloopback) = nonloopback else {
+            // Non-loopback coverage is unavailable, but the caller must still
+            // run every loopback baseline and check any admitted offline child.
+            return None;
+        };
         let reference = missing
             .probe_evidence()
             .expect("measured refusal has evidence");
@@ -2939,7 +2948,6 @@ fn open_offline_control_run(workspace: CanonPath, nonloopback: std::net::IpAddr)
             !independent_control_pairs,
             "independent host control still works; confinement must be demonstrated: {transcript}"
         );
-        assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
         eprintln!(
             "note: non-loopback pairing became unavailable during measurement; verified precise refusal against a fresh independent control"
         );
@@ -2950,31 +2958,6 @@ fn open_offline_control_run(workspace: CanonPath, nonloopback: std::net::IpAddr)
             .into_run()
             .unwrap_or_else(|error| panic!("offline run failed: {error}")),
     )
-}
-
-#[cfg(target_os = "macos")]
-fn macos_offline_control_or_not_verifiable(
-    initial: Option<std::net::IpAddr>,
-    fresh: impl FnOnce() -> Option<std::net::IpAddr>,
-) -> Option<std::net::IpAddr> {
-    let paired = initial.or_else(|| {
-        eprintln!("note: initial non-loopback TCP control unavailable; re-pairing a fresh control");
-        fresh()
-    });
-    if paired.is_none() {
-        eprintln!(
-            "not-verifiable: no pairable non-loopback control after a fresh measurement; \
-             independent offline verification is unavailable"
-        );
-    }
-    paired
-}
-
-fn assert_offline_child_cannot_reach(offline: &Run, network_spec: SpawnSpec) {
-    assert!(
-        execute(offline, network_spec).is_err(),
-        "offline child reached an IP endpoint"
-    );
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2991,22 +2974,27 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
     ];
     let nonloopback = local_non_loopback().filter(|ip| non_loopback_control_pairs(*ip));
     #[cfg(target_os = "macos")]
-    let nonloopback = macos_offline_control_or_not_verifiable(nonloopback, || {
+    let nonloopback = nonloopback.or_else(|| {
+        eprintln!("note: initial non-loopback TCP control unavailable; re-pairing a fresh control");
         local_non_loopback().filter(|ip| non_loopback_control_pairs(*ip))
     });
-    let Some(nonloopback) = nonloopback else {
+    if let Some(nonloopback) = nonloopback {
+        endpoints.extend([
+            ("tcp", tcp_control(nonloopback)),
+            ("udp", udp_control(nonloopback)),
+        ]);
+    } else {
         #[cfg(target_os = "macos")]
-        return;
+        eprintln!(
+            "not-verifiable: no pairable non-loopback control after a fresh measurement; \
+             non-loopback offline coverage is unavailable; checking loopback controls"
+        );
         #[cfg(not(target_os = "macos"))]
         {
-            // A host that cannot pair on a non-loopback address cannot provide the
-            // paired address-class control. It must still refuse the requested
-            // offline guarantee rather than silently treating the missing probe as
-            // proof. Said out loud, because a silent skip of the strong path is
-            // indistinguishable from having run it.
+            // A missing host prerequisite must cause a precise refusal.
             eprintln!(
                 "note: no pairable non-loopback address on this host; asserting the refusal is \
-             precise rather than the guarantee is demonstrated"
+                 precise rather than the guarantee is demonstrated"
             );
             let missing = match open_run(Confinement::Off, true, root, 1024 * 1024, 1024) {
                 Err(ProcessError::MissingCapabilities(missing)) => missing,
@@ -3016,11 +3004,7 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
             assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
             return;
         }
-    };
-    endpoints.extend([
-        ("tcp", tcp_control(nonloopback)),
-        ("udp", udp_control(nonloopback)),
-    ]);
+    }
 
     for (protocol, (endpoint, control)) in endpoints {
         let workspace = root.clone();
@@ -3040,8 +3024,8 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
         );
         execute(&baseline, network_spec.clone()).expect("paired network control must work");
 
-        // A refusal alone never passes. macOS additionally checks whether
-        // the independent network prerequisite changed during measurement.
+        // Check every admitted offline child. macOS accepts a precise refusal
+        // only when independent non-loopback coverage is unavailable.
         #[cfg(target_os = "macos")]
         let offline = open_offline_control_run(workspace, nonloopback);
         // Linux never demonstrates offline (ADR 2026-08-21 §5): Landlock's
@@ -3065,8 +3049,11 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let offline = open_confined_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
         if let Some(offline) = offline {
-            assert_offline_child_cannot_reach(&offline, network_spec);
-        } else if cfg!(not(target_os = "linux")) {
+            assert!(
+                execute(&offline, network_spec).is_err(),
+                "offline child reached an IP endpoint"
+            );
+        } else if cfg!(not(any(target_os = "linux", target_os = "macos"))) {
             return;
         }
         match control {
@@ -3078,57 +3065,9 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_seatbelt_offline_oracle_retries_a_stale_unpairable_control() {
-    // Catches: an earlier failed control rejects a later pairable measurement.
-    let address = "192.0.2.1".parse().unwrap();
-    assert_eq!(
-        macos_offline_control_or_not_verifiable(None, || Some(address)),
-        Some(address)
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_seatbelt_offline_oracle_reports_unpairable_controls_as_not_verifiable() {
-    // Catches: no independent control is treated as a probe failure.
-    assert_eq!(macos_offline_control_or_not_verifiable(None, || None), None);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_seatbelt_offline_oracle_preserves_an_already_paired_control() {
-    // Catches: a needless new measurement discards an available control.
-    let address = "192.0.2.1".parse().unwrap();
-    assert_eq!(
-        macos_offline_control_or_not_verifiable(Some(address), || {
-            panic!("an available control needs no repair")
-        }),
-        Some(address)
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-#[should_panic(expected = "offline child reached an IP endpoint")]
-fn macos_seatbelt_offline_oracle_rejects_false_network_confinement() {
-    // Catches: a false offline claim passes despite a child reaching a live control.
-    let root = cwd();
-    let baseline = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024)
-        .expect("unconfined baseline");
-    let (endpoint, _control) = tcp_control("127.0.0.1".parse().unwrap());
-    let network_spec = fixture_arg_spec(
-        "exec_contract_fixture_connects",
-        [OsString::from("tcp"), OsString::from(endpoint)],
-        None,
-        root,
-    );
-    execute(&baseline, network_spec.clone()).expect("paired network control must work");
-    assert_offline_child_cannot_reach(&baseline, network_spec);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
 fn macos_seatbelt_offline_controls_cover_tcp_udp_and_both_address_classes() {
+    // Catches: an admitted offline child reaches a live loopback endpoint,
+    // including when independent non-loopback coverage is unavailable.
     // The same paired controls are intentionally run under the Seatbelt-only
     // target gate. A missing profile compiler/backend must return a precise
     // capability refusal; it may not silently run the child unconfined.
