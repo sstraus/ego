@@ -127,10 +127,29 @@ pub fn windows_system_environment() -> Vec<(&'static str, OsString)> {
 }
 
 #[cfg(not(windows))]
-fn ready_prompt_count(output: &[u8]) -> usize {
+pub fn ready_prompt_count(output: &[u8]) -> usize {
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+    // A typed-line repaint also contains "> ". Only a completed, empty
+    // editor frame is ready for input; Ctrl-D during submission can be lost
+    // while Reedline leaves raw mode and starts its next cursor query.
     output
-        .windows(2)
-        .filter(|window| *window == b"> ")
+        .windows(HIDE_CURSOR.len())
+        .enumerate()
+        .filter(|(_, window)| *window == HIDE_CURSOR)
+        .filter(|(start, _)| {
+            let frame = &output[start + HIDE_CURSOR.len()..];
+            let Some(end) = frame
+                .windows(SHOW_CURSOR.len())
+                .position(|window| window == SHOW_CURSOR)
+            else {
+                return false;
+            };
+            let mut screen = vt100::Parser::new(24, 80, 0);
+            screen.process(&frame[..end]);
+            screen.screen().contents().trim() == ">"
+        })
         .count()
         .saturating_sub(1)
 }
