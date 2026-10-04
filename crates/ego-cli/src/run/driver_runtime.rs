@@ -1354,7 +1354,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 Arc::new(super::session_commands::NoLiveRuns),
                                                 Arc::new(SystemClock),
                                             );
-                                        let fork_at_message = matches!(command, repl::HostCommand::Fork(_));
+                                        let fork_at_message =
+                                            matches!(command, repl::HostCommand::Fork(_));
                                         let prepared = match command {
                                             repl::HostCommand::Fork(item) => {
                                                 lifecycle.prepare_fork_at(active.id(), item)

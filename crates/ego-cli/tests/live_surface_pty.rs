@@ -4829,6 +4829,7 @@ fn fork_after_a_turn() -> String {
     receipt
 }
 
+// Catches: a successful fork switches sessions silently or names the wrong parent.
 #[test]
 fn fork_prints_a_receipt_naming_the_source_session() {
     let receipt = fork_after_a_turn();
@@ -4836,6 +4837,20 @@ fn fork_prints_a_receipt_naming_the_source_session() {
         receipt.contains(&format!("forked session {}", support::FIXTURE_SESSION_ID))
             && receipt.contains("ego resume"),
         "no fork receipt naming the parent: {receipt:?}"
+    );
+    assert_eq!(receipt.matches("forked session").count(), 1, "{receipt}");
+    let successor = receipt
+        .split(" into ")
+        .nth(1)
+        .expect("successor id")
+        .split(';')
+        .next()
+        .unwrap();
+    let successor: ego_core::event::id::SessionId = successor.parse().expect("receipt session id");
+    assert_ne!(successor.to_string(), support::FIXTURE_SESSION_ID);
+    assert!(
+        receipt.contains(&format!("this is now session {successor}")),
+        "{receipt}"
     );
 }
 
@@ -4945,12 +4960,13 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
     status(&after)
 }
 
+// Catches: a tip fork discards the measured occupancy and renders ctx ?.
 #[test]
 fn the_forked_session_keeps_the_context_reading_in_its_status_row() {
     let status = status_row_after_forking_a_session_with_a_context_reading();
     assert!(
-        !status.contains("ctx ?"),
-        "the fork lost the context reading: {status:?}"
+        status.contains("ctx 9.2%"),
+        "the fork lost or changed the measured context reading: {status:?}"
     );
 }
 
@@ -7130,13 +7146,37 @@ fn critic_fork_model_is_present_before_first_successor_prompt() {
     critic_successor_model_before_generation("fork");
 }
 
-// Catches: quitting directly after compaction leaves resume without a model.
+// Catches: silent compaction, a receipt naming the wrong successor, or claiming unmeasured occupancy.
 #[test]
-fn critic_compact_model_is_present_before_first_successor_prompt() {
-    critic_successor_model_before_generation("compact");
+fn compact_prints_a_receipt_naming_the_successor_and_reports_context_availability() {
+    let (receipt, target) = critic_successor_model_before_generation("compact");
+    assert_eq!(receipt.matches("compacted session").count(), 1, "{receipt}");
+    assert!(
+        receipt.contains(&format!(
+            "compacted session {} into {target}",
+            support::FIXTURE_SESSION_ID
+        )),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!("this is now session {target}")),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains("Before: context 14 of 32768 tokens"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains("after: known once the next reply is generated"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!("ego resume {}", support::FIXTURE_SESSION_ID)),
+        "{receipt}"
+    );
 }
 
-fn critic_successor_model_before_generation(action: &str) {
+fn critic_successor_model_before_generation(action: &str) -> (String, String) {
     let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
     let mut replies = vec![Reply::Sse(text("CRITIC-SOURCE-ANSWER"))];
     if action == "compact" {
@@ -7144,6 +7184,7 @@ fn critic_successor_model_before_generation(action: &str) {
     }
     let stub = Stub::start(Plan {
         completions: replies,
+        context_length: Some(32_768),
         ..Plan::default()
     });
     let places = support::Places::new();
@@ -7184,6 +7225,7 @@ fn critic_successor_model_before_generation(action: &str) {
     input.flush().unwrap();
     until_local_action_completed(&reader, &mut output, start, action, PROGRESS_DEADLINE);
     drain_until_quiet(&reader, &mut output);
+    let receipt = normalized(&output[start..]);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     let status = bounded_exit(child);
@@ -7208,4 +7250,8 @@ fn critic_successor_model_before_generation(action: &str) {
         target["model"], "ollama/qwen3",
         "{action} successor lost its model before its first prompt: {listing}"
     );
+    (
+        receipt,
+        target["id"].as_str().expect("successor id").to_owned(),
+    )
 }
