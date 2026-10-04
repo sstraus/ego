@@ -1829,6 +1829,58 @@ fn macos_seatbelt_refuses_an_unrepresentable_profile_root() {
     }
 }
 
+// Catches: Landlock drops configured exec roots or admits them with write authority.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_configured_exec_root_runs_real_binary_without_widening_writes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let tools = tempfile::tempdir().expect("external tools");
+    let outside = tempfile::tempdir().expect("unrelated directory");
+    let workspace = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+    let tools = std::fs::canonicalize(tools.path()).expect("canonical tools");
+    let program = tools.join("cp");
+    std::fs::copy("/bin/cp", &program).expect("record installed executable");
+    let source = tools.join("source");
+    std::fs::write(&source, b"original").expect("source");
+    let inside = workspace.join("copied");
+    let copy = |target: &std::path::Path| {
+        SpawnSpec::new(
+            vec![
+                program.as_os_str().to_owned(),
+                source.as_os_str().to_owned(),
+                target.as_os_str().to_owned(),
+            ],
+            Some(CanonPath::new(workspace.clone())),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .expect("copy spec")
+    };
+    let policy = run_confinement(Confinement::Workspace, false, CanonPath::new(&workspace));
+    let unlisted = open_policy(policy.clone(), 1024 * 1024, 1024).expect("unlisted run");
+    execute(&unlisted, copy(&inside)).expect_err("unlisted tool must not execute");
+    assert!(!inside.exists(), "unlisted tool copied a file");
+    let admitted = open_policy(
+        policy.with_exec_paths(vec![CanonPath::new(&tools)]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("admitted run");
+    execute(&admitted, copy(&inside)).expect("admitted tool copies into workspace");
+    assert_eq!(
+        std::fs::read(&inside).expect("copied contents"),
+        b"original"
+    );
+    for target in [tools.join("existing"), outside.path().join("existing")] {
+        std::fs::write(&target, b"preserve").expect("existing outside file");
+        execute(&admitted, copy(&target)).expect_err("exec roots must not widen writes");
+        assert_eq!(
+            std::fs::read(&target).expect("preserved contents"),
+            b"preserve"
+        );
+    }
+}
+
 /// An executable `tool.sh` in `dir`.
 #[cfg(target_os = "macos")]
 fn write_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
