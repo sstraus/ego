@@ -85,7 +85,7 @@ fn successor_accepts_next_turn(action: &str) {
         let start = output.len();
         input.write_all(format!("/{action}\r").as_bytes()).unwrap();
         input.flush().unwrap();
-        until_prompt_from(&reader, &mut output, start);
+        until_local_action_completed(&reader, &mut output, start, action, PROGRESS_DEADLINE);
         drain_until_quiet(&reader, &mut output);
     }
     let requests_before = stub.requests().len();
@@ -171,7 +171,12 @@ fn successor_accepts_next_turn(action: &str) {
         .unwrap()
         .iter()
         .find(|row| row["id"] != support::FIXTURE_SESSION_ID)
-        .expect("successor catalogue row");
+        .unwrap_or_else(|| {
+            panic!(
+                "successor catalogue row missing: {listing}; PTY: {}",
+                normalized(&output)
+            )
+        });
     assert_eq!(target["model"], "ollama/qwen3");
     let resumed = places
         .ego(&stub)
