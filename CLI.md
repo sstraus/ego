@@ -457,6 +457,18 @@ Every surface that opens a session takes them, from one declaration: `ego run`,
 (`SessionShape`), so the served surface cannot drift into a `--tools` that
 means something else.
 
+The builtins `history.search` (`{"query":"acp trust"}`) and `history.open`
+(`{"session":"<id>"}`) read prior conversations across the admitted session
+store's workspace roots. Search returns at most 1 KiB of JSON with session ids,
+titles, UTC updated dates and conversational snippets. Open returns at most
+8 KiB of user/assistant text, with an omission notice when bounded. Tool results
+and streamed deltas are excluded. `--tools` and `--no-tools` control their
+availability like the other builtins. SQLite FTS5 lives in a derived
+`history.sqlite` cache beside the JSONL sessions; a missing or corrupt cache is
+rebuilt from those logs. First use may build the index; later searches update
+changed sessions. The cache is never needed to resume a session.
+
+
 On `ego acp` this is how a caller shapes the sessions the served process will
 open, before any client connects. Naming none of them is the unshaped session
 and is byte-for-byte the behaviour of an `ego acp` that had no such flags.

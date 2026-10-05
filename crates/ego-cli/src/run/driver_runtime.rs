@@ -994,6 +994,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         let next_registry = match tools(
                                             args.tools.as_ref(),
                                             Some(prospective.core()),
+                                            Some(Arc::new(jsonl_store.history())),
                                         ) {
                                             Ok(registry) => registry,
                                             Err(error) => {
@@ -1573,6 +1574,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 target_skills
                                                     .as_ref()
                                                     .map(crate::skill::SkillCatalogueCapture::core),
+                                                Some(Arc::new(jsonl_store.history())),
                                             )
                                             .map_err(|error| {
                                                 CompactionError::Internal(error.to_string())

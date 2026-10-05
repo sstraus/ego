@@ -191,7 +191,7 @@ async fn open_scope_phase(
         mcp_runtime,
         mcp_registry,
         artifact_store,
-        jsonl_store: Arc::new(jsonl_store),
+        jsonl_store,
         session_id,
         clock: SystemClock,
     })
@@ -392,6 +392,7 @@ fn materialize_run_phase<'store>(
                 &settings,
                 args,
                 matches!(&host.driver, Driver::Interactive { .. }),
+                Arc::new(scoped.jsonl_store.history()),
                 host.diagnostics,
             )
             .map_err(usage)?;
