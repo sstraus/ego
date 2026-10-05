@@ -53,6 +53,7 @@ fn conversation(messages: Vec<Message>) -> Conversation {
 /// once, so a field that silently stops being sent has nowhere to hide.
 fn golden_request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gpt-5.1".to_string(),
         messages: conversation(vec![
             Message::text(Role::System, "You are terse."),
@@ -259,6 +260,7 @@ fn an_assistant_turn_of_pure_tool_calls_sends_no_content_key() {
 #[test]
 fn reasoning_state_is_refused_rather_than_dropped() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "What is in ./src?"),
             Message {

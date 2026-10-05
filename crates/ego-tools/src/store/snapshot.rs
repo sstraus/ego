@@ -78,7 +78,7 @@ use serde::{Deserialize, Serialize};
 /// v12 retains the exact `ToolCallStarted` event for every tool item so
 /// continuation parent checks remain exact after bounded replay. A v11 cache
 /// is discarded and rebuilt from the authoritative v11 event log.
-pub const SNAPSHOT_VERSION: u32 = 14;
+pub const SNAPSHOT_VERSION: u32 = 15;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

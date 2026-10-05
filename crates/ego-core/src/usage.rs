@@ -67,10 +67,39 @@ pub struct UsageLines {
 }
 
 /// Token and cost totals for one line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct UsageLine {
     pub usage: Usage,
     pub cost: CostBreakdown,
+}
+
+impl UsageLine {
+    /// Token-weighted cache reads from the corrected durable input categories.
+    pub fn cache_hit(&self) -> Option<f64> {
+        let input = u128::from(self.usage.uncached_input_tokens)
+            + u128::from(self.usage.cache_read_tokens)
+            + u128::from(self.usage.cache_write_tokens)
+            + u128::from(self.usage.cache_write_extended_tokens);
+        (input != 0).then(|| self.usage.cache_read_tokens as f64 / input as f64)
+    }
+}
+
+impl Serialize for UsageLine {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Line<'a> {
+            usage: &'a Usage,
+            cost: &'a CostBreakdown,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            cache_hit: Option<f64>,
+        }
+        Line {
+            usage: &self.usage,
+            cost: &self.cost,
+            cache_hit: self.cache_hit(),
+        }
+        .serialize(serializer)
+    }
 }
 
 /// Exact per-currency totals plus every durable unknown-cost reason.

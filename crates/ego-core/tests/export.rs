@@ -144,6 +144,7 @@ fn generation_started(attempt: AttemptRef) -> SessionEntry {
         EventKind::GenerationStarted {
             attempt,
             role: GenerationRole::Main,
+            snapshot: None,
         },
     )
 }
