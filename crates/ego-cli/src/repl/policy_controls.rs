@@ -703,8 +703,7 @@ mod tests {
         else {
             panic!("the restored default mode must reach the human party");
         };
-        // Owners: this test, the CLI source, the policy, and the capture.
-        assert_eq!(Arc::strong_count(&configured_human), 4);
+        assert_eq!(Arc::strong_count(&configured_human), 3);
         assert_eq!(Arc::strong_count(&snapshot_human), 1);
         drop(restored_policy);
         drop(restored);
