@@ -409,6 +409,49 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(roots)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ego__subcmd__roots_commands" \
+"*::: :->roots" \
+&& ret=0
+
+    case $state in
+    (roots)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ego-roots-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+'--profile=[]:PROFILE:_default' \
+'--access=[]:ACCESS:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':path:_files' \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+'--profile=[]:PROFILE:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':path:_files' \
+&& ret=0
+;;
+(ls)
+_arguments "${_arguments_options[@]}" : \
+'--profile=[]:PROFILE:_default' \
+'--json[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (rules)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
@@ -516,6 +559,7 @@ _ego_commands() {
 'auth:Manage subscription credentials.' \
 'mcp:Manage configured MCP servers.' \
 'config:Manage stored user configuration.' \
+'roots:' \
 'rules:Inspect and manage persistent permission rules.' \
 'mcp-server:Serve scoped ego runs over MCP on stdio.' \
     )
@@ -678,6 +722,30 @@ _ego__subcmd__models_commands() {
 _ego__subcmd__resume_commands() {
     local commands; commands=()
     _describe -t commands 'ego resume commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__roots_commands] )) ||
+_ego__subcmd__roots_commands() {
+    local commands; commands=(
+'add:Add or update one user perimeter root' \
+'rm:Remove a root by its stored spelling' \
+'ls:List roots stored in the selected user target' \
+    )
+    _describe -t commands 'ego roots commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__roots__subcmd__add_commands] )) ||
+_ego__subcmd__roots__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego roots add commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__roots__subcmd__ls_commands] )) ||
+_ego__subcmd__roots__subcmd__ls_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego roots ls commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__roots__subcmd__rm_commands] )) ||
+_ego__subcmd__roots__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego roots rm commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__rules_commands] )) ||
 _ego__subcmd__rules_commands() {

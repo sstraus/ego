@@ -388,3 +388,44 @@ fn child_environment_and_network_controls_are_durable_and_strict() {
     let effective: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(effective["network"], "online");
 }
+
+// Catches: roots are not writable through the managed vocabulary or add/rm overwrite sibling fields.
+#[test]
+fn roots_commands_update_exact_user_target_without_erasing_other_settings() {
+    let fixture = Fixture::new();
+    fixture.write_config("model='ollama/qwen3'\n");
+    let path = fixture.workspace.path().to_str().unwrap();
+    for args in [
+        vec!["roots", "add", "--access", "read-write", path],
+        vec!["roots", "add", "--access", "read-write", path],
+        vec!["roots", "add", "--profile", "strict", path],
+    ] {
+        let output = fixture.run(&args);
+        assert!(output.status.success(), "{}", error(&output));
+    }
+    let output = fixture.run(&["roots", "ls"]);
+    assert!(text(&output).contains("read-write"));
+    let original = std::fs::read_to_string(fixture.config_path()).unwrap();
+    assert!(original.contains("ollama/qwen3"));
+    assert!(
+        fixture
+            .run(&["roots", "rm", "--profile", "strict", path])
+            .status
+            .success()
+    );
+    assert!(
+        fixture
+            .run(&["config", "set", "--profile", "strict", "roots=[]"])
+            .status
+            .success()
+    );
+    let output = fixture.run(&["roots", "ls", "--profile", "strict"]);
+    assert_eq!(text(&output).trim(), "[]");
+    let before_invalid = std::fs::read_to_string(fixture.config_path()).unwrap();
+    let output = fixture.run(&["config", "set", "roots=[{path='relative',access='read'}]"]);
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(fixture.config_path()).unwrap(),
+        before_invalid
+    );
+}

@@ -70,6 +70,7 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::ExecEnv, "exec.env"),
         (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
         (ManagedConfigKey::Network, "network"),
+        (ManagedConfigKey::Roots, "roots"),
     ];
     let profile = [
         (ManagedConfigKey::Model, "model"),
@@ -81,6 +82,7 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::ExecEnv, "exec.env"),
         (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
         (ManagedConfigKey::Network, "network"),
+        (ManagedConfigKey::Roots, "roots"),
     ];
     let ci = [
         (ManagedConfigKey::Model, "model"),
@@ -94,6 +96,7 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::ExecEnv, "exec.env"),
         (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
         (ManagedConfigKey::Network, "network"),
+        (ManagedConfigKey::Roots, "roots"),
     ];
     for (key, spelling) in base.iter().chain(profile.iter()).chain(ci.iter()) {
         assert_eq!(key.as_str(), *spelling);

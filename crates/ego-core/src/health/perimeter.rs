@@ -33,8 +33,15 @@ impl Perimeter {
         effective: &Effective,
         roots: &[ProfileRoot],
     ) -> Self {
+        let mut warnings = root_warnings(confinement.workspace().as_path(), roots);
+        if confinement.level() == crate::permit::Confinement::Off {
+            warnings.push(
+                "open-perimeter: sandbox is off; exec children have unrestricted filesystem access"
+                    .into(),
+            );
+        }
         Self {
-            warnings: root_warnings(confinement.workspace().as_path(), roots),
+            warnings,
             workspace: confinement.workspace().as_path().to_path_buf(),
             roots: roots
                 .iter()
@@ -64,6 +71,16 @@ impl Perimeter {
                 "online"
             },
         }
+    }
+
+    /// Include process-edge diagnostics without exposing mutable projection state.
+    pub fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        for warning in warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+        self
     }
 
     /// The same terminal block on all three surfaces.

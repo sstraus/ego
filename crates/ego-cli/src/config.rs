@@ -139,6 +139,10 @@ async fn execute_inner(
                 .values
                 .into_iter()
                 .find_map(|(candidate, value)| (candidate == *key).then_some(value).flatten())
+                .or_else(|| {
+                    (*key == ego_core::config::ManagedConfigKey::Roots)
+                        .then(|| ManagedConfigValue::Roots(Vec::new()))
+                })
                 .ok_or_else(|| RunTermination::Failed {
                     message: format!("config key `{key}` is absent from the selected user target"),
                 })?;
@@ -174,6 +178,20 @@ async fn execute_inner(
                     ));
                 }
             }
+        }
+        ConfigAction::Root {
+            target,
+            path,
+            access,
+        } => {
+            let result = store
+                .mutate(UserConfigMutation::Root {
+                    target: target.clone(),
+                    path: path.clone(),
+                    access: *access,
+                })
+                .map_err(store_failure)?;
+            render_receipt(result, out)?;
         }
         ConfigAction::Set { target, key, value } => {
             let result = store
@@ -460,6 +478,18 @@ fn render_json(
 
 fn render_receipt(result: UserConfigMutationResult, out: &Stdout) -> Result<(), RunTermination> {
     let (key, value) = match result.facts {
+        UserConfigMutationFacts::Root { path, access } => (
+            ego_core::config::ManagedConfigKey::Roots,
+            format!(
+                "{} {}",
+                match access {
+                    Some(ego_core::permit::RootAccess::Read) => "read",
+                    Some(ego_core::permit::RootAccess::ReadWrite) => "read-write",
+                    None => "removed",
+                },
+                path.display()
+            ),
+        ),
         UserConfigMutationFacts::Set { key, value } => (key, value.to_toml()),
         UserConfigMutationFacts::Unset { key } => (key, "<absent>".to_owned()),
         _ => {

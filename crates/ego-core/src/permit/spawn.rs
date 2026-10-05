@@ -887,6 +887,7 @@ pub struct RunConfinement {
     offline: bool,
     workspace: CanonPath,
     exec_paths: Vec<CanonPath>,
+    roots: Vec<super::ProfileRoot>,
     requirements: ExecRequirements,
 }
 
@@ -910,6 +911,7 @@ impl RunConfinement {
             offline,
             workspace,
             exec_paths: Vec::new(),
+            roots: Vec::new(),
             requirements: ExecRequirements::new(required),
         })
     }
@@ -923,6 +925,17 @@ impl RunConfinement {
     pub fn with_exec_paths(mut self, exec_paths: Vec<CanonPath>) -> Self {
         self.exec_paths = exec_paths;
         self
+    }
+
+    /// Canonical perimeter roots admitted before any process effect.
+    #[must_use]
+    pub fn with_roots(mut self, roots: Vec<super::ProfileRoot>) -> Self {
+        self.roots = roots;
+        self
+    }
+
+    pub fn roots(&self) -> &[super::ProfileRoot] {
+        &self.roots
     }
 
     pub fn exec_paths(&self) -> &[CanonPath] {

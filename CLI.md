@@ -54,6 +54,7 @@ ego auth   login|logout|status [PROVIDER]
 ego models [--provider P] [--refresh] [--json]
 ego hooks  ls [--json]                     read-only admitted hook catalogue
 ego config get|set|unset|ls|edit
+ego roots  add|rm|ls                         user perimeter roots
 ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               stable IDs; `explain <tool> <args>` shows the
                               canonical intent + matching rule, dry)
@@ -691,7 +692,7 @@ sandbox); a defined winner when limits collide (budget beats schema-retry:
 exit 5); **stdout is protocol-clean** in json/jsonl/acp modes, all diagnostics
 on stderr; agent files are a versioned format. CLI reference and completions
 are generated from the same final clap definitions and snapshot-tested. M5
-regression case regenerates both artifacts only after all 17 commands and their
+regression case regenerates both artifacts only after all 18 commands and their
 applicability rules are installed; hand-maintained parallel command lists are
 not release evidence.
 
@@ -1466,9 +1467,9 @@ Base and profile fields use normal per-field precedence; unset restores inherita
 and capability checks. `network="on"` is the default and never clears an
 explicit `--offline` invocation.
 
-Effective perimeter inspection warns when canonical roots overlap the workspace
-or a read root is covered by a read-write root. These warnings do not change
-access. A missing or unresolvable configured path is reported as a warning and
+Effective perimeter inspection warns when canonical roots overlap the workspace.
+A read root beneath a read-write root is refused with `nested-read-only-root`,
+including symlink aliases: Landlock cannot subtract access from a broader grant. A missing or unresolvable configured path is reported as a warning and
 remains an admission error; it is never shown as an admitted root.
 
 `ego config ls --effective` and `/config perimeter` show the same perimeter
@@ -1478,7 +1479,7 @@ network mode. The interactive command projects the session's existing
 confinement and admitted roots; it does not reload configuration. Headless
 inspection uses the current directory and untrusted configuration resolution.
 Capabilities remain `not_checked` because inspection does not execute probes.
-Profile roots describe permission reach; they do not widen the exec sandbox.
+Profile roots reach both permission policy and exec confinement; sandbox `ro` still denies all writes.
 Doctor may name admitted roots in this block only; all other diagnostics keep
 the existing path redaction policy.
 
@@ -1677,3 +1678,54 @@ Only supplied rows come from this file, and they are rebuilt on every
 invocation rather than cached at all; the cache holds only *discovered* rows,
 from providers that enumerate themselves.
 
+### Perimeter roots and profile presets
+
+Without an explicit roots list, the perimeter includes the workspace and
+`~/Gits` read-write. If `~/Gits` is missing, a `default-root-missing` warning
+reports the workspace-only perimeter. Explicit lists replace that default;
+`roots=[]` selects workspace-only. The workspace remains writable under
+`sandbox="workspace"`, including within a read-only extra root.
+
+`ego roots add [--profile NAME] [--access read|read-write] PATH`,
+`ego roots rm [--profile NAME] PATH`, and `ego roots ls [--profile NAME] [--json]`
+manage the exact stored user target. Add defaults to read, updates an existing
+path in place, and rm matches its stored spelling. Each edit is one locked,
+validated atomic transaction; the first edit creates an explicit list.
+`ego config set 'roots=[{path="~/Gits",access="read"}]'` and its `--profile`
+form replace the list. Single-file read roots are supported on Seatbelt and
+Landlock; paths and symlinks are canonicalized before admission. Landlock blocks
+content writes but does not block timestamp changes to existing files. Project/local
+roots may only restrict existing operator reach to read access; they cannot
+add authority, and untrusted project configuration remains ignored.
+
+Presets are ordinary profile contents in the user config, selected explicitly
+with `--profile NAME`. No preset schema or implicit open selection exists:
+
+```toml
+[profile.strict]
+sandbox = "workspace"
+roots = []
+
+[profile.tree]
+sandbox = "workspace"
+roots = [
+  { path = "~/Gits", access = "read-write" },
+  { path = "~/.codex/ORCHESTRATION.md", access = "read" },
+]
+
+[profile.open]
+sandbox = "off"
+roots = []
+```
+
+The tree allowlist is explicit: include only existing files/directories needed
+by the agent (for example `~/.codex` or `~/.claude` instead of the single file).
+`~/Gits/AGENTS.md` is already covered by the writable tree. Selecting open
+always prints `open-perimeter`: exec children have unrestricted filesystem
+access. Permission mode remains separate; open is adjacent to yolo, not a mode
+change.
+
+Production capability probes need a temporary path outside every granted root.
+If TMPDIR lies within a granted root, sandbox startup refuses with
+`perimeter-probe-temp-overlap` rather than weakening verification or silently
+falling back. In particular, a tree run needs TMPDIR outside `~/Gits`.

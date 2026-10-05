@@ -358,6 +358,7 @@ fn resolve_inner(
     let mut session_dir = None;
     let mut artifact_dir = None;
     let mut roots = Vec::new();
+    let mut root_restrictions = Vec::new();
 
     for sourced in &eligible {
         let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
@@ -457,8 +458,21 @@ fn resolve_inner(
                 value: path,
             });
         }
-        if let Some(profile) = profile.filter(|profile| !profile.roots.is_empty()) {
-            roots = profile.roots.clone();
+        if let Some(selected) = profile
+            .and_then(|p| p.roots.as_ref())
+            .or(sourced.value.roots.as_ref())
+        {
+            if matches!(sourced.source, Source::Project | Source::Local) {
+                root_restrictions.push(if roots_source.is_none() {
+                    vec![crate::permit::RootCfg {
+                        path: "~/Gits".into(),
+                        access: crate::permit::RootAccess::ReadWrite,
+                    }]
+                } else {
+                    roots.clone()
+                });
+            }
+            roots = selected.clone();
             roots_source = Some(sourced.source);
         }
         if let Some(path) = profile.and_then(|profile| profile.artifact_dir.clone()) {
@@ -600,7 +614,7 @@ fn resolve_inner(
     let clamped = ceilings.clamp(&system_ceiling);
 
     let mut max_mode: Option<Mode> = None;
-    let mut root_ceilings = Vec::new();
+    let mut root_ceilings = root_restrictions;
     for sourced in eligible
         .iter()
         .filter(|layer| layer.source == Source::System)
@@ -630,8 +644,8 @@ fn resolve_inner(
         if let Some(bounds) = &sourced.value.roots {
             root_ceilings.push(bounds.clone());
         }
-        if let Some(profile) = profile.filter(|profile| !profile.roots.is_empty()) {
-            root_ceilings.push(profile.roots.clone());
+        if let Some(bounds) = profile.and_then(|p| p.roots.as_ref()) {
+            root_ceilings.push(bounds.clone());
         }
     }
     if let Some(maximum) = max_mode {

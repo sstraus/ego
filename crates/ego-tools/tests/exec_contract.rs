@@ -3378,3 +3378,109 @@ fn configured_exec_environment_reaches_real_builtin_children() {
         );
     }
 }
+
+// Catches: roots reach permission policy but are ignored by the real exec sandbox,
+// or a single-file read root grants its sibling or write access.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn perimeter_roots_reach_real_children_without_widening_single_file_access() {
+    use ego_core::permit::RootAccess;
+    let tree = tempfile::tempdir().unwrap();
+    let base = tree.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let home = base.join("home");
+    let writable = home.join("Gits");
+    let allowlist = home.join("instructions");
+    for dir in [&workspace, &writable, &allowlist] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let file = allowlist.join("allowed.md");
+    let sibling = allowlist.join("private.md");
+    std::fs::write(&file, "allowed").unwrap();
+    std::fs::write(&sibling, "private").unwrap();
+    let alias = home.join("instructions-link");
+    std::os::unix::fs::symlink(&file, &alias).unwrap();
+    let roots = ego_core::permit::admit_roots(
+        &[
+            ego_core::permit::RootCfg {
+                path: writable.clone(),
+                access: RootAccess::ReadWrite,
+            },
+            ego_core::permit::RootCfg {
+                path: alias,
+                access: RootAccess::Read,
+            },
+        ],
+        &CanonPath::new(&home),
+        &OsFs,
+    )
+    .unwrap();
+    let cwd = CanonPath::new(&workspace);
+    let read = |path: &std::path::Path| {
+        SpawnSpec::new(
+            vec!["/bin/cat".into(), path.as_os_str().to_owned()],
+            Some(cwd.clone()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap()
+    };
+    for level in [Confinement::Workspace, Confinement::Ro] {
+        let policy = run_confinement(level, false, cwd.clone()).with_roots(roots.clone());
+        let run = open_policy(policy, 1024 * 1024, 1024).expect("real perimeter backend");
+        execute(&run, read(&file)).expect("single file read allowed");
+        assert!(
+            execute(&run, read(&sibling)).is_err(),
+            "single file must not expose sibling"
+        );
+        let source = workspace.join("overwrite-source");
+        std::fs::write(&source, "changed").unwrap();
+        assert!(
+            execute(
+                &run,
+                mutation_spec("overwrite", &[&source, &file], cwd.clone())
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "allowed");
+        let target = writable.join(if level == Confinement::Workspace {
+            "rw-create"
+        } else {
+            "ro-create"
+        });
+        let outcome = execute(&run, mutation_spec("create", &[&target], cwd.clone()));
+        assert_eq!(
+            outcome.is_ok(),
+            level == Confinement::Workspace,
+            "{outcome:?}"
+        );
+        assert_eq!(target.exists(), level == Confinement::Workspace);
+    }
+}
+
+// Catches: a tree preset publishes unproven capabilities when TMPDIR is inside its RW root.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn perimeter_probe_temp_overlap_is_a_named_startup_refusal() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let workspace = tempfile::tempdir().unwrap();
+    let tmp = std::env::temp_dir().canonicalize().unwrap();
+    let policy = run_confinement(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(workspace.path().canonicalize().unwrap()),
+    )
+    .with_roots(vec![ProfileRoot::new(
+        CanonPath::new(tmp),
+        RootAccess::ReadWrite,
+    )]);
+    let attempt = attempt_policy(policy, 1024 * 1024, 1024);
+    let error = match attempt.outcome {
+        Err(error) => error,
+        Ok(_) => panic!("overlapping probe scope was admitted"),
+    };
+    assert!(
+        error.to_string().contains("perimeter-probe-temp-overlap"),
+        "{error}"
+    );
+}

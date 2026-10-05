@@ -120,6 +120,7 @@ pub enum ManagedConfigKey {
     Thinking,
     Mode,
     Sandbox,
+    Roots,
     ExecEnv,
     ExecEnvAllowlist,
     Network,
@@ -132,7 +133,7 @@ pub enum ManagedConfigKey {
 }
 
 impl ManagedConfigKey {
-    const BASE: [Self; 11] = [
+    const BASE: [Self; 12] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
@@ -144,8 +145,9 @@ impl ManagedConfigKey {
         Self::ExecEnv,
         Self::ExecEnvAllowlist,
         Self::Network,
+        Self::Roots,
     ];
-    const PROFILE: [Self; 9] = [
+    const PROFILE: [Self; 10] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
@@ -155,8 +157,9 @@ impl ManagedConfigKey {
         Self::ExecEnv,
         Self::ExecEnvAllowlist,
         Self::Network,
+        Self::Roots,
     ];
-    const CI_PROFILE: [Self; 11] = [
+    const CI_PROFILE: [Self; 12] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
@@ -168,6 +171,7 @@ impl ManagedConfigKey {
         Self::ExecEnv,
         Self::ExecEnvAllowlist,
         Self::Network,
+        Self::Roots,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -178,6 +182,7 @@ impl ManagedConfigKey {
             Self::Sandbox => "sandbox",
             Self::ExecEnv => "exec.env",
             Self::ExecEnvAllowlist => "exec.env_allowlist",
+            Self::Roots => "roots",
             Self::Network => "network",
             Self::Budget => "budget",
             Self::Bare => "bare",
@@ -206,6 +211,7 @@ impl ManagedConfigKey {
             "sandbox" => Ok(Self::Sandbox),
             "exec.env" => Ok(Self::ExecEnv),
             "exec.env_allowlist" => Ok(Self::ExecEnvAllowlist),
+            "roots" => Ok(Self::Roots),
             "network" => Ok(Self::Network),
             "budget" => Ok(Self::Budget),
             "bare" => Ok(Self::Bare),
@@ -241,6 +247,7 @@ pub enum ManagedConfigValue {
     Thinking(ThinkingLevel),
     Mode(Mode),
     Sandbox(Confinement),
+    Roots(Vec<crate::permit::RootCfg>),
     ExecEnv(super::ExecEnvironment),
     ExecEnvAllowlist(Vec<String>),
     Network(super::Network),
@@ -265,6 +272,7 @@ impl ManagedConfigValue {
             ManagedConfigKey::Mode => decode(key, value).map(Self::Mode),
             ManagedConfigKey::Sandbox => decode(key, value).map(Self::Sandbox),
             ManagedConfigKey::ExecEnv => decode(key, value).map(Self::ExecEnv),
+            ManagedConfigKey::Roots => decode(key, value).map(Self::Roots),
             ManagedConfigKey::Network => decode(key, value).map(Self::Network),
             ManagedConfigKey::ExecEnvAllowlist => {
                 let names: Vec<String> = decode(key, value)?;
@@ -325,6 +333,7 @@ impl ManagedConfigValue {
                     .map(|segment| toml::Value::String(segment.as_str().to_owned()))
                     .collect(),
             ),
+            Self::Roots(roots) => toml::Value::try_from(roots).expect("roots are TOML data"),
             Self::Path(path) => toml::Value::String(path.to_string_lossy().into_owned()),
         };
         value.to_string()

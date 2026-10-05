@@ -68,7 +68,10 @@ fn system_ceiling_fields_are_exclusive_and_intersect() {
         Source::Flags,
     ] {
         assert!(ConfigLayer::parse(source, "max_mode='yolo'").is_err());
-        assert!(ConfigLayer::parse(source, "roots=[]").is_err());
+        assert_eq!(
+            ConfigLayer::parse(source, "roots=[]").is_ok(),
+            matches!(source, Source::User | Source::Project | Source::Local)
+        );
     }
     let layers = [
         ConfigLayer::parse(Source::System, "max_mode='edits'\nroots=[]").unwrap(),

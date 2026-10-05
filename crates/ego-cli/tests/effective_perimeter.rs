@@ -143,10 +143,10 @@ fn unadmitted_perimeter_fails_closed_without_raw_doctor_paths() {
     assert!(!output.contains(missing.to_str().unwrap()));
 }
 
-// Catches: redundant roots are presented without warning, including through a symlink.
+// Catches: a canonical alias bypasses nested-read-only refusal; workspace overlap stays visible.
 #[cfg(unix)]
 #[test]
-fn overlapping_perimeter_roots_warn_without_changing_admitted_access() {
+fn overlapping_roots_refuse_read_nesting_and_warn_on_workspace_overlap() {
     let scratch = tempfile::tempdir().unwrap();
     let workspace = scratch.path().join("workspace");
     let home = scratch.path().join("ego-home");
@@ -155,35 +155,45 @@ fn overlapping_perimeter_roots_warn_without_changing_admitted_access() {
     std::fs::create_dir(&home).unwrap();
     let alias = scratch.path().join("alias");
     std::os::unix::fs::symlink(&nested, &alias).unwrap();
-    std::fs::write(home.join("config.toml"), format!(
-        "[profile.inspect]\nroots = [{{path = '{}', access = 'read-write'}}, {{path = '{}', access = 'read'}}]\n",
-        workspace.display(), alias.display()
-    )).unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_ego"))
-        .args(["config", "ls", "--effective", "--json"])
-        .current_dir(&workspace)
-        .env("EGO_HOME", &home)
-        .env("EGO_PROFILE", "inspect")
-        .env_remove("EGO_MODEL")
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    let warnings = value["warnings"].as_array().unwrap();
-    assert_eq!(warnings.len(), 3);
-    assert!(warnings.iter().any(|warning| {
-        warning
-            .as_str()
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_ego"))
+            .args(["config", "ls", "--effective", "--json"])
+            .current_dir(&workspace)
+            .env("EGO_HOME", &home)
+            .env("EGO_PROFILE", "inspect")
+            .env_remove("EGO_MODEL")
+            .output()
             .unwrap()
-            .contains("covered by a read-write root")
-    }));
+    };
+    let config = |access| {
+        format!(
+            "[profile.inspect]\nroots=[{{path='{}',access='read-write'}},{{path='{}',access='{access}'}}]\n",
+            workspace.display(),
+            alias.display()
+        )
+    };
+    std::fs::write(home.join("config.toml"), config("read")).unwrap();
+    let refused = run();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("nested-read-only-root"));
+    std::fs::write(home.join("config.toml"), config("read-write")).unwrap();
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap().contains("overlaps the workspace"))
+    );
     assert_eq!(
         value["roots"][1]["path"],
         nested.canonicalize().unwrap().to_str().unwrap()
     );
-    assert_eq!(value["roots"][1]["access"], "read");
+    assert_eq!(value["roots"][1]["access"], "read-write");
 }

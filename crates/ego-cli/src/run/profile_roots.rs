@@ -38,3 +38,62 @@ pub(crate) fn admit(
     .map_err(|error| error.to_string())?;
     Ok(roots)
 }
+
+/// Materialize the default at the process edge, keeping missing paths visible.
+pub(crate) fn defaults(effective: &mut Effective, home: &std::path::Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if effective.roots_source.is_none() {
+        let path = home.join("Gits");
+        if path.is_dir() {
+            effective.roots = vec![ego_core::permit::RootCfg {
+                path,
+                access: ego_core::permit::RootAccess::ReadWrite,
+            }];
+        } else {
+            warnings.push(
+                "default-root-missing: ~/Gits is absent; using workspace-only perimeter".into(),
+            );
+        }
+    }
+    if effective.sandbox == Some(ego_core::permit::Confinement::Off) {
+        warnings.push(
+            "open-perimeter: sandbox is off; exec children have unrestricted filesystem access"
+                .into(),
+        );
+    }
+    warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ego_core::config::{ConfigLayer, Source, Trust, resolve};
+    // Catches: default HOME reach is broadened or an explicit empty profile cannot clear it.
+    #[test]
+    fn perimeter_default_uses_fake_home_and_explicit_profile_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join("Gits")).unwrap();
+        let mut effective = resolve(&[], Trust::Untrusted, None).unwrap();
+        assert!(defaults(&mut effective, &home).is_empty());
+        assert_eq!(effective.roots[0].path, home.join("Gits"));
+        assert_eq!(
+            effective.roots[0].access,
+            ego_core::permit::RootAccess::ReadWrite
+        );
+        let layer = ConfigLayer::parse(Source::User, "[profile.strict]\nroots=[]").unwrap();
+        let mut strict = resolve(&[layer], Trust::Untrusted, Some("strict")).unwrap();
+        assert!(defaults(&mut strict, &home).is_empty());
+        assert!(strict.roots.is_empty());
+        std::fs::remove_dir(home.join("Gits")).unwrap();
+        let mut missing = resolve(&[], Trust::Untrusted, None).unwrap();
+        assert_eq!(defaults(&mut missing, &home).len(), 1);
+        assert!(missing.roots.is_empty());
+        missing.sandbox = Some(ego_core::permit::Confinement::Off);
+        assert!(
+            defaults(&mut missing, &home)
+                .iter()
+                .any(|warning| warning.contains("open-perimeter"))
+        );
+    }
+}

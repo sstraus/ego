@@ -209,7 +209,7 @@ pub struct ProfileLayer {
     pub artifact_dir: Option<std::path::PathBuf>,
     /// Extra directories this profile opens to the run, beyond the workspace.
     #[serde(default)]
-    pub roots: Vec<crate::permit::RootCfg>,
+    pub roots: Option<Vec<crate::permit::RootCfg>>,
     /// Complete MCP entries contributed by this profile. Entries replace the
     /// same name from the layer's base table; their fields never merge.
     #[serde(default)]
@@ -887,7 +887,7 @@ pub struct ConfigLayer {
     pub sandbox: Option<Confinement>,
     /// System-only maximum permission mode, independent of the default mode.
     pub max_mode: Option<Mode>,
-    /// System-only ceiling on extra canonical roots; an empty list permits none.
+    /// Extra roots; system declarations additionally cap lower layers.
     pub roots: Option<Vec<crate::permit::RootCfg>>,
     pub exec: Option<ExecLayer>,
     pub network: Option<Network>,
@@ -929,7 +929,7 @@ impl ConfigLayer {
     pub fn parse(source: Source, text: &str) -> Result<Sourced<ConfigLayer>, ConfigError> {
         let value: ConfigLayer =
             toml::from_str(text).map_err(|err| classify_parse_error(source, &err))?;
-        if source != Source::System && (value.max_mode.is_some() || value.roots.is_some()) {
+        if source != Source::System && value.max_mode.is_some() {
             return Err(ConfigError::Invalid {
                 source,
                 message: "`max_mode` and base `roots` ceilings belong only to the system layer"
@@ -947,11 +947,13 @@ impl ConfigLayer {
                 ),
             });
         }
-        if !matches!(source, Source::System | Source::User)
-            && let Some((name, _)) = value
-                .profile
-                .iter()
-                .find(|(_, profile)| !profile.roots.is_empty())
+        if !matches!(
+            source,
+            Source::System | Source::User | Source::Project | Source::Local
+        ) && let Some((name, _)) = value
+            .profile
+            .iter()
+            .find(|(_, profile)| profile.roots.is_some())
         {
             return Err(ConfigError::Invalid {
                 source,
@@ -959,6 +961,39 @@ impl ConfigLayer {
                     "profile `{name}` cannot declare `roots`; only the system and user layers may widen where a run can reach"
                 ),
             });
+        }
+        let declarations = value
+            .roots
+            .iter()
+            .chain(value.profile.values().filter_map(|p| p.roots.as_ref()));
+        for roots in declarations {
+            if !matches!(source, Source::System | Source::User)
+                && (!matches!(source, Source::Project | Source::Local)
+                    || roots
+                        .iter()
+                        .any(|root| root.access == crate::permit::RootAccess::ReadWrite))
+            {
+                return Err(ConfigError::Invalid {
+                    source,
+                    message: "roots in project/local layers may only restrict read access".into(),
+                });
+            }
+            for root in roots {
+                if !root.path.is_absolute() && !root.path.starts_with("~") {
+                    return Err(ConfigError::Invalid {
+                        source,
+                        message: "roots paths must be absolute or start with ~/".into(),
+                    });
+                }
+                if root.access == crate::permit::RootAccess::Read
+                    && roots.iter().any(|other| {
+                        other.access == crate::permit::RootAccess::ReadWrite
+                            && root.path.starts_with(&other.path)
+                    })
+                {
+                    return Err(ConfigError::Invalid { source, message: "nested-read-only-root: a read root beneath a read-write root cannot be enforced by Landlock".into() });
+                }
+            }
         }
         for exec in value.exec.iter().chain(
             value

@@ -24,16 +24,34 @@ fn system_root_ceilings_use_canonical_paths_and_preserve_access() {
         path: path.into(),
         access,
     };
-    let system = ConfigLayer::parse(Source::System, &format!(
-        "roots=[{{path='{}',access='read'}},{{path='{}',access='read-write'}},{{path='{}',access='read'}}]",
-        allowed.display(), writable.display(), frozen.display()
-    )).unwrap();
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            &format!(
+                "roots=[{{path='{}',access='read-write'}},{{path='{}',access='read'}}]",
+                writable.display(),
+                frozen.display()
+            )
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("nested-read-only-root")
+    );
+    let system = ConfigLayer::parse(
+        Source::System,
+        &format!(
+            "roots=[{{path='{}',access='read'}},{{path='{}',access='read-write'}}]",
+            allowed.display(),
+            writable.display()
+        ),
+    )
+    .unwrap();
     let effective = resolve(&[system], Trust::Untrusted, None).unwrap();
     for (path, access, permitted) in [
         (&allowed, RootAccess::Read, true),
         (&allowed, RootAccess::ReadWrite, false),
-        (&writable, RootAccess::ReadWrite, false),
-        (&frozen, RootAccess::ReadWrite, false),
+        (&writable, RootAccess::ReadWrite, true),
+        (&frozen, RootAccess::ReadWrite, true),
         (&sibling, RootAccess::Read, false),
         (&escape, RootAccess::Read, false),
         (&workspace, RootAccess::ReadWrite, true),
@@ -69,4 +87,55 @@ fn system_root_ceilings_use_canonical_paths_and_preserve_access() {
         )
         .is_err()
     );
+}
+
+// Catches: a trusted project read allowlist adds paths beyond operator authority,
+// or an explicit empty profile fails to replace a base list.
+#[test]
+fn project_read_restriction_cannot_widen_operator_roots() {
+    let tree = tempfile::tempdir().unwrap();
+    let base = tree.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let allowed = home.join("Gits");
+    let outside = base.join("outside");
+    let workspace = allowed.join("workspace");
+    for path in [&workspace, &outside] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let user = ConfigLayer::parse(
+        Source::User,
+        &format!(
+            "roots=[{{path='{}',access='read-write'}}]
+[profile.strict]
+roots=[]",
+            allowed.display()
+        ),
+    )
+    .unwrap();
+    assert!(
+        resolve(std::slice::from_ref(&user), Trust::Trusted, Some("strict"))
+            .unwrap()
+            .roots
+            .is_empty()
+    );
+    for (path, permitted) in [(&allowed, true), (&outside, false)] {
+        let project = ConfigLayer::parse(
+            Source::Project,
+            &format!("roots=[{{path='{}',access='read'}}]", path.display()),
+        )
+        .unwrap();
+        let effective = resolve(&[user.clone(), project], Trust::Trusted, None).unwrap();
+        let roots = admit_roots(&effective.roots, &CanonPath::new(&home), &OsFs).unwrap();
+        assert_eq!(
+            check_root_ceilings(
+                &roots,
+                &effective.root_ceilings,
+                &CanonPath::new(&home),
+                &CanonPath::new(&workspace),
+                &OsFs
+            )
+            .is_ok(),
+            permitted
+        );
+    }
 }

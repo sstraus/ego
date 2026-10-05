@@ -664,7 +664,9 @@ pub(super) fn admit_windows_unconfined_start(
         settings.confinement.offline(),
         CanonPath::new(&settings.root),
     )
-    .map_err(|error| UsageError(error.to_string()))?;
+    .map_err(|error| UsageError(error.to_string()))?
+    .with_roots(settings.confinement.roots().to_vec())
+    .with_exec_paths(settings.confinement.exec_paths().to_vec());
     Ok(())
 }
 
@@ -730,7 +732,7 @@ pub(super) fn frozen_rooted_settings(
 pub(super) fn finish_rooted_settings(
     args: &Args,
     cwd: PathBuf,
-    effective: Effective,
+    mut effective: Effective,
     trust: Trust,
     profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
     diagnostics: &dyn Diagnostics,
@@ -764,7 +766,13 @@ pub(super) fn finish_rooted_settings(
         ));
     }
 
-    super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
+    if let Some(home) = std::env::var_os("HOME") {
+        for warning in super::profile_roots::defaults(&mut effective, Path::new(&home)) {
+            diagnostics.note(&warning);
+        }
+    }
+    let roots =
+        super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
 
     let exec_paths = effective
         .exec_paths
@@ -787,7 +795,8 @@ pub(super) fn finish_rooted_settings(
         CanonPath::new(&root),
     )
     .map_err(|err| UsageError(err.to_string()))?
-    .with_exec_paths(exec_paths);
+    .with_exec_paths(exec_paths)
+    .with_roots(roots);
 
     Ok(Settings {
         run_deadline,
