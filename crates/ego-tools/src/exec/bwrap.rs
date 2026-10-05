@@ -82,6 +82,16 @@ impl BwrapBackend {
             } else {
                 "--ro-bind"
             };
+            for root in policy.roots() {
+                let root_mode = if policy.level() == Confinement::Workspace
+                    && root.access() == ego_core::permit::RootAccess::ReadWrite
+                {
+                    "--bind"
+                } else {
+                    "--ro-bind"
+                };
+                bind(&mut arguments, root_mode, root.path().as_path());
+            }
             bind(&mut arguments, mode, policy.workspace().as_path());
             bind(&mut arguments, mode, scratch.as_path());
         }
