@@ -232,16 +232,17 @@ pub(crate) fn saved_override(
         .rev()
         .find(|(later, origin)| {
             origin != "user"
-                && !matches!(
-                    (value, later),
-                    (
-                        ManagedConfigValue::Budget(ego_core::ceiling::Budget::Money(_)),
-                        ManagedConfigValue::Budget(ego_core::ceiling::Budget::Tokens(_)),
-                    ) | (
-                        ManagedConfigValue::Budget(ego_core::ceiling::Budget::Tokens(_)),
-                        ManagedConfigValue::Budget(ego_core::ceiling::Budget::Money(_)),
-                    )
-                )
+                && (origin.starts_with("user profile ")
+                    || !matches!(
+                        (value, later),
+                        (
+                            ManagedConfigValue::Budget(ego_core::ceiling::Budget::Money(_)),
+                            ManagedConfigValue::Budget(ego_core::ceiling::Budget::Tokens(_)),
+                        ) | (
+                            ManagedConfigValue::Budget(ego_core::ceiling::Budget::Tokens(_)),
+                            ManagedConfigValue::Budget(ego_core::ceiling::Budget::Money(_)),
+                        )
+                    ))
         })
         .map(|(_, origin)| {
             format!(
