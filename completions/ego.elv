@@ -305,6 +305,7 @@ set edit:completion:arg-completer[ego] = {|@words|
         &'ego;config;ls'= {
             cand --profile 'profile'
             cand --json 'json'
+            cand --effective 'Show the effective run perimeter instead of stored values'
             cand -h 'Print help'
             cand --help 'Print help'
         }

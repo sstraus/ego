@@ -83,6 +83,10 @@ pub struct Effective {
     pub thinking: Option<ThinkingLevel>,
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    /// Winning layer for the selected sandbox, absent for the default.
+    pub sandbox_source: Option<Source>,
+    /// Winning layer for the active profile roots.
+    pub roots_source: Option<Source>,
     /// Additional user-selected read and executable roots, before canonicalization.
     pub exec_paths: Vec<PathBuf>,
     pub permissions: Ruleset,
@@ -326,6 +330,8 @@ fn resolve_inner(
     let mut thinking = None;
     let mut mode = None;
     let mut sandbox = None;
+    let mut sandbox_source = None;
+    let mut roots_source = None;
     let mut exec_paths = Vec::new();
     let mut permissions = Ruleset::default();
     let mut judge = None;
@@ -378,6 +384,7 @@ fn resolve_inner(
             .or(sourced.value.sandbox)
         {
             sandbox = Some(value);
+            sandbox_source = Some(sourced.source);
         }
         if let Some(paths) = profile
             .and_then(|profile| profile.exec_paths.as_ref())
@@ -417,6 +424,7 @@ fn resolve_inner(
         }
         if let Some(profile) = profile.filter(|profile| !profile.roots.is_empty()) {
             roots = profile.roots.clone();
+            roots_source = Some(sourced.source);
         }
         if let Some(path) = profile.and_then(|profile| profile.artifact_dir.clone()) {
             artifact_dir = Some(Sourced {
@@ -561,6 +569,8 @@ fn resolve_inner(
         thinking,
         mode,
         sandbox,
+        sandbox_source,
+        roots_source,
         exec_paths,
         permissions,
         judge,

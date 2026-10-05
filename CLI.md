@@ -174,7 +174,7 @@ The final root grammar is exact:
 ego config get   [--profile NAME] [--json] KEY
 ego config set   [--profile NAME] KEY=TOML_VALUE
 ego config unset [--profile NAME] KEY
-ego config ls    [--profile NAME] [--json]
+ego config ls    [--profile NAME] [--effective] [--json]
 ego config edit
 
 ego rules ls       [--profile NAME] [--json]
@@ -1432,6 +1432,17 @@ authority: it reports a warning and recovery copy without retry or rollback.
 Orphan candidates from a crashed parent are never silently removed.
 The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
 candidate retention for every editor result.
+
+`ego config ls --effective` and `/config perimeter` show the same perimeter
+block as doctor: canonical workspace, admitted profile roots and their access
+and origin layer, sandbox selection and backend, capability evidence, and
+network mode. The interactive command projects the session's existing
+confinement and admitted roots; it does not reload configuration. Headless
+inspection uses the current directory and untrusted configuration resolution.
+Capabilities remain `not_checked` because inspection does not execute probes.
+Profile roots describe permission reach; they do not widen the exec sandbox.
+Doctor may name admitted roots in this block only; all other diagnostics keep
+the existing path redaction policy.
 
 `ego doctor [--json]` and `/doctor` are two renderings of one ordered,
 versioned `HealthSnapshot`: config, credential status, session store,

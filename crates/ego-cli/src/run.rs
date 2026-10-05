@@ -158,7 +158,7 @@ use port_adapters::*;
 mod headless_driver;
 use headless_driver::*;
 mod composition_root;
-mod profile_roots;
+pub(crate) mod profile_roots;
 use composition_root::*;
 pub use composition_root::{CliPrepared, DirectPreflight, preflight_ci};
 mod execution;

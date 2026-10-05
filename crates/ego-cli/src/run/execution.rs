@@ -202,6 +202,7 @@ struct ResumePreparation<'store> {
     mode: Mode,
     policy_selection: GenerationPolicySelection,
     policy_source: Arc<dyn GenerationPolicySource>,
+    perimeter: crate::perimeter::Perimeter,
     invocation: RunInvocationId,
     run_id: RunId,
     resume_plan: Option<ResumePlan>,
@@ -244,6 +245,11 @@ fn prepare_resume_phase<'store>(
         GenerationPolicySelection::new(mode, settings.effective.permissions.clone());
     let profile_roots = super::profile_roots::admit(&settings.effective)
         .map_err(|message| RunTermination::Failed { message })?;
+    let perimeter = crate::perimeter::Perimeter::session(
+        &settings.confinement,
+        &settings.effective,
+        &profile_roots,
+    );
     let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
         CliGenerationPolicySource::new(
             policy_selection.clone(),
@@ -292,6 +298,7 @@ fn prepare_resume_phase<'store>(
         mode,
         policy_selection,
         policy_source,
+        perimeter,
         invocation,
         run_id,
         resume_plan,
@@ -323,6 +330,7 @@ pub(super) struct MaterializedRun<'store> {
     pub(super) mode: Mode,
     pub(super) policy_selection: GenerationPolicySelection,
     pub(super) policy_source: Arc<dyn GenerationPolicySource>,
+    pub(super) perimeter: crate::perimeter::Perimeter,
     pub(super) invocation: RunInvocationId,
     pub(super) run_id: RunId,
     pub(super) resume_plan: Option<ResumePlan>,
@@ -346,6 +354,7 @@ fn materialize_run_phase<'store>(
         mode,
         policy_selection,
         policy_source,
+        perimeter,
         invocation,
         run_id,
         resume_plan,
@@ -473,6 +482,7 @@ fn materialize_run_phase<'store>(
         mode,
         policy_selection,
         policy_source,
+        perimeter,
         invocation,
         run_id,
         resume_plan,

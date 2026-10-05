@@ -376,7 +376,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__config__subcmd__ls)
-            opts="-h --profile --json --help"
+            opts="-h --profile --json --effective --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

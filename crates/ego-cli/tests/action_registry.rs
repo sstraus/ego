@@ -7,7 +7,7 @@ use ego_cli::repl::actions::{
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 
-const NAMES: [&str; 25] = [
+const NAMES: [&str; 26] = [
     "help",
     "model",
     "thinking",
@@ -23,6 +23,7 @@ const NAMES: [&str; 25] = [
     "usage",
     "statusline",
     "export",
+    "config",
     "doctor",
     "quit",
     "new",
@@ -37,15 +38,17 @@ const NAMES: [&str; 25] = [
 
 #[test]
 fn final_surface_has_exact_names_in_contract_order_and_stable_ids() {
+    // Catches: missing public commands, reordered completion, or changed slash identities.
     let registry = ActionRegistry::final_surface();
     assert_eq!(registry.names(), NAMES);
     assert_eq!(registry.id("help"), Some(ActionId::Help));
     assert_eq!(registry.id("model"), Some(ActionId::Model));
     assert_eq!(registry.id("thinking"), Some(ActionId::Thinking));
     assert_eq!(registry.id("statusline"), Some(ActionId::Statusline));
+    assert_eq!(registry.id("config"), Some(ActionId::Config));
     assert_eq!(registry.id("hooks"), Some(ActionId::Hooks));
     assert_eq!(registry.id("version"), Some(ActionId::Version));
-    assert_eq!(registry.len(), 25);
+    assert_eq!(registry.len(), 26);
 }
 
 #[test]

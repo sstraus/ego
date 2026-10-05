@@ -4,7 +4,12 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
     const SECTIONS: [(&str, &[ActionId]); 6] = [
         (
             "Discover",
-            &[ActionId::Help, ActionId::Doctor, ActionId::Version],
+            &[
+                ActionId::Help,
+                ActionId::Config,
+                ActionId::Doctor,
+                ActionId::Version,
+            ],
         ),
         (
             "Model",
@@ -744,6 +749,9 @@ pub(super) fn apply_surface_effect(
             } else {
                 return Some(Line::HostCommand(HostCommand::Hooks));
             }
+        }
+        SurfaceActionEffect::Config => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Config)));
         }
         SurfaceActionEffect::Doctor => {
             // The whole snapshot, not the MCP corner of one. `/doctor` and
