@@ -1253,6 +1253,22 @@ pub(crate) fn repl_set_on(
 mod repl_view;
 pub(crate) use repl_view::{repl_text, saved_override};
 
+/// Resolve trusted Jev settings for the supplied ego home, without reading auth.
+pub(crate) fn jev(home: Option<&Path>) -> Result<ego_core::config::JevConfig, UsageError> {
+    let mut found = Vec::new();
+    if let Some(system) = layer(Source::System, Path::new(SYSTEM_CONFIG))? {
+        found.push(system);
+    }
+    if let Some(home) = home
+        && let Some(user) = layer(Source::User, &home.join("config.toml"))?
+    {
+        found.push(user);
+    }
+    resolve(&found, Trust::Untrusted, None)
+        .map(|effective| effective.jev)
+        .map_err(|err| UsageError(err.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

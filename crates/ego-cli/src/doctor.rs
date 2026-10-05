@@ -9,6 +9,8 @@
 //!
 //! See `docs/decisions/2026-09-03-doctor-observes-one-redacted-health-snapshot.md`.
 
+mod jev;
+
 use std::path::PathBuf;
 
 use ego_core::config::Trust;
@@ -75,6 +77,10 @@ fn snapshot_with_perimeter(
     roots: &VisibleRoots,
     perimeter: Option<&crate::perimeter::Perimeter>,
 ) -> HealthSnapshot {
+    let jev = jev::Jev {
+        workspace: workspace.clone(),
+        home: home.clone(),
+    };
     let configuration = Configuration;
     let credentials = Credentials { home };
     let sessions = SessionStore {
@@ -87,8 +93,9 @@ fn snapshot_with_perimeter(
     let skills = Skills { workspace };
     let hooks = Hooks;
     let acp = Acp;
-    let probes: [&dyn HealthProbe; 9] = [
+    let probes: [&dyn HealthProbe; 10] = [
         &configuration,
+        &jev,
         &credentials,
         &sessions,
         &sandbox,

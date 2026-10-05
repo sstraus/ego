@@ -1881,3 +1881,33 @@ async fn critic_nested_fork_keeps_each_cutoff_and_local_ids_after_ancestor_delet
     );
     connection.finish().await;
 }
+
+// Catches: ACP metadata overriding trusted Jev endpoint/policy before admission.
+#[tokio::test]
+async fn jev_metadata_is_refused_before_session_effects() {
+    for method in [
+        "session/new",
+        "session/load",
+        "session/resume",
+        "session/fork",
+    ] {
+        for meta in [
+            serde_json::json!({"jev":{}}),
+            serde_json::json!({"ego":{"jev":{}}}),
+        ] {
+            let fixture = support::DurableAcpFixture::new();
+            let target = fixture.seed_replay_session(ROOT, "Target", 200_000);
+            let before = fixture.effect_counts();
+            let mut connection = Connected::new(fixture.router());
+            connection.initialize().await;
+            let mut params = serde_json::json!({"cwd":ROOT,"mcpServers":[],"_meta":meta});
+            if method != "session/new" {
+                params["sessionId"] = serde_json::json!(target.session_id);
+            }
+            let (response, _) = connection.request(method, params).await;
+            assert!(response.get("error").is_some(), "{method}: {response}");
+            assert_eq!(fixture.effect_counts(), before);
+            connection.finish().await;
+        }
+    }
+}

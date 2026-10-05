@@ -1855,6 +1855,13 @@ impl<R: JsonRpcMessage> JsonRpcMessage for McpChecked<R> {
         let request = R::parse_message(method, params)?;
         let raw = serde_json::to_value(params)
             .map_err(|error| Error::internal_error().data(error.to_string()))?;
+        if raw.get("_meta").is_some_and(|meta| {
+            meta.get("jev").is_some() || meta.get("ego").is_some_and(|ego| ego.get("jev").is_some())
+        }) {
+            return Err(refused_params(
+                "jev configuration belongs only to system and user config",
+            ));
+        }
         let supplied = raw
             .get("mcpServers")
             .and_then(serde_json::Value::as_array)
