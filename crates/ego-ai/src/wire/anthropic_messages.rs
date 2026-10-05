@@ -505,7 +505,35 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         },
         output_config: effort.map(|effort| OutputConfig { effort }),
     };
-    Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))
+    if super::cache::control(req).is_none() {
+        return Ok(serde_json::to_vec(&wire).expect("WireRequest serialises JSON"));
+    }
+    let mut body = serde_json::to_value(&wire).expect("WireRequest serialises JSON");
+    if let Some(control) = super::cache::control(req) {
+        if let Some(system) = body.get_mut("system") {
+            super::cache::mark_content(system, &control);
+        }
+        let stable = req
+            .messages
+            .messages()
+            .iter()
+            .take(
+                req.cache
+                    .as_ref()
+                    .expect("cache control has metadata")
+                    .stable_messages,
+            )
+            .filter(|message| message.role != Role::System && !message.content.is_empty())
+            .count();
+        if let Some(messages) = body["messages"].as_array_mut() {
+            for message in messages.iter_mut().take(stable).rev() {
+                if super::cache::mark_content(&mut message["content"], &control) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(serde_json::to_vec(&body).expect("a JSON value serialises"))
 }
 
 /// A complete HTTP request for `req` against `target`.

@@ -301,6 +301,7 @@ mod rebuild {
                 EventKind::GenerationStarted {
                     attempt: AttemptRef::first(GenerationId::new()),
                     role: GenerationRole::Main,
+                    snapshot: None,
                 },
             )
         }

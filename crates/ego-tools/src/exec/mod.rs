@@ -300,6 +300,10 @@ impl GuardedExec {
 }
 
 impl ProcessExecutor for GuardedExec {
+    fn confinement(&self) -> Option<ego_core::permit::Confinement> {
+        Some(self.context.confinement())
+    }
+
     fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
         identity::capture(spec)
     }
@@ -485,6 +489,10 @@ impl RunEffectPorts {
         Self::build(config, backend, capabilities)
     }
 
+    pub fn process_handle(&self) -> Arc<dyn ProcessExecutor> {
+        Arc::clone(&self.process) as Arc<dyn ProcessExecutor>
+    }
+
     pub fn process(&self) -> &dyn ProcessExecutor {
         self.process.as_ref()
     }
@@ -592,6 +600,21 @@ fn policy_digest_with_runtime_roots(
     )?;
     for root in runtime_roots {
         update_path_field(&mut hash, b"runtime_root", root.as_path().as_os_str())?;
+    }
+    update_digest_field(
+        &mut hash,
+        b"roots.count",
+        &(policy.roots().len() as u64).to_be_bytes(),
+    )?;
+    for root in policy.roots() {
+        update_path_field(&mut hash, b"root.path", root.path().as_path().as_os_str())?;
+        update_digest_field(
+            &mut hash,
+            b"root.access",
+            &[u8::from(
+                root.access() == ego_core::permit::RootAccess::ReadWrite,
+            )],
+        )?;
     }
     let identity = backend.identity();
     update_digest_field(&mut hash, b"backend.name", identity.name().as_bytes())?;

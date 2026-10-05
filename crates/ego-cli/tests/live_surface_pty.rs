@@ -899,10 +899,11 @@ fn successor_accepts_next_turn(action: &str) {
             )
         });
     assert_eq!(target["model"], "ollama/qwen3");
-    let resumed = places
-        .ego(&stub)
-        .subcommand("resume")
-        .args(["--sandbox", "off"]);
+    let resumed = places.ego(&stub).subcommand("resume").args([
+        target["id"].as_str().unwrap(),
+        "--sandbox",
+        "off",
+    ]);
     let pair = NativePtySystem::default()
         .openpty(PtySize {
             rows: 24,
@@ -5554,7 +5555,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 26] = [
+    const COMMANDS: [&str; 27] = [
         "help",
         "model",
         "thinking",
@@ -5573,6 +5574,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "config",
         "doctor",
         "quit",
+        "refresh",
         "new",
         "name",
         "goal",

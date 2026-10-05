@@ -567,6 +567,7 @@ pub const TOOL_CEILING: u64 = 128;
 /// let the pair disagree about what was tested and still both pass.
 pub fn canonical(profile: &Profile) -> GenRequest {
     GenRequest {
+        cache: None,
         model: profile.model.to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, PROMPT)])
             .expect("one user message is a conversation"),
@@ -584,6 +585,7 @@ pub fn canonical(profile: &Profile) -> GenRequest {
 /// fill in a complicated schema.
 pub fn tool_calling(profile: &Profile) -> GenRequest {
     GenRequest {
+        cache: None,
         messages: Conversation::new(vec![Message::text(
             Role::User,
             "Read the file ./src/main.rs using the read_file tool. \

@@ -388,7 +388,8 @@ impl CliPrepared {
         // an escalation becomes a question the operator can answer instead of
         // an internal error the host can only render as a failure.
         let profile_roots =
-            super::profile_roots::admit(&self.effective).map_err(RunExecutorError::new)?;
+            super::profile_roots::admit(&self.effective, self.confinement.workspace())
+                .map_err(RunExecutorError::new)?;
         let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
             CliGenerationPolicySource::new(
                 policy_selection,
@@ -398,6 +399,7 @@ impl CliPrepared {
             .with_profile_roots(profile_roots),
         );
         let config = TurnConfig {
+            cache: self.effective.cache,
             system: self.system,
             identity: Some(AgentIdentity {
                 version: crate::build_info::VERSION.to_owned(),

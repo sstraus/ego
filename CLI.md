@@ -54,6 +54,7 @@ ego auth   login|logout|status [PROVIDER]
 ego models [--provider P] [--refresh] [--json]
 ego hooks  ls [--json]                     read-only admitted hook catalogue
 ego config get|set|unset|ls|edit
+ego roots  add|rm|ls                         user perimeter roots
 ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               stable IDs; `explain <tool> <args>` shows the
                               canonical intent + matching rule, dry)
@@ -157,7 +158,7 @@ omitted when empty: two states, identical bytes.
 | `ego hooks` | **yes** | `ls [--json]` reads the same immutable admitted hook catalogue used by execution; it neither reloads nor edits hook policy |
 | `ego config` | **yes** | `get`, `set`, `unset`, `ls`, and whole-document `edit` use one strict atomic user-config transaction; stored profiles are explicit targets and management ignores ambient `EGO_PROFILE` |
 | `ego rules` | **yes** | `ls`, `allow`, `deny`, `revoke`, `remember`, and `explain` share the canonical rule grammar, atomic user store, and effective policy service; management ignores ambient `EGO_PROFILE` and never executes the explained call |
-| `ego usage` | **yes** | reports the versioned main/judge/compaction/total accounting DTO for this workspace; `--period` accepts `all` or a positive `s`/`m`/`h` duration and `--json` emits the same DTO. The text view is a compact `session model role in out cached cost` table that hides role rows with no activity unless `--all-roles` is given; the flag is presentation only and never reaches the JSON report |
+| `ego usage` | **yes** | reports the versioned main/judge/compaction/total accounting DTO for this workspace; `--period` accepts `all` or a positive `s`/`m`/`h` duration and `--json` emits the same DTO. The text view is a compact `session model role in out cached cache_hit cost` table that hides role rows with no activity unless `--all-roles` is given; the flag is presentation only and never reaches the JSON report |
 | `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
 | `ego doctor` | **yes** | one ordered, versioned, redacted `HealthSnapshot` over nine sections, rendered as text or `--json`. It reads existing facts only: it never logs in, refreshes a credential or a catalogue, reloads an extension, edits config, or calls a hosted provider. `/doctor` renders the same snapshot, and a fact ego cannot observe without mutating something is reported `not_checked` with its reason rather than omitted |
 
@@ -703,7 +704,7 @@ sandbox); a defined winner when limits collide (budget beats schema-retry:
 exit 5); **stdout is protocol-clean** in json/jsonl/acp modes, all diagnostics
 on stderr; agent files are a versioned format. CLI reference and completions
 are generated from the same final clap definitions and snapshot-tested. M5
-regression case regenerates both artifacts only after all 17 commands and their
+regression case regenerates both artifacts only after all 18 commands and their
 applicability rules are installed; hand-maintained parallel command lists are
 not release evidence.
 
@@ -942,8 +943,8 @@ the composer appears retain their Enter boundaries without cooked terminal
 echo. The first starts a turn; further submitted lines enter the busy FIFO.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /history QUERY /fork [message-id] /compact /clear /usage /statusline /export /doctor /quit /new
-/name /goal /tools /expand /skills /hooks /version`. These 25 commands are the complete
+/sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /doctor /quit /new
+/name /goal /tools /expand /skills /hooks /version`. These 27 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
@@ -1352,13 +1353,15 @@ ordinary output length or generic invalid input, and is never blindly retried.
 The operator then invokes `/compact` or `ego compact`; M3 introduced no
 automatic threshold.
 
-ACP v1 advertises only the optional `_ego/compact` extension in
-`AgentCapabilities._meta`. Its request is
+ACP v1 advertises the optional `_ego/compact` extension in
+`AgentCapabilities._meta`. The durable lifecycle adapter also advertises
+standard load, list, tip fork, resume, delete, and close. Its request is
 `{"v":1,"sessionId":"...","requestId":"..."}`; its response carries
 `v`, `sourceSessionId`, `sourceSeq`, `targetSessionId`, `publication`, and
 `successorStartRequestId`. A successful response registers the target so the
-next standard `session/prompt` adopts it. It does not advertise `session/load`
-or add standard list, fork, resume, or delete operations. Because ACP has no
+next standard `session/prompt` adopts it. The extension itself adds no standard
+lifecycle operation; those are served separately by the durable M5 adapter.
+Because ACP has no
 standard context-overflow stop reason, the preceding `session/prompt` returns a
 structured application error naming `_ego/compact` after the typed settlement
 is durable; it does not report max tokens or refusal.
@@ -1384,6 +1387,16 @@ hidden behind a compaction checkpoint cannot be selected. An inherited message
 branches its owning ancestor at that ancestor's completion sequence. Title and
 active goal come from the selected boundary. An explicit completed boundary can
 be read while the source writer runs; a tip fork requires an inactive source.
+
+Standard ACP `session/fork` currently serves the tip. The message selector
+`_meta.ego.atMessageId`, lineage metadata, and inherited-message replay are
+planned extensions. The accepted cache design snapshots only the system prompt
+per epoch; resume/fork inherit it, and compaction or explicit refresh replaces
+it. Tool admission remains current. The snapshot is captured on the first admitted generation. `/refresh` reloads
+instructions and opens a new epoch on the next admitted generation; it refuses
+while source work is pending. Live runtime and host facts are transient data
+before current user intent. Provider cache fields remain regression case, with decisions in
+`docs/decisions/2026-09-30-conversation-fork-cache-prefix.md`.
 
 ## 7. Configuration
 
@@ -1454,6 +1467,40 @@ Orphan candidates from a crashed parent are never silently removed.
 The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
 candidate retention for every editor result.
 
+System policy can also set `max_mode="edits"`, using the order
+plan < default < edits < auto < yolo. A selected mode above the maximum is
+refused before run effects, including live ACP and REPL selections. A refused
+selection preserves the current and pending mode. `max_mode` is system-only and does not change
+the default mode; a plan maximum must be paired with `mode="plan"`.
+A system `sandbox` value is a confinement floor: lower layers and selected
+profiles may tighten it but cannot weaken it.
+
+System `roots=[{path="/path",access="read"}]` bounds extra roots and
+configured exec paths after canonicalization. `roots=[]` allows no extra
+roots. The workspace remains unchanged. System profile roots also bound
+that profile. Broader roots and write access under a read-only bound are
+refused; multiple system declarations all bind. These ceilings do not
+grant access by themselves.
+
+Child process controls are opt-in. `ego config set 'exec.env="inherit"'`
+keeps the full inherited environment (the default). `exec.env="core"` keeps
+PATH, HOME, USER, LOGNAME, SHELL, TMPDIR, TMP, TEMP, LANG, LC_ALL, LC_CTYPE,
+SYSTEMROOT, WINDIR, COMSPEC and PATHEXT if present. `exec.env="allowlist"`
+keeps only names in `exec.env_allowlist`, for example
+`ego config set 'exec.env_allowlist=["PATH","HOME"]'`; an empty list keeps none.
+These controls apply to built-in exec children, including rebuilt tool registries.
+They do not change provider credentials, MCP declarations or hook environments.
+Base and profile fields use normal per-field precedence; unset restores inheritance.
+
+`ego config set 'network="off"'` applies the existing `--offline` guarantees
+and capability checks. `network="on"` is the default and never clears an
+explicit `--offline` invocation.
+
+Effective perimeter inspection warns when canonical roots overlap the workspace.
+A read root beneath a read-write root is refused with `nested-read-only-root`,
+including symlink aliases: Landlock cannot subtract access from a broader grant. A missing or unresolvable configured path is reported as a warning and
+remains an admission error; it is never shown as an admitted root.
+
 `ego config ls --effective` and `/config perimeter` show the same perimeter
 block as doctor: canonical workspace, admitted profile roots and their access
 and origin layer, sandbox selection and backend, capability evidence, and
@@ -1461,7 +1508,7 @@ network mode. The interactive command projects the session's existing
 confinement and admitted roots; it does not reload configuration. Headless
 inspection uses the current directory and untrusted configuration resolution.
 Capabilities remain `not_checked` because inspection does not execute probes.
-Profile roots describe permission reach; they do not widen the exec sandbox.
+Profile roots reach both permission policy and exec confinement; sandbox `ro` still denies all writes.
 Doctor may name admitted roots in this block only; all other diagnostics keep
 the existing path redaction policy.
 
@@ -1619,7 +1666,7 @@ reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
                                    # or "unknown" (fails closed) or "any"
 default_reasoning_effort = "medium" # optional; omission means unknown
 cancel = "cooperative"             # "unsupported" | "cooperative" | "immediate"
-cache = "short"                    # "none" | "short" | "long"
+cache = "short"                    # "none" | "short" (5m) | "long" (1h, user config only)
 transport = "sse"
 
 # `image_input` is either a bare string — `"unknown"` (the default, and it
@@ -1684,3 +1731,55 @@ renderer. A line reports how many earlier turns were omitted. Display replay
 adds no events or usage. Known transcript items that cannot be rendered show
 `[transcript item unavailable]`; unknown durable records keep the store's
 existing recovery refusal.
+
+### Perimeter roots and profile presets
+
+Without an explicit roots list, the perimeter includes the workspace and
+`~/Gits` read-write. If `~/Gits` is missing, a `default-root-missing` warning
+reports the workspace-only perimeter. Explicit lists replace that default;
+`roots=[]` selects workspace-only. The workspace remains writable under
+`sandbox="workspace"`, including within a read-only extra root.
+
+`ego roots add [--profile NAME] [--access read|read-write] PATH`,
+`ego roots rm [--profile NAME] PATH`, and `ego roots ls [--profile NAME] [--json]`
+manage the exact stored user target. Add defaults to read, updates an existing
+path in place, and rm matches its stored spelling. Each edit is one locked,
+validated atomic transaction; the first edit creates an explicit list.
+`ego config set 'roots=[{path="~/Gits",access="read"}]'` and its `--profile`
+form replace the list. Single-file read roots are supported on Seatbelt and
+Landlock; paths and symlinks are canonicalized before admission. Landlock blocks
+content writes but does not block timestamp changes to existing files. Project/local
+roots may only restrict existing operator reach to read access; they cannot
+add authority, and untrusted project configuration remains ignored.
+
+Presets are ordinary profile contents in the user config, selected explicitly
+with `--profile NAME`. No preset schema or implicit open selection exists:
+
+```toml
+[profile.strict]
+sandbox = "workspace"
+roots = []
+
+[profile.tree]
+sandbox = "workspace"
+roots = [
+  { path = "~/Gits", access = "read-write" },
+  { path = "~/.codex/ORCHESTRATION.md", access = "read" },
+]
+
+[profile.open]
+sandbox = "off"
+roots = []
+```
+
+The tree allowlist is explicit: include only existing files/directories needed
+by the agent (for example `~/.codex` or `~/.claude` instead of the single file).
+`~/Gits/AGENTS.md` is already covered by the writable tree. Selecting open
+always prints `open-perimeter`: exec children have unrestricted filesystem
+access. Permission mode remains separate; open is adjacent to yolo, not a mode
+change.
+
+Production capability probes need a temporary path outside every granted root.
+If TMPDIR lies within a granted root, sandbox startup refuses with
+`perimeter-probe-temp-overlap` rather than weakening verification or silently
+falling back. In particular, a tree run needs TMPDIR outside `~/Gits`.

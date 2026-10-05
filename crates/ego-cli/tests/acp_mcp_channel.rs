@@ -485,7 +485,7 @@ fn duplicate_host_connection_id_cannot_redirect_a_live_sessions_updates() {
     assert!(stub.generations().iter().any(|generation| {
         generation["messages"].as_array().is_some_and(|messages| {
             messages.iter().any(|message| {
-                message["role"] == "system"
+                message["role"] == "user"
                     && message["content"]
                         .as_str()
                         .is_some_and(|content| content.contains("/workspace/first"))
@@ -560,7 +560,7 @@ fn host_mail_arriving_during_a_tool_call_reaches_the_next_generation() {
         generations.get(1).is_some_and(|generation| {
             generation["messages"].as_array().is_some_and(|messages| {
                 messages.iter().any(|message| {
-                    message["role"] == "system"
+                    message["role"] == "user"
                         && message["content"].as_str().is_some_and(|content| {
                             content.contains("mail-17") && content.contains("review the new branch")
                         })
@@ -629,7 +629,7 @@ fn acp_host_resources_are_subscribed_and_workspace_reaches_the_model() {
         stub.generations().iter().any(|generation| {
             generation["messages"].as_array().is_some_and(|messages| {
                 messages.iter().any(|message| {
-                    message["role"] == "system"
+                    message["role"] == "user"
                         && message["content"]
                             .as_str()
                             .is_some_and(|content| content.contains("/workspace/repo"))
@@ -643,7 +643,7 @@ fn acp_host_resources_are_subscribed_and_workspace_reaches_the_model() {
         generations.last().is_some_and(|generation| {
             generation["messages"].as_array().is_some_and(|messages| {
                 messages.iter().any(|message| {
-                    message["role"] == "system"
+                    message["role"] == "user"
                         && message["content"]
                             .as_str()
                             .is_some_and(|content| content.contains("/workspace/other"))

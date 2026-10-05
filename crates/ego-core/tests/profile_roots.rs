@@ -286,7 +286,7 @@ fn roots_declared_by_a_repository_or_any_non_operator_layer_are_rejected_at_load
 
 #[test]
 fn roots_in_an_inactive_profile_of_a_repository_layer_are_still_rejected() {
-    let toml = "[profile.other]\nroots = [{ path = \"/srv\", access = \"read\" }]\n";
+    let toml = "[profile.other]\nroots = [{ path = \"/srv\", access = \"read-write\" }]\n";
 
     assert!(ConfigLayer::parse(Source::Project, toml).is_err());
 }

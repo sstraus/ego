@@ -431,7 +431,7 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                             prompt_revision,
                         })
                     }
-                    EventKind::Forked { source, at_seq } => {
+                    EventKind::Forked { source, at_seq, .. } => {
                         lineage = Some(SessionLineage::Fork { source, at_seq })
                     }
                     EventKind::ExecutionObserved { observation, .. } => {
@@ -634,7 +634,7 @@ impl JsonlStore {
         first.next();
         let valid_kind = match (&event.kind, seed.lineage()) {
             (
-                EventKind::Forked { source, at_seq },
+                EventKind::Forked { source, at_seq, .. },
                 SessionLineage::Fork {
                     source: lineage_source,
                     at_seq: lineage_seq,
@@ -1189,7 +1189,7 @@ impl JsonlStore {
                     source_seq: *source_seq,
                     prompt_revision: *prompt_revision,
                 }),
-                EventKind::Forked { source, at_seq } => Some(SessionLineage::Fork {
+                EventKind::Forked { source, at_seq, .. } => Some(SessionLineage::Fork {
                     source: *source,
                     at_seq: *at_seq,
                 }),
@@ -1993,7 +1993,7 @@ impl JsonlStore {
                             break;
                         }
                         match event.kind {
-                            EventKind::Forked { source, at_seq } => {
+                            EventKind::Forked { source, at_seq, .. } => {
                                 lineage = Some(SessionLineage::Fork { source, at_seq });
                             }
                             EventKind::CompactionSeeded {
@@ -2258,7 +2258,9 @@ impl ReplaySource for JsonlStore {
                 source_seq,
                 prompt_revision,
             }),
-            EventKind::Forked { source, at_seq } => Some(SessionLineage::Fork { source, at_seq }),
+            EventKind::Forked { source, at_seq, .. } => {
+                Some(SessionLineage::Fork { source, at_seq })
+            }
             _ => None,
         };
         if lineage.is_some() && first_event.env.seq != first {

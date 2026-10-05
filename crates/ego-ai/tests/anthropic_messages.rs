@@ -54,6 +54,7 @@ fn conversation(messages: Vec<Message>) -> Conversation {
 /// silently stops being sent has nowhere to hide.
 fn wide_request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "claude-opus-5".to_string(),
         messages: conversation(vec![
             Message::text(Role::System, "You are terse."),
@@ -112,6 +113,7 @@ fn the_system_prompt_is_a_top_level_parameter_and_not_a_message() {
 #[test]
 fn every_system_turn_lands_in_the_one_slot_the_api_offers() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::System, "You are terse."),
             Message::text(Role::System, "Answer in Italian."),
@@ -136,6 +138,7 @@ fn every_system_turn_lands_in_the_one_slot_the_api_offers() {
 #[test]
 fn a_tool_result_is_a_block_inside_a_user_turn() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "What is in ./src?"),
             Message {
@@ -191,6 +194,7 @@ fn a_tool_result_is_a_block_inside_a_user_turn() {
 #[test]
 fn a_failed_tool_result_carries_the_flag_that_says_so() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "read it"),
             Message {
@@ -228,6 +232,7 @@ fn a_failed_tool_result_carries_the_flag_that_says_so() {
 #[test]
 fn a_request_with_no_ceiling_is_refused_rather_than_given_one() {
     let req = GenRequest {
+        cache: None,
         max_output_tokens: None,
         ..wide_request()
     };
@@ -264,6 +269,7 @@ fn an_effort_level_is_sent_verbatim_beside_adaptive_thinking() {
         (ThinkingLevel::Max, "max"),
     ] {
         let body = body_of(&GenRequest {
+            cache: None,
             thinking: level,
             ..wide_request()
         });
@@ -296,6 +302,7 @@ fn an_effort_level_is_sent_verbatim_beside_adaptive_thinking() {
 #[test]
 fn off_disables_thinking_and_states_no_effort_at_all() {
     let body = body_of(&GenRequest {
+        cache: None,
         thinking: ThinkingLevel::Off,
         ..wide_request()
     });
@@ -316,6 +323,7 @@ fn off_disables_thinking_and_states_no_effort_at_all() {
 #[test]
 fn minimal_is_refused_and_the_refusal_names_the_six_that_work() {
     let refused = request_body(&GenRequest {
+        cache: None,
         thinking: ThinkingLevel::Minimal,
         ..wide_request()
     })
@@ -371,6 +379,7 @@ fn declining_parallel_calls_is_spelled_on_tool_choice() {
     );
 
     let declined = body_of(&GenRequest {
+        cache: None,
         parallel_tool_calls: false,
         ..wide_request()
     });
@@ -380,6 +389,7 @@ fn declining_parallel_calls_is_spelled_on_tool_choice() {
     );
 
     let toolless = body_of(&GenRequest {
+        cache: None,
         tools: Vec::new(),
         parallel_tool_calls: false,
         ..wide_request()
@@ -410,6 +420,7 @@ fn declining_parallel_calls_is_spelled_on_tool_choice() {
 fn reasoning_state_is_replayed_exactly_as_the_provider_minted_it() {
     let block = r#"{"type":"thinking","thinking":"Due file, quindi.","signature":"EpoGCpcGCkgIBRABGAIiQL2f"}"#;
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "What is in ./src?"),
             Message {
@@ -452,6 +463,7 @@ fn reasoning_state_is_replayed_exactly_as_the_provider_minted_it() {
 #[test]
 fn reasoning_state_from_another_dialect_is_refused_rather_than_sent() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "hi"),
             Message {
@@ -484,6 +496,7 @@ fn reasoning_state_from_another_dialect_is_refused_rather_than_sent() {
 #[test]
 fn reasoning_state_that_is_not_json_is_refused() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "hi"),
             Message {
@@ -514,6 +527,7 @@ fn reasoning_state_that_is_not_json_is_refused() {
 #[test]
 fn tool_arguments_that_are_not_json_are_refused() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "read it"),
             Message {
@@ -553,6 +567,7 @@ fn tool_arguments_that_are_not_json_are_refused() {
 #[test]
 fn a_system_turn_that_is_not_text_is_refused() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "go"),
             Message {

@@ -15,6 +15,7 @@ pub struct Perimeter {
     backend: &'static str,
     capabilities: &'static str,
     network: &'static str,
+    warnings: Vec<String>,
 }
 
 /// One canonical root admitted by the profile's permission policy.
@@ -32,7 +33,15 @@ impl Perimeter {
         effective: &Effective,
         roots: &[ProfileRoot],
     ) -> Self {
+        let mut warnings = root_warnings(confinement.workspace().as_path(), roots);
+        if confinement.level() == crate::permit::Confinement::Off {
+            warnings.push(
+                "open-perimeter: sandbox is off; exec children have unrestricted filesystem access"
+                    .into(),
+            );
+        }
         Self {
+            warnings,
             workspace: confinement.workspace().as_path().to_path_buf(),
             roots: roots
                 .iter()
@@ -64,6 +73,16 @@ impl Perimeter {
         }
     }
 
+    /// Include process-edge diagnostics without exposing mutable projection state.
+    pub fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        for warning in warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+        self
+    }
+
     /// The same terminal block on all three surfaces.
     pub fn text(&self) -> String {
         let mut lines = vec![
@@ -90,6 +109,11 @@ impl Perimeter {
             format!("  capabilities\t{}", self.capabilities),
             format!("  network\t{}\tinvocation", self.network),
         ]);
+        lines.extend(
+            self.warnings
+                .iter()
+                .map(|warning| format!("  warning\t{warning}")),
+        );
         lines.join("\n")
     }
 }
@@ -103,4 +127,28 @@ fn display_path(path: &Path) -> String {
         .chars()
         .flat_map(|character| character.escape_debug())
         .collect()
+}
+
+fn root_warnings(workspace: &Path, roots: &[ProfileRoot]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for root in roots {
+        let path = root.path().as_path();
+        if path.starts_with(workspace) || workspace.starts_with(path) {
+            warnings.push(format!(
+                "root {} overlaps the workspace",
+                display_path(path)
+            ));
+        }
+        if root.access() == RootAccess::Read
+            && roots.iter().any(|other| {
+                other.access() == RootAccess::ReadWrite && path.starts_with(other.path().as_path())
+            })
+        {
+            warnings.push(format!(
+                "read root {} is covered by a read-write root",
+                display_path(path)
+            ));
+        }
+    }
+    warnings
 }

@@ -210,6 +210,7 @@ fn conversation(messages: Vec<Message>) -> Conversation {
 /// that has none.
 fn widest_request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gpt-5.1".to_string(),
         messages: conversation(vec![
             Message::text(Role::System, "You are terse."),

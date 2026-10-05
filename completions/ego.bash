@@ -58,6 +58,9 @@ _ego() {
             ego,resume)
                 cmd="ego__subcmd__resume"
                 ;;
+            ego,roots)
+                cmd="ego__subcmd__roots"
+                ;;
             ego,rules)
                 cmd="ego__subcmd__rules"
                 ;;
@@ -109,6 +112,15 @@ _ego() {
             ego__subcmd__mcp,rm)
                 cmd="ego__subcmd__mcp__subcmd__rm"
                 ;;
+            ego__subcmd__roots,add)
+                cmd="ego__subcmd__roots__subcmd__add"
+                ;;
+            ego__subcmd__roots,ls)
+                cmd="ego__subcmd__roots__subcmd__ls"
+                ;;
+            ego__subcmd__roots,rm)
+                cmd="ego__subcmd__roots__subcmd__rm"
+                ;;
             ego__subcmd__rules,allow)
                 cmd="ego__subcmd__rules__subcmd__allow"
                 ;;
@@ -134,7 +146,7 @@ _ego() {
 
     case "${cmd}" in
         ego)
-            opts="-h --help run resume fork compact export ls usage models hooks doctor acp a2a auth mcp config rules mcp-server"
+            opts="-h --help run resume fork compact export ls usage models hooks doctor acp a2a auth mcp config roots rules mcp-server"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -845,6 +857,78 @@ _ego() {
                     return 0
                     ;;
                 -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__roots)
+            opts="-h --help add rm ls"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__roots__subcmd__add)
+            opts="-h --profile --access --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --access)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__roots__subcmd__ls)
+            opts="-h --profile --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__roots__subcmd__rm)
+            opts="-h --profile --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --profile)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
