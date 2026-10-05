@@ -1019,7 +1019,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     // scope this server already opened rather than a second egress: an `ego
     // acp` invocation is online by construction, so this adds no reach it did
     // not already have.
-    let (controls, ceiling, rule_target) =
+    let (controls, ceiling, rule_target, coordinator) =
         match run::protocol_effective(root.as_path(), args.session_dir.clone(), args.shape.clone())
         {
             Ok(effective) => {
@@ -1069,6 +1069,10 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                     Arc::new(AcpSessionControls::new(&effective, ceiling, catalogue)),
                     ceiling,
                     rule_target,
+                    effective
+                        .active_profile
+                        .as_ref()
+                        .is_some_and(|profile| profile.name == "coordinator"),
                 )
             }
             Err(error) => {
@@ -1137,9 +1141,22 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     let trust_port: Arc<dyn SessionTrustAdmission> =
         Arc::new(CliSessionTrustAdmission::new(crate::config::ego_home()));
 
+    let notices = ego_acp::serve::AcpNotices::default();
+    let _observer = match crate::orchestration_observer::start(
+        coordinator,
+        &root,
+        notices.clone(),
+        Arc::clone(&store),
+    ) {
+        Ok(observer) => observer,
+        Err(error) => {
+            return failed(format!(
+                "the orchestration observer could not start: {error}"
+            ));
+        }
+    };
     let roots = Arc::new(CanonicalRoots { base: root });
     let spawner = Arc::new(TokioExecutionSpawner);
-    let notices = ego_acp::serve::AcpNotices::default();
     let factory = move || {
         ego_acp::serve::durable_agent_with_compaction(
             Arc::clone(&controller),

@@ -158,3 +158,219 @@ async fn timeout_cancels_one_exchange_without_retry() {
     assert!(start.elapsed() < Duration::from_secs(1));
     assert_eq!(http.calls.lock().unwrap().len(), 1);
 }
+
+// Catches: cached dotenv credentials, symlink bypass and an off switch still invoking Http.
+#[tokio::test]
+async fn configured_calls_read_rotated_keys_and_honour_canonical_switches() {
+    use ego_ai::jev::ConfiguredDecisions;
+    use ego_core::config::{ConfigLayer, JevConfig, JevUse, Source};
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let env_file = home.join("workspace/example-project/.env");
+    std::fs::create_dir_all(env_file.parent().unwrap()).unwrap();
+    let root = home.join("workspace/repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let configured =
+        ConfiguredDecisions::new(JevConfig::default(), home.into(), Duration::from_secs(1));
+    let http = Recorder {
+        calls: Arc::new(Mutex::new(vec![])),
+        response: fixture()["response"].clone(),
+        stall: false,
+    };
+    for key in ["first-synthetic-key", "second-synthetic-key"] {
+        std::fs::write(&env_file, format!("OPENROUTER_API_KEY='{key}'\n")).unwrap();
+        assert!(
+            configured
+                .ask(
+                    &http,
+                    &root,
+                    JevUse::Wake,
+                    true,
+                    &json!("test"),
+                    &questions()
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let calls = http.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .last()
+                .unwrap()
+                .headers()
+                .iter()
+                .find(|h| h.name() == "authorization")
+                .unwrap()
+                .value(),
+            format!("Bearer {key}").as_bytes()
+        );
+    }
+    std::fs::remove_file(&env_file).unwrap();
+    assert!(
+        configured
+            .ask(
+                &http,
+                &root,
+                JevUse::Wake,
+                true,
+                &json!("test"),
+                &questions()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(http.calls.lock().unwrap().len(), 2);
+    let text = format!(
+        "[[jev.roots]]\npath='{}'\nwake={{on=false}}",
+        root.display()
+    );
+    let config = ConfigLayer::parse(Source::User, &text)
+        .unwrap()
+        .value
+        .jev
+        .unwrap();
+    let off = ConfiguredDecisions::new(config, home.into(), Duration::from_secs(1));
+    assert!(
+        off.ask(
+            &http,
+            &root,
+            JevUse::Wake,
+            true,
+            &json!("test"),
+            &questions()
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    #[cfg(unix)]
+    {
+        let link = home.join("symlink");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        assert!(
+            off.ask(
+                &http,
+                &link,
+                JevUse::Wake,
+                true,
+                &json!("test"),
+                &questions()
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+    // A use cannot go live just because configuration says on.
+    assert!(
+        configured
+            .ask(
+                &http,
+                &root,
+                JevUse::Router,
+                false,
+                &json!("test"),
+                &questions()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(http.calls.lock().unwrap().len(), 2);
+}
+// Catches: gateway identity auth mixed with Authorization and gateway losing ZDR.
+#[tokio::test]
+async fn explicit_gateway_uses_only_its_identity_header_and_always_zdr() {
+    use ego_ai::jev::ConfiguredDecisions;
+    use ego_core::config::{ConfigLayer, JevUse, Source};
+    let tmp = tempfile::tempdir().unwrap();
+    let config=ConfigLayer::parse(Source::User,"[jev]\nendpoint='https://gateway.example/jev/decisions'\nauth={kind='header',name='X-User-Email',value='fixture@example.test'}").unwrap().value.jev.unwrap();
+    let configured = ConfiguredDecisions::new(config, tmp.path().into(), Duration::from_secs(1));
+    let http = Recorder {
+        calls: Arc::new(Mutex::new(vec![])),
+        response: fixture()["response"].clone(),
+        stall: false,
+    };
+    configured
+        .ask(
+            &http,
+            tmp.path(),
+            JevUse::Destructive,
+            true,
+            &json!("test"),
+            &questions(),
+        )
+        .await
+        .unwrap();
+    let calls = http.calls.lock().unwrap();
+    assert_eq!(
+        calls[0]
+            .headers()
+            .iter()
+            .find(|h| h.name() == "x-user-email")
+            .unwrap()
+            .value(),
+        b"fixture@example.test"
+    );
+    assert!(
+        !calls[0]
+            .headers()
+            .iter()
+            .any(|h| h.name() == "authorization")
+    );
+    let body: Value = serde_json::from_slice(calls[0].body()).unwrap();
+    assert_eq!(
+        body["provider"],
+        json!({"zdr":true,"data_collection":"deny"})
+    );
+    let settings = configured.settings(tmp.path()).unwrap();
+    assert!(!settings.verified_zdr());
+    assert!(settings.summary().contains("unverified-ZDR"));
+    assert!(!settings.summary().contains("fixture@example.test"));
+}
+
+// Catches: explicit environment references ignored in favor of captured or literal keys.
+#[tokio::test]
+async fn explicit_api_key_gateway_resolves_the_named_environment_at_call_time() {
+    use ego_ai::jev::ConfiguredDecisions;
+    use ego_core::config::{ConfigLayer, JevUse, Source};
+    let tmp = tempfile::tempdir().unwrap();
+    // PATH is an existing non-secret environment value; no process-global mutation.
+    let expected = std::env::var("PATH").unwrap();
+    let config = ConfigLayer::parse(
+        Source::User,
+        "[jev]\nendpoint='https://gateway.example/decisions'\nauth={kind='api_key',env='PATH'}",
+    )
+    .unwrap()
+    .value
+    .jev
+    .unwrap();
+    let configured = ConfiguredDecisions::new(config, tmp.path().into(), Duration::from_secs(1));
+    let http = Recorder {
+        calls: Arc::new(Mutex::new(vec![])),
+        response: fixture()["response"].clone(),
+        stall: false,
+    };
+    configured
+        .ask(
+            &http,
+            tmp.path(),
+            JevUse::Router,
+            true,
+            &json!("test"),
+            &questions(),
+        )
+        .await
+        .unwrap();
+    let calls = http.calls.lock().unwrap();
+    assert_eq!(
+        calls[0]
+            .headers()
+            .iter()
+            .find(|h| h.name() == "authorization")
+            .unwrap()
+            .value(),
+        format!("Bearer {expected}").as_bytes()
+    );
+}
