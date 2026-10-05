@@ -221,8 +221,8 @@ impl ObservationPump {
             if self.cursor.files.get(&path) == Some(&revision) {
                 continue;
             }
-            self.cursor.files.insert(path.clone(), revision);
             let peer = tracked_peer(&self.children, &path)?;
+            self.cursor.files.insert(path.clone(), revision);
             self.observe(
                 Observation {
                     text,

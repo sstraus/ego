@@ -19,6 +19,12 @@ fn recorded_mail_and_result_file_materialize_one_durable_card_within_sixty_secon
     let stamp = results.join(".watch-stamp");
     std::fs::write(&stamp, "observer must not consume Claude's stamp").unwrap();
     let mut pump = ObservationPump::open(home.path(), home.path()).unwrap();
+    // The recorded tracking maps this result filename to the mail sender.
+    std::fs::write(
+        home.path().join("Gits/.tmp/coordinator/children.tsv"),
+        CHILDREN,
+    )
+    .unwrap();
     let observer = pump.observer().to_owned();
     assert_ne!(observer, "ec07d385-51fd-5d74-a472-9917b30a6ad2");
     pump.ingest_inbox(page, SCAN_INTERVAL_MS).unwrap();

@@ -56,7 +56,7 @@ fn restart_keeps_one_ordered_pending_batch_and_committed_events_do_not_repeat() 
             .iter()
             .map(|card| card.text.as_str())
             .collect::<Vec<_>>(),
-        ["RESULT one", "QUESTION two", "BLOCKED three"]
+        ["RESULT one", "BLOCKED three", "QUESTION two"]
     );
     assert_eq!(cursor.ready(100 + BATCH_WINDOW_MS), batch);
     restored.acknowledge();

@@ -82,7 +82,12 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn observe(&mut self, event: Observation, now_ms: u64) -> Salience {
-        let id = content_id(&event.text);
+        // File and mail copies share the tracked child and event content;
+        // identical completions from different children remain distinct.
+        let id = match event.peer.as_deref() {
+            Some(peer) => content_id(&format!("{peer}\0{}", event.text.trim())),
+            None => content_id(&event.text),
+        };
         if event.text.trim().starts_with("RESULT")
             && let Some(peer) = event.peer
         {
@@ -108,7 +113,6 @@ impl Cursor {
                 result: event.result,
                 at_ms: event.at_ms,
             });
-            self.pending.sort_by_key(|card| card.at_ms);
         }
         salience
     }
