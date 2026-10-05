@@ -931,7 +931,7 @@ the composer appears retain their Enter boundaries without cooked terminal
 echo. The first starts a turn; further submitted lines enter the busy FIFO.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /fork [message-id] /compact /refresh /clear /usage /statusline /export /doctor /quit /new
+/sessions /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
 /name /goal /tools /expand /skills /hooks /version`. These 25 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
@@ -1488,6 +1488,22 @@ Effective perimeter inspection warns when canonical roots overlap the workspace.
 A read root beneath a read-write root is refused with `nested-read-only-root`,
 including symlink aliases: Landlock cannot subtract access from a broader grant. A missing or unresolvable configured path is reported as a warning and
 remains an admission error; it is never shown as an admitted root.
+
+`/config` lists Model, Mode, Sandbox, Perimeter, and Budget from the session's
+captured startup configuration. Each declaration names its origin layer and
+any overriding layer, including the active profile. Independent money and token
+ceilings remain visible; system clamps and ignored project layers are reported.
+The admitted perimeter is printed beneath the settings.
+
+`/config set KEY TOML_VALUE` uses the same strict parser and atomic transaction
+as `ego config set KEY=TOML_VALUE`. For example, `/config set mode "plan"` or
+`/config set budget "20k"`. It saves the user base layer, preserves unrelated
+TOML and comments, and reports publication and durability. Saved defaults apply
+to future sessions; current model, mode, budget, and confinement stay under their
+existing session authorities. An active profile or higher layer can override a
+saved default; the receipt names that layer. Use `/model`, `/thinking`, or `/mode`
+for live selection, and `ego config set --profile NAME KEY=TOML_VALUE` for explicit
+profile edits. Config edits are unavailable while a turn is running.
 
 `ego config ls --effective` and `/config perimeter` show the same perimeter
 block as doctor: canonical workspace, admitted profile roots and their access

@@ -75,8 +75,19 @@ fn slash_perimeter_is_local_and_rejects_unknown_arguments() {
     use ego_cli::repl::actions::{ActionId, ActionRegistry, Dispatch, InputOrigin};
     let registry = ActionRegistry::final_surface();
     assert!(matches!(
-        registry.classify(registry.submit("/config perimeter", InputOrigin::Typed)),
+        registry.classify(registry.submit("/config", InputOrigin::Typed)),
         Dispatch::Action(ActionId::Config)
+    ));
+    assert!(
+        matches!(registry.classify(registry.submit("/config set mode 'plan'", InputOrigin::Typed)), Dispatch::Config(arguments) if arguments == "set mode 'plan'")
+    );
+    assert!(matches!(
+        registry.classify(registry.submit("/config set mode 'plan'", InputOrigin::BracketedPaste)),
+        Dispatch::Prompt
+    ));
+    assert!(matches!(
+        registry.classify(registry.submit("/config perimeter", InputOrigin::Typed)),
+        Dispatch::Config(arguments) if arguments == "perimeter"
     ));
     assert!(matches!(
         registry.classify(registry.submit("/config unknown", InputOrigin::Typed)),

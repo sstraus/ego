@@ -229,6 +229,15 @@ pub(super) fn surface_line(
                     }
                     return (Line::HostCommand(HostCommand::Fork(item)), failed);
                 }
+                Dispatch::Config(arguments) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice =
+                            Some("config is unavailable while a turn is running".to_owned());
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::Config(arguments)), failed);
+                }
                 Dispatch::Hooks => {
                     if phase.get() == EditPhase::Busy {
                         status.lock().expect("surface status lock").notice = Some(
@@ -378,6 +387,12 @@ pub(super) fn surface_line(
                         status.lock().expect("surface status lock").notice = Some(
                             "switching forks is unavailable while a turn is running".to_owned(),
                         );
+                        repaint_status(status);
+                        continue;
+                    }
+                    Dispatch::Config(_) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some("config is unavailable while a turn is running".to_owned());
                         repaint_status(status);
                         continue;
                     }

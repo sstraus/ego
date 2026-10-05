@@ -1197,7 +1197,52 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Config,
                                     )) => {
-                                        diagnostics.note(&perimeter.text());
+                                        diagnostics.note(&crate::config::repl_text(
+                                            &effective,
+                                            skill_profile_layers.as_deref().unwrap_or_default(),
+                                            &perimeter,
+                                        ));
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Config(
+                                        arguments,
+                                    )) => {
+                                        if arguments == "perimeter" {
+                                            diagnostics.note(&perimeter.text());
+                                        } else {
+                                            match crate::config::repl_set_args(&arguments) {
+                                                Ok(set) => match crate::config::repl_set(&set) {
+                                                    Ok(receipt) => {
+                                                        diagnostics.note(&receipt);
+                                                        diagnostics.note("Saved to user base configuration; applies to future sessions. Current session authority is unchanged.");
+                                                        if let Some(warning) =
+                                                            crate::config::saved_override(
+                                                                &set,
+                                                                &effective,
+                                                                skill_profile_layers
+                                                                    .as_deref()
+                                                                    .unwrap_or_default(),
+                                                            )
+                                                        {
+                                                            diagnostics.note(&warning);
+                                                        }
+                                                        diagnostics.note(
+                                                            &crate::config::repl_text(
+                                                                &effective,
+                                                                skill_profile_layers
+                                                                    .as_deref()
+                                                                    .unwrap_or_default(),
+                                                                &perimeter,
+                                                            ),
+                                                        );
+                                                    }
+                                                    Err(error) => diagnostics.note(&format!(
+                                                        "config set failed: {error:?}"
+                                                    )),
+                                                },
+                                                Err(error) => diagnostics.note(&error.to_string()),
+                                            }
+                                        }
                                         continue;
                                     }
                                     // The same snapshot `ego doctor` prints,
