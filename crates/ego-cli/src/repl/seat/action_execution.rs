@@ -31,6 +31,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 ActionId::New,
                 ActionId::Fork,
                 ActionId::Compact,
+                ActionId::Refresh,
                 ActionId::Name,
                 ActionId::Goal,
                 ActionId::Export,
@@ -610,6 +611,9 @@ pub(super) fn apply_surface_effect(
         }
         SurfaceActionEffect::Permissions => {
             return choose_permission_action(editor, phase, status, busy);
+        }
+        SurfaceActionEffect::Refresh => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Refresh)));
         }
         SurfaceActionEffect::Compact => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Compact)));

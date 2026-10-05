@@ -38,9 +38,9 @@ mod regression_case {
     use super::*;
 
     #[test]
-    fn current_writers_keep_codec_twelve_and_advance_snapshot_to_fourteen() {
+    fn current_writers_keep_codec_twelve_and_advance_snapshot_to_fifteen() {
         assert_eq!(ego_core::store::codec::CODEC_VERSION, 12);
-        assert_eq!(SNAPSHOT_VERSION, 14);
+        assert_eq!(SNAPSHOT_VERSION, 15);
     }
 
     #[test]

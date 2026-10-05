@@ -63,7 +63,11 @@ fn charged_log() -> (Vec<DomainEvent>, [AttemptRef; 3]) {
         log.push(event(
             &mut seq,
             at,
-            EventKind::GenerationStarted { attempt, role },
+            EventKind::GenerationStarted {
+                attempt,
+                role,
+                snapshot: None,
+            },
         ));
         log.push(event(
             &mut seq,
@@ -172,6 +176,7 @@ fn fork_spend_is_local_and_does_not_replay_source_charges_into_the_target() {
         EventKind::Forked {
             source,
             at_seq: Seq::default(),
+            snapshot: None,
         },
     )]);
     assert!(!source_state.charges.is_empty());
@@ -191,6 +196,7 @@ fn unpriced_cost_stays_unknown_and_context_occupancy_is_not_a_billed_total() {
             EventKind::GenerationStarted {
                 attempt,
                 role: GenerationRole::Main,
+                snapshot: None,
             },
         ),
         event(
@@ -246,6 +252,7 @@ fn pre_attribution_usage_is_explicitly_legacy_but_later_unattributed_usage_is_re
         EventKind::GenerationStarted {
             attempt,
             role: GenerationRole::Main,
+            snapshot: None,
         },
     );
     let after_attribution = event(
@@ -420,5 +427,48 @@ mod report_service {
             Err(UsageReportError::UnattributedCharge { session: actual, charge_index: 0 })
                 if actual == session
         ));
+    }
+    // Catches: cache-hit reporting double-counting corrected usage or treating cache writes as reads.
+    #[test]
+    fn cache_hit_uses_corrected_input_and_both_write_categories() {
+        let session = SessionId::new();
+        let (mut log, [attempt, _, _]) = charged_log();
+        let mut seq = log.last().expect("last event").env.seq;
+        seq.next();
+        log.push(event(
+            &mut seq,
+            4_000,
+            EventKind::UsageCorrected {
+                attempt,
+                usage: Usage {
+                    uncached_input_tokens: 10,
+                    cache_read_tokens: 50,
+                    cache_write_tokens: 20,
+                    cache_write_extended_tokens: 20,
+                    output_tokens: 4,
+                    ..Usage::IDENTITY
+                },
+                cost_delta: cost("USD", "0.01"),
+            },
+        ));
+        let store = FixtureStore {
+            entries: BTreeMap::from([(
+                session,
+                log.into_iter().map(SessionEntry::Event).collect(),
+            )]),
+            metadata: vec![meta(session, Some("provider/model"), 4_000)],
+            reads: Arc::new(AtomicUsize::new(0)),
+        };
+        let clock = CountingClock {
+            now: Timestamp::from_millis(4_000),
+            reads: Arc::new(AtomicUsize::new(0)),
+        };
+        let report = block_on(
+            UsageReportService::new(&store, &clock).report(&store.metadata, UsagePeriod::All),
+        )
+        .expect("report");
+        assert_eq!(report.sessions[0].lines.main.cache_hit(), Some(0.5));
+        let json = serde_json::to_value(&report).expect("json");
+        assert_eq!(json["sessions"][0]["lines"]["main"]["cache_hit"], 0.5);
     }
 }

@@ -586,7 +586,7 @@ impl CliCompactionCommand {
         let mut loop_ = TurnLoop::new(session, runtime, tools)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
         if let Some(replayed) = active.replayed() {
-            loop_ = loop_.with_ancestor_conversation(replayed.conversation().clone());
+            loop_ = loop_.with_replayed_context(replayed);
         }
         if judge_available {
             loop_ = loop_.with_judge(JudgeContext {

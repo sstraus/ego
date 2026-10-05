@@ -418,6 +418,7 @@ fn compaction_attempts_settle_in_the_source_ledger_for_every_terminal_boundary()
         state.apply(&event(EventKind::GenerationStarted {
             attempt,
             role: GenerationRole::Compaction,
+            snapshot: None,
         }));
         state.apply(&event(EventKind::UsageUpdated {
             usage,
@@ -528,6 +529,7 @@ fn compaction_output_stays_private_from_the_source_conversation() {
         event(EventKind::GenerationStarted {
             attempt: AttemptRef::first(GenerationId::new()),
             role: GenerationRole::Compaction,
+            snapshot: None,
         }),
         event(EventKind::AssistantMessage { text: checkpoint() }),
         event(EventKind::CompactionSeeded {
@@ -874,6 +876,7 @@ fn busy_state(busy: &CompactionBusy) -> SessionState {
             EventKind::GenerationStarted {
                 attempt: AttemptRef::first(GenerationId::new()),
                 role: GenerationRole::Main,
+                snapshot: None,
             },
         ),
     };

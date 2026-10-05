@@ -346,6 +346,7 @@ mod acp_golden {
                 EventKind::Forked {
                     source: SessionId::new(),
                     at_seq: Seq::default(),
+                    snapshot: None,
                 },
             ),
             ev(
@@ -529,6 +530,7 @@ mod acp_golden {
             EventKind::GenerationStarted {
                 attempt: AttemptRef::first(GenerationId::new()),
                 role: GenerationRole::Main,
+                snapshot: None,
             },
             EventKind::ExecutionObserved {
                 observation: ego_core::permit::ExecObservation::new(
@@ -579,6 +581,7 @@ mod acp_golden {
             EventKind::Forked {
                 source: SessionId::new(),
                 at_seq: Seq::default(),
+                snapshot: None,
             },
             EventKind::HookCatalogueAdmitted {
                 descriptors: HookCatalogueEvidence::new(vec![hook_catalogue_entry()]).unwrap(),
@@ -813,6 +816,7 @@ mod acp_golden {
         let event = with_item(EventKind::Forked {
             source: SessionId::new(),
             at_seq: Seq::default(),
+            snapshot: None,
         });
         assert_eq!(acp_v1(&event), None);
         assert_eq!(acp_v2(&event), None);
