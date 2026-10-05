@@ -55,6 +55,23 @@ impl HttpCall for Call {
         })
     }
 }
+fn enabled(
+    mut config: ego_core::config::JevConfig,
+    root: &std::path::Path,
+) -> ego_core::config::JevConfig {
+    let on = ego_core::config::JevUseOverride {
+        on: Some(true),
+        ..Default::default()
+    };
+    config.roots.push(ego_core::config::JevRoot {
+        path: root.to_string_lossy().into(),
+        endpoint: None,
+        wake: Some(on.clone()),
+        destructive: Some(on.clone()),
+        router: Some(on),
+    });
+    config
+}
 fn fixture() -> Value {
     serde_json::from_str(include_str!("fixtures/jev/decisions.json")).unwrap()
 }
@@ -170,8 +187,11 @@ async fn configured_calls_read_rotated_keys_and_honour_canonical_switches() {
     std::fs::create_dir_all(env_file.parent().unwrap()).unwrap();
     let root = home.join("workspace/repo");
     std::fs::create_dir_all(&root).unwrap();
-    let configured =
-        ConfiguredDecisions::new(JevConfig::default(), home.into(), Duration::from_secs(1));
+    let configured = ConfiguredDecisions::new(
+        enabled(JevConfig::default(), &root),
+        home.into(),
+        Duration::from_secs(1),
+    );
     let http = Recorder {
         calls: Arc::new(Mutex::new(vec![])),
         response: fixture()["response"].clone(),
@@ -286,7 +306,11 @@ async fn explicit_gateway_uses_only_its_identity_header_and_always_zdr() {
     use ego_core::config::{ConfigLayer, JevUse, Source};
     let tmp = tempfile::tempdir().unwrap();
     let config=ConfigLayer::parse(Source::User,"[jev]\nendpoint='https://gateway.example/jev/decisions'\nauth={kind='header',name='X-User-Email',value='fixture@example.test'}").unwrap().value.jev.unwrap();
-    let configured = ConfiguredDecisions::new(config, tmp.path().into(), Duration::from_secs(1));
+    let configured = ConfiguredDecisions::new(
+        enabled(config, tmp.path()),
+        tmp.path().into(),
+        Duration::from_secs(1),
+    );
     let http = Recorder {
         calls: Arc::new(Mutex::new(vec![])),
         response: fixture()["response"].clone(),
@@ -346,7 +370,11 @@ async fn explicit_api_key_gateway_resolves_the_named_environment_at_call_time() 
     .value
     .jev
     .unwrap();
-    let configured = ConfiguredDecisions::new(config, tmp.path().into(), Duration::from_secs(1));
+    let configured = ConfiguredDecisions::new(
+        enabled(config, tmp.path()),
+        tmp.path().into(),
+        Duration::from_secs(1),
+    );
     let http = Recorder {
         calls: Arc::new(Mutex::new(vec![])),
         response: fixture()["response"].clone(),
