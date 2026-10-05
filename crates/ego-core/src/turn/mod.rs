@@ -2744,7 +2744,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     .run_tool(policy.as_ref(), &policy_snapshot, turn, &mut pending[index])
                     .await?
                 {
-                    ToolOutcome::Answered { ok, result } => {
+                    ToolOutcome::Answered { ok, mut result } => {
+                        self.tools.mask_result(&mut result);
                         let call = &pending[index];
                         self.journal.append(
                             turn,
@@ -2756,9 +2757,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     }
                     ToolOutcome::Executed {
                         ok,
-                        result,
+                        mut result,
                         selector,
                     } => {
+                        self.tools.mask_result(&mut result);
                         let call = &pending[index];
                         self.journal.append(
                             turn,

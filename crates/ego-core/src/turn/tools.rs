@@ -676,10 +676,6 @@ impl<'a> Tools<'a> {
             std::sync::Arc::clone(&self.effects.duplex),
             resume,
         );
-        let mut execution = tool.execute(call, &guarded).await?;
-        if let ToolExecution::Complete(result) = &mut execution {
-            self.mask_result(result);
-        }
-        Ok(execution)
+        tool.execute(call, &guarded).await
     }
 }

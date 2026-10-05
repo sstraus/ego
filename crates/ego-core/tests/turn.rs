@@ -1806,9 +1806,11 @@ mod turn {
 
     #[test]
     fn failed_tool_diagnostic_does_not_leak_known_secret_to_model_or_log() {
-        // Catches: error-to-result conversion bypasses disclosure masking.
+        // Catches: execution or preparation error-to-result conversion bypasses disclosure masking.
         const SECRET: &str = "example-regression-token";
-        struct DiagnosticTool;
+        struct DiagnosticTool {
+            fail_prepare: bool,
+        }
 
         impl TypedTool for DiagnosticTool {
             type Params = ReadParams;
@@ -1826,6 +1828,11 @@ mod turn {
                 params: ReadParams,
                 ctx: &PrepareCtx<'_>,
             ) -> Result<PreparedCall, ToolError> {
+                if self.fail_prepare {
+                    return Err(ToolError::InvalidParams(format!(
+                        "credential rejected: {SECRET}"
+                    )));
+                }
                 FakeReadTool.prepare_typed(params, ctx)
             }
 
@@ -1843,64 +1850,66 @@ mod turn {
             }
         }
 
-        let mut fx = Fixture::new(vec![
-            vec![
-                AiEvent::ToolCall {
-                    call_id: "diagnostic".to_owned(),
-                    name: "read".to_owned(),
-                    args: r#"{"path":"/ws/input"}"#.to_owned(),
-                },
-                AiEvent::Stop(StopReason::ToolUse),
-            ],
-            vec![AiEvent::Stop(StopReason::Stop)],
-        ]);
-        fx.registry = vec![Arc::new(Typed(DiagnosticTool))];
-        fx.fs.file("/ws/input", "input");
-        let mut budget = fx.gate.borrow_mut();
-        let tools = Tools::new(
-            &fx.registry,
-            ToolEffectPorts::new(
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
-                Arc::new(NoResolver),
-                Arc::new(NoHop),
-                Arc::new(NoDuplex),
-            )
-            .with_secret_values(ego_core::secrets::SecretValues::new([SECRET
-                .as_bytes()
-                .to_vec()])),
-            CanonPath::new("/ws"),
-        );
-        let mut turn = TurnLoop::open(
-            session(
-                SessionState::default(),
-                &fx.store,
-                &fx.clock,
-                &fx.sink,
-                CancelToken::new(),
-            ),
-            model_for(&fx, &fx.generator, &mut budget),
-            tools,
-        );
-        let outcome = block_on(turn.run("read the input")).expect("turn completes");
-        assert_eq!(outcome.exit_reason, ExitReason::Completed);
-        let events = fx.store.events();
-        let diagnostic = events
-            .iter()
-            .find_map(|event| match &event.kind {
-                EventKind::ToolCallCompleted { ok: false, result } => Some(result.model_text()),
-                _ => None,
-            })
-            .expect("failed tool result is durable");
-        let calls = fx.generator.calls();
-        assert_eq!(calls.len(), 2, "the error is fed back to the model");
-        let request = serde_json::to_string(&calls[1]).expect("serialize model request");
-        assert!(
-            !diagnostic.contains(SECRET) && !request.contains(SECRET),
-            "failed diagnostic leaked known secret: log={diagnostic}; model={request}"
-        );
-        assert!(diagnostic.contains("[REDACTED]"));
+        for fail_prepare in [false, true] {
+            let mut fx = Fixture::new(vec![
+                vec![
+                    AiEvent::ToolCall {
+                        call_id: "diagnostic".to_owned(),
+                        name: "read".to_owned(),
+                        args: r#"{"path":"/ws/input"}"#.to_owned(),
+                    },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]);
+            fx.registry = vec![Arc::new(Typed(DiagnosticTool { fail_prepare }))];
+            fx.fs.file("/ws/input", "input");
+            let mut budget = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                )
+                .with_secret_values(ego_core::secrets::SecretValues::new([SECRET
+                    .as_bytes()
+                    .to_vec()])),
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                model_for(&fx, &fx.generator, &mut budget),
+                tools,
+            );
+            let outcome = block_on(turn.run("read the input")).expect("turn completes");
+            assert_eq!(outcome.exit_reason, ExitReason::Completed);
+            let events = fx.store.events();
+            let diagnostic = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    EventKind::ToolCallCompleted { ok: false, result } => Some(result.model_text()),
+                    _ => None,
+                })
+                .expect("failed tool result is durable");
+            let calls = fx.generator.calls();
+            assert_eq!(calls.len(), 2, "the error is fed back to the model");
+            let request = serde_json::to_string(&calls[1]).expect("serialize model request");
+            assert!(
+                !diagnostic.contains(SECRET) && !request.contains(SECRET),
+                "failed diagnostic leaked known secret (prepare={fail_prepare}): log={diagnostic}; model={request}"
+            );
+            assert!(diagnostic.contains("[REDACTED]"));
+        }
     }
 
     /// Every `seq` in the log, in the order it was written.
