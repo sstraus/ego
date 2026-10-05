@@ -34,7 +34,8 @@ use reedline::Signal;
 
 pub(super) const DRAFT_COMMAND: &str = "ego:draft";
 pub(super) const BUSY_SUBMIT_COMMAND: &str = "ego:busy-submit";
-pub(super) const INTERRUPT_COMMAND: &str = "ego:interrupt";
+pub(super) const BACKGROUND_COMMAND: &str = "ego:background";
+const INTERRUPT_COMMAND: &str = "ego:interrupt";
 pub(super) const PASTE_PATH_COMMAND: &str = "ego:paste-path:";
 pub(super) const REMOVE_PASTE_IMAGE_COMMAND: &str = "ego:remove-paste-image";
 pub(super) const CLIPBOARD_PASTE_COMMAND: &str = "ego:clipboard-paste";
@@ -60,6 +61,8 @@ pub enum HostCommand {
     Export(ExportSelection),
     Hooks,
     Config(String),
+    Tasks(String),
+    Background,
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
     BusySubmit,
@@ -80,6 +83,9 @@ impl HostCommand {
         }
         if command == BUSY_SUBMIT_COMMAND {
             return Some(Self::BusySubmit);
+        }
+        if command == BACKGROUND_COMMAND {
+            return Some(Self::Background);
         }
         if command == INTERRUPT_COMMAND {
             return Some(Self::Interrupt);

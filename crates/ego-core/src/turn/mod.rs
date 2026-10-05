@@ -474,8 +474,37 @@ fn apply_intent(
     control: &mut InteractiveControl,
     turn: TurnId,
     intent: ControlIntent,
+    process: Option<&dyn crate::permit::ProcessExecutor>,
 ) -> Result<bool, StoreError> {
     match intent {
+        ControlIntent::Background { reply } => {
+            let Some((process, id)) =
+                process.and_then(|process| process.foreground_exec().map(|id| (process, id)))
+            else {
+                let _ = reply.send(Err(ControlError::Unavailable(
+                    "no running exec to background".into(),
+                )));
+                return Ok(false);
+            };
+            if let Err(error) =
+                journal.append(turn, None, None, EventKind::DetachedExecStarted { id })
+            {
+                cancel.cancel(CancelCause::Host);
+                let _ = reply.send(Err(ControlError::Store(error.to_string())));
+                return Err(error.into());
+            }
+            match process.detach_foreground(id) {
+                Ok(()) => {
+                    let _ = reply.send(Ok(id));
+                }
+                Err(error) => {
+                    cancel.cancel(CancelCause::Host);
+                    let _ = reply.send(Err(ControlError::Unavailable(error.to_string())));
+                    return Err(StoreError::Io(std::io::Error::other(error.to_string())));
+                }
+            }
+            Ok(false)
+        }
         ControlIntent::Submit { text, reply } => {
             let id = QueuedPromptId::new();
             match journal.append(
@@ -545,6 +574,7 @@ async fn await_controlled<F, T>(
     turn: TurnId,
     work: F,
     disposition: InterruptDisposition,
+    process: Option<&dyn crate::permit::ProcessExecutor>,
 ) -> Controlled<T>
 where
     F: Future<Output = T>,
@@ -578,7 +608,7 @@ where
                     let coordinator = control
                         .as_deref_mut()
                         .expect("an intent came from an attached coordinator");
-                    apply_intent(journal, cancel, coordinator, turn, intent)
+                    apply_intent(journal, cancel, coordinator, turn, intent, process)
                 };
                 match applied {
                     Ok(true) if disposition == InterruptDisposition::Return => {
@@ -3080,7 +3110,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         .control
                         .as_deref_mut()
                         .expect("the boundary intent came from this coordinator");
-                    let _ = apply_intent(&self.journal, &self.cancel, control, turn, intent)?;
+                    let _ = apply_intent(&self.journal, &self.cancel, control, turn, intent, None)?;
                 }
                 BoundaryIntent::Closed => {
                     self.control = None;
@@ -3310,6 +3340,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     turn,
                     source.resolve(model_request),
                     InterruptDisposition::Return,
+                    None,
                 )
                 .await
                 {
@@ -3681,6 +3712,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         turn,
                         pause,
                         InterruptDisposition::Return,
+                        None,
                     )
                     .await
                     {
@@ -4081,6 +4113,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 turn,
                 stream.next(),
                 InterruptDisposition::Return,
+                None,
             )
             .await
             {
@@ -4398,6 +4431,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             turn,
             source.resolve(GenerationModelRequest::new(GenerationRole::Judge)),
             InterruptDisposition::Return,
+            None,
         )
         .await
         {
@@ -4456,6 +4490,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 turn,
                 cache.acquire(key),
                 InterruptDisposition::Return,
+                None,
             )
             .await
             {
@@ -4608,6 +4643,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 turn,
                 stream.next(),
                 InterruptDisposition::Return,
+                None,
             )
             .await
             {
@@ -5038,6 +5074,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             turn,
                             self.tools.settle(policy, pending),
                             InterruptDisposition::Return,
+                            None,
                         )
                         .await;
                         let resolution = match resolution {
@@ -5132,6 +5169,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                     turn,
                                     self.tools.decide(policy, call.item, pending),
                                     InterruptDisposition::Return,
+                                    None,
                                 )
                                 .await;
                                 let decision = match decision {
@@ -5309,6 +5347,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             self.tools
                 .execute(policy, tool.as_ref(), authorized, resume_context),
             InterruptDisposition::AwaitEffect,
+            (tool.descriptor().name == "exec").then_some(self.tools.effect_ports().process()),
         )
         .await;
         let execution = match execution {
@@ -5384,6 +5423,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     turn,
                     elicitor.elicit(question, request.clone()),
                     InterruptDisposition::Return,
+                    None,
                 )
                 .await;
                 match elicited {
@@ -5492,6 +5532,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 turn,
                 elicitor.elicit(question, request.clone()),
                 InterruptDisposition::Return,
+                None,
             )
             .await;
             let outcome = match elicited {
@@ -5607,6 +5648,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             turn,
             port.resume(&continuation_id, &canonical_json, causality),
             InterruptDisposition::AwaitEffect,
+            None,
         )
         .await;
         let execution = match execution {

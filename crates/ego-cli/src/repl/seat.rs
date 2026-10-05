@@ -35,8 +35,8 @@ use super::status::{
 };
 use super::surface::InteractivePainter;
 use super::{
-    BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, PASTE_PATH_COMMAND,
-    REMOVE_PASTE_IMAGE_COMMAND, answer,
+    BACKGROUND_COMMAND, BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line,
+    PASTE_PATH_COMMAND, REMOVE_PASTE_IMAGE_COMMAND, answer,
 };
 use crate::cli::{managed_rule, managed_rule_effect, managed_rule_id};
 use crate::model::{GenerationSelection, GenerationSelectionSnapshot};
@@ -110,6 +110,7 @@ enum SurfaceActionEffect {
     Clear,
     Statusline,
     Mcp,
+    Tasks,
     Tools,
     Expand,
     Skills,
@@ -150,6 +151,7 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Clear => SurfaceActionEffect::Clear,
             ActionId::Statusline => SurfaceActionEffect::Statusline,
             ActionId::Mcp => SurfaceActionEffect::Mcp,
+            ActionId::Tasks => SurfaceActionEffect::Tasks,
             ActionId::Tools => SurfaceActionEffect::Tools,
             ActionId::Expand => SurfaceActionEffect::Expand,
             ActionId::Skills => SurfaceActionEffect::Skills,
@@ -1052,6 +1054,7 @@ impl Seat {
                     }
                     Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
+                    Dispatch::Tasks(arguments) => Line::HostCommand(HostCommand::Tasks(arguments)),
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
                     }
@@ -1186,6 +1189,7 @@ impl Seat {
             ActionId::Clear,
             ActionId::Statusline,
             ActionId::Mcp,
+            ActionId::Tasks,
             ActionId::Tools,
             ActionId::Expand,
             ActionId::Skills,

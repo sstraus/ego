@@ -1014,6 +1014,18 @@ pub trait ProcessExecutor: Send + Sync {
         spec: &'a SpawnSpec,
     ) -> BoxFuture<'a, Result<ToolResult, ProcessError>>;
 
+    /// The active foreground exec that can be retained by this session.
+    fn foreground_exec(&self) -> Option<DetachedExecId> {
+        None
+    }
+
+    /// Release its foreground waiter after the coordinator records admission.
+    fn detach_foreground(&self, _id: DetachedExecId) -> Result<(), ProcessError> {
+        Err(ProcessError::Invariant(
+            "no foreground exec to detach".into(),
+        ))
+    }
+
     /// Transfer one admitted process to the session owner and return its ID.
     fn start_background<'a>(
         &'a self,

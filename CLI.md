@@ -963,7 +963,7 @@ echo. The first starts a turn; further submitted lines enter the busy FIFO.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
 /sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
-/name /goal /tools /expand /skills /hooks /version`. These 27 commands are the complete
+/name /goal /tasks /tools /expand /skills /hooks /version`. These 28 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
@@ -1141,6 +1141,7 @@ bounded channels.
 |---|---|---|
 | Input line, history, multiline | **yes** | reedline. Active `Ctrl+C` requests cancellation and reports it immediately. Idle `Ctrl+C` abandons the line; a second idle `Ctrl+C` within 500 ms exits. `Ctrl+D` ends it |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
+| Ctrl+B, `/tasks` | **yes** | Ctrl+B retains the running admitted exec as a session-owned detached command without restarting it. `/tasks` lists bounded output and status; `/tasks ID` inspects one task, `/tasks cancel ID` requests cancellation. Settlements are announced once at the next generation boundary; restart reports unsettled tasks as Interrupted |
 | Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |
 | Ctrl+Z | **yes** (Unix) | stops ego as a shell job with the terminal back in cooked mode; `fg` restores raw mode and repaints the composer or the open modal, which stays unanswered. A running `exec` keeps running in its own process group, and its timeout does not count the time ego was stopped. Windows has no job control: the key reports that it is unsupported |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |

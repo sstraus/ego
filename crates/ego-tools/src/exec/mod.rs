@@ -338,7 +338,23 @@ impl ProcessExecutor for GuardedExec {
         &'a self,
         spec: &'a SpawnSpec,
     ) -> BoxFuture<'a, Result<ego_core::permit::ToolResult, ProcessError>> {
-        Box::pin(self.context.execute(spec))
+        Box::pin(async move {
+            if let Some(owner) = &self.session_owner {
+                self.context
+                    .execute_promotable(owner.session_context(), spec)
+                    .await
+            } else {
+                self.context.execute(spec).await
+            }
+        })
+    }
+
+    fn foreground_exec(&self) -> Option<DetachedExecId> {
+        self.context.foreground_exec()
+    }
+
+    fn detach_foreground(&self, id: DetachedExecId) -> Result<(), ProcessError> {
+        self.session_context().detach_foreground(id)
     }
 
     fn start_background<'a>(

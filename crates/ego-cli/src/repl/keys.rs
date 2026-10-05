@@ -23,6 +23,7 @@ pub(super) enum Intercept {
     SubmitBusy,
     /// Expedite the durable pending-steer prefix.
     Interrupt,
+    Background,
 }
 
 /// Decide a key.
@@ -42,7 +43,9 @@ pub(super) fn intercept(code: KeyCode, modifiers: KeyModifiers) -> Intercept {
 
     let pressed_s = matches!(code, KeyCode::Char(key) if key.eq_ignore_ascii_case(&'s'));
 
-    if pressed_v && only_control {
+    if matches!(code, KeyCode::Char(key) if key.eq_ignore_ascii_case(&'b')) && only_control {
+        Intercept::Background
+    } else if pressed_v && only_control {
         Intercept::ClipboardImage
     } else if pressed_s && only_control {
         Intercept::Draft
@@ -58,6 +61,29 @@ pub(super) fn intercept(code: KeyCode, modifiers: KeyModifiers) -> Intercept {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches: Ctrl+B falls through to cursor movement or swallows Alt+B.
+    #[test]
+    fn ctrl_b_promotes_only_the_control_chord() {
+        assert_eq!(
+            intercept(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            Intercept::Background
+        );
+        assert_eq!(
+            intercept(
+                KeyCode::Char('B'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Intercept::Background
+        );
+        assert_eq!(
+            intercept(
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            ),
+            Intercept::Editor
+        );
+    }
 
     #[test]
     fn ctrl_v_is_egos_key_and_not_the_editors() {

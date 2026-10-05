@@ -107,6 +107,147 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
     );
 }
 
+// Catches: Ctrl+B kills/restarts the child, loses its handle, or duplicates its settlement.
+#[test]
+fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "printf REGRESSION-MARKER > started; while [ ! -f release ]; do sleep 0.05; done; printf DETACHED-DONE > completed; printf DETACHED-DONE"],
+        "background": false,
+        "timeout_ms": 15000
+    });
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("DETACHED", "exec", &arguments.to_string())),
+            Reply::Sse(text("DETACHED-LAUNCHED")),
+            Reply::Sse(text("DETACHED-NEXT-TURN")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# detached exec critic fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "--mode",
+        "yolo",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"start the detached command\r").unwrap();
+    input.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !places.workspace_path().join("started").exists() {
+        assert!(Instant::now() < deadline, "foreground child never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    input.write_all(b"\x02").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "background exec id:");
+    until_normalized(&reader, &mut output, start, "DETACHED-LAUNCHED");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let mark = output.len();
+    input.write_all(b"/tasks\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, mark, "running");
+    assert!(
+        !places.workspace_path().join("completed").exists(),
+        "Ctrl+B restarted or waited for the command"
+    );
+    places.file("release", "continue\n");
+    let completed = places.workspace_path().join("completed");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // Catches the completion-file race: the shell writes the file before its
+    // exit and output evidence settle. Observe delivery at a turn boundary
+    // instead of treating that file as a process-settlement barrier.
+    loop {
+        let start = output.len();
+        input.write_all(b"inspect the completed command\r").unwrap();
+        input.flush().unwrap();
+        while !normalized(&output[start..]).contains("DETACHED-NEXT-TURN") {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            output.extend(
+                reader
+                    .recv_timeout(remaining)
+                    .expect("settlement reply deadline"),
+            );
+        }
+        let start = output.len();
+        until_prompt_from_with_context(
+            &reader,
+            &mut output,
+            start,
+            deadline.saturating_duration_since(Instant::now()),
+            "detached settlement composer",
+        );
+        let generations = stub.generations();
+        let history = generations.last().expect("next generation")["messages"].to_string();
+        if (history.contains("exited code 0") && history.contains("DETACHED-DONE"))
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+    }
+    let completion = std::fs::read_to_string(&completed).ok();
+    let mark = output.len();
+    input.write_all(b"/tasks\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, mark, "exited code 0");
+    let mark = output.len();
+    input.write_all(b"/help\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, mark, "/tasks");
+    until_normalized(&reader, &mut output, mark, "Ctrl+B");
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "REPL exit: {status:?}");
+    assert_eq!(
+        completion.as_deref(),
+        Some("DETACHED-DONE"),
+        "detached command was killed when its launching REPL turn ended"
+    );
+    let generations = stub.generations();
+    let history = generations.last().expect("next generation")["messages"].to_string();
+    assert_eq!(
+        history.matches("stdout tail (").count(),
+        1,
+        "settlement duplicated in model history: {history}"
+    );
+    assert!(
+        normalized(&output).contains("exited code 0"),
+        "settlement not announced"
+    );
+    assert!(
+        history.contains("exited code 0") && history.contains("DETACHED-DONE"),
+        "next turn lost detached settlement: {history}"
+    );
+}
+
 // Catches: a second cross-root selection rebases a relative store under the selected project.
 #[test]
 fn repeated_cross_root_resume_preserves_relative_session_store() {
@@ -5662,7 +5803,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 27] = [
+    const COMMANDS: [&str; 28] = [
         "help",
         "model",
         "thinking",
@@ -5685,6 +5826,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "new",
         "name",
         "goal",
+        "tasks",
         "tools",
         "expand",
         "skills",
@@ -5772,6 +5914,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("new", None),
         ("name", None),
         ("goal", None),
+        ("tasks", Some("background tasks: none")),
         ("tools", Some("tools:")),
         ("expand", Some("no tool call to expand yet")),
         ("skills", None),
@@ -8641,4 +8784,44 @@ fn esc_cancels_both_task_children_and_restores_one_idle_composer() {
         "{visible}"
     );
     assert!(!visible.contains("must not finish"), "{visible}");
+}
+
+// Catches: /tasks cancel targets a different process, cannot inspect bounded output, or leaves the child running.
+#[test]
+fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "printf ready > ready; printf REGRESSION-MARKER-OUTPUT; while [ ! -f release ]; do sleep 0.05; done; printf survived > survived"],
+        "timeout_ms": 15000
+    });
+    let mut session = modal_session(("exec", &arguments.to_string()));
+    session.press(b"start a long exec\r");
+    session.wait("[d] details");
+    session.press(b"y");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !session.ego.workspace_path().join("ready").exists() {
+        assert!(Instant::now() < deadline, "foreground child did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    session.press(b"\x02");
+    session.wait(TOOL_TURN_DONE);
+    let transcript = normalized(&session.output);
+    let prefix = "background exec id: ";
+    let offset = transcript.rfind(prefix).expect("background handle") + prefix.len();
+    let id = &transcript[offset..offset + 36];
+    assert!(id.parse::<ego_core::event::id::DetachedExecId>().is_ok());
+    session.press(b"/tasks\r");
+    session.wait("running");
+    session.wait("REGRESSION-MARKER-OUTPUT");
+    session.press(format!("/tasks cancel {id}\r").as_bytes());
+    session.wait("background exec ");
+    loop {
+        session.press(format!("/tasks {id}\r").as_bytes());
+        drain_until_quiet(&session.reader, &mut session.output);
+        if normalized(&session.output[session.mark..]).contains("cancelled") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "cancel did not settle");
+    }
+    assert!(!session.ego.workspace_path().join("survived").exists());
+    session.finish();
 }

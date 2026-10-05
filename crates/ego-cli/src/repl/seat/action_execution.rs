@@ -41,6 +41,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
             "Integrations",
             &[
                 ActionId::Mcp,
+                ActionId::Tasks,
                 ActionId::Tools,
                 ActionId::Skills,
                 ActionId::Hooks,
@@ -238,6 +239,9 @@ pub(super) fn surface_line(
                     }
                     return (Line::HostCommand(HostCommand::Fork(item)), failed);
                 }
+                Dispatch::Tasks(arguments) => {
+                    return (Line::HostCommand(HostCommand::Tasks(arguments)), failed);
+                }
                 Dispatch::Config(arguments) => {
                     if phase.get() == EditPhase::Busy {
                         status.lock().expect("surface status lock").notice =
@@ -314,6 +318,18 @@ pub(super) fn surface_line(
         }
 
         match command {
+            HostCommand::Background => {
+                let notice = if phase.get() == EditPhase::Busy {
+                    match futures::executor::block_on(ingress.background()) {
+                        Ok(id) => format!("background exec id: {id}"),
+                        Err(error) => error.to_string(),
+                    }
+                } else {
+                    "no running exec to background".into()
+                };
+                status.lock().expect("surface status lock").notice = Some(notice);
+                repaint_status(status);
+            }
             HostCommand::Draft => {
                 let buffer = editor.current_buffer_contents().to_string();
                 if buffer.is_empty() {
@@ -404,6 +420,11 @@ pub(super) fn surface_line(
                         );
                         repaint_status(status);
                         continue;
+                    }
+                    Dispatch::Tasks(arguments) => {
+                        editor.run_edit_commands(&[EditCommand::Clear]);
+                        status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+                        return (Line::HostCommand(HostCommand::Tasks(arguments)), false);
                     }
                     Dispatch::Config(_) => {
                         status.lock().expect("surface status lock").notice =
@@ -740,6 +761,9 @@ pub(super) fn apply_surface_effect(
                 format!("mcp: {:?}", registry_status.servers())
             };
             status.lock().expect("surface status lock").notice = Some(notice);
+        }
+        SurfaceActionEffect::Tasks => {
+            return Some(Line::HostCommand(HostCommand::Tasks(String::new())));
         }
         SurfaceActionEffect::Tools => {
             let actions = status
