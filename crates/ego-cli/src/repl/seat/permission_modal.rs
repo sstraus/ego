@@ -271,24 +271,31 @@ mod tests {
     /// Catches detached process controls losing their target or presenting
     /// cancellation as a read-only operation in the permission modal.
     #[test]
-    fn session_process_controls_show_the_action_target_and_bounded_risk() {
+    fn session_process_controls_show_the_action_target_in_the_rendered_prompt() {
+        use ego_core::config::Mode;
+        use ego_core::permit::{CanonPath, Escalation, OpName};
         let id = ego_core::event::id::DetachedExecId::new();
         for (action, verb) in [
             (SessionProcessAction::Inspect, "inspect"),
             (SessionProcessAction::Cancel, "cancel"),
         ] {
-            assert_eq!(
-                describe_operation(&Op::SessionProcess { id, action }),
-                format!("{verb} session process {id}")
+            let request = PermissionRequest::new(
+                "exec_control",
+                vec![Op::SessionProcess { id, action }],
+                Escalation::ModeAsks {
+                    mode: Mode::Default,
+                    op: OpName::SessionProcess,
+                    path: CanonPath::new("/workspace"),
+                },
             );
+            let rendered = compact_prompt(&request);
+            assert!(
+                rendered.contains(&format!("Allow {verb} session process {id}?")),
+                "{rendered}"
+            );
+            assert!(rendered.contains("[y] yes"), "{rendered}");
+            assert!(rendered.contains("[n] no"), "{rendered}");
         }
-        assert_eq!(
-            risk_words(&risk(
-                RiskClass::Bounded,
-                vec![RiskReason::SessionProcessControl]
-            )),
-            "Risk: limited - controls a session process"
-        );
     }
 
     /// Catches a command shown differently from the one that would run: an

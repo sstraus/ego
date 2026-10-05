@@ -1268,7 +1268,7 @@ fn detached_exec_returns_a_handle_before_the_child_finishes() {
 }
 
 #[test]
-fn detached_exec_output_is_bounded_and_readable_before_and_after_exit() {
+fn detached_exec_output_is_bounded_and_cancel_preserves_the_settled_exit() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let ready = directory.path().join("ready");
     let release = directory.path().join("release");
@@ -1390,6 +1390,29 @@ fn detached_exec_output_is_bounded_and_readable_before_and_after_exit() {
         "full output evidence was unreachable: {settled}"
     );
     assert!(settled.len() < 1024, "settled output was not bounded");
+    // Catches cancelling an already-exited ID falsely reporting Cancelled.
+    let (tool, call) = tools
+        .prepare("exec_cancel", &serde_json::json!({"id": id}).to_string())
+        .expect("cancel settled process");
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("session-owned cancellation must be authorized");
+    };
+    let ego_core::mcp::ToolExecution::Complete(result) =
+        block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+    else {
+        panic!("cancel must complete");
+    };
+    assert!(
+        result.model_text().contains("cancellation requested"),
+        "{}",
+        result.model_text()
+    );
+    assert!(
+        !result.model_text().contains(": cancelled"),
+        "{}",
+        result.model_text()
+    );
+    assert!(inspect(&id).contains("exited code 7"));
 }
 
 #[test]
@@ -1455,7 +1478,12 @@ fn detached_exec_cancel_by_id_settles_cancelled() {
     else {
         panic!("cancel must complete");
     };
-    assert!(cancelled.model_text().contains("cancelled"));
+    assert!(
+        cancelled.model_text().contains("cancelled")
+            || cancelled.model_text().contains("cancellation requested"),
+        "{}",
+        cancelled.model_text()
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let (tool, call) = tools

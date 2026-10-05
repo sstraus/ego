@@ -1654,19 +1654,20 @@ mod sandbox_question_tests {
     #[test]
     fn a_cancelled_detached_exec_does_not_wait_for_a_sandbox_answer() {
         let rig = rig(Arc::new(Widening), true);
-        let context = Arc::new(rig.context);
+        let executor = super::super::GuardedExec::new(Arc::new(rig.context));
+        use ego_core::permit::ProcessExecutor as _;
         let id = DetachedExecId::new();
-        context
-            .start_background(id, &rig.spec)
-            .expect("start detached exec");
+        block_on(executor.start_background(id, &rig.spec)).expect("start detached exec");
         block_on(async {
             tokio::time::timeout(Duration::from_secs(10), async {
                 while rig.seat.asked.load(Ordering::SeqCst) == 0 {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                context.cancel_background(id).expect("cancel detached exec");
+                executor
+                    .cancel_background(id)
+                    .expect("cancel detached exec");
                 loop {
-                    let status = context.background_status(id).expect("detached status");
+                    let status = executor.background_status(id).expect("detached status");
                     if let Some(outcome) = status.outcome {
                         assert!(
                             matches!(outcome, DetachedExecOutcome::Cancelled),

@@ -292,16 +292,29 @@ fn commit_probe_transcript(
 /// cancellation and lifecycle bounds are captured before any call can run.
 pub struct GuardedExec {
     context: Arc<process::RunProcessContext>,
+    session_owner: Option<Arc<GuardedExec>>,
 }
 
 impl GuardedExec {
+    fn session_context(&self) -> &Arc<process::RunProcessContext> {
+        self.session_owner
+            .as_ref()
+            .map_or(&self.context, |owner| owner.session_context())
+    }
+
     fn new(context: Arc<process::RunProcessContext>) -> Self {
-        Self { context }
+        Self {
+            context,
+            session_owner: None,
+        }
     }
 }
 
 impl Drop for GuardedExec {
     fn drop(&mut self) {
+        if self.session_owner.is_some() {
+            return;
+        }
         self.context.cancel_all_background();
         self.context.wait_background_shutdown();
     }
@@ -327,18 +340,18 @@ impl ProcessExecutor for GuardedExec {
         id: DetachedExecId,
         spec: &'a SpawnSpec,
     ) -> BoxFuture<'a, Result<(), ProcessError>> {
-        Box::pin(async move { self.context.start_background(id, spec) })
+        Box::pin(async move { self.session_context().start_background(id, spec) })
     }
 
     fn background_status(
         &self,
         id: DetachedExecId,
     ) -> Result<ego_core::permit::DetachedExecSnapshot, ProcessError> {
-        self.context.background_status(id)
+        self.session_context().background_status(id)
     }
 
     fn cancel_background(&self, id: DetachedExecId) -> Result<(), ProcessError> {
-        self.context.cancel_background(id)
+        self.session_context().cancel_background(id)
     }
 
     fn execute_handler<'a>(
@@ -510,6 +523,19 @@ impl RunEffectPorts {
     pub(crate) fn for_probe(config: ExecRunConfig, backend: Arc<dyn Backend>) -> Self {
         let capabilities = backend.maximum_demonstrable_caps();
         Self::build(config, backend, capabilities)
+    }
+
+    /// Keep detached effects with the session while foreground effects retain
+    /// this turn's cancellation and transport bounds.
+    pub fn with_session_processes(&self, session: &Self) -> Self {
+        Self {
+            process: Arc::new(GuardedExec {
+                context: Arc::clone(&self.process.context),
+                session_owner: Some(Arc::clone(&session.process)),
+            }),
+            http: Arc::clone(&self.http),
+            duplex: Arc::clone(&self.duplex),
+        }
     }
 
     pub fn process(&self) -> &dyn ProcessExecutor {

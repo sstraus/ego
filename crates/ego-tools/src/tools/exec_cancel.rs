@@ -64,7 +64,7 @@ impl TypedTool for ExecCancelTool {
             };
             io.background_cancel(id).map_err(ToolError::Process)?;
             Ok(ToolResult::builtin(format!(
-                "background exec {id}: cancelled"
+                "background exec {id}: cancellation requested"
             )))
         })
     }
