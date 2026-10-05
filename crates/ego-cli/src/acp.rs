@@ -1123,8 +1123,15 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     // One lister for the whole connection: it holds no session state, and
     // the answer it helps ask is carried by the run selection rather than by
     // anything this adapter remembers.
-    let trust_port: Arc<dyn SessionTrustAdmission> =
-        Arc::new(CliSessionTrustAdmission::new(crate::config::ego_home()));
+    let trust = CliSessionTrustAdmission::new(crate::config::ego_home());
+    let trust = if args.shape.profile.is_some()
+        && args.shape.profile_source == Some(ego_core::config::Source::Flags)
+    {
+        trust.with_host_profile()
+    } else {
+        trust
+    };
+    let trust_port: Arc<dyn SessionTrustAdmission> = Arc::new(trust);
 
     let roots = Arc::new(CanonicalRoots { base: root });
     let spawner = Arc::new(TokioExecutionSpawner);
