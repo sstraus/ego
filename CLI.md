@@ -580,7 +580,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 10,
+  "v": 11,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
