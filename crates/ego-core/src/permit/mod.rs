@@ -47,7 +47,7 @@ pub use prepared_call::{
     Change, HookHttpPreparedEnvelope, McpPreparedEnvelope, Op, OpName, PreparedCall,
     SecretEgressAuthority,
 };
-pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots};
+pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots, check_root_ceilings};
 pub use sandbox_grant::{SandboxAccess, SandboxGrant, SandboxGrantPort};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;

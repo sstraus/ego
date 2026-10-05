@@ -52,6 +52,9 @@ impl ProfileRoot {
 /// Why a profile's roots were refused at load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootsError {
+    OutsideCeiling {
+        path: CanonPath,
+    },
     NotAbsolute {
         path: PathBuf,
     },
@@ -68,6 +71,9 @@ pub enum RootsError {
 impl std::fmt::Display for RootsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RootsError::OutsideCeiling { path } => {
+                write!(f, "extra root {path} exceeds the system roots ceiling")
+            }
             RootsError::NotAbsolute { path } => write!(
                 f,
                 "profile root {} must be an absolute path or start with `~/`",
@@ -143,4 +149,41 @@ fn expand(path: &Path, home: &CanonPath) -> Result<PathBuf, RootsError> {
             path: path.to_path_buf(),
         })
     }
+}
+
+/// Refuse extra canonical roots outside any independently declared system bound.
+pub fn check_root_ceilings(
+    roots: &[ProfileRoot],
+    ceilings: &[Vec<RootCfg>],
+    home: &CanonPath,
+    workspace: &CanonPath,
+    resolver: &dyn PathResolver,
+) -> Result<(), RootsError> {
+    for ceiling in ceilings {
+        let allowed = admit_roots(ceiling, home, resolver)?;
+        for root in roots {
+            if root.path().is_or_under(workspace) {
+                continue;
+            }
+            let containing = allowed
+                .iter()
+                .filter(|bound| root.path().is_or_under(bound.path()))
+                .max_by_key(|bound| bound.path().as_path().components().count());
+            let access_allowed = containing.is_some_and(|bound| {
+                root.access() == RootAccess::Read || bound.access() == RootAccess::ReadWrite
+            });
+            let covers_read_only = root.access() == RootAccess::ReadWrite
+                && allowed.iter().any(|bound| {
+                    bound.access() == RootAccess::Read
+                        && bound.path().is_or_under(root.path())
+                        && !bound.path().is_or_under(workspace)
+                });
+            if !access_allowed || covers_read_only {
+                return Err(RootsError::OutsideCeiling {
+                    path: root.path().clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }

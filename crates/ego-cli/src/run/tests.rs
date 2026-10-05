@@ -2092,3 +2092,34 @@ fn a_plain_host_is_told_nothing_per_event() {
         assert_eq!(plain.signal(&event, &state), "");
     }
 }
+
+// Catches: the process composition admits exec_paths outside a system root
+// ceiling even though profile roots are checked.
+#[test]
+fn system_root_ceiling_is_checked_before_run_effects() {
+    let tree = tempdir().unwrap();
+    let workspace = tree.path().canonicalize().unwrap();
+    let extra = workspace.parent().unwrap();
+    let layers = [
+        ConfigLayer::parse(Source::System, "roots=[]").unwrap(),
+        ConfigLayer::parse(Source::User, &format!("exec_paths=['{}']", extra.display())).unwrap(),
+    ];
+    let effective = resolve_selected(&layers, Trust::Untrusted, None).unwrap();
+    let args = executor::protocol_args(None, crate::cli::SessionShape::default());
+    let result = composition::finish_rooted_settings(
+        &args,
+        workspace,
+        effective,
+        Trust::Untrusted,
+        Some(layers.to_vec()),
+        &Stderr,
+    );
+    assert!(result.is_err());
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("system roots ceiling")
+    );
+}

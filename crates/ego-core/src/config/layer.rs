@@ -45,6 +45,21 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Whether this mode stays under the approved system maximum.
+    pub const fn within(self, maximum: Self) -> bool {
+        self.ceiling_rank() <= maximum.ceiling_rank()
+    }
+
+    const fn ceiling_rank(self) -> u8 {
+        match self {
+            Self::Plan => 0,
+            Self::Default => 1,
+            Self::Edits => 2,
+            Self::Auto => 3,
+            Self::Yolo => 4,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Plan => "plan",
@@ -870,6 +885,10 @@ pub struct ConfigLayer {
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    /// System-only maximum permission mode, independent of the default mode.
+    pub max_mode: Option<Mode>,
+    /// System-only ceiling on extra canonical roots; an empty list permits none.
+    pub roots: Option<Vec<crate::permit::RootCfg>>,
     pub exec: Option<ExecLayer>,
     pub network: Option<Network>,
     /// Additional read and executable roots; absence preserves lower authority.
@@ -910,6 +929,13 @@ impl ConfigLayer {
     pub fn parse(source: Source, text: &str) -> Result<Sourced<ConfigLayer>, ConfigError> {
         let value: ConfigLayer =
             toml::from_str(text).map_err(|err| classify_parse_error(source, &err))?;
+        if source != Source::System && (value.max_mode.is_some() || value.roots.is_some()) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "`max_mode` and base `roots` ceilings belong only to the system layer"
+                    .into(),
+            });
+        }
         if let Some((name, _)) = value.profile.iter().find(|(name, profile)| {
             name.as_str() != "ci"
                 && (profile.session_dir.is_some() || profile.artifact_dir.is_some())

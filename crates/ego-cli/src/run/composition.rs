@@ -764,6 +764,8 @@ pub(super) fn finish_rooted_settings(
         ));
     }
 
+    super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
+
     let exec_paths = effective
         .exec_paths
         .iter()

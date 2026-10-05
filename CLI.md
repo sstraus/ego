@@ -1438,6 +1438,20 @@ Orphan candidates from a crashed parent are never silently removed.
 The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
 candidate retention for every editor result.
 
+System policy can also set `max_mode="edits"`, using the order
+plan < default < edits < auto < yolo. A selected mode above the maximum is
+refused before run effects. `max_mode` is system-only and does not change
+the default mode; a plan maximum must be paired with `mode="plan"`.
+A system `sandbox` value is a confinement floor: lower layers and selected
+profiles may tighten it but cannot weaken it.
+
+System `roots=[{path="/path",access="read"}]` bounds extra roots and
+configured exec paths after canonicalization. `roots=[]` allows no extra
+roots. The workspace remains unchanged. System profile roots also bound
+that profile. Broader roots and write access under a read-only bound are
+refused; multiple system declarations all bind. These ceilings do not
+grant access by themselves.
+
 Child process controls are opt-in. `ego config set 'exec.env="inherit"'`
 keeps the full inherited environment (the default). `exec.env="core"` keeps
 PATH, HOME, USER, LOGNAME, SHELL, TMPDIR, TMP, TEMP, LANG, LC_ALL, LC_CTYPE,

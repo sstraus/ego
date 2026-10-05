@@ -82,6 +82,10 @@ pub struct Effective {
     pub model: Option<ModelRef>,
     pub thinking: Option<ThinkingLevel>,
     pub mode: Option<Mode>,
+    /// The system maximum remains available to implicit interactive defaults.
+    pub max_mode: Option<Mode>,
+    /// Each system declaration must contain every admitted extra root.
+    pub root_ceilings: Vec<Vec<crate::permit::RootCfg>>,
     pub sandbox: Option<Confinement>,
     pub exec: super::ExecLayer,
     pub network: super::Network,
@@ -165,6 +169,8 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         model,
         thinking,
         mode,
+        max_mode,
+        roots,
         sandbox,
         exec,
         network,
@@ -183,6 +189,8 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (model.is_some(), "model"),
         (thinking.is_some(), "thinking"),
         (mode.is_some(), "mode"),
+        (max_mode.is_some(), "max_mode"),
+        (roots.is_some(), "roots"),
         (sandbox.is_some(), "sandbox"),
         (exec.is_some(), "exec"),
         (network.is_some(), "network"),
@@ -591,10 +599,57 @@ fn resolve_inner(
     }
     let clamped = ceilings.clamp(&system_ceiling);
 
+    let mut max_mode: Option<Mode> = None;
+    let mut root_ceilings = Vec::new();
+    for sourced in eligible
+        .iter()
+        .filter(|layer| layer.source == Source::System)
+    {
+        if let Some(maximum) = sourced.value.max_mode
+            && max_mode.is_none_or(|current| maximum.within(current))
+        {
+            max_mode = Some(maximum);
+        }
+        let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
+        for maximum in sourced
+            .value
+            .sandbox
+            .iter()
+            .chain(profile.and_then(|profile| profile.sandbox.as_ref()))
+        {
+            if !sandbox.unwrap_or_default().within(*maximum) {
+                return Err(ConfigError::Invalid {
+                    source: Source::System,
+                    message: format!(
+                        "sandbox {} exceeds the system ceiling {maximum}",
+                        sandbox.unwrap_or_default()
+                    ),
+                });
+            }
+        }
+        if let Some(bounds) = &sourced.value.roots {
+            root_ceilings.push(bounds.clone());
+        }
+        if let Some(profile) = profile.filter(|profile| !profile.roots.is_empty()) {
+            root_ceilings.push(profile.roots.clone());
+        }
+    }
+    if let Some(maximum) = max_mode {
+        let selected = mode.unwrap_or(Mode::Default);
+        if !selected.within(maximum) {
+            return Err(ConfigError::Invalid {
+                source: Source::System,
+                message: format!("mode {selected} exceeds system max_mode {maximum}"),
+            });
+        }
+    }
+
     Ok(Effective {
         model,
         thinking,
         mode,
+        max_mode,
+        root_ceilings,
         sandbox,
         exec,
         network,
