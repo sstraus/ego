@@ -41,6 +41,7 @@ struct ProfileBase {
     private_scratch: PathBuf,
     runtime_roots: Vec<PathBuf>,
     exec_paths: Vec<PathBuf>,
+    roots: Vec<SandboxGrant>,
 }
 
 impl SeatbeltBackend {
@@ -72,6 +73,20 @@ impl SeatbeltBackend {
                 .map(|root| root.as_path().to_path_buf())
                 .collect(),
             exec_paths,
+            roots: policy
+                .roots()
+                .iter()
+                .map(|root| SandboxGrant {
+                    path: root.path().clone(),
+                    access: if root.access() == ego_core::permit::RootAccess::ReadWrite
+                        && policy.level() == Confinement::Workspace
+                    {
+                        ego_core::permit::SandboxAccess::Write
+                    } else {
+                        ego_core::permit::SandboxAccess::Read
+                    },
+                })
+                .collect(),
         };
         Self::render_to_file(base, &[], policy.requirements().required())
     }
@@ -98,6 +113,7 @@ impl SeatbeltBackend {
             .iter()
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
+        let grants = base.roots.iter().chain(grants).cloned().collect::<Vec<_>>();
         let rendered = profile::render(&ProfileInput {
             level: base.level,
             offline: base.offline,
@@ -105,7 +121,7 @@ impl SeatbeltBackend {
             private_scratch: &base.private_scratch,
             runtime_roots: &runtime_roots,
             exec_paths: &exec_paths,
-            grants,
+            grants: &grants,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
 

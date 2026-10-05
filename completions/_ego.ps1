@@ -38,6 +38,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('auth', 'auth', [CompletionResultType]::ParameterValue, 'Manage subscription credentials.')
             [CompletionResult]::new('mcp', 'mcp', [CompletionResultType]::ParameterValue, 'Manage configured MCP servers.')
             [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Manage stored user configuration.')
+            [CompletionResult]::new('roots', 'roots', [CompletionResultType]::ParameterValue, 'roots')
             [CompletionResult]::new('rules', 'rules', [CompletionResultType]::ParameterValue, 'Inspect and manage persistent permission rules.')
             [CompletionResult]::new('mcp-server', 'mcp-server', [CompletionResultType]::ParameterValue, 'Serve scoped ego runs over MCP on stdio.')
             break
@@ -342,6 +343,34 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;config;edit' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;roots' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('add', 'add', [CompletionResultType]::ParameterValue, 'Add or update one user perimeter root')
+            [CompletionResult]::new('rm', 'rm', [CompletionResultType]::ParameterValue, 'Remove a root by its stored spelling')
+            [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List roots stored in the selected user target')
+            break
+        }
+        'ego;roots;add' {
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--access', '--access', [CompletionResultType]::ParameterName, 'access')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;roots;rm' {
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;roots;ls' {
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'json')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

@@ -263,3 +263,18 @@ pub fn listing(
         in_workspace(metas, root)
     })
 }
+
+/// Interactive rows use current durable prose rather than a stale manifest cache.
+pub(crate) fn saved_sessions(
+    store: &ego_tools::store::JsonlStore,
+) -> Result<Vec<SessionMeta>, StoreError> {
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    let mut metas = Vec::new();
+    for listed in store.list()? {
+        if let Some(meta) = store.lifecycle_meta(listed.id)? {
+            metas.push(meta);
+        }
+    }
+    by_recency(&mut metas);
+    Ok(metas)
+}

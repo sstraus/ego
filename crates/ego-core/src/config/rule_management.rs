@@ -211,7 +211,7 @@ impl RuleManagement {
             if let Some(entry) = rules
                 .deny
                 .iter()
-                .find(|entry| entry.rule().matches(op, workspace))
+                .find(|entry| entry.denies(op, workspace, &rules.allow))
             {
                 return RuleExplanation {
                     operations,
@@ -442,9 +442,17 @@ fn effective_row(entry: &SourcedRule, effect: ManagedRuleEffect) -> EffectiveRul
 }
 
 fn binding(rules: &Ruleset, rule: &Rule) -> Option<EffectiveRule> {
-    RuleManagement::rows(rules)
-        .into_iter()
-        .find(|row| row.rule == *rule)
+    let lifted_default = rules
+        .allow
+        .iter()
+        .any(|entry| entry.rule() == rule && entry.origins().contains(Source::User));
+    RuleManagement::rows(rules).into_iter().find(|row| {
+        row.rule == *rule
+            && !(lifted_default
+                && row.effect == ManagedRuleEffect::Deny
+                && row.from == Source::Default
+                && row.also.is_empty())
+    })
 }
 
 fn binding_identity(row: Option<&EffectiveRule>) -> Option<(ManagedRuleEffect, RuleId, Source)> {

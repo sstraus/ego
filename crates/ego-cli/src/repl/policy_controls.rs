@@ -292,6 +292,9 @@ pub trait PreflightPort: Send + Sync {
 
 /// Re-resolve policy from the frozen source set admitted for this session.
 pub trait FrozenPolicyResolver: Send + Sync {
+    /// The maximum mode admitted by this session's frozen authority.
+    fn max_mode(&self) -> Result<Option<Mode>, PolicyControlError>;
+
     fn resolve_rule_transaction(
         &self,
         before: &RuleSnapshot,
@@ -361,6 +364,7 @@ impl std::error::Error for PolicyControlError {}
 
 /// Application owner for policy preflight, persistence, resolution, and staging.
 pub struct PolicyApplicationOwner {
+    max_mode: Result<Option<Mode>, PolicyControlError>,
     selection: GenerationPolicySelection,
     rules: RuleApplication,
     preflight: Arc<dyn PreflightPort>,
@@ -376,6 +380,7 @@ impl PolicyApplicationOwner {
     ) -> Self {
         Self {
             selection,
+            max_mode: resolver.max_mode(),
             rules: RuleApplication::new(store, UserConfigTarget::Base),
             preflight,
             resolver,
@@ -423,6 +428,13 @@ impl PolicyApplicationOwner {
     }
 
     fn apply_mode(&self, mode: Mode) -> Result<PolicyControlOutcome, PolicyControlError> {
+        if let Some(maximum) = self.max_mode.as_ref().map_err(Clone::clone)?
+            && !mode.within(*maximum)
+        {
+            return Err(PolicyControlError::Resolution {
+                diagnostic: format!("mode {mode} exceeds system max_mode {maximum}"),
+            });
+        }
         if mode == Mode::Auto {
             self.preflight.validate_auto()?;
         }

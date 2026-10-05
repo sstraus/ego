@@ -357,6 +357,8 @@ pub struct Ended {
     pub result: Value,
     /// One canonical, sanitized projection of MCP startup failures.
     pub mcp_errors: Vec<String>,
+    /// Interactive selection that must re-enter admission at its recorded root.
+    pub selected_session: Option<ego_core::store::session_store::SessionMeta>,
 }
 
 impl Ended {
@@ -367,6 +369,7 @@ impl Ended {
             session: SessionId::new(),
             state: SessionState::default(),
             result: Value::String(String::new()),
+            selected_session: None,
             mcp_errors: Vec::new(),
         }
     }
@@ -534,7 +537,7 @@ pub(super) struct InteractiveServices {
 }
 
 pub(super) async fn interactive_through(
-    args: Args,
+    mut args: Args,
     cancel: CancelToken,
     seat: Arc<repl::Seat>,
     capabilities: Capabilities,
@@ -552,14 +555,6 @@ pub(super) async fn interactive_through(
     let interactive_seat: Arc<dyn InteractiveSeat> = seat.clone();
     let elicitor: Arc<dyn Elicitor> = seat.clone();
     let human = interactive_seat.has_human();
-    let status = InteractiveStatus {
-        seat: Arc::clone(&seat),
-        width: capabilities.width,
-        human,
-        native: human && capabilities.osc != OscProfile::None,
-        picker: None,
-        model_config_store: None,
-    };
     let between = || {
         text_sink.finish();
         // A terminal output queue is asynchronous. Its empty sentinel is the
@@ -567,27 +562,74 @@ pub(super) async fn interactive_through(
         // repaint a fresh composer for the next turn.
         output.finish();
     };
-    let ended = match execute(
-        args,
-        |_| &signalling as &dyn EventSink,
-        cancel,
-        None,
-        RunHost {
-            driver: Driver::Interactive {
-                seat: interactive_seat,
-                between: &between,
+    // Choose before admission so project files and guarded adapters bind to the recorded root.
+    if human && matches!(args.session, crate::cli::SessionChoice::Resume(None)) {
+        let metas = (|| {
+            let root = workspace(args.directory.as_ref())?;
+            let store = session::jsonl(
+                rooted_path(&root, session::store_root(args.session_dir.as_ref())?),
+                root.clone(),
+            );
+            crate::catalogue::saved_sessions(&store).map_err(|error| UsageError(error.to_string()))
+        })();
+        let metas = match metas {
+            Ok(metas) => metas,
+            Err(error) => return Ended::refused(RunTermination::UsageError { message: error.0 }),
+        };
+        let Some(id) = interactive_seat.pick_session(metas.clone()) else {
+            return Ended::refused(RunTermination::Done);
+        };
+        let Some(meta) = metas.into_iter().find(|meta| meta.id == id) else {
+            return Ended::refused(RunTermination::Done);
+        };
+        if let Err(error) = select_recorded_session(&mut args, &meta) {
+            return Ended::refused(RunTermination::UsageError { message: error.0 });
+        }
+    }
+    let ended = loop {
+        let status = InteractiveStatus {
+            seat: Arc::clone(&seat),
+            width: capabilities.width,
+            human,
+            native: human && capabilities.osc != OscProfile::None,
+            picker: None,
+            model_config_store: None,
+        };
+        let mut ended = match execute(
+            args.clone(),
+            |_| &signalling as &dyn EventSink,
+            cancel.clone(),
+            None,
+            RunHost {
+                driver: Driver::Interactive {
+                    seat: Arc::clone(&interactive_seat),
+                    between: &between,
+                },
+                elicitor: Some(Arc::clone(&elicitor)),
+                status: Some(status),
+                diagnostics: output,
+                text_output: Some(output),
+                evidence: Arc::clone(&services.evidence),
             },
-            elicitor: Some(elicitor),
-            status: Some(status),
-            diagnostics: output,
-            text_output: Some(output),
-            evidence: services.evidence,
-        },
-    )
-    .await
-    {
-        Ok(ended) => ended,
-        Err(refusal) => Ended::refused(refusal),
+        )
+        .await
+        {
+            Ok(ended) => ended,
+            Err(refusal) => Ended::refused(refusal),
+        };
+        let Some(meta) = ended.selected_session.take() else {
+            break ended;
+        };
+        if let Err(error) = select_recorded_session(&mut args, &meta) {
+            break Ended::refused(RunTermination::UsageError { message: error.0 });
+        }
+        seat.action_registry().release_skill_view();
+        if !interactive_seat.activate_session(meta.id) {
+            break Ended::refused(RunTermination::UsageError {
+                message: "the terminal could not activate the selected session".to_owned(),
+            });
+        }
+        output.note(&format!("resumed session {}", meta.id));
     };
     text_sink.finish();
     let counts = seat.exit_counts();
@@ -612,6 +654,21 @@ pub(super) async fn interactive_through(
     }
     announce.closing(&ended.termination);
     ended
+}
+
+/// Keep the store location stable while normal admission resolves the selected project.
+fn select_recorded_session(
+    args: &mut Args,
+    meta: &ego_core::store::session_store::SessionMeta,
+) -> Result<(), UsageError> {
+    let previous_root = workspace(args.directory.as_ref())?;
+    args.session_dir = Some(rooted_path(
+        &previous_root,
+        session::store_root(args.session_dir.as_ref())?,
+    ));
+    args.directory = Some(meta.workspace_root.clone());
+    args.session = crate::cli::SessionChoice::Resume(Some(meta.id.to_string()));
+    Ok(())
 }
 
 /// Everything ego tells the host that is *not* the answer: the marks, the

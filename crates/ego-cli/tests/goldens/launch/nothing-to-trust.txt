@@ -1,4 +1,6 @@
 # nothing-to-trust: first launch
+εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
+εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
 εgo: ego 0.1.0 · ollama/qwen3
 Esc interrupts · Enter queues · Ctrl+S draft · Option+P models · /help
 hello
@@ -7,6 +9,8 @@ a launch transcript
 εgo: To resume: ego resume <session>
 
 # nothing-to-trust: next launch
+εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
+εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
 εgo: ego 0.1.0 · ollama/qwen3
 Esc interrupts · Enter queues · Ctrl+S draft · Option+P models · /help
 hello

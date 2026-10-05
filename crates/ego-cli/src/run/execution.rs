@@ -113,6 +113,10 @@ async fn resolve_invocation_phase(
 fn enable_trusted_interactive_auto(settings: &mut Settings, driver: &Driver<'_>) {
     if settings.trust == Trust::Trusted
         && settings.effective.mode.is_none()
+        && settings
+            .effective
+            .max_mode
+            .is_none_or(|maximum| Mode::Auto.within(maximum))
         && matches!(driver, Driver::Interactive { seat, .. } if seat.has_human())
     {
         settings.effective.mode = Some(Mode::Auto);
@@ -191,7 +195,7 @@ async fn open_scope_phase(
         mcp_runtime,
         mcp_registry,
         artifact_store,
-        jsonl_store: Arc::new(jsonl_store),
+        jsonl_store,
         session_id,
         clock: SystemClock,
     })
@@ -243,8 +247,9 @@ fn prepare_resume_phase<'store>(
     };
     let policy_selection =
         GenerationPolicySelection::new(mode, settings.effective.permissions.clone());
-    let profile_roots = super::profile_roots::admit(&settings.effective)
-        .map_err(|message| RunTermination::Failed { message })?;
+    let profile_roots =
+        super::profile_roots::admit(&settings.effective, settings.confinement.workspace())
+            .map_err(|message| RunTermination::Failed { message })?;
     let perimeter = crate::perimeter::Perimeter::session(
         &settings.confinement,
         &settings.effective,
@@ -393,6 +398,7 @@ fn materialize_run_phase<'store>(
                 &settings,
                 args,
                 matches!(&host.driver, Driver::Interactive { .. }),
+                Arc::new(scoped.jsonl_store.history()),
                 host.diagnostics,
             )
             .map_err(usage)?;

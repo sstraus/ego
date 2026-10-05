@@ -77,12 +77,14 @@ impl Submission {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     Action(ActionId),
+    History(String),
     SessionMetadata(SessionMetadataOperation),
     Skill(AdmittedSkillOperation),
     Skills(SkillSurfaceAction),
     Export(ExportSelection),
     Fork(ego_core::event::id::ItemId),
     Hooks,
+    Config(String),
     Prompt,
     Immediate,
     InteractiveIngress,
@@ -475,7 +477,7 @@ impl ActionRegistry {
             )
             .unavailable("the interactive permission controller"),
             enabled(Mcp, "mcp", "Inspect admitted MCP connections"),
-            enabled(Sessions, "sessions", "Browse durable sessions"),
+            enabled(Sessions, "sessions", "Browse durable sessions").alias("history"),
             enabled(Fork, "fork", "Fork a durable session"),
             enabled(Compact, "compact", "Compact the active context")
                 .unavailable("the compaction service"),
@@ -490,7 +492,7 @@ impl ActionRegistry {
             enabled(
                 Config,
                 "config",
-                "Inspect the effective perimeter — /config perimeter",
+                "Inspect configuration — /config [perimeter | set KEY VALUE]",
             ),
             enabled(Doctor, "doctor", "Diagnose local subsystem health"),
             enabled(Quit, "quit", "Exit the interactive session"),
@@ -660,6 +662,12 @@ impl ActionRegistry {
         Ok(())
     }
 
+    /// A completed root redirect releases the old admitted catalogue.
+    pub(crate) fn release_skill_view(&self) {
+        *self.skill_view.lock().expect("skill view lock") = None;
+        self.set_availability(ActionId::Skills, Availability::Busy);
+    }
+
     fn skill_capture(&self) -> Result<Option<SkillCatalogueCapture>, RegistryError> {
         let view = self.skill_view.lock().expect("skill view lock").clone();
         view.map(|view| {
@@ -782,6 +790,20 @@ impl ActionRegistry {
             let boundary = command.find(char::is_whitespace).unwrap_or(command.len());
             let name = &command[..boundary];
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
+            if name == "history" && self.resolve_alias(name) == Some(ActionId::Sessions) {
+                if self.availability(ActionId::Sessions) != Availability::Enabled {
+                    return Dispatch::Refused {
+                        reason: "history is unavailable while a turn is running",
+                    };
+                }
+                return if raw_arguments.trim().is_empty() {
+                    Dispatch::Refused {
+                        reason: "usage: /history QUERY",
+                    }
+                } else {
+                    Dispatch::History(raw_arguments.trim().to_owned())
+                };
+            }
             if name == "name" && self.resolve_slash(name) == Some(ActionId::Name) {
                 return parse_name_action(raw_arguments);
             }
@@ -844,11 +866,19 @@ impl ActionRegistry {
                 };
             }
             if name == "config" && self.resolve_slash(name) == Some(ActionId::Config) {
-                return if raw_arguments.trim() == "perimeter" {
+                if self.availability(ActionId::Config) != Availability::Enabled {
+                    return Dispatch::Refused {
+                        reason: "config is unavailable",
+                    };
+                }
+                let arguments = raw_arguments.trim();
+                return if arguments.is_empty() {
                     Dispatch::Action(ActionId::Config)
+                } else if arguments == "perimeter" || arguments.starts_with("set ") {
+                    Dispatch::Config(arguments.to_owned())
                 } else {
                     Dispatch::Refused {
-                        reason: "usage: /config perimeter",
+                        reason: "usage: /config [perimeter | set KEY TOML_VALUE]",
                     }
                 };
             }
