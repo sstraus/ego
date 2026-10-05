@@ -235,6 +235,7 @@ struct RecordingResolver {
     answer: Arc<Mutex<RecordingAnswers>>,
     calls: Arc<Mutex<Vec<NetworkTarget>>>,
     delay: Arc<Mutex<Option<Duration>>>,
+    deadlines: Arc<Mutex<Vec<Instant>>>,
 }
 impl RecordingResolver {
     fn insert(&self, target: NetworkTarget, ip: IpAddr) {
@@ -252,9 +253,10 @@ impl Resolver for RecordingResolver {
     fn resolve(
         &self,
         target: NetworkTarget,
-        _deadline: Instant,
+        deadline: Instant,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         self.calls.lock().expect("calls").push(target.clone());
+        self.deadlines.lock().expect("deadlines").push(deadline);
         let delay = *self.delay.lock().expect("delay");
         let answer = self
             .answer
@@ -1869,11 +1871,12 @@ fn delayed_resolution_times_out_before_socket() {
     );
 }
 
-// Catches: reminting the deadline after DNS admits the 40 ms + 80 ms exchange.
+// Catches: reminting the deadline after DNS admits a body held past the original deadline.
 #[test]
 fn composed_dns_and_body_delays_share_one_absolute_call_deadline() {
     prepare_http_deadline_fixture();
-    let (body_tx, body_rx) = mpsc::channel();
+    let (body_tx, body_rx) = mpsc::channel::<Instant>();
+    let (expired_tx, expired_rx) = mpsc::channel();
     let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
         let request = read_request(&mut stream);
@@ -1881,11 +1884,15 @@ fn composed_dns_and_body_delays_share_one_absolute_call_deadline() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabc")
             .expect("first response phase");
         stream.flush().expect("first response flush");
-        // Start the body delay only after the consumer has observed abc.
-        body_rx
-            .recv_timeout(Duration::from_millis(250))
+        let deadline = body_rx
+            .recv_timeout(Duration::from_secs(30))
             .expect("consumer observed the first body phase");
-        std::thread::sleep(Duration::from_millis(80));
+        // Release on the observed timeout, not a scheduler-sensitive body sleep.
+        // If DNS remints the deadline, release after the original deadline instead:
+        // the remaining three seconds of that renewed budget would admit def.
+        let _ = expired_rx.recv_timeout(
+            deadline.saturating_duration_since(Instant::now()) + Duration::from_secs(1),
+        );
         stream.write_all(b"def").expect("second response phase");
         stream.flush().expect("second response flush");
         CapturedConnection {
@@ -1898,8 +1905,10 @@ fn composed_dns_and_body_delays_share_one_absolute_call_deadline() {
         .expect("target");
     let resolver = RecordingResolver::default();
     resolver.insert(target.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-    resolver.delay(Duration::from_millis(40));
-    let timeout = Duration::from_millis(100);
+    // Leave six seconds for real socket scheduling under suite contention.
+    // DNS still consumes four seconds, so renewal cannot hide behind that margin.
+    resolver.delay(Duration::from_secs(4));
+    let timeout = Duration::from_secs(10);
     let fixture = run_ports_with(
         resolver.clone(),
         false,
@@ -1928,7 +1937,10 @@ fn composed_dns_and_body_delays_share_one_absolute_call_deadline() {
             .expect("headers before absolute deadline");
         let body = response.body().expect("streaming body");
         assert_eq!(body.next().await, Some(Ok(b"abc".to_vec())));
-        body_tx.send(()).expect("release the delayed body phase");
+        let deadline = resolver.deadlines.lock().expect("deadlines")[0];
+        body_tx
+            .send(deadline)
+            .expect("hold the remaining body phase");
         let error = body
             .next()
             .await
@@ -1936,6 +1948,8 @@ fn composed_dns_and_body_delays_share_one_absolute_call_deadline() {
             .expect_err("DNS plus body delay exceeds one absolute deadline");
         assert!(matches!(error.failure(), TransportFailure::TimedOut));
         assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+        // The watchdog may already have released the server under heavy scheduling.
+        let _ = expired_tx.send(());
     });
     assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
     let captures = server.finish();
