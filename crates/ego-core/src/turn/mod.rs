@@ -2906,8 +2906,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     .await?
                 {
                     ToolOutcome::Answered { ok, mut result } => {
-                        self.tools.mask_result(&mut result);
                         let call = &pending[index];
+                        self.tools
+                            .finish_result(&mut result, self.invocation, call.item);
                         self.journal.append(
                             turn,
                             Some(call.item),
@@ -2921,8 +2922,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         mut result,
                         selector,
                     } => {
-                        self.tools.mask_result(&mut result);
                         let call = &pending[index];
+                        self.tools
+                            .finish_result(&mut result, self.invocation, call.item);
                         self.journal.append(
                             turn,
                             Some(call.item),
@@ -3224,7 +3226,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             );
         }
 
-        let capture = match self.policy_source.capture() {
+        let capture = match self.policy_source.capture().and_then(|capture| {
+            match self.tools.mcp_output_root() {
+                Some(root) => capture
+                    .with_session_read_root(root.clone())
+                    .map_err(|error| error.to_string()),
+                None => Ok(capture),
+            }
+        }) {
             Ok(capture) => capture,
             Err(error) => {
                 tracing::warn!(%error, "the generation policy could not be captured");
@@ -5542,7 +5551,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         };
         match execution {
             crate::mcp::ToolExecution::Complete(mut result) => {
-                self.tools.mask_result(&mut result);
+                self.tools
+                    .finish_result(&mut result, self.invocation, tool_call);
                 self.journal.append(
                     turn,
                     Some(tool_call),

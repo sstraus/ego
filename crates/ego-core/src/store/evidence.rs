@@ -354,6 +354,24 @@ pub trait EvidenceStore: Send + Sync {
     /// The generic CAS this semantic evidence view is backed by.
     fn blob_store(&self) -> &dyn BlobStore;
 
+    /// Create and resolve only the session's model-readable MCP output directory.
+    /// Stores without filesystem output return `None`.
+    fn mcp_output_root(&self) -> Result<Option<crate::permit::CanonPath>, EvidenceError> {
+        Ok(None)
+    }
+
+    /// Atomically publish one immutable output, identified by run and tool item.
+    fn spill_mcp_output(
+        &self,
+        _run: crate::evidence::RunInvocationId,
+        _call: crate::event::id::ItemId,
+        _bytes: &[u8],
+    ) -> Result<std::path::PathBuf, EvidenceError> {
+        Err(EvidenceError::Io {
+            message: "session output publication unavailable".into(),
+        })
+    }
+
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError>;
 
     fn read_page<'a>(

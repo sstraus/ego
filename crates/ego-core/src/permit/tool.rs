@@ -399,6 +399,20 @@ impl ToolResult {
         }
     }
 
+    /// Publish oversized MCP text before exposing or journaling the result.
+    /// An unavailable store or failed write keeps a preview and a failure notice.
+    pub fn spill_mcp_output(
+        &mut self,
+        store: Option<&dyn crate::store::evidence::EvidenceStore>,
+        run: crate::evidence::RunInvocationId,
+        call: crate::event::id::ItemId,
+    ) {
+        if let ToolResultProvenance::Foreign { result } = &mut self.provenance {
+            result.spill_output(store, run, call);
+            self.content = vec![ToolContentBlock::builtin(result.visible_text().to_owned())];
+        }
+    }
+
     pub fn provenance(&self) -> &ToolResultProvenance {
         &self.provenance
     }
