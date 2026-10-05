@@ -3,9 +3,9 @@
 **Give any model a body. Keep the authority.**
 
 εgo is a compact, provider-agnostic coding agent harness written in Rust.
-Models can reason and propose. Real work also requires tools, memory,
-boundaries, and evidence. εgo supplies that operational layer while keeping the
-model replaceable and authority in the operator's hands.
+Models reason and propose. εgo supplies tools, durable conversations, permissions,
+confinement, and evidence, while keeping the model replaceable and authority in
+the operator's hands.
 
 > **The agent is not the model. The agent is the harness.**
 
@@ -13,158 +13,103 @@ model replaceable and authority in the operator's hands.
 prompt → prepare → permit → execute → evidence
 ```
 
-Scripting-first and Unix-native, εgo turns model output into governed action:
-prompts enter, structured events leave, and the same durable session can move
-between an interactive terminal, a pipeline, and an ACP host.
+Use it when you want a coding agent in your terminal, a bounded agent step in a
+script, or an agent behind an ACP host. The terminal, pipeline, and host share
+the durable session machinery.
 
-## Why εgo
+## Five-minute start
 
-- **Any model, one operational contract.** Provider differences stay at the
-  edge instead of owning the workflow.
-- **Actions earn authority.** Tools prepare canonical operations before policy
-  permits them; execution cannot quietly widen what was approved.
-- **Confinement is demonstrated.** A guarantee is exposed only when the current
-  host and production path prove it.
-- **Work leaves evidence.** Sessions, decisions, and tool results are durable,
-  observable, and replayable.
-- **Small enough for the Unix toolbox.** Use εgo interactively or compose it in
-  scripts without adopting an IDE-sized platform.
-
-## What works today
-
-The working binary provides interactive sessions, headless runs, durable
-resume/listing, session forks and compaction, local and structurally sanitized
-exports, a shared current-model catalogue, subscription login, MCP configuration
-management, atomic user-config and permission-rule management, read-only hook
-catalogue inspection, a read-only redacted health diagnosis, an inbound MCP run
-server, and an ACP server. Ollama and Anthropic are selectable directly — the
-latter from a bootstrap catalogue compiled into the binary, so an API key alone
-is enough; current subscription profiles use `ego auth`. The public **OpenAI**
-row speaks the Responses contract and is *not* selectable yet: it is refused by
-name until an operator records a sanitized live call against a current entitled
-model, which needs a key this project does not have.
-Commands whose subsystem has not landed are refused by name instead of being
-advertised as working.
-
-## Quickstart
-
-Available entry points are `ego [PROMPT]`, `ego run`, `ego resume`, `ego ls`,
-`ego fork`, `ego compact`, `ego export`, `ego usage`, `ego models`, `ego mcp`,
-`ego config`, `ego roots`, `ego rules`, `ego hooks`, `ego doctor`, `ego mcp-server`,
-`ego acp`, and `ego a2a`, plus `ego auth` for subscription credentials.
-`ego a2a --listen ENDPOINT` serves Agent2Agent so another agent can discover
-and delegate to εgo; a socket path is authenticated by the operating system,
-while an address requires a credential and refuses by name if it is reachable
-from outside this machine. Promptless `ego resume [ID]` re-enters
-the interactive driver; a resume carrying a prompt or `-` stays headless.
-`ego hooks ls` inspects the admitted system and user hook catalogue without
-reading project configuration. `ego doctor [--json]` reports one ordered,
-redacted health snapshot and changes nothing it looks at; `/doctor` renders the
-same snapshot inside a session.
-
-`docs/reference/cli.md` and the scripts in `completions/` are generated from the
-parser and checked in. Regenerate them with
-`EGO_UPDATE_ARTIFACTS=1 cargo test -p ego-cli --test reference` after changing
-the grammar; the same test fails the build if you forget.
-
-### A hosted model, with nothing but a key
-
-An API key in the environment is the whole setup. εgo ships a bootstrap model
-catalogue compiled into the binary, so there is no `models.toml` to write
-first:
+You need Rust 1.95 or newer and a model you can access. From a source checkout,
+install into a directory you own (no published package or release is required):
 
 ```sh
-export ANTHROPIC_API_KEY=sk-…
-ego -m anthropic/claude-opus-5
+cargo install --locked --path crates/ego-cli --root "$PWD/.ego-bin"
+export PATH="$PWD/.ego-bin/bin:$PATH"
+ego --help
 ```
 
-Public OpenAI Responses and Gemini Interactions are selectable through the
-same catalogue. Set `OPENAI_API_KEY` or `GEMINI_API_KEY`, then use `ego models`
-to choose a current model. The accepted
-`docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`
-separates deterministic conformance from live provider evidence; a missing
-recording does not disable a published mapping.
+The source includes a patched Reedline dependency in `vendor/`; keep the checkout
+intact during installation. On this project's development Mac, Cargo must run
+through the configured mbx shim; see [building from source](docs/getting-started/README.md).
 
-`ego models` lists what that catalogue knows, with a `SOURCE` column reading
-`builtin` until a file of yours overrides a row. The built-in facts are the
-weakest of three layers — `/etc/ego/models.toml` overrides them and
-`$EGO_HOME/models.toml` overrides both, per model — and they carry **no
-prices**, so a run under a cost ceiling still asks you to state rates rather
-than trusting a number compiled in months ago. `CLI.md` §7.2 documents the
-file and the layering.
-
-For a subscription profile, log in before selecting its model:
+Choose a provider/model from `ego models`. For example, with an existing local
+Ollama installation and a downloaded completion model:
 
 ```sh
-ego auth login openai-codex
-ego -m openai-codex/gpt-5.3-codex
-```
-
-### Ollama
-
-Start Ollama, install a model, then open an interactive εgo session:
-
-```sh
-ollama pull qwen3
 ego models --provider ollama --refresh
-cargo run -p ego-cli -- -m ollama/qwen3
+ego config set 'roots=[]'
+ego -m ollama/gemma4:e4b-mlx --thinking off
 ```
 
-εgo asks whether to trust project files before reading project config or
-ambient instructions. In a trusted interactive workspace, deterministic local
-low/bounded calls use automatic analysis without a ritual confirmation; high,
-unknown, external, credential, or irreversible effects retain their existing
-decision paths. `/yolo` switches the session policy immediately; `Ctrl+D` ends
-the session.
+Type a first prompt such as “Explain the main entry points in this repository.”
+The model name above is an example: use one listed by your daemon.
+`ego config set 'roots=[]'` selects workspace-only access instead of the default `~/Gits`
+extra root, keeping unrelated repositories outside the perimeter. For a hosted
+model, supply its API key or complete subscription login first; see
+[providers and login](docs/guides/providers.md). No key belongs in project files.
 
-For a headless one-shot whose stdout can be piped:
+| Entry point | Use it for |
+| --- | --- |
+| `ego` or `ego PROMPT` | Interactive conversation, model selection, permissions, and session controls |
+| `ego run PROMPT` | One headless run; text, JSON, or live JSONL on stdout |
+| `ego acp` | ACP over stdio for a host such as TUICommander |
+
+A pipeline uses an explicit model and never prompts for permission or trust:
 
 ```sh
-cargo run -p ego-cli -- run -m ollama/qwen3 --output json \
-  "Explain this repository" | jq .result
+printf '%s\n' 'Reply with one sentence about what a coding harness does.' | \
+  ego run -m ollama/gemma4:e4b-mlx --thinking off --no-tools --timeout 30s --output json -
 ```
 
-Headless runs never ask for trust or permission. They remain untrusted and
-bare by default; use permission rules or a mode explicitly when a script needs
-an effect. Run `cargo run -p ego-cli -- --help` for the commands available in
-this checkout.
+Headless work is untrusted and bare by default. Project configuration and ambient
+instructions do not silently become script authority. See
+[permissions and confinement](docs/guides/permissions.md) before allowing effects.
+
+## What it does
+
+- Read, search, edit, write, and execute through prepared operations and permits.
+- Keep durable sessions; resume, fork at a completed message, compact, and export.
+- Select from local, hosted API, and subscription provider profiles through one
+  model catalogue. Unsupported capabilities fail explicitly.
+- Bound a run by tokens or money, turns, and time; retry only delivery-safe failures.
+- Produce schema-validated answers and versioned structured output for scripts.
+- Connect external MCP tools, serve scoped runs over MCP and ACP, and expose local A2A discovery.
+- Load named skills and lifecycle hooks under the same authority boundaries.
+- Inspect configuration, effective perimeter, usage, and redacted health facts.
+
+Permission mode and operating-system confinement are separate choices. A relaxed
+permission mode does not remove a sandbox or an administrator's ceilings.
+
+## Status and platforms
+
+This is an unreleased project; there is no stable release yet. `ego-cli` currently
+has version `0.1.0` and workspace packages are not published. The command references
+describe this checkout, not a promise about a future release.
+
+macOS uses Seatbelt and Linux uses its confinement backends when the host can prove
+the requested guarantee. Windows transport and private-state support exist, but
+Windows confinement and the final cross-platform product proof remain open work.
+An unavailable confinement guarantee is refused rather than silently weakened.
+See [platforms and troubleshooting](docs/guides/troubleshooting.md) and
+[the roadmap](ARCHITECTURE.mdregression case-resolves-48).
+
+## Documentation
+
+Start with the [documentation index](docs/README.md):
+
+- [Getting started](docs/getting-started/README.md) and [interactive use](docs/guides/interactive.md)
+- [Sessions, runs, turns, permits, and evidence](docs/concepts/README.md)
+- [CLI reference](docs/reference/README.md) and [configuration reference](docs/reference/configuration.md)
+- [Providers](docs/guides/providers.md), [tools](docs/guides/tools.md), and [permissions](docs/guides/permissions.md)
+- [ACP, MCP, skills, hooks, and orchestration](docs/integrations/README.md)
+- [Architecture](docs/architecture.md), [changelog](CHANGELOG.md), and [historical research](ARCHITECTURE.md)
 
 ## Name
 
-The name carries three ideas at once:
-
-- **ε — the smallest explicit bound.** A compact layer with boundaries that
-  are measured instead of assumed.
-- **ego — the mediator.** The harness stands between model intent, policy, and
-  the reality of the host.
-- **go — from language to action.** εgo is built to do the work, not merely
-  talk about it.
+**ε** is the smallest explicit bound. **ego** is the mediator between model intent,
+policy, and the host. **go** moves language into action.
 
 > **Minimum layer. Maximum agency. Explicit control.**
 
-The complete positioning, manifesto, and voice live in
-[`docs/22-brand-narrative.md`](docs/22-brand-narrative.md).
-
-### Naming and distribution
-
-Name availability was verified on 2026-08-19:
-
-| Channel | State |
-| --- | --- |
-| binary `ego` in `PATH` | free |
-| Homebrew formula | free |
-| Homebrew cask | free |
-| crates.io | taken — `intgr/ego` v1.2.0, "Alter Ego: run Linux desktop applications under a different local user", alive (updated 2026-01-08) |
-| npm | taken |
-| ego.sh / ego.dev | registered |
-
-The crates.io collision blocks nothing: crate name and binary name are
-independent (`ripgrep` ships `rg`). If we ever publish, it goes out as `ego-cli`
-or `egoh` — both free — with `[[bin]] name = "ego"`. Distribution via GitHub
-releases or a private Homebrew tap makes the question moot.
-
-For comparison, `fx` is already a Homebrew formula (antonmedv's JSON viewer), so
-the reference project has a worse collision than ours.
-
-## Where to start
-
+The [brand narrative](ARCHITECTURE.md) preserves the manifesto
+and voice. The workspace declares the MIT license in `Cargo.toml`.
