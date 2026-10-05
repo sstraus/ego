@@ -302,13 +302,13 @@ fn assert_tool_origin_and_continuation_result(state: &SessionState, item: ItemId
 }
 
 #[test]
-fn snapshot_version_is_fourteen_and_validation_exposes_exact_rejection_set() {
-    assert_eq!(SNAPSHOT_VERSION, 14);
+fn snapshot_version_is_fifteen_and_validation_exposes_exact_rejection_set() {
+    assert_eq!(SNAPSHOT_VERSION, 15);
     let fixture = Fixture::new();
     let state = fixture.full_replay();
     assert_eq!(state.hook_settlements().len(), 1);
     let snapshot = Snapshot::new(fixture.id, fixture.events[3].env.seq, state.clone());
-    assert_eq!(snapshot.v, 14);
+    assert_eq!(snapshot.v, 15);
     assert_eq!(
         validate(
             &snapshot,

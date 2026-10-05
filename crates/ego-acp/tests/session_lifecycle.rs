@@ -1039,6 +1039,201 @@ async fn fork_uses_durable_lineage_and_attaches_only_the_child() {
     connection.finish().await;
 }
 
+// Catches: ignored fork metadata, lost inherited IDs, stale/deleted parent lookup,
+// and inherited replay ordered after the child's own messages.
+#[tokio::test]
+async fn message_fork_replays_the_cutoff_before_local_history_even_after_parent_deletion() {
+    let fixture = support::DurableAcpFixture::new();
+    let (source, items) = fixture.seed_settled_messages(ROOT);
+    let mut connection = Connected::new(fixture.router());
+    let initialized = connection.initialize().await;
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["sessionCapabilities"]["fork"]["_meta"]["ego"]["atMessage"],
+        true
+    );
+    let (forked, before) = connection
+        .request(
+            "session/fork",
+            serde_json::json!({
+                "sessionId": source, "cwd": ROOT, "mcpServers": [],
+                "_meta": {"ego": {"atMessageId": items[0]}}
+            }),
+        )
+        .await;
+    assert!(before.is_empty());
+    let child = forked["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("fork failed: {forked}"))
+        .to_owned();
+    let announced = connection.announced().await;
+    let lineage = &updates(&announced)[0]["update"]["_meta"]["ego"]["lineage"];
+    assert_eq!(lineage["kind"], "fork");
+    assert_eq!(lineage["sourceSessionId"], source);
+    assert_eq!(lineage["rootSessionId"], source);
+    assert_eq!(lineage["atMessageId"], serde_json::json!(items[0]));
+    let own = fixture.append_settled_message(&child, "child turn");
+    let (deleted, _) = connection
+        .request("session/delete", serde_json::json!({"sessionId": source}))
+        .await;
+    assert!(deleted.get("result").is_some(), "delete failed: {deleted}");
+    let (loaded, _) = connection
+        .request(
+            "session/load",
+            serde_json::json!({"sessionId": child, "cwd": ROOT, "mcpServers": []}),
+        )
+        .await;
+    assert!(loaded.get("result").is_some(), "load failed: {loaded}");
+    let history = connection.announced().await;
+    let frames = updates(&history);
+    let messages = frames
+        .iter()
+        .filter(|frame| frame["update"]["sessionUpdate"] == "user_message_chunk")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages.len(),
+        2,
+        "cutoff omitted or tip inherited: {history:?}"
+    );
+    assert_eq!(
+        messages[0]["update"]["messageId"],
+        serde_json::json!(items[0])
+    );
+    assert_eq!(messages[0]["update"]["content"]["text"], "turn 1");
+    assert_eq!(messages[0]["update"]["_meta"]["ego"]["inherited"], true);
+    assert_eq!(messages[1]["update"]["messageId"], serde_json::json!(own));
+    assert_eq!(messages[1]["update"]["content"]["text"], "child turn");
+    assert!(
+        messages[1]["update"]["_meta"]["ego"]
+            .get("inherited")
+            .is_none()
+    );
+    assert_eq!(
+        frames.last().unwrap()["update"]["_meta"]["ego"]["lineage"]["sourceDeleted"],
+        true
+    );
+    let (listed, _) = connection
+        .request("session/list", serde_json::json!({"cwd": ROOT}))
+        .await;
+    let listed_child = listed["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["sessionId"] == child)
+        .unwrap();
+    assert_eq!(
+        listed_child["_meta"]["ego"]["lineage"]["sourceDeleted"],
+        true
+    );
+    let (forked_again, _) = connection
+        .request(
+            "session/fork",
+            serde_json::json!({"sessionId": child, "cwd": ROOT, "mcpServers": []}),
+        )
+        .await;
+    assert!(
+        forked_again.get("result").is_some(),
+        "deleted ancestor blocked child fork: {forked_again}"
+    );
+    connection.announced().await;
+    connection.finish().await;
+}
+
+// Catches: unknown or foreign IDs silently turning into a successful tip fork.
+#[tokio::test]
+async fn invalid_message_forks_publish_no_child() {
+    let fixture = support::DurableAcpFixture::new();
+    let (source, _) = fixture.seed_settled_messages(ROOT);
+    let (_, foreign) = fixture.seed_settled_messages(ROOT);
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    for message in [
+        serde_json::json!(ego_core::event::id::ItemId::new()),
+        serde_json::json!(foreign[0]),
+        serde_json::Value::Null,
+        serde_json::json!("bad-id"),
+    ] {
+        let before = fixture.effect_counts().2;
+        let (response, notifications) = connection.request("session/fork", serde_json::json!({
+            "sessionId": source, "cwd": ROOT, "mcpServers": [], "_meta": {"ego": {"atMessageId": message}}
+        })).await;
+        assert!(
+            response.get("error").is_some(),
+            "invalid message accepted: {response}"
+        );
+        assert!(notifications.is_empty());
+        assert_eq!(
+            fixture.effect_counts().2,
+            before,
+            "invalid fork published a child"
+        );
+    }
+    connection.finish().await;
+}
+
+// Catches: compaction edges disappearing or incorrectly terminating the tree root.
+#[tokio::test]
+async fn compaction_children_project_lineage_in_list_and_load_info() {
+    let fixture = support::DurableAcpFixture::new();
+    let (source, _) = fixture.seed_settled_messages(ROOT);
+    let child = fixture.seed_compaction_child(&source);
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (listed, _) = connection
+        .request("session/list", serde_json::json!({"cwd": ROOT}))
+        .await;
+    let item = listed["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["sessionId"] == child)
+        .unwrap();
+    let expected = serde_json::json!({"kind": "compaction", "sourceSessionId": source, "rootSessionId": source, "sourceDeleted": false});
+    assert_eq!(item["_meta"]["ego"]["lineage"], expected);
+    let (loaded, _) = connection
+        .request(
+            "session/load",
+            serde_json::json!({"sessionId": child, "cwd": ROOT, "mcpServers": []}),
+        )
+        .await;
+    assert!(loaded.get("result").is_some(), "load failed: {loaded}");
+    let announced = connection.announced().await;
+    assert_eq!(
+        updates(&announced).last().unwrap()["update"]["_meta"]["ego"]["lineage"],
+        expected
+    );
+    connection.finish().await;
+}
+
+// Catches: a durable goal set outside the current connection never reaching
+// the host's plan card on attachment.
+#[tokio::test]
+async fn loading_a_goal_emits_one_current_plan_entry() {
+    let fixture = support::DurableAcpFixture::new();
+    let (session, _) = fixture.seed_settled_messages(ROOT);
+    fixture.set_current_goal(&session, "Finish the ACP surface");
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (loaded, _) = connection
+        .request(
+            "session/load",
+            serde_json::json!({"sessionId": session, "cwd": ROOT, "mcpServers": []}),
+        )
+        .await;
+    assert!(loaded.get("result").is_some(), "load failed: {loaded}");
+    let announced = connection.announced().await;
+    let plans = updates(&announced)
+        .into_iter()
+        .filter(|params| params["update"]["sessionUpdate"] == "plan")
+        .collect::<Vec<_>>();
+    assert_eq!(plans.len(), 1, "no complete current plan: {announced:?}");
+    let entries = plans[0]["update"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["content"], "Finish the ACP surface");
+    assert_eq!(entries[0]["status"], "in_progress");
+    assert_eq!(entries[0]["_meta"]["ego"]["goalState"], "active");
+    connection.finish().await;
+}
+
 #[tokio::test]
 async fn failed_mcp_admission_leaves_no_fork_child_listed() {
     let fixture = support::DurableAcpFixture::new();
@@ -1579,5 +1774,110 @@ async fn malformed_unknown_and_wrong_root_requests_return_explicit_errors() {
             "{method} did not explain its refusal: {response}"
         );
     }
+    connection.finish().await;
+}
+
+// Catches: nested forks replaying an ancestor's discarded tail, losing local
+// frames, or treating a tombstoned ancestor as unavailable.
+#[tokio::test]
+async fn critic_nested_fork_keeps_each_cutoff_and_local_ids_after_ancestor_deletion() {
+    let fixture = support::DurableAcpFixture::new();
+    let (root, root_items) = fixture.seed_settled_messages(ROOT);
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (fork, _) = connection
+        .request(
+            "session/fork",
+            serde_json::json!({
+                "sessionId": root, "cwd": ROOT, "mcpServers": [],
+                "_meta": {"ego": {"atMessageId": root_items[0]}}
+            }),
+        )
+        .await;
+    let child = fork["result"]["sessionId"].as_str().unwrap().to_owned();
+    connection.announced().await;
+    let child_first = fixture.append_settled_message(&child, "child first");
+    let child_tail = fixture.append_settled_message(&child, "discarded child tail");
+    let (fork, _) = connection
+        .request(
+            "session/fork",
+            serde_json::json!({
+                "sessionId": child, "cwd": ROOT, "mcpServers": [],
+                "_meta": {"ego": {"atMessageId": child_first}}
+            }),
+        )
+        .await;
+    let grandchild = fork["result"]["sessionId"].as_str().unwrap().to_owned();
+    connection.announced().await;
+    let local = fixture.append_settled_message(&grandchild, "grandchild local");
+    for parent in [&root, &child] {
+        let (deleted, _) = connection
+            .request(
+                "session/delete",
+                serde_json::json!({
+                    "sessionId": parent
+                }),
+            )
+            .await;
+        assert!(deleted.get("error").is_none(), "{deleted}");
+    }
+    connection.finish().await;
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (loaded, _) = connection
+        .request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": grandchild, "cwd": ROOT, "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let announced = connection.announced().await;
+    let messages = updates(&announced)
+        .into_iter()
+        .filter(|params| params["update"]["sessionUpdate"] == "user_message_chunk")
+        .map(|params| &params["update"])
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 3, "discarded tails replayed: {messages:?}");
+    for (message, expected) in messages.iter().zip([root_items[0], child_first, local]) {
+        assert_eq!(message["messageId"], expected.to_string());
+    }
+    assert_eq!(messages[0]["_meta"]["ego"]["inherited"], true);
+    assert_eq!(messages[1]["_meta"]["ego"]["inherited"], true);
+    assert!(messages[2]["_meta"]["ego"].get("inherited").is_none());
+    assert_eq!(
+        loaded["result"]["_meta"]["ego"]["lineage"]["rootSessionId"],
+        root
+    );
+    assert_eq!(
+        loaded["result"]["_meta"]["ego"]["lineage"]["sourceDeleted"],
+        true
+    );
+    let (before, _) = connection
+        .request("session/list", serde_json::json!({"cwd": ROOT}))
+        .await;
+    for hidden in [root_items[1], child_tail] {
+        let (refused, _) = connection
+            .request(
+                "session/fork",
+                serde_json::json!({
+                    "sessionId": grandchild, "cwd": ROOT, "mcpServers": [],
+                    "_meta": {"ego": {"atMessageId": hidden}}
+                }),
+            )
+            .await;
+        assert!(
+            refused.get("error").is_some(),
+            "hidden tail became forkable: {refused}"
+        );
+    }
+    let (after, _) = connection
+        .request("session/list", serde_json::json!({"cwd": ROOT}))
+        .await;
+    assert_eq!(
+        before["result"]["sessions"], after["result"]["sessions"],
+        "refused forks published sessions"
+    );
     connection.finish().await;
 }

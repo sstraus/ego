@@ -392,6 +392,7 @@ impl CliPrepared {
             .with_profile_roots(profile_roots),
         );
         let config = TurnConfig {
+            cache: self.effective.cache,
             system: self.system,
             identity: Some(AgentIdentity {
                 version: crate::build_info::VERSION.to_owned(),

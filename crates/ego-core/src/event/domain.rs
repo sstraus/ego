@@ -429,6 +429,8 @@ pub enum EventKind {
     /// resumed session able to say that a request was in flight — and, once
     /// `AttemptSettled` arrives, whether it may safely be sent again.
     GenerationStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<crate::session::PromptSnapshot>,
         attempt: AttemptRef,
         #[serde(default)]
         role: GenerationRole,
@@ -533,7 +535,12 @@ pub enum EventKind {
     /// The session log was compacted; `summary` replaces the compacted span.
     Compacted { summary: String },
     /// This session was forked from `source` at `at_seq`.
-    Forked { source: SessionId, at_seq: Seq },
+    Forked {
+        source: SessionId,
+        at_seq: Seq,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<crate::session::PromptSnapshot>,
+    },
     /// One complete ordered hook catalogue was admitted atomically.
     HookCatalogueAdmitted { descriptors: HookCatalogueEvidence },
     /// One real owner durably froze the ordered hook plan for its occurrence.

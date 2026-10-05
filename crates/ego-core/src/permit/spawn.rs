@@ -359,6 +359,12 @@ impl SpawnSpec {
         self.cwd.as_ref()
     }
 
+    /// Remove the process lifetime bound for a session-owned, request-bounded child.
+    pub fn session_lifetime(mut self) -> Self {
+        self.timeout = None;
+        self
+    }
+
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
@@ -987,6 +993,11 @@ impl std::error::Error for RunConfinementError {}
 
 /// Host process execution behind the permit-checking facade.
 pub trait ProcessExecutor: Send + Sync {
+    /// Effective confinement of this effect scope; unknown refuses channel reuse.
+    fn confinement(&self) -> Option<Confinement> {
+        None
+    }
+
     /// An adapter that cannot observe identity leaves it incomplete, never
     /// inventing facts that could support reusable approval.
     fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {

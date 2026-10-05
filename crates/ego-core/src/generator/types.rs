@@ -869,6 +869,9 @@ pub struct ReasoningState {
 /// A request to generate the next assistant turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenRequest {
+    /// Transient provider-cache policy and prefix boundary; never journaled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<PromptCache>,
     /// The model to generate with, as a provider-catalogue id (e.g.
     /// `"claude-opus-5"`). `ego-core` treats this as an opaque string; the
     /// catalogue and provider table live in `ego-ai` (ARCH §3.1).
@@ -886,4 +889,12 @@ pub struct GenRequest {
     pub thinking: ThinkingLevel,
     pub max_output_tokens: Option<u64>,
     pub parallel_tool_calls: bool,
+}
+
+/// Stable messages precede the volatile context/current user request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCache {
+    pub lineage_root: crate::event::id::SessionId,
+    pub retention: super::capabilities::CacheRetention,
+    pub stable_messages: usize,
 }

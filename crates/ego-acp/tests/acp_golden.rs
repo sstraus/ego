@@ -346,6 +346,7 @@ mod acp_golden {
                 EventKind::Forked {
                     source: SessionId::new(),
                     at_seq: Seq::default(),
+                    snapshot: None,
                 },
             ),
             ev(
@@ -529,6 +530,7 @@ mod acp_golden {
             EventKind::GenerationStarted {
                 attempt: AttemptRef::first(GenerationId::new()),
                 role: GenerationRole::Main,
+                snapshot: None,
             },
             EventKind::ExecutionObserved {
                 observation: ego_core::permit::ExecObservation::new(
@@ -579,6 +581,7 @@ mod acp_golden {
             EventKind::Forked {
                 source: SessionId::new(),
                 at_seq: Seq::default(),
+                snapshot: None,
             },
             EventKind::HookCatalogueAdmitted {
                 descriptors: HookCatalogueEvidence::new(vec![hook_catalogue_entry()]).unwrap(),
@@ -739,6 +742,101 @@ mod acp_golden {
         state
     }
 
+    // Catches: live turns omitting the goal plan, or showing blocked/achieved
+    // goals as active work. The state is reduced from real goal journal events.
+    #[test]
+    fn live_turn_boundaries_project_the_current_goal_status_without_inventing_steps() {
+        use ego_acp::project::project_acp_updates_v1;
+        use ego_core::goal::{GoalOwner, GoalTransition};
+        use ego_core::public::PublicEvent;
+        let turn = TurnId::new();
+        let boundary = PublicEvent::TurnStarted { turn };
+        assert!(
+            project_acp_updates_v1(
+                &boundary,
+                &SessionState::default(),
+                &caps(None),
+                std::path::Path::new("/workspace")
+            )
+            .is_empty()
+        );
+        for (state_name, expected_status) in [
+            ("active", "in_progress"),
+            ("achieved", "completed"),
+            ("blocked", "pending"),
+        ] {
+            let goal = ego_core::event::id::GoalId::new();
+            let mut seq = Seq::ZERO;
+            let mut events = vec![ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::GoalSet {
+                    id: goal,
+                    objective: "Deliver the goal".to_owned(),
+                    owner: GoalOwner::Operator,
+                    ceilings: ego_core::ceiling::Ceilings::default(),
+                    derived_from: None,
+                },
+            )];
+            if state_name == "achieved" {
+                events.push(ev(
+                    seq.next(),
+                    turn,
+                    None,
+                    EventKind::GoalTransitioned {
+                        id: goal,
+                        transition: GoalTransition::Achieved {
+                            attested_by: GoalOwner::Operator,
+                            evidence: None,
+                        },
+                    },
+                ));
+            } else if state_name == "blocked" {
+                for _ in 0..3 {
+                    events.push(ev(
+                        seq.next(),
+                        TurnId::new(),
+                        None,
+                        EventKind::GoalTransitioned {
+                            id: goal,
+                            transition: GoalTransition::BlockerObserved {
+                                reason: "Missing operator decision".to_owned(),
+                            },
+                        },
+                    ));
+                }
+            }
+            let state = state_after(&events);
+            for boundary in [
+                boundary.clone(),
+                PublicEvent::TurnCompleted {
+                    turn,
+                    ok: true,
+                    exit_reason: ego_core::event::domain::ExitReason::Completed,
+                },
+            ] {
+                let updates = project_acp_updates_v1(
+                    &boundary,
+                    &state,
+                    &caps(None),
+                    std::path::Path::new("/workspace"),
+                );
+                assert_eq!(updates.len(), 1, "goal state {state_name}");
+                let plan = serde_json::to_value(&updates[0]).unwrap();
+                assert_eq!(plan["sessionUpdate"], "plan");
+                let entries = plan["entries"].as_array().unwrap();
+                assert_eq!(entries.len(), 1, "goal is one entry, not fabricated steps");
+                assert_eq!(entries[0]["content"], "Deliver the goal");
+                assert_eq!(
+                    entries[0]["status"], expected_status,
+                    "goal state {state_name}"
+                );
+                assert_eq!(entries[0]["_meta"]["ego"]["goalState"], state_name);
+            }
+        }
+    }
+
     /// The core v1 projection golden: `project_v1` over the whole fixture
     /// log, `None`s filtered out, one compact JSON object per line — must
     /// match the committed `.jsonl` fixture exactly, up to trailing
@@ -813,6 +911,7 @@ mod acp_golden {
         let event = with_item(EventKind::Forked {
             source: SessionId::new(),
             at_seq: Seq::default(),
+            snapshot: None,
         });
         assert_eq!(acp_v1(&event), None);
         assert_eq!(acp_v2(&event), None);
@@ -1332,6 +1431,7 @@ mod acp_golden {
             &[ReplayFrame {
                 event: project_public(&log[1]).expect("public occupancy event"),
                 state,
+                inherited: false,
             }],
             Some(200_000),
             std::path::Path::new("/workspace"),

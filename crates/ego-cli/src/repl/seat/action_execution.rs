@@ -31,6 +31,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 ActionId::New,
                 ActionId::Fork,
                 ActionId::Compact,
+                ActionId::Refresh,
                 ActionId::Name,
                 ActionId::Goal,
                 ActionId::Export,
@@ -397,7 +398,9 @@ pub(super) fn surface_line(
                 }
                 match futures::executor::block_on(ingress.submit(buffer.clone())) {
                     Ok(queue) => {
-                        editor.run_edit_commands(&[EditCommand::Clear]);
+                        if editor.accept_buffer(prompt).is_err() {
+                            return (Line::Ended, true);
+                        }
                         let mut current = status.lock().expect("surface status lock");
                         current.queue = queue;
                         current.origin = InputOrigin::Typed;
@@ -610,6 +613,9 @@ pub(super) fn apply_surface_effect(
         }
         SurfaceActionEffect::Permissions => {
             return choose_permission_action(editor, phase, status, busy);
+        }
+        SurfaceActionEffect::Refresh => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Refresh)));
         }
         SurfaceActionEffect::Compact => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Compact)));

@@ -864,10 +864,20 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.permission_material += 1 + by.is_some() as u64 + reason.is_some() as u64;
             ExportEvent::PermissionDecided { allowed: *allowed }
         }
-        EventKind::GenerationStarted { attempt, role } => ExportEvent::GenerationStarted {
-            attempt: *attempt,
-            role: *role,
-        },
+        EventKind::GenerationStarted {
+            attempt,
+            role,
+            snapshot,
+        } => {
+            redactions.opaque_prose += u64::from(snapshot.is_some());
+            if let Some(system) = snapshot.as_ref().and_then(|value| value.system.as_ref()) {
+                redactions.path += system.sources.len() as u64;
+            }
+            ExportEvent::GenerationStarted {
+                attempt: *attempt,
+                role: *role,
+            }
+        }
         EventKind::FallbackDecision {
             candidate,
             decision,
@@ -956,10 +966,20 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::Compacted
         }
-        EventKind::Forked { source, at_seq } => ExportEvent::Forked {
-            source: *source,
-            at_seq: *at_seq,
-        },
+        EventKind::Forked {
+            source,
+            at_seq,
+            snapshot,
+        } => {
+            redactions.opaque_prose += u64::from(snapshot.is_some());
+            if let Some(system) = snapshot.as_ref().and_then(|value| value.system.as_ref()) {
+                redactions.path += system.sources.len() as u64;
+            }
+            ExportEvent::Forked {
+                source: *source,
+                at_seq: *at_seq,
+            }
+        }
         EventKind::HookCatalogueAdmitted { descriptors } => {
             redactions.path += descriptors.len() as u64;
             ExportEvent::HookCatalogueAdmitted {
@@ -1246,7 +1266,7 @@ impl EvidenceValidation {
         position: Seq,
         event: &EventKind,
     ) -> Result<(), ExportError> {
-        let EventKind::GenerationStarted { attempt, role } = event else {
+        let EventKind::GenerationStarted { attempt, role, .. } = event else {
             return Ok(());
         };
         let Some((_, admitted_role, _)) = self.generations.get(attempt) else {

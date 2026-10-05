@@ -1058,6 +1058,7 @@ fn generation_quote() -> PricingQuote {
 
 fn generation_request(prompt: &str) -> GenRequest {
     GenRequest {
+        cache: None,
         model: "provider/model".to_owned(),
         messages: Conversation::new(vec![Message::text(Role::User, prompt.to_owned())])
             .expect("one user message is valid"),

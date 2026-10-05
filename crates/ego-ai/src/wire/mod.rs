@@ -16,6 +16,7 @@
 //! landed, so the signature is written against types that have stopped moving.
 
 pub mod anthropic_messages;
+mod cache;
 pub mod gemini_interactions;
 pub mod github_copilot_completions;
 pub mod kimi_anthropic;

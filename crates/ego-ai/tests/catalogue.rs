@@ -112,6 +112,7 @@ static SUPPLIED_OPENAI: Supplied = Supplied::new(&OpenAiCompletions);
 
 fn request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gemma4:e4b-mlx".to_string(),
         messages: Conversation::new(Vec::new()).expect("an empty history is valid"),
         tools: Vec::new(),
@@ -609,6 +610,7 @@ fn a_local_model_with_no_output_ceiling_is_refused_for_the_ceiling_and_not_the_p
         block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http)).expect("resolved");
 
     let uncapped = GenRequest {
+        cache: None,
         max_output_tokens: None,
         ..request()
     };

@@ -60,6 +60,7 @@ impl JudgeInput {
         ])
         .expect("two text messages are a valid conversation");
         GenRequest {
+            cache: None,
             model: config.request_model.clone(),
             messages,
             tools: Vec::new(),

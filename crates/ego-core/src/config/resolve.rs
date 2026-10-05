@@ -79,6 +79,7 @@ impl ResolvedMcpConfig {
 /// and the trust gate have been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
+    pub cache: crate::generator::capabilities::CacheRetention,
     pub model: Option<ModelRef>,
     pub thinking: Option<ThinkingLevel>,
     pub mode: Option<Mode>,
@@ -166,6 +167,7 @@ impl std::fmt::Display for Discarded {
 /// eligibility, so it is never discarded and saying it was would be false.
 fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     let ConfigLayer {
+        cache,
         model,
         thinking,
         mode,
@@ -186,6 +188,7 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     } = layer;
     let mut settings = Vec::new();
     for (present, name) in [
+        (cache.is_some(), "cache"),
         (model.is_some(), "model"),
         (thinking.is_some(), "thinking"),
         (mode.is_some(), "mode"),
@@ -340,6 +343,7 @@ fn resolve_inner(
     } else {
         None
     };
+    let mut cache = crate::generator::capabilities::CacheRetention::Short;
     let mut model = None;
     let mut thinking = None;
     let mut mode = None;
@@ -381,6 +385,12 @@ fn resolve_inner(
             );
         }
 
+        if let Some(value) = sourced.value.cache
+            && (value != crate::generator::capabilities::CacheRetention::Long
+                || sourced.source == Source::User)
+        {
+            cache = value;
+        }
         if let Some(m) = profile
             .and_then(|p| p.model.clone())
             .or_else(|| sourced.value.model.clone())
@@ -659,6 +669,7 @@ fn resolve_inner(
     }
 
     Ok(Effective {
+        cache,
         model,
         thinking,
         mode,

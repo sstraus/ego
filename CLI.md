@@ -158,7 +158,7 @@ omitted when empty: two states, identical bytes.
 | `ego hooks` | **yes** | `ls [--json]` reads the same immutable admitted hook catalogue used by execution; it neither reloads nor edits hook policy |
 | `ego config` | **yes** | `get`, `set`, `unset`, `ls`, and whole-document `edit` use one strict atomic user-config transaction; stored profiles are explicit targets and management ignores ambient `EGO_PROFILE` |
 | `ego rules` | **yes** | `ls`, `allow`, `deny`, `revoke`, `remember`, and `explain` share the canonical rule grammar, atomic user store, and effective policy service; management ignores ambient `EGO_PROFILE` and never executes the explained call |
-| `ego usage` | **yes** | reports the versioned main/judge/compaction/total accounting DTO for this workspace; `--period` accepts `all` or a positive `s`/`m`/`h` duration and `--json` emits the same DTO. The text view is a compact `session model role in out cached cost` table that hides role rows with no activity unless `--all-roles` is given; the flag is presentation only and never reaches the JSON report |
+| `ego usage` | **yes** | reports the versioned main/judge/compaction/total accounting DTO for this workspace; `--period` accepts `all` or a positive `s`/`m`/`h` duration and `--json` emits the same DTO. The text view is a compact `session model role in out cached cache_hit cost` table that hides role rows with no activity unless `--all-roles` is given; the flag is presentation only and never reaches the JSON report |
 | `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
 | `ego doctor` | **yes** | one ordered, versioned, redacted `HealthSnapshot` over nine sections, rendered as text or `--json`. It reads existing facts only: it never logs in, refreshes a credential or a catalogue, reloads an extension, edits config, or calls a hosted provider. `/doctor` renders the same snapshot, and a fact ego cannot observe without mutating something is reported `not_checked` with its reason rather than omitted |
 
@@ -926,8 +926,12 @@ History, completion, multiline editing, bracketed paste, and concurrent output
 use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
 
+The live seat enters raw mode before startup discovery, so lines typed before
+the composer appears retain their Enter boundaries without cooked terminal
+echo. The first starts a turn; further submitted lines enter the busy FIFO.
+
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /fork [message-id] /compact /clear /usage /statusline /export /doctor /quit /new
+/sessions /fork [message-id] /compact /refresh /clear /usage /statusline /export /doctor /quit /new
 /name /goal /tools /expand /skills /hooks /version`. These 25 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
@@ -1337,13 +1341,15 @@ ordinary output length or generic invalid input, and is never blindly retried.
 The operator then invokes `/compact` or `ego compact`; M3 introduced no
 automatic threshold.
 
-ACP v1 advertises only the optional `_ego/compact` extension in
-`AgentCapabilities._meta`. Its request is
+ACP v1 advertises the optional `_ego/compact` extension in
+`AgentCapabilities._meta`. The durable lifecycle adapter also advertises
+standard load, list, tip fork, resume, delete, and close. Its request is
 `{"v":1,"sessionId":"...","requestId":"..."}`; its response carries
 `v`, `sourceSessionId`, `sourceSeq`, `targetSessionId`, `publication`, and
 `successorStartRequestId`. A successful response registers the target so the
-next standard `session/prompt` adopts it. It does not advertise `session/load`
-or add standard list, fork, resume, or delete operations. Because ACP has no
+next standard `session/prompt` adopts it. The extension itself adds no standard
+lifecycle operation; those are served separately by the durable M5 adapter.
+Because ACP has no
 standard context-overflow stop reason, the preceding `session/prompt` returns a
 structured application error naming `_ego/compact` after the typed settlement
 is durable; it does not report max tokens or refusal.
@@ -1369,6 +1375,16 @@ hidden behind a compaction checkpoint cannot be selected. An inherited message
 branches its owning ancestor at that ancestor's completion sequence. Title and
 active goal come from the selected boundary. An explicit completed boundary can
 be read while the source writer runs; a tip fork requires an inactive source.
+
+Standard ACP `session/fork` currently serves the tip. The message selector
+`_meta.ego.atMessageId`, lineage metadata, and inherited-message replay are
+planned extensions. The accepted cache design snapshots only the system prompt
+per epoch; resume/fork inherit it, and compaction or explicit refresh replaces
+it. Tool admission remains current. The snapshot is captured on the first admitted generation. `/refresh` reloads
+instructions and opens a new epoch on the next admitted generation; it refuses
+while source work is pending. Live runtime and host facts are transient data
+before current user intent. Provider cache fields remain regression case, with decisions in
+`docs/decisions/2026-09-30-conversation-fork-cache-prefix.md`.
 
 ## 7. Configuration
 
@@ -1637,7 +1653,7 @@ reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
                                    # or "unknown" (fails closed) or "any"
 default_reasoning_effort = "medium" # optional; omission means unknown
 cancel = "cooperative"             # "unsupported" | "cooperative" | "immediate"
-cache = "short"                    # "none" | "short" | "long"
+cache = "short"                    # "none" | "short" (5m) | "long" (1h, user config only)
 transport = "sse"
 
 # `image_input` is either a bare string — `"unknown"` (the default, and it

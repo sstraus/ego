@@ -879,6 +879,8 @@ where
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigLayer {
+    /// Prompt caching: short (default), none, or explicit user opt-in long.
+    pub cache: Option<crate::generator::capabilities::CacheRetention>,
     pub model: Option<ModelRef>,
     /// Default reasoning effort. Absence contributes no precedence value.
     pub thinking: Option<ThinkingLevel>,
@@ -934,6 +936,15 @@ impl ConfigLayer {
                 source,
                 message: "`max_mode` and base `roots` ceilings belong only to the system layer"
                     .into(),
+            });
+        }
+        if value.cache == Some(crate::generator::capabilities::CacheRetention::Long)
+            && source != Source::User
+        {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "cache = long requires explicit user config".to_owned(),
+
             });
         }
         if let Some((name, _)) = value.profile.iter().find(|(name, profile)| {
