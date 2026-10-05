@@ -371,6 +371,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     config: self.config.clone(),
                     admission: self.admission.clone(),
                     invocation: self.invocation,
+                    retry_pause: self.retry_pause.clone(),
                 },
                 tools: self
                     .tools

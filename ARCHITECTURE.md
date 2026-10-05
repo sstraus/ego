@@ -239,10 +239,13 @@ Carried over from fx because it is cheap and correct (`ARCHITECTURE.md` §2.4):
 **delivery certainty** — `DeliveryCertainty { DefinitelyUnsent, PossiblySent }`
 tracked per attempt, deciding whether a retry is safe or might double-bill.
 In M5 one core turn coordinator owns every attempt: `--retry N` permits at
-most N additional attempts on the same model and only after
-`DefinitelyUnsent`; ordered fallback re-resolves current catalogue facts and
+most N additional attempts on the same model after a transient failure that
+was `DefinitelyUnsent` or showed no output, waiting with exponential backoff
+(`ARCHITECTURE.md`);
+ordered fallback re-resolves current catalogue facts and
 must prove capability and request expressibility before a fresh attempt.
-Possibly-sent work never retries or falls back automatically. Each attempt
+Possibly-sent work that showed output never retries, and possibly-sent work
+never falls back automatically. Each attempt
 keeps its own identity, reservation, digest, settlement, usage, and cost; the
 turn folds them without rewriting history. The complete failure contract is
 `ARCHITECTURE.md`.

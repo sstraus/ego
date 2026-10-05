@@ -146,8 +146,15 @@ pub enum RunTermination {
     PermissionRequired { action: String, by: DeniedBy },
     /// A durable question awaits an answer from the invoking human.
     QuestionRequired { question: Box<QuestionReport> },
-    /// The provider or the network failed.
+    /// The provider or the network failed, and the turn's effect is known:
+    /// the failed attempt showed nothing, or the provider itself reported the
+    /// failure. The run is settled and the session takes the next prompt.
+    /// `message` names the cause once, in words a host may show.
     Provider { message: String },
+    /// The exchange was lost after the turn had already shown output, so
+    /// nobody can say what the provider did with the rest. The only provider
+    /// failure that leaves the run uncertain.
+    ProviderUncertain { message: String },
     /// The provider explicitly reported that the model context window was
     /// exhausted. The run is settled; a host may offer explicit compaction.
     ContextOverflow { message: String },
@@ -198,7 +205,7 @@ impl RunTermination {
             RunTermination::UsageError { .. } => 2,
             RunTermination::PermissionRequired { .. } => 3,
             RunTermination::QuestionRequired { .. } => 3,
-            RunTermination::Provider { .. } => 4,
+            RunTermination::Provider { .. } | RunTermination::ProviderUncertain { .. } => 4,
             RunTermination::ContextOverflow { .. } => 4,
             RunTermination::BudgetExceeded => 5,
             RunTermination::MaxTurns => 5,
@@ -235,6 +242,7 @@ impl RunTermination {
             RunTermination::TaskFailed
             | RunTermination::UsageError { .. }
             | RunTermination::Provider { .. }
+            | RunTermination::ProviderUncertain { .. }
             | RunTermination::ContextOverflow { .. }
             | RunTermination::Failed { .. }
             | RunTermination::Signalled(_) => "error",
@@ -280,6 +288,25 @@ impl RunTermination {
     /// inventing a placeholder would hide the bug that produced it. The
     /// missing thing is the whole [`Denial`], so an action can no longer
     /// arrive without an authority beside it.
+    /// [`after_turn`](Self::after_turn) for a whole turn outcome.
+    ///
+    /// A provider failure carries what the turn learned about it: the cause a
+    /// host may be shown, and whether the turn's effect is known. Everything
+    /// else is decided by the exit reason alone.
+    pub fn after_outcome(outcome: &crate::turn::TurnOutcome) -> Option<Self> {
+        match (&outcome.exit_reason, &outcome.provider_failure) {
+            (ExitReason::Provider, Some(failure)) if failure.effect_known => {
+                Some(RunTermination::Provider {
+                    message: failure.cause.clone(),
+                })
+            }
+            (ExitReason::Provider, Some(failure)) => Some(RunTermination::ProviderUncertain {
+                message: failure.cause.clone(),
+            }),
+            _ => Self::after_turn(outcome.exit_reason, outcome.denied.clone()),
+        }
+    }
+
     pub fn after_turn(reason: ExitReason, denied: Option<Denial>) -> Option<Self> {
         match reason {
             ExitReason::Completed => None,

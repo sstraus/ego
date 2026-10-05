@@ -203,6 +203,8 @@ pub enum Reply {
     },
     /// An HTTP failure, for the provider-error paths.
     Status(u16),
+    /// An HTTP failure that states a `Retry-After` delay in seconds.
+    StatusRetryAfter { status: u16, seconds: u64 },
 }
 
 /// A deterministic hand-off between the PTY observer and the fake provider.
@@ -763,6 +765,7 @@ fn sse(stream: &mut TcpStream, reply: Reply, path: &str) -> std::io::Result<()> 
         match reply {
             Reply::Sse(body) => Reply::Sse(as_messages(&body)),
             Reply::Status(status) => Reply::Status(status),
+            retry @ Reply::StatusRetryAfter { .. } => retry,
             Reply::Paced { .. } | Reply::GatedPaced { .. } => {
                 panic!("the Messages rendering has no paced form; see `as_messages`")
             }
@@ -776,6 +779,15 @@ fn sse(stream: &mut TcpStream, reply: Reply, path: &str) -> std::io::Result<()> 
             write!(
                 stream,
                 "HTTP/1.1 {status} Stub\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            stream.flush()
+        }
+        Reply::StatusRetryAfter { status, seconds } => {
+            let body = format!("the stub was told to answer {status}");
+            write!(
+                stream,
+                "HTTP/1.1 {status} Stub\r\ncontent-type: text/plain\r\nretry-after: {seconds}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             )?;
             stream.flush()

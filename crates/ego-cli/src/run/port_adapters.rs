@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// The wall-clock wait between two attempts of one generation plan.
+pub(super) struct TokioRetryPause;
+
+impl ego_core::turn::RetryPause for TokioRetryPause {
+    fn pause(&self, delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(delay))
+    }
+}
+
 pub(super) async fn effect_scope(
     confinement: &RunConfinement,
     evidence: &SessionEvidenceStore,

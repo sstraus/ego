@@ -141,6 +141,7 @@ pub(super) async fn drive_headless_turn(
         config,
         admission: Arc::clone(&admission),
         invocation,
+        retry_pause: Arc::new(TokioRetryPause),
     };
     let fs = OsFs;
     let effect_ports = ToolEffectPorts::new(

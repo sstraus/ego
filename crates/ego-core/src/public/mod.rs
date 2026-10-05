@@ -33,7 +33,8 @@ use crate::state::Usage;
 /// Version 7 adds the public question item and its structured report. The
 /// durable codec stays at 7 because new event variants are additive.
 /// Version 9 adds the closed question target to the public report. Version 10
-/// adds the sanitized fallback decision event.
+/// adds the sanitized fallback decision event. Version 11 adds the live
+/// provider retry status.
 ///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
@@ -41,7 +42,7 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 10;
+pub const PUBLIC_EVENT_VERSION: u32 = 11;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
@@ -260,6 +261,27 @@ pub enum PublicEvent {
         ceiling: CeilingEffect,
         /// What the ceiling rests on, when it rests on anything.
         rates: RateSource,
+    },
+    /// A transient provider failure will be retried after `delay_ms`.
+    ///
+    /// Live status, not a durable fact: the failed attempt is already in the
+    /// log with its own error and settlement, and the wait in between is a
+    /// harness decision a host shows while it lasts. So, like
+    /// [`MeteringSelected`](Self::MeteringSelected), the harness publishes it
+    /// directly and no `DomainEvent` records it; a replay never shows a wait
+    /// that ended long ago.
+    ///
+    /// `attempt` counts retries from 1 to `limit`, the candidate's retry
+    /// allowance. `cause` is host-safe by construction (see
+    /// [`AiEvent::ProviderFailure`](crate::generator::port::AiEvent::ProviderFailure)).
+    /// The status ends when a later item, or the turn's completion, arrives.
+    ProviderRetry {
+        turn: TurnId,
+        attempt: u32,
+        limit: u32,
+        delay_ms: u64,
+        kind: ErrorKind,
+        cause: String,
     },
     /// A fallback was sanitized or skipped before any network effect.
     FallbackDecision {

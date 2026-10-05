@@ -341,9 +341,7 @@ impl Turns<'_> {
                 };
             }
 
-            if let Some(termination) =
-                RunTermination::after_turn(outcome.exit_reason, outcome.denied)
-            {
+            if let Some(termination) = RunTermination::after_outcome(&outcome) {
                 return (termination, self.answer(&loop_.state()));
             }
 

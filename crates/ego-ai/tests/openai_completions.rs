@@ -897,6 +897,10 @@ async fn an_error_status_is_reported_with_what_the_provider_said() {
                     .to_string(),
                 kind: ErrorKind::Transient,
             },
+            AiEvent::ProviderFailure {
+                cause: "the provider returned HTTP 429: Rate limit reached for gpt-5.1".to_string(),
+                retry_after: None,
+            },
             AiEvent::Stop(StopReason::Error),
         ]
     );
@@ -955,6 +959,12 @@ async fn an_unmapped_status_is_unclassified_rather_than_assumed_retryable() {
             AiEvent::Error {
                 message: "the provider returned HTTP 418: not json at all".to_string(),
                 kind: ErrorKind::Unclassified,
+            },
+            // A body that is no envelope stays in the operator's message and
+            // out of the host-safe cause.
+            AiEvent::ProviderFailure {
+                cause: "the provider returned HTTP 418".to_string(),
+                retry_after: None,
             },
             AiEvent::Stop(StopReason::Error),
         ]

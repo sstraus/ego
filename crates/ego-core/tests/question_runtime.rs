@@ -674,6 +674,7 @@ fn with_foreign_turn<R>(
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
+            retry_pause: Arc::new(NoRetryPause),
         },
         tools,
     )
@@ -801,6 +802,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
+            retry_pause: Arc::new(NoRetryPause),
         },
         tools,
     )
@@ -1091,6 +1093,7 @@ fn reconstructed_resume_without_captured_policy_fails_closed_before_settlement()
                 },
                 admission: Arc::new(EvidenceAdmissionService::new()),
                 invocation: RunInvocationId::new(),
+                retry_pause: Arc::new(NoRetryPause),
             };
             let state = SessionHookState::new(
                 HookLifecycleDispatcher::new(
@@ -1415,4 +1418,13 @@ fn foreign_port_failure_after_settlement_does_not_complete_or_retry_the_call() {
             assert_eq!(store.events().len(), event_count);
         },
     );
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
+    }
 }

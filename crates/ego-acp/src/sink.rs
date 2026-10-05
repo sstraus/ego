@@ -38,7 +38,7 @@ use ego_core::public::PublicEvent;
 use ego_core::sink::EventSink;
 use ego_core::state::SessionState;
 
-use crate::project::project_acp_updates_v1;
+use crate::project::{project_acp_updates_v1, provider_retry_cleared_v1, provider_retry_v1};
 
 /// Publishes a run's public events to an ACP client as `session/update`.
 ///
@@ -61,6 +61,8 @@ pub struct AcpSink {
     root: PathBuf,
     /// Whether the failure below has already been reported.
     reported: Mutex<bool>,
+    /// Whether a provider retry status is showing and must be cleared.
+    retrying: Mutex<bool>,
 }
 
 impl AcpSink {
@@ -76,6 +78,7 @@ impl AcpSink {
             caps,
             root,
             reported: Mutex::new(false),
+            retrying: Mutex::new(false),
         }
     }
 }
@@ -85,7 +88,22 @@ impl EventSink for AcpSink {
         // The complete entry point includes reduced usage and tool progress.
         // That is why `publish` carries the reduction. See
         // `ARCHITECTURE.md`.
-        for update in project_acp_updates_v1(event, state, &self.caps, &self.root) {
+        let mut updates = Vec::new();
+        {
+            let mut retrying = self
+                .retrying
+                .lock()
+                .expect("a poisoned lock means a publisher panicked mid-event");
+            if let Some(status) = provider_retry_v1(event) {
+                *retrying = true;
+                updates.push(status);
+            } else if *retrying && ends_retry_status(event) {
+                *retrying = false;
+                updates.push(provider_retry_cleared_v1());
+            }
+        }
+        updates.extend(project_acp_updates_v1(event, state, &self.caps, &self.root));
+        for update in updates {
             let notification = v1::SessionNotification::new(self.session.clone(), update);
             if let Err(err) = self.connection.send_notification(notification) {
                 let mut reported = self
@@ -104,4 +122,17 @@ impl EventSink for AcpSink {
             }
         }
     }
+}
+
+/// Whether `event` ends a showing retry status: the next attempt produced an
+/// item, or the turn ended (succeeded, failed after the last retry, or was
+/// cancelled during the wait).
+fn ends_retry_status(event: &PublicEvent) -> bool {
+    matches!(
+        event,
+        PublicEvent::ItemStarted { .. }
+            | PublicEvent::ItemDelta { .. }
+            | PublicEvent::ItemCompleted { .. }
+            | PublicEvent::TurnCompleted { .. }
+    )
 }

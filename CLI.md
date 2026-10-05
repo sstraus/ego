@@ -427,8 +427,9 @@ confined execs. The launcher was subsequently fixed.
     --budget B          hard cap: '2.5$' or '400k' tokens → exit 5 when hit
     --max-turns N       cap agent turns
     --timeout DUR       wall clock: '90s', '10m' → exit 124
-    --retry N           provider retries, delivery-certainty-aware: only
-                        DefinitelyUnsent attempts retry automatically
+    --retry N           provider retries, delivery-certainty-aware: a
+                        transient failure that was unsent or showed no
+                        output retries, with backoff (default 0; ACP 6)
     --fallback P/M      ordered model degradation chain (repeatable)
 -f, --file FILE         prompt/agent file (§5)
     --var K=V           template variable for agent files (repeatable)
@@ -494,12 +495,15 @@ posture does no ambient discovery, so an explicit file is the only way to tell
 a served session anything about its workspace.
 
 Final retry semantics are owned above provider mappings. `--retry N` permits
-at most N additional attempts on the same resolved model and only after a
-`DefinitelyUnsent` settlement. Each repeatable `--fallback P/M` is an ordered
+at most N additional attempts on the same resolved model after a `Transient`
+failure that was `DefinitelyUnsent` or emitted no text, reasoning or tool
+call. Each retry waits 1, 2, 4 … seconds (at most 60), or the provider's
+`Retry-After`, and is announced to the host while it waits. `ego acp`
+sessions allow six retries; a headless run defaults to none. Each repeatable `--fallback P/M` is an ordered
 candidate that is re-resolved from current facts and attempted only after
 capability and request-expressibility checks preserve tools, images, schemas,
-limits, and reasoning state. A possibly-sent attempt stops automatic retry and
-fallback. Every attempt has a fresh ID, reservation, request digest, settlement,
+limits, and reasoning state. A possibly-sent attempt that showed output stops
+automatic retry, and any possibly-sent attempt stops fallback. Every attempt has a fresh ID, reservation, request digest, settlement,
 usage, and cost; output totals fold them without hiding failed or charged work.
 See the accepted attempt-ownership ADR.
 
