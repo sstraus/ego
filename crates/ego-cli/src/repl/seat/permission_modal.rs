@@ -5,7 +5,7 @@
 //! knows about the call sits behind the details key.
 
 use ego_core::permit::analysis::{RiskAssessment, RiskClass, RiskReason};
-use ego_core::permit::{Op, PermissionRequest};
+use ego_core::permit::{Op, PermissionRequest, SessionProcessAction};
 
 /// A command longer than this is cut in the compact prompt so it stays one
 /// row on a normal terminal; the details show it whole.
@@ -155,6 +155,13 @@ fn describe_operation(op: &Op) -> String {
                 .join(" ")
         ),
         Op::ReadEvidence { .. } => "read saved tool output".to_owned(),
+        Op::SessionProcess { id, action } => {
+            let verb = match action {
+                SessionProcessAction::Inspect => "inspect",
+                SessionProcessAction::Cancel => "cancel",
+            };
+            format!("{verb} session process {id}")
+        }
         Op::Opaque { tool, .. } => format!("call {}", safe(&tool.to_string())),
         Op::Connect { target, .. } | Op::ProtocolConnect { target } => {
             format!("connect to {}", safe(&target.to_string()))
@@ -179,6 +186,7 @@ fn risk_words(risk: &RiskAssessment) -> String {
         .iter()
         .map(|reason| match reason {
             RiskReason::ReadOnly => "only reads",
+            RiskReason::SessionProcessControl => "controls a session process",
             RiskReason::ScopedWrite => "changes files in the workspace",
             RiskReason::ProcessEffectsUnknown => "runs a program",
             RiskReason::IdentityIncomplete => "program not fully identified",
@@ -258,6 +266,29 @@ mod tests {
                 "{words}"
             );
         }
+    }
+
+    /// Catches detached process controls losing their target or presenting
+    /// cancellation as a read-only operation in the permission modal.
+    #[test]
+    fn session_process_controls_show_the_action_target_and_bounded_risk() {
+        let id = ego_core::event::id::DetachedExecId::new();
+        for (action, verb) in [
+            (SessionProcessAction::Inspect, "inspect"),
+            (SessionProcessAction::Cancel, "cancel"),
+        ] {
+            assert_eq!(
+                describe_operation(&Op::SessionProcess { id, action }),
+                format!("{verb} session process {id}")
+            );
+        }
+        assert_eq!(
+            risk_words(&risk(
+                RiskClass::Bounded,
+                vec![RiskReason::SessionProcessControl]
+            )),
+            "Risk: limited - controls a session process"
+        );
     }
 
     /// Catches a command shown differently from the one that would run: an
