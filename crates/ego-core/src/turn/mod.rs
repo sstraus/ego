@@ -525,17 +525,17 @@ where
     loop {
         let raced = {
             let intent = Box::pin(receive_intent(control));
-            let interruption = async {
+            let completion = async {
                 if disposition == InterruptDisposition::AwaitEffect {
-                    return ControlRace::Intent(intent.await);
+                    return ControlRace::Work(work.as_mut().await);
                 }
-                match select(Box::pin(cancel.0.cancelled.clone()), intent).await {
-                    Either::Left(_) => ControlRace::Cancelled,
-                    Either::Right((intent, _)) => ControlRace::Intent(intent),
+                match select(work.as_mut(), Box::pin(cancel.0.cancelled.clone())).await {
+                    Either::Left((result, _)) => ControlRace::Work(result),
+                    Either::Right(_) => ControlRace::Cancelled,
                 }
             };
-            match select(work.as_mut(), Box::pin(interruption)).await {
-                Either::Left((result, _)) => ControlRace::Work(result),
+            match select(intent, Box::pin(completion)).await {
+                Either::Left((intent, _)) => ControlRace::Intent(intent),
                 Either::Right((race, _)) => race,
             }
         };

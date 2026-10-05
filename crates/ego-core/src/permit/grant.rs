@@ -1002,7 +1002,10 @@ pub enum Classification {
 /// `Ask` means the current party escalated. The turn records that question
 /// before it asks the human seat, if one exists. `Reclassify` carries raw
 /// params and never a scope or prepared call.
+/// Like `Classification`, this short-lived decision keeps the prepared call
+/// inline; adding human display context does not warrant boxing authorizations.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Resolution {
     /// Decided. The party allowed it, or refused it.
     Settled(Result<Authorized, PolicyDenied>),
