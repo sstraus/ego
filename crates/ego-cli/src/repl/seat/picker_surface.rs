@@ -229,7 +229,11 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
     rows.join("\n")
 }
 
-fn window_bounds(total: usize, visible: usize, selected: Option<usize>) -> (usize, usize) {
+pub(super) fn window_bounds(
+    total: usize,
+    visible: usize,
+    selected: Option<usize>,
+) -> (usize, usize) {
     let visible = visible.min(total);
     let start = selected
         .unwrap_or(0)
@@ -251,7 +255,7 @@ fn model_row(marker: &str, index: usize, slug: &str, suffix: &str, width: usize)
     format!("{prefix}{}{suffix}", truncate_cells(slug, slug_width))
 }
 
-fn truncate_cells(text: &str, width: usize) -> String {
+pub(super) fn truncate_cells(text: &str, width: usize) -> String {
     let line = crate::render::Line::plain(text);
     if line.width() <= width {
         return text.to_owned();

@@ -113,6 +113,10 @@ pub enum RegisteredTool {
     Effect(Arc<dyn crate::permit::Tool>),
     HumanInput(Arc<dyn crate::question::HumanInputTool>),
     Skill(Arc<crate::skill::SkillCatalogue>),
+    History {
+        source: Arc<dyn crate::history::SessionHistory>,
+        tool: crate::history::HistoryTool,
+    },
 }
 
 impl RegisteredTool {
@@ -127,6 +131,7 @@ impl RegisteredTool {
                 }
             }
             Self::HumanInput(tool) => tool.descriptor(),
+            Self::History { tool, .. } => tool.descriptor(),
             Self::Skill(_) => crate::generator::types::ToolDescriptor {
                 name: "skill".to_owned(),
                 description:
@@ -178,14 +183,14 @@ impl RegisteredTool {
     pub fn as_effect(&self) -> Option<&Arc<dyn crate::permit::Tool>> {
         match self {
             Self::Effect(tool) => Some(tool),
-            Self::HumanInput(_) | Self::Skill(_) => None,
+            Self::HumanInput(_) | Self::Skill(_) | Self::History { .. } => None,
         }
     }
 
     pub fn as_human_input(&self) -> Option<&Arc<dyn crate::question::HumanInputTool>> {
         match self {
             Self::HumanInput(tool) => Some(tool),
-            Self::Effect(_) | Self::Skill(_) => None,
+            Self::Effect(_) | Self::Skill(_) | Self::History { .. } => None,
         }
     }
 }
@@ -4482,6 +4487,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 call,
                 presentation,
             } => (tool, call, presentation),
+            PreparedToolCall::History { source, request } => {
+                return Ok(match source.read(request).await {
+                    Ok(text) => answered(true, text),
+                    Err(error) => answered(false, error.to_string()),
+                });
+            }
             PreparedToolCall::HumanInput(request) => {
                 return self.run_question(turn, call, request).await;
             }

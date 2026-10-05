@@ -6,6 +6,7 @@
 
 mod blob;
 mod evidence;
+mod history;
 mod io;
 mod jsonl_store;
 mod lease;
@@ -16,6 +17,7 @@ mod writer;
 
 pub use blob::SessionBlobStore;
 pub use evidence::SessionEvidenceStore;
+pub use history::{HistoryError, HistoryHit, HistoryIndex};
 #[cfg(feature = "test-support")]
 pub use io::NonDurableOsIo;
 pub use io::{AtomicReplacePublication, OsIo, PrivateLogWriter, StoreIo, tmp_path_for};
