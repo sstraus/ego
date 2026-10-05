@@ -131,6 +131,7 @@ fn reconnect_replays_the_same_tool_progress_and_absolute_location() {
     let frames = [ReplayFrame {
         event: started("read", r#"{"path":"src/main.rs"}"#),
         state: SessionState::default(),
+        inherited: false,
     }];
     let updates = project_replay_v1(&frames, None, Path::new("/workspace"));
     assert_eq!(updates.len(), 2);

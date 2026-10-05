@@ -168,7 +168,7 @@ fn valid_fork_publication_writes_one_tagged_event_and_manifest_atomically() {
     assert_eq!(entries.len(), 1);
     assert!(matches!(
         &entries[0],
-        SessionEntry::Event(DomainEvent { env, kind: EventKind::Forked { source: actual, at_seq } })
+        SessionEntry::Event(DomainEvent { env, kind: EventKind::Forked { source: actual, at_seq , .. } })
             if env.seq == seq(1)
                 && env.ts == SEED_TIMESTAMP
                 && env.item.is_none()

@@ -805,6 +805,8 @@ where
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigLayer {
+    /// Prompt caching: short (default), none, or explicit user opt-in long.
+    pub cache: Option<crate::generator::capabilities::CacheRetention>,
     pub model: Option<ModelRef>,
     /// Default reasoning effort. Absence contributes no precedence value.
     pub thinking: Option<ThinkingLevel>,
@@ -849,6 +851,14 @@ impl ConfigLayer {
     pub fn parse(source: Source, text: &str) -> Result<Sourced<ConfigLayer>, ConfigError> {
         let value: ConfigLayer =
             toml::from_str(text).map_err(|err| classify_parse_error(source, &err))?;
+        if value.cache == Some(crate::generator::capabilities::CacheRetention::Long)
+            && source != Source::User
+        {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "cache = long requires explicit user config".to_owned(),
+            });
+        }
         if let Some((name, _)) = value.profile.iter().find(|(name, profile)| {
             name.as_str() != "ci"
                 && (profile.session_dir.is_some() || profile.artifact_dir.is_some())

@@ -61,6 +61,7 @@ fn conversation(messages: Vec<Message>) -> Conversation {
 /// silently stops being sent has nowhere to hide.
 fn wide_request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gemini-3.7-flash".to_string(),
         messages: conversation(vec![
             Message::text(Role::System, "You are terse."),
@@ -118,6 +119,7 @@ fn the_system_prompt_is_a_top_level_string_and_not_a_step() {
 #[test]
 fn every_system_turn_lands_in_the_one_slot_the_api_offers() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::System, "You are terse."),
             Message::text(Role::System, "Answer in Italian."),
@@ -139,6 +141,7 @@ fn every_system_turn_lands_in_the_one_slot_the_api_offers() {
 #[test]
 fn a_system_turn_that_is_not_text_is_refused_before_request_construction() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "go"),
             Message {
@@ -179,6 +182,7 @@ fn a_system_turn_that_is_not_text_is_refused_before_request_construction() {
 #[test]
 fn a_prior_answer_replays_as_a_model_output_step() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "hello"),
             Message::text(Role::Assistant, "hi"),
@@ -209,6 +213,7 @@ fn an_image_is_inline_base64_content_with_its_mime_type() {
     )
     .expect("the fixture is a valid PNG");
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![Message {
             role: Role::User,
             content: vec![
@@ -239,6 +244,7 @@ fn an_image_is_inline_base64_content_with_its_mime_type() {
 #[test]
 fn a_tool_call_and_its_result_are_two_steps_and_the_arguments_are_an_object() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "read it"),
             Message {
@@ -287,6 +293,7 @@ fn a_tool_call_and_its_result_are_two_steps_and_the_arguments_are_an_object() {
 #[test]
 fn tool_arguments_that_are_not_json_are_refused() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "read it"),
             Message {
@@ -322,6 +329,7 @@ fn tool_arguments_that_are_not_json_are_refused() {
 #[test]
 fn tool_arguments_that_are_not_an_object_are_refused() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "read it"),
             Message {
@@ -361,6 +369,7 @@ fn tool_arguments_that_are_not_an_object_are_refused() {
 fn reasoning_state_is_replayed_exactly_as_the_provider_minted_it() {
     let blob = r#"{"type":"thought","signature":"EpoGCpcGAdHtim9","summary":[{"type":"text","text":"short"}]}"#;
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "think"),
             Message {
@@ -387,6 +396,7 @@ fn reasoning_state_is_replayed_exactly_as_the_provider_minted_it() {
 #[test]
 fn reasoning_state_from_another_dialect_is_refused() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "think"),
             Message {
@@ -416,6 +426,7 @@ fn reasoning_state_from_another_dialect_is_refused() {
 #[test]
 fn malformed_reasoning_state_is_refused_before_network_effects() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "think"),
             Message {
@@ -448,6 +459,7 @@ fn a_thinking_level_this_api_spells_is_sent_verbatim() {
         (ThinkingLevel::High, "high"),
     ] {
         let body = body_of(&GenRequest {
+            cache: None,
             thinking: level,
             ..wide_request()
         });
@@ -473,6 +485,7 @@ fn a_thinking_level_this_api_spells_is_sent_verbatim() {
 #[test]
 fn off_is_refused_because_this_api_cannot_switch_thinking_off() {
     let refusal = request_body(&GenRequest {
+        cache: None,
         thinking: ThinkingLevel::Off,
         ..wide_request()
     })
@@ -504,6 +517,7 @@ fn a_level_above_high_is_refused_rather_than_clamped() {
     for level in [ThinkingLevel::XHigh, ThinkingLevel::Max] {
         assert_eq!(
             request_body(&GenRequest {
+                cache: None,
                 thinking: level,
                 ..wide_request()
             })
@@ -830,6 +844,7 @@ data: {"index":0,"event_type":"step.stop"}
         .next()
         .expect("the thought closes with replayable state");
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "think"),
             Message {

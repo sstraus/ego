@@ -1107,3 +1107,77 @@ fn one_hop_response_into_parts_preserves_owned_parts_and_closed_body_kind() {
         assert_eq!(location, b"https://example.test/next");
     });
 }
+
+/// Catches spent semantic authority reused on a retained stdio channel, or a claim spawning eagerly.
+#[test]
+fn stdio_request_claim_is_exact_single_use_and_does_not_spawn() {
+    struct SessionProcess;
+    impl ProcessExecutor for SessionProcess {
+        fn confinement(&self) -> Option<ego_core::permit::Confinement> {
+            Some(ego_core::permit::Confinement::Off)
+        }
+        fn execute<'a>(
+            &'a self,
+            _: &'a SpawnSpec,
+        ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+            unreachable!("claim does not execute")
+        }
+    }
+    let call = PreparedCall::mcp_stdio(
+        McpSubject::Tool {
+            server: "server".into(),
+            name: "execute".into(),
+        },
+        McpOperationKind::CallTool,
+        vec![(tool("server", "execute"), digest("args-a"))],
+        McpAdmissionFingerprint::new("capture", "execute", "schema").expect("admission"),
+        "stdio-binding",
+        "server",
+        SpawnSpec::new(
+            vec!["server".into()],
+            None,
+            Some(std::time::Duration::from_secs(1)),
+            EnvPolicy::Inherited,
+        )
+        .expect("spec"),
+        &serde_json::json!({}),
+    )
+    .expect("call");
+    let expected = call.clone();
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(server/execute)"], &[]),
+    );
+    let authorized = match policy.classify(call) {
+        ego_core::permit::Classification::Settled(Ok(value)) => value,
+        other => panic!("{other:?}"),
+    };
+    let (call, permit) = authorized.into_parts();
+    let spawner = Arc::new(FakeSpawner::default());
+    let guarded = GuardedEffects::new(
+        permit,
+        &MemoryFs,
+        &SessionProcess,
+        &NoEvidence,
+        Arc::new(FakeResolver::default()),
+        Arc::new(FakeOneHop::default()),
+        spawner.clone(),
+    );
+    let claim = guarded.claim_mcp_stdio(call).expect("fresh claim");
+    assert_eq!(claim.envelope(), expected.mcp_envelope().expect("envelope"));
+    assert_eq!(claim.confinement(), ego_core::permit::Confinement::Off);
+    assert!(
+        guarded.claim_mcp_stdio(expected).is_err(),
+        "spent request claim was accepted again"
+    );
+    assert!(
+        spawner.specs.lock().expect("specs").is_empty(),
+        "request claim started a child"
+    );
+    assert_eq!(
+        claim.into_spawn_spec().timeout(),
+        None,
+        "per-call deadline became child lifetime"
+    );
+}

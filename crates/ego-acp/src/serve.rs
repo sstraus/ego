@@ -11,7 +11,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::negotiate::{SERVED, negotiate};
-use crate::project::{AcpNotice, project_notice_v1, project_replay_v1, stop_reason_v1};
+use crate::project::{
+    AcpNotice, project_goal_plan_v1, project_notice_v1, project_replay_v1, stop_reason_v1,
+};
 use crate::question::{AcpQuestionAdapter, CapabilityCapture};
 use agent_client_protocol::{
     Agent, AgentProtocolRouter, ByteStreams, Client, ConnectTo, ConnectionTo, Error, ErrorCode,
@@ -49,7 +51,7 @@ use ego_core::run::{
 };
 use ego_core::session_lifecycle::{
     HoldState, LifecycleError, SessionAttachment, SessionCursor, SessionLifecycle,
-    SessionLifecycleStore, SessionPage,
+    SessionLifecycleStore, SessionLineageInfo, SessionPage,
 };
 use ego_core::sink::EventSink;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
@@ -670,7 +672,12 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
             v1::SessionCapabilities::new()
                 .list(v1::SessionListCapabilities::new())
                 .delete(v1::SessionDeleteCapabilities::new())
-                .fork(v1::SessionForkCapabilities::new())
+                .fork(
+                    v1::SessionForkCapabilities::new().meta(serde_json::Map::from_iter([(
+                        "ego".to_owned(),
+                        serde_json::json!({"atMessage": true}),
+                    )])),
+                )
                 .resume(v1::SessionResumeCapabilities::new())
                 .close(v1::SessionCloseCapabilities::new()),
         )
@@ -1646,6 +1653,8 @@ trait LifecycleOperations: Send + Sync {
     ) -> Result<SessionPage, LifecycleError>;
     fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError>;
     fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError>;
+    fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError>;
+    fn lineage_info(&self, id: SessionId) -> Result<Option<SessionLineageInfo>, LifecycleError>;
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment>;
     fn resume<'a>(
         &'a self,
@@ -1656,6 +1665,7 @@ trait LifecycleOperations: Send + Sync {
         &self,
         id: SessionId,
         target: SessionId,
+        message: Option<ItemId>,
     ) -> LifecycleFuture<'_, ego_core::session_lifecycle::CreatedSession>;
     fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
     /// Hide a session this server refused to open, durably and without its
@@ -1698,6 +1708,14 @@ where
         SessionLifecycle::meta(self, id)
     }
 
+    fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError> {
+        SessionLifecycle::goal(self, id)
+    }
+
+    fn lineage_info(&self, id: SessionId) -> Result<Option<SessionLineageInfo>, LifecycleError> {
+        SessionLifecycle::lineage_info(self, id)
+    }
+
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment> {
         Box::pin(SessionLifecycle::load(self, id, root))
     }
@@ -1722,8 +1740,14 @@ where
         &self,
         id: SessionId,
         target: SessionId,
+        message: Option<ItemId>,
     ) -> LifecycleFuture<'_, ego_core::session_lifecycle::CreatedSession> {
-        Box::pin(SessionLifecycle::fork_as(self, id, target))
+        Box::pin(async move {
+            match message {
+                Some(message) => self.fork_at_as(id, message, target).await,
+                None => self.fork_as(id, target).await,
+            }
+        })
     }
 
     fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()> {
@@ -2248,16 +2272,34 @@ fn refused_params(error: impl fmt::Display) -> Error {
 fn session_meta(
     state: HoldState,
     summary: Option<&str>,
+    lineage: Option<SessionLineageInfo>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut ego = serde_json::json!({"hold": {"state": state}});
     if let Some(summary) = summary {
         ego["summary"] = serde_json::Value::String(summary.to_owned());
     }
+    if let Some(info) = lineage {
+        use ego_core::session::SessionLineage;
+        let (kind, source) = match info.lineage {
+            SessionLineage::Fork { source, .. } => ("fork", source),
+            SessionLineage::Compaction { source, .. } => ("compaction", source),
+        };
+        let mut lineage = serde_json::json!({"kind": kind, "sourceSessionId": source,
+            "rootSessionId": info.root, "sourceDeleted": info.source_deleted});
+        if let Some(message) = info.at_message {
+            lineage["atMessageId"] = serde_json::json!(message)
+        }
+        ego["lineage"] = lineage;
+    }
     serde_json::Map::from_iter([("ego".to_owned(), ego)])
 }
 
-fn session_info(meta: SessionMeta, hold: HoldState) -> v1::SessionInfo {
-    let extension = session_meta(hold, meta.summary.as_deref());
+fn session_info(
+    meta: SessionMeta,
+    hold: HoldState,
+    lineage: Option<SessionLineageInfo>,
+) -> v1::SessionInfo {
+    let extension = session_meta(hold, meta.summary.as_deref(), lineage);
     v1::SessionInfo::new(meta.id.to_string(), meta.workspace_root)
         .title(meta.title)
         .updated_at(meta.updated.to_rfc3339())
@@ -2268,19 +2310,36 @@ fn emit_info(
     connection: &ConnectionTo<Client>,
     id: &v1::SessionId,
     meta: &SessionMeta,
+    lifecycle: Option<&dyn LifecycleOperations>,
 ) -> Result<(), Error> {
+    let lineage = lifecycle
+        .map(|lifecycle| lifecycle.lineage_info(meta.id))
+        .transpose()
+        .map_err(|error| lifecycle_error(&error))?
+        .flatten();
+    let hold = lifecycle
+        .map(|lifecycle| lifecycle.hold(meta.id))
+        .transpose()
+        .map_err(|error| lifecycle_error(&error))?
+        .unwrap_or(HoldState::Running);
     connection.send_notification(v1::SessionNotification::new(
         id.clone(),
         v1::SessionUpdate::SessionInfoUpdate(
             v1::SessionInfoUpdate::new()
                 .title(meta.title.clone())
                 .updated_at(meta.updated.to_rfc3339())
-                .meta(serde_json::Map::from_iter([(
-                    "ego".to_owned(),
-                    serde_json::json!({"summary": meta.summary}),
-                )])),
+                .meta(session_meta(hold, meta.summary.as_deref(), lineage)),
         ),
-    ))
+    ))?;
+    if let Some(lifecycle) = lifecycle {
+        let goal = lifecycle
+            .goal(meta.id)
+            .map_err(|error| lifecycle_error(&error))?;
+        if let Some(plan) = project_goal_plan_v1(goal.as_ref()) {
+            connection.send_notification(v1::SessionNotification::new(id.clone(), plan))?;
+        }
+    }
+    Ok(())
 }
 
 fn emit_config_options(
@@ -2302,6 +2361,7 @@ fn emit_attachment(
     connection: &ConnectionTo<Client>,
     id: &v1::SessionId,
     attachment: &SessionAttachment,
+    lifecycle: Option<&dyn LifecycleOperations>,
 ) -> Result<(), Error> {
     for update in project_replay_v1(
         &attachment.replay,
@@ -2310,7 +2370,7 @@ fn emit_attachment(
     ) {
         connection.send_notification(v1::SessionNotification::new(id.clone(), update))?;
     }
-    emit_info(connection, id, &attachment.meta)
+    emit_info(connection, id, &attachment.meta, lifecycle)
 }
 
 /// Build the ACP router over one concrete core controller.
@@ -2662,7 +2722,7 @@ where
                     )?;
                     notices.register(id.clone(), cx.clone());
                     if let Some(meta) = announcement {
-                        emit_info(&cx, &id, &meta)?;
+                        emit_info(&cx, &id, &meta, lifecycle.as_deref())?;
                     }
                     if let Some(pending) = pending_measurement {
                         let connection = cx.clone();
@@ -2728,7 +2788,8 @@ where
                         }
                     };
                     let items = visible.into_iter().map(|meta| {
-                        lifecycle.hold(meta.id).map(|hold| session_info(meta, hold))
+                        let lineage = lifecycle.lineage_info(meta.id)?;
+                        lifecycle.hold(meta.id).map(|hold| session_info(meta, hold, lineage))
                     }).collect::<Result<Vec<_>, _>>();
                     match items {
                         Ok(items) => responder.respond(
@@ -2884,10 +2945,10 @@ where
                     responder.respond(
                         v1::LoadSessionResponse::new()
                             .config_options(config_options(controls.as_ref(), id))
-                            .meta(session_meta(hold, attachment.meta.summary.as_deref())),
+                            .meta(session_meta(hold, attachment.meta.summary.as_deref(), lifecycle.lineage_info(id).map_err(|error| lifecycle_error(&error))?)),
                     )?;
                     notices.register(request.session_id.clone(), cx.clone());
-                    emit_attachment(&cx, &request.session_id, &attachment)
+                    emit_attachment(&cx, &request.session_id, &attachment, Some(lifecycle.as_ref()))
                     })
                 }
             },
@@ -3029,7 +3090,7 @@ where
                             .config_options(config_options(controls.as_ref(), id)),
                     )?;
                     notices.register(request.session_id.clone(), cx.clone());
-                    emit_attachment(&cx, &request.session_id, &attachment)
+                    emit_attachment(&cx, &request.session_id, &attachment, Some(lifecycle.as_ref()))
                     })
                 }
             },
@@ -3083,11 +3144,21 @@ where
                     if let Err(error) = validate_mcp_servers(&request.mcp_servers) {
                         return responder.respond_with_error(refused_params(error));
                     }
+                    let at_message = match request.meta.as_ref().and_then(|meta| meta.get("ego")) {
+                        Some(ego) => match ego.get("atMessageId") {
+                            Some(value) => match serde_json::from_value::<ItemId>(value.clone()) {
+                                Ok(message) => Some(message),
+                                Err(_) => return responder.respond_with_error(Error::invalid_params().data("atMessageId must be a message UUID")),
+                            },
+                            None => None,
+                        },
+                        None => None,
+                    };
                     // Hidden before the fork publishes it, so no list or load
                     // can see the child between publication and admission.
                     let child = SessionId::new();
                     let hidden = unadmitted.hold(child);
-                    let child = match lifecycle.fork(source, child).await {
+                    let child = match lifecycle.fork(source, child, at_message).await {
                         Ok(child) => child.id,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
@@ -3145,7 +3216,7 @@ where
                             .config_options(config_options(controls.as_ref(), child)),
                     )?;
                     notices.register(child_id.clone(), cx.clone());
-                    emit_info(&cx, &child_id, &attachment.meta)
+                    emit_info(&cx, &child_id, &attachment.meta, Some(lifecycle.as_ref()))
                     })
                 }
             },
@@ -3600,7 +3671,7 @@ where
                         if let Some(lifecycle) = &lifecycle {
                             match lifecycle.meta(durable_session) {
                                 Ok(meta) if meta.summary.is_some() => {
-                                    if let Err(error) = emit_info(&connection, &id, &meta) {
+                                    if let Err(error) = emit_info(&connection, &id, &meta, Some(lifecycle.as_ref())) {
                                         tracing::warn!(%error, "ACP session info update could not be delivered");
                                     }
                                 }
@@ -3726,7 +3797,7 @@ where
                 let sessions = sessions.clone();
                 let unadmitted = unadmitted.clone();
                 let confinement = confinement.clone();
-                async move |request: v1::SetSessionConfigOptionRequest, responder, _cx| {
+                async move |request: v1::SetSessionConfigOptionRequest, responder, cx: ConnectionTo<Client>| {
                     // Absent controls are unavailable, not partially emulated:
                     // the same rule that makes an unadvertised lifecycle method
                     // answer `method_not_found` rather than pretend.
@@ -3774,6 +3845,7 @@ where
                     // picker showing a confinement the run does not have, and
                     // a host reading its own selection back would be told the
                     // change landed when nothing downstream had moved.
+                    let mode_changed = matches!(change, SessionControlChange::Mode(_));
                     let staged = if matches!(change, SessionControlChange::Sandbox(_)) {
                         sessions.stage_confinement(
                             &request.session_id, session, controls.as_ref(), change,
@@ -3782,9 +3854,17 @@ where
                         controls.stage(session, change).map_err(|error| control_error(&error))
                     };
                     match staged {
-                        Ok(state) => responder.respond(v1::SetSessionConfigOptionResponse::new(
-                            crate::controls::options(&state),
-                        )),
+                        Ok(state) => {
+                            let options = crate::controls::options(&state);
+                            responder.respond(v1::SetSessionConfigOptionResponse::new(options.clone()))?;
+                            cx.send_notification(v1::SessionNotification::new(request.session_id.clone(),
+                                v1::SessionUpdate::ConfigOptionUpdate(v1::ConfigOptionUpdate::new(options))))?;
+                            if mode_changed && let Some(mode) = state.mode.current {
+                                cx.send_notification(v1::SessionNotification::new(request.session_id,
+                                    v1::SessionUpdate::CurrentModeUpdate(v1::CurrentModeUpdate::new(mode.as_str()))))?;
+                            }
+                            Ok(())
+                        },
                         Err(error) => responder.respond_with_error(error),
                     }
                 }

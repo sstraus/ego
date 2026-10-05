@@ -514,7 +514,7 @@ fn import_target(containing: &Path, scope: &Path, reference: &str) -> Option<Pat
 /// A prompt that came from somewhere other than a file — `--system TEXT` —
 /// has an empty [`sources`](Self::sources), and that is the truth rather than
 /// a gap: the user's own words have no file to attribute.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SystemPrompt {
     /// What the model is sent, framed.
     pub text: String,
