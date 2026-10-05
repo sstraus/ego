@@ -93,8 +93,6 @@ pub enum Authority {
         model: ModelRef,
         attempt: AttemptRef,
     },
-    /// One calibrated Decisions exchange judged this exact exec call safe.
-    DestructiveJudge { model: ModelRef },
     /// A previously generated opinion was reapplied after fresh policy checks.
     CachedJudge { model: ModelRef, analysis: String },
 }

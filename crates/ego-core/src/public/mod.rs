@@ -679,7 +679,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // the reasoning item and its deltas; nothing downstream can act on
         // the continuation token, and `CLI.md` §4.2's rule is that a new
         // internal event never becomes public automatically.
-        EventKind::ReasoningState { .. } | EventKind::RouterDecision { .. } => None,
+        EventKind::ReasoningState { .. } => None,
         EventKind::PromptQueued { .. } | EventKind::PromptDeliveryExpedited { .. } => None,
         EventKind::Compacted { .. } => None,
         EventKind::Forked { .. } => None,

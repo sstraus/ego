@@ -8,7 +8,6 @@ pub mod catalogue;
 pub mod conformance;
 pub mod generator;
 pub mod http;
-pub mod jev;
 pub mod kimi;
 pub mod oauth;
 pub mod ollama;
