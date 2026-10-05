@@ -18,8 +18,9 @@ use crate::goal::{GoalOwner, GoalRecord, GoalRefusal, GoalState, GoalTransition}
 use crate::public::{PublicEvent, project_public};
 use crate::run::RequestId;
 use crate::session::{
-    ForkError, PreparedFork, ReplayContext, ReplayError, ReplaySource, ReplaySourceError,
-    SessionBlobSource, TargetPublication, TargetSeed,
+    ForkError, LineageEdges, PreparedFork, ReplayContext, ReplayError, ReplaySource,
+    ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication, TargetSeed,
+    walk_lineage,
 };
 use crate::state::{HoldReceipts, PauseState, SessionState};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -267,6 +268,16 @@ pub struct ClosedSession {
 pub struct ReplayFrame {
     pub event: PublicEvent,
     pub state: SessionState,
+    pub inherited: bool,
+}
+
+/// Transient catalogue facts reconstructed from durable lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLineageInfo {
+    pub lineage: SessionLineage,
+    pub root: SessionId,
+    pub at_message: Option<ItemId>,
+    pub source_deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,6 +749,14 @@ where
     }
 
     fn replay(&self, id: SessionId) -> Result<(SessionState, Vec<ReplayFrame>), LifecycleError> {
+        self.replay_prefix(id, None)
+    }
+
+    fn replay_prefix(
+        &self,
+        id: SessionId,
+        cutoff: Option<Seq>,
+    ) -> Result<(SessionState, Vec<ReplayFrame>), LifecycleError> {
         if self.store.is_quarantined(id)? {
             return Err(LifecycleError::UnknownSession);
         }
@@ -750,6 +769,9 @@ where
         let mut semantic = Seq::ZERO;
         for entry in entries {
             if let SessionEntry::Event(event) = entry {
+                if cutoff.is_some_and(|cutoff| event.env.seq > cutoff) {
+                    break;
+                }
                 let expected = semantic.next();
                 if event.env.seq != expected {
                     return Err(LifecycleError::Replay(ReplaySourceError::CorruptSession {
@@ -763,6 +785,7 @@ where
                     frames.push(ReplayFrame {
                         event: public,
                         state: state.clone(),
+                        inherited: false,
                     });
                 }
             }
@@ -797,6 +820,61 @@ where
 
     pub fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
         self.metadata.meta(id)
+    }
+
+    /// Derive tree metadata without retaining a second lineage authority.
+    pub fn lineage_info(
+        &self,
+        id: SessionId,
+    ) -> Result<Option<SessionLineageInfo>, LifecycleError> {
+        let state = self.metadata.state(id)?;
+        let Some(lineage) = state.lineage else {
+            return Ok(None);
+        };
+        let steps = walk_lineage(
+            &*self.metadata.store,
+            lineage,
+            &mut std::collections::HashSet::from([id]),
+            LineageEdges::ForksAndCompactions,
+        )?;
+        let source = steps.first().expect("a lineage has a source").source;
+        let parent = self.metadata.state(source)?;
+        let cutoff = match lineage {
+            SessionLineage::Fork { at_seq, .. } => Some(at_seq),
+            SessionLineage::Compaction { .. } => None,
+        };
+        let at_message = if let Some(cutoff) = cutoff {
+            // A turn has several messages but one settled cutoff. Use its last
+            // visible message as the canonical marker, also for tip forks.
+            self.metadata
+                .store
+                .entries(&source)?
+                .ok_or(LifecycleError::UnknownSession)?
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    SessionEntry::Event(event)
+                        if event.env.seq <= cutoff
+                            && matches!(
+                                event.kind,
+                                EventKind::UserPrompt { .. }
+                                    | EventKind::AssistantDelta { .. }
+                                    | EventKind::AssistantMessage { .. }
+                            ) =>
+                    {
+                        event.env.item
+                    }
+                    _ => None,
+                })
+                .next_back()
+        } else {
+            None
+        };
+        Ok(Some(SessionLineageInfo {
+            lineage,
+            root: steps.last().expect("a lineage has a root").source,
+            at_message,
+            source_deleted: parent.deleted,
+        }))
     }
 
     /// Hide a session the caller refused to open (see
@@ -912,7 +990,7 @@ where
                 requested: root.to_path_buf(),
             });
         }
-        let (state, frames) = self.metadata.replay(id)?;
+        let (state, mut frames) = self.metadata.replay(id)?;
         if state.deleted {
             return Err(LifecycleError::Deleted);
         }
@@ -923,6 +1001,28 @@ where
         // was awaited; the check inside `replay` ran before that.
         if self.metadata.store.is_quarantined(id)? {
             return Err(LifecycleError::UnknownSession);
+        }
+        if replay && let Some(lineage) = state.lineage {
+            let steps = walk_lineage(
+                &*self.metadata.store,
+                lineage,
+                &mut std::collections::HashSet::from([id]),
+                LineageEdges::Forks,
+            )?;
+            let mut inherited = Vec::new();
+            for step in steps.into_iter().rev() {
+                let SessionLineage::Fork { at_seq, .. } = step.edge else {
+                    continue;
+                };
+                let (_, ancestor_frames) =
+                    self.metadata.replay_prefix(step.source, Some(at_seq))?;
+                inherited.extend(ancestor_frames.into_iter().map(|mut frame| {
+                    frame.inherited = true;
+                    frame
+                }));
+            }
+            inherited.append(&mut frames);
+            frames = inherited;
         }
         let context_window = ManifestEvidence::rebuild(&*self.metadata.store, &id)?
             .generations()
@@ -965,8 +1065,17 @@ where
         source: SessionId,
         message: ItemId,
     ) -> Result<CreatedSession, LifecycleError> {
+        self.fork_at_as(source, message, SessionId::new()).await
+    }
+
+    /// Fork at a message under an id the adapter can hide during admission.
+    pub async fn fork_at_as(
+        &self,
+        source: SessionId,
+        message: ItemId,
+        target: SessionId,
+    ) -> Result<CreatedSession, LifecycleError> {
         let prepared = self.prepare_fork_at(source, message)?;
-        let target = SessionId::new();
         let publication = self.publish_prepared_fork(target, &prepared)?;
         Ok(CreatedSession {
             id: target,

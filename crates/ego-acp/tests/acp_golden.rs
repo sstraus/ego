@@ -1332,6 +1332,7 @@ mod acp_golden {
             &[ReplayFrame {
                 event: project_public(&log[1]).expect("public occupancy event"),
                 state,
+                inherited: false,
             }],
             Some(200_000),
             std::path::Path::new("/workspace"),

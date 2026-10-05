@@ -102,6 +102,73 @@ impl SessionRunLifecycle for InactiveRuns {
 }
 
 impl DurableAcpFixture {
+    /// Two successful turns, produced with the same domain journal facts as a run.
+    pub fn seed_settled_messages(&self, root: &str) -> (String, [ItemId; 2]) {
+        let lifecycle = SessionLifecycle::new(
+            Arc::clone(&self.store),
+            Arc::new(InactiveRuns),
+            Arc::new(TestClock),
+        );
+        let session = lifecycle.create(PathBuf::from(root)).unwrap().id;
+        let items = [
+            self.append_settled_message(&session.to_string(), "turn 1"),
+            self.append_settled_message(&session.to_string(), "turn 2"),
+        ];
+        (session.to_string(), items)
+    }
+
+    pub fn append_settled_message(&self, session: &str, text: &str) -> ItemId {
+        let session: SessionId = session.parse().unwrap();
+        let item = ItemId::new();
+        let turn = TurnId::new();
+        let mut seq = self.store.semantic_seq(&session);
+        for (item, kind) in [
+            (
+                Some(item),
+                EventKind::UserPrompt {
+                    text: text.to_owned(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            ),
+            (
+                None,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ego_core::event::domain::ExitReason::Completed,
+                },
+            ),
+        ] {
+            seq.next();
+            self.store
+                .append(
+                    &session,
+                    &DomainEvent {
+                        env: Envelope {
+                            seq,
+                            id: EventId::new(),
+                            turn,
+                            item,
+                            parent: None,
+                            ts: Timestamp::EPOCH,
+                            producer: Producer::Main,
+                        },
+                        kind,
+                    },
+                )
+                .unwrap();
+        }
+        item
+    }
+
+    pub fn seed_compaction_child(&self, source: &str) -> String {
+        let source: SessionId = source.parse().unwrap();
+        let target = SessionId::new();
+        let seed =
+            TargetSeed::compaction(source, Seq::ZERO, 1, "summary".to_owned(), Timestamp::EPOCH);
+        assert!(self.store.publish_fork(target, &seed).switch_target());
+        target.to_string()
+    }
     pub fn new() -> Self {
         let effects = Arc::new(EffectCounts::default());
         Self {
