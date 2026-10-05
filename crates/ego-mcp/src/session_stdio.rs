@@ -713,4 +713,42 @@ mod tests {
             session.close().await;
         }
     }
+
+    // Catches admission waiting beyond its own deadline behind a stalled discovery.
+    #[tokio::test]
+    async fn queued_admission_deadline_does_not_wait_for_stalled_discovery() {
+        let effects = Arc::new(Effects::default());
+        let session = McpStdioSession::new(
+            SessionId::new(),
+            effects.clone(),
+            Arc::new(ObservedProcess),
+            Confinement::Off,
+        );
+        let server: McpServerName = "owned".parse().expect("server");
+        let first_options = McpClientOptions::new(4096, Instant::now() + Duration::from_secs(5))
+            .expect("first options");
+        let mut first = Box::pin(session.admit(server.clone(), spec(), first_options));
+        tokio::select! {
+            result = &mut first => panic!("discovery unexpectedly ended: {}", result.is_err()),
+            _ = async {
+                while effects.starts.load(Ordering::Acquire) == 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            } => {}
+        }
+        let queued = session.admit(server, spec(), options());
+        let outcome = tokio::time::timeout(Duration::from_millis(300), queued).await;
+        drop(first);
+        session.close().await;
+        assert!(
+            outcome.is_ok(),
+            "queued admission ignored its own deadline behind discovery"
+        );
+        assert!(outcome.expect("bounded admission").is_err());
+        assert_eq!(
+            effects.starts.load(Ordering::Acquire),
+            1,
+            "expired admission opened another child"
+        );
+    }
 }
