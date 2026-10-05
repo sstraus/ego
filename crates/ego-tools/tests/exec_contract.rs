@@ -632,6 +632,8 @@ fn exec_contract_fixture_connects() {
         "udp" => {
             let socket = UdpSocket::bind("0.0.0.0:0").expect("udp socket");
             socket.send_to(b"probe", endpoint).expect("udp control");
+            // Keep the socket alive until local delivery can be observed on macOS.
+            std::thread::sleep(Duration::from_millis(50));
         }
         other => panic!("unknown network fixture protocol: {other}"),
     }
@@ -656,7 +658,7 @@ fn exec_contract_fixture_connects() {
 /// shape a libtest host dispatches", and `the_probe_envelope_is_the_one_both_
 /// hosts_dispatch` pins "the shape production emits" to the same words. Change
 /// the builder alone and that unit test fails.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn the_probe_envelope_delivers_its_sentinel_from_a_real_child() {
     use std::io::Read as _;
@@ -687,7 +689,7 @@ fn the_probe_envelope_delivers_its_sentinel_from_a_real_child() {
     assert_eq!(received, sentinel.as_bytes());
 }
 
-/// The control child of the macOS offline probe, hosted by libtest.
+/// The control child of the shared offline probe, hosted by libtest.
 ///
 /// The probe spawns `current_exe()` with its private envelope. Inside a test
 /// binary that executable is libtest, so without this the envelope was parsed
@@ -700,7 +702,7 @@ fn the_probe_envelope_delivers_its_sentinel_from_a_real_child() {
 /// The name is the token itself because `--exact` matches it, and the body
 /// calls the production dispatcher rather than reimplementing the connect, so
 /// what the tests measure cannot drift from what a real run measures.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 #[ignore = "hosts the offline probe's control child; not a test of its own"]
 fn __ego_internal_network_probe_v1() {
@@ -2413,22 +2415,22 @@ fn observation_reports_capabilities_and_audit_identity_without_granting_them() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn observe_returns_the_measured_fact_before_an_unsupported_run_is_refused() {
+fn observe_reports_the_same_offline_capability_used_for_run_admission() {
+    // Catches: offline admission ignores the shared probe observation.
     let fixture = config_fixture(Confinement::Off, true, cwd(), 1024 * 1024, 1024);
-    let (observation, _probe_evidence) = block_on(RunEffectPorts::observe(&fixture.config))
+    let (observation, _) = block_on(RunEffectPorts::observe(&fixture.config))
         .expect("observation must not apply the run requirements");
-    assert_eq!(observation.capabilities(), ExecCaps::empty());
-    assert!(!observation.backend().name().is_empty());
-    assert!(!observation.backend().revision().is_empty());
-
-    let error = match block_on(RunEffectPorts::for_run(fixture.config)) {
-        Ok(_) => panic!("the ordinary run must still refuse unsupported offline execution"),
-        Err(error) => error,
-    };
-    let ProcessError::MissingCapabilities(missing) = error else {
-        panic!("unsupported offline execution failed without a typed capability refusal");
-    };
-    assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+    match block_on(RunEffectPorts::for_run(fixture.config)) {
+        Ok((_, admitted, _)) => {
+            assert_eq!(admitted, observation);
+            assert!(observation.capabilities().contains(ExecCaps::NO_IP_NETWORK));
+        }
+        Err(ProcessError::MissingCapabilities(missing)) => {
+            assert_eq!(missing.available(), observation.capabilities());
+            assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+        }
+        Err(error) => panic!("offline failed without a typed capability refusal: {error}"),
+    }
 }
 
 #[test]
@@ -2647,7 +2649,7 @@ fn workspace_observation_child() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn linux_landlock_abi_status_and_workspace_rights_are_fail_closed() {
+fn linux_backend_workspace_rights_and_exact_argv_are_fail_closed() {
     let root = cwd();
     let Some(run) = open_confined_run(Confinement::Workspace, false, root, 1024 * 1024, 1024)
     else {
@@ -2686,13 +2688,6 @@ fn linux_landlock_abi_status_and_workspace_rights_are_fail_closed() {
     let out = block_on(run.ports.process().execute(&spec))
         .expect("a complete Landlock probe must execute its exact target argv");
     assert!(format!("{out:?}").contains("linux exact target"));
-
-    let missing = match open_run(Confinement::Off, true, cwd(), 1024 * 1024, 1024) {
-        Err(ProcessError::MissingCapabilities(missing)) => missing,
-        Err(err) => panic!("offline failed without a precise capability refusal: {err:?}"),
-        Ok(_) => panic!("Landlock-only Linux backend claimed complete offline capability"),
-    };
-    assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
 }
 
 #[cfg(target_os = "linux")]
@@ -2723,15 +2718,69 @@ fn linux_landlock_workspace_requires_refer_truncate_and_known_rights() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn linux_offline_for_run_refuses_unconditionally_without_no_ip_network_proof() {
-    let error = match open_run(Confinement::Off, true, cwd(), 1024 * 1024, 1024) {
-        Ok(_) => panic!("Landlock must never claim NO_IP_NETWORK without paired controls"),
-        Err(error) => error,
-    };
-    let ProcessError::MissingCapabilities(missing) = error else {
-        panic!("offline Linux refusal must name the missing capability");
-    };
-    assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+fn linux_bwrap_offline_runs_all_filesystem_levels_when_namespace_controls_work() {
+    // Catches: Linux still refuses offline despite a working namespace backend,
+    // or the selected wrapper cannot run the exact admitted target.
+    let available = std::process::Command::new("/usr/bin/bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-net",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+            "/usr/bin/true",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    for level in [Confinement::Off, Confinement::Ro, Confinement::Workspace] {
+        match open_run(level, true, cwd(), 1024 * 1024, 1024) {
+            Ok(run) => {
+                assert_eq!(run.observation.backend().name(), "bwrap");
+                assert!(
+                    run.observation
+                        .capabilities()
+                        .contains(ExecCaps::NO_IP_NETWORK)
+                );
+                let spec = SpawnSpec::new(
+                    vec!["/bin/echo".into(), "offline exact target".into()],
+                    Some(cwd()),
+                    None,
+                    EnvPolicy::Inherited,
+                )
+                .expect("valid target");
+                let output =
+                    block_on(run.ports.process().execute(&spec)).expect("offline target must run");
+                assert!(format!("{output:?}").contains("offline exact target"));
+            }
+            Err(ProcessError::MissingCapabilities(missing))
+                if !available || local_non_loopback().is_none() =>
+            {
+                assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+            }
+            Err(error) => panic!("working bwrap must demonstrate {level} offline: {error}"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_failed_bwrap_controls_fall_back_to_landlock_without_claiming_capabilities() {
+    // Catches: a bwrap launch or failed positive control is treated as proof.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let path = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+    let fixture = config_fixture(Confinement::Workspace, false, path, 1024 * 1024, 1024);
+    // The workspace disappears after policy resolution, before measurement.
+    workspace.close().expect("remove workspace");
+    let (observation, _) =
+        block_on(RunEffectPorts::observe(&fixture.config)).expect("observe fallback");
+    assert_eq!(observation.backend().name(), "landlock");
+    assert_eq!(observation.capabilities(), ExecCaps::empty());
+    assert!(matches!(
+        block_on(RunEffectPorts::for_run(fixture.config)),
+        Err(ProcessError::MissingCapabilities(_))
+    ));
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -3021,7 +3070,9 @@ fn open_offline_control_run(
                     .as_str()
                     .filter(|suite| suite.ends_with("-nonloopback.control.receiver"))
             })
-            .expect("a failed baseline receiver names its protocol");
+            .unwrap_or_else(|| {
+                panic!("a failed baseline receiver names its protocol: {transcript}")
+            });
         let control = receiver_failure
             .strip_suffix(".receiver")
             .expect("receiver suite suffix");
@@ -3122,36 +3173,94 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
             workspace.clone(),
         );
         execute(&baseline, network_spec.clone()).expect("paired network control must work");
+        // Observe and drain the actual host-side positive control before
+        // trying the same endpoint from the isolated child.
+        match &control {
+            NetworkControl::Tcp(listener) => {
+                listener
+                    .set_nonblocking(true)
+                    .expect("nonblocking receiver");
+                let _ = listener
+                    .accept()
+                    .expect("positive TCP control reached the host");
+            }
+            NetworkControl::Udp(socket) => {
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(250)))
+                    .unwrap();
+                let mut bytes = [0_u8; 16];
+                let (length, _) = socket
+                    .recv_from(&mut bytes)
+                    .expect("positive UDP control reached the host");
+                assert_eq!(&bytes[..length], b"probe");
+            }
+        }
 
         // Check every admitted offline child. macOS accepts a precise refusal
         // only when independent non-loopback coverage is unavailable.
         #[cfg(target_os = "macos")]
         let offline = open_offline_control_run(workspace, nonloopback);
-        // Linux never demonstrates offline (ADR 2026-08-21 §5): Landlock's
-        // network rules are port-based, cannot tell loopback from anything
-        // else, and no second mechanism proves the no-IP contract. Offline
-        // must therefore be refused, naming exactly the guarantee asked for,
-        // while the paired control above shows the network was reachable.
         #[cfg(target_os = "linux")]
-        let offline: Option<Run> =
-            match open_run(Confinement::Off, true, workspace, 1024 * 1024, 1024) {
-                Err(ProcessError::MissingCapabilities(missing)) => {
-                    assert_eq!(missing.required(), required_caps(Confinement::Off, true));
-                    assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
-                    None
-                }
-                Err(error) => {
-                    panic!("offline failed without a precise capability refusal: {error}")
-                }
-                Ok(_) => panic!("Linux offline proceeded without a mechanism that proves it"),
-            };
+        let offline = match open_run(Confinement::Off, true, workspace, 1024 * 1024, 1024) {
+            Ok(run) => Some(run),
+            Err(ProcessError::MissingCapabilities(missing)) => {
+                assert_eq!(missing.required(), ExecCaps::NO_IP_NETWORK);
+                assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+                None
+            }
+            Err(error) => panic!("offline failed without a precise capability refusal: {error}"),
+        };
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let offline = open_confined_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
         if let Some(offline) = offline {
-            assert!(
-                execute(&offline, network_spec).is_err(),
-                "offline child reached an IP endpoint"
-            );
+            let result = execute(&offline, network_spec);
+            match &control {
+                NetworkControl::Tcp(listener) => {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(ProcessError::Exit {
+                                code: Some(101),
+                                ..
+                            })
+                        ),
+                        "TCP child must report denial: {result:?}"
+                    );
+                    assert!(
+                        listener
+                            .accept()
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+                        "offline TCP reached the host listener"
+                    );
+                }
+                NetworkControl::Udp(socket) => {
+                    // Catches: a send accepted in an isolated namespace is
+                    // mistaken for delivery, or an unconfined send is admitted.
+                    assert!(
+                        matches!(
+                            result,
+                            Ok(())
+                                | Err(ProcessError::Exit {
+                                    code: Some(101),
+                                    ..
+                                })
+                        ),
+                        "UDP child did not complete its bounded attempt: {result:?}"
+                    );
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(100)))
+                        .unwrap();
+                    assert!(
+                        socket
+                            .recv_from(&mut [0_u8; 16])
+                            .is_err_and(|error| matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            )),
+                        "offline UDP reached the host receiver"
+                    );
+                }
+            }
         } else if cfg!(not(any(target_os = "linux", target_os = "macos"))) {
             return;
         }
