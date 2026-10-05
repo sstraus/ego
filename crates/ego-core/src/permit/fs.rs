@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::{self, BoxFuture};
 
+use super::SessionProcessAction;
 use super::foreign::{
     DuplexHandle, DuplexSpawner, GuardedHttp, HttpRequest, OneHop, OneHopResponse, PreparedConnect,
     Resolver, TransportError, TransportFailure,
@@ -23,8 +24,9 @@ use super::grant::{ForeignClaim, Permit, PermitDenied};
 use super::path::CanonPath;
 use super::prepared_call::{Op, PreparedCall};
 use super::scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanRequest};
-use super::spawn::{ProcessError, ProcessExecutor, SpawnSpec};
+use super::spawn::{DetachedExecSnapshot, ProcessError, ProcessExecutor, SpawnSpec};
 use super::tool::{ToolError, ToolResult};
+use crate::event::id::DetachedExecId;
 use crate::hook::EffectScope;
 use crate::store::evidence::{EvidencePage, EvidenceRead, EvidenceRef, EvidenceStore};
 use crate::suspension::{ContinuationError, GuardedMcpResume};
@@ -161,6 +163,28 @@ pub trait GuardedIo<'s>: Send + Sync {
 
     /// Execute the exact process specification admitted by this permit.
     fn exec<'a>(&'a self, spec: &'a SpawnSpec) -> BoxFuture<'a, Result<ToolResult, ProcessError>>;
+
+    fn exec_background<'a>(
+        &'a self,
+        _id: DetachedExecId,
+        _spec: &'a SpawnSpec,
+    ) -> BoxFuture<'a, Result<(), ProcessError>> {
+        Box::pin(future::ready(Err(ProcessError::Invariant(
+            "guarded I/O has no background process owner".to_owned(),
+        ))))
+    }
+
+    fn background_status(&self, _id: DetachedExecId) -> Result<DetachedExecSnapshot, ProcessError> {
+        Err(ProcessError::Invariant(
+            "guarded I/O has no background process owner".into(),
+        ))
+    }
+
+    fn background_cancel(&self, _id: DetachedExecId) -> Result<(), ProcessError> {
+        Err(ProcessError::Invariant(
+            "guarded I/O has no background process owner".into(),
+        ))
+    }
 
     /// Read the exact bounded evidence request admitted inside this session.
     fn read_evidence<'a>(
@@ -770,6 +794,33 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
             ))));
         }
         self.process.execute(spec)
+    }
+
+    fn exec_background<'a>(
+        &'a self,
+        id: DetachedExecId,
+        spec: &'a SpawnSpec,
+    ) -> BoxFuture<'a, Result<(), ProcessError>> {
+        if let Err(denied) = self.permit.allows_spawn(spec) {
+            return Box::pin(future::ready(Err(ProcessError::Invariant(
+                denied.to_string(),
+            ))));
+        }
+        self.process.start_background(id, spec)
+    }
+
+    fn background_status(&self, id: DetachedExecId) -> Result<DetachedExecSnapshot, ProcessError> {
+        self.permit
+            .allows_session_process(id, SessionProcessAction::Inspect)
+            .map_err(|denied| ProcessError::Invariant(denied.to_string()))?;
+        self.process.background_status(id)
+    }
+
+    fn background_cancel(&self, id: DetachedExecId) -> Result<(), ProcessError> {
+        self.permit
+            .allows_session_process(id, SessionProcessAction::Cancel)
+            .map_err(|denied| ProcessError::Invariant(denied.to_string()))?;
+        self.process.cancel_background(id)
     }
 
     fn read_evidence<'a>(

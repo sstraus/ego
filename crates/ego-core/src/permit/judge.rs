@@ -252,6 +252,10 @@ enum CanonicalOp {
         reference: String,
         offset: u64,
     },
+    SessionProcess {
+        id: String,
+        action: super::SessionProcessAction,
+    },
     Opaque {
         server: String,
         name: String,
@@ -305,6 +309,10 @@ impl From<&Op> for CanonicalOp {
             Op::ReadEvidence { request } => Self::ReadEvidence {
                 reference: request.reference.to_string(),
                 offset: request.offset,
+            },
+            Op::SessionProcess { id, action } => Self::SessionProcess {
+                id: id.to_string(),
+                action: *action,
             },
             Op::Opaque {
                 tool,

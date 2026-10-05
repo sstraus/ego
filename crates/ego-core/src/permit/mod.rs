@@ -47,17 +47,17 @@ pub use grant::{
 pub use path::CanonPath;
 pub use prepared_call::{
     Change, HookHttpPreparedEnvelope, McpPreparedEnvelope, Op, OpName, PreparedCall,
-    SecretEgressAuthority,
+    SecretEgressAuthority, SessionProcessAction,
 };
 pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots, check_root_ceilings};
 pub use sandbox_grant::{SandboxAccess, SandboxGrant, SandboxGrantPort};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;
 pub use spawn::{
-    BackendIdentity, Confinement, ConfinementParseError, EnvName, EnvNameError, EnvPolicy,
-    ExecCaps, ExecObservation, ExecRequirements, ExplicitEnvBinding, ExplicitEnvValueError,
-    MissingExecCaps, PolicyDigest, PolicyDigestError, ProcessError, ProcessExecutor,
-    RunConfinement, RunConfinementError, SpawnSpec, SpawnSpecError,
+    BackendIdentity, Confinement, ConfinementParseError, DetachedExecOutcome, DetachedExecSnapshot,
+    EnvName, EnvNameError, EnvPolicy, ExecCaps, ExecObservation, ExecRequirements,
+    ExplicitEnvBinding, ExplicitEnvValueError, MissingExecCaps, PolicyDigest, PolicyDigestError,
+    ProcessError, ProcessExecutor, RunConfinement, RunConfinementError, SpawnSpec, SpawnSpecError,
 };
 pub(crate) use tool::ToolResultProvenance;
 pub use tool::{

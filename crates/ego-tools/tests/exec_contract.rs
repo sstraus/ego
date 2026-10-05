@@ -483,6 +483,162 @@ fn exec_contract_fixture_emits_until_killed() {
 
 #[test]
 #[ignore]
+fn exec_contract_fixture_waits_after_large_output() {
+    let mut args = std::env::args()
+        .skip_while(|argument| argument != "--")
+        .skip(1);
+    let ready = args.next().expect("ready marker path");
+    let release = args.next().expect("release marker path");
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(b"first-stdout\n").unwrap();
+    stdout.write_all(&vec![b'x'; 100 * 1024]).unwrap();
+    stdout.write_all(b"\nlast-stdout\n").unwrap();
+    stdout.flush().unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::path::Path::new(&release).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::io::stderr().write_all(b"last-stderr\n").unwrap();
+    std::process::exit(7);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn exec_contract_fixture_waits_for_owner_shutdown() {
+    let marker = std::env::args()
+        .skip_while(|argument| argument != "--")
+        .nth(1)
+        .expect("PID marker path");
+    std::fs::write(marker, std::process::id().to_string()).unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_exec_owner_drop_reaps_child_before_returning() {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("pid");
+    let root = cwd();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let spec = fixture_spec(
+        "exec_contract_fixture_waits_for_owner_shutdown",
+        &[&marker],
+        None,
+        root,
+    );
+    block_on(
+        run.ports
+            .process()
+            .start_background(ego_core::event::id::DetachedExecId::new(), &spec),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid: i32 = std::fs::read_to_string(&marker)
+        .expect("child started")
+        .parse()
+        .unwrap();
+    assert!(kill(Pid::from_raw(pid), None).is_ok());
+    drop(run);
+    assert_eq!(
+        kill(Pid::from_raw(pid), None),
+        Err(Errno::ESRCH),
+        "dropping a session returned with its detached child still alive"
+    );
+}
+
+#[test]
+fn detached_exec_cannot_write_through_read_only_confinement() {
+    use ego_core::permit::DetachedExecOutcome;
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let root = CanonPath::new(std::fs::canonicalize(workspace_dir.path()).unwrap());
+    let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 64) else {
+        return;
+    };
+    let target = workspace_dir.path().join("forbidden-by-ro");
+    let spec = mutation_spec("create", &[&target], root);
+    let id = ego_core::event::id::DetachedExecId::new();
+    block_on(run.ports.process().start_background(id, &spec)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let outcome = loop {
+        let snapshot = run.ports.process().background_status(id).unwrap();
+        if let Some(outcome) = snapshot.outcome {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "confined process did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        matches!(&outcome, DetachedExecOutcome::Exited { code, .. } if *code != 0),
+        "read-only confinement did not reject the detached mutation: {outcome:?}"
+    );
+    assert!(
+        !target.exists(),
+        "detached exec bypassed the filesystem sandbox"
+    );
+}
+
+#[test]
+fn detached_exec_timeout_and_launch_failure_keep_distinct_outcomes() {
+    use ego_core::permit::DetachedExecOutcome;
+
+    let root = cwd();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let timed = fixture_spec(
+        "exec_contract_fixture_waits_after_large_output",
+        &[
+            &directory.path().join("ready"),
+            &directory.path().join("release"),
+        ],
+        Some(Duration::from_millis(100)),
+        root.clone(),
+    );
+    let missing = SpawnSpec::new(
+        vec![OsString::from(root.as_path().join("no-such-executable"))],
+        Some(root),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let timed_id = ego_core::event::id::DetachedExecId::new();
+    let failed_id = ego_core::event::id::DetachedExecId::new();
+    block_on(run.ports.process().start_background(timed_id, &timed)).unwrap();
+    block_on(run.ports.process().start_background(failed_id, &missing)).unwrap();
+    let settled = |id| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(outcome) = run.ports.process().background_status(id).unwrap().outcome {
+                return outcome;
+            }
+            assert!(Instant::now() < deadline, "detached outcome did not settle");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    assert!(matches!(
+        settled(timed_id),
+        DetachedExecOutcome::TimedOut { .. }
+    ));
+    assert!(matches!(
+        settled(failed_id),
+        DetachedExecOutcome::Failed { .. }
+    ));
+}
+
+#[test]
+#[ignore]
 fn exec_contract_fixture_emits_both_streams_and_exits_nonzero() {
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
@@ -988,6 +1144,369 @@ fn exec_tool_policy_denial_stops_before_guarded_effects() {
             assert_eq!(tool, "exec");
         }
         other => panic!("deny must settle before guarded execution: {other:?}"),
+    }
+}
+
+#[test]
+fn detached_exec_request_keeps_the_foreground_spawn_authority() {
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: Vec::new(),
+                deny: vec![exact_executable_rule(executable_text)],
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let fs = OsFs;
+    let registry = builtins();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let arguments = serde_json::json!({
+        "argv": [executable_text, "--version"],
+        "background": true
+    });
+    let (_, call) = tools
+        .prepare("exec", &arguments.to_string())
+        .expect("a background request is a valid exec request");
+    assert!(matches!(call.ops(), [Op::Spawn { .. }]));
+    assert!(matches!(
+        tools.authorize(&policy, call),
+        Classification::Settled(Err(PolicyDenied::Denied { .. }))
+    ));
+}
+
+#[test]
+fn detached_exec_returns_a_handle_before_the_child_finishes() {
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable
+        .to_str()
+        .expect("test executable is UTF-8")
+        .to_owned();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let cancel = run.cancel.clone();
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let policy = ego_core::permit::PolicyEngine::new(
+            root.clone(),
+            Mode::Yolo,
+            Ruleset::from_layer(
+                PermCfg {
+                    allow: vec![exact_executable_rule(&executable_text)],
+                    deny: Vec::new(),
+                    judge: None,
+                },
+                Source::Project,
+            ),
+        );
+        let fs = OsFs;
+        let registry = builtins();
+        let tools = TurnTools::new(
+            &registry,
+            ToolEffectPorts::new(
+                &fs,
+                run.ports.process(),
+                &run.evidence,
+                run.ports.resolver_handle(),
+                run.ports.one_hop_handle(),
+                run.ports.duplex_handle(),
+            ),
+            root,
+        );
+        let arguments = serde_json::json!({
+            "argv": [
+                executable_text,
+                "--ignored",
+                "--exact",
+                "exec_contract_fixture_emits_until_killed",
+                "--nocapture"
+            ],
+            "background": true
+        });
+        let (tool, call) = tools.prepare("exec", &arguments.to_string()).unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("the fixture must be authorized");
+        };
+        ready_sender.send(()).expect("ready receiver");
+        let result = block_on(tools.execute(&policy, tool.as_ref(), authorized, None));
+        sender.send(result).expect("result receiver");
+    });
+    ready_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("preparation must complete before timing execution");
+    let result = match receiver.recv_timeout(Duration::from_millis(500)) {
+        Ok(result) => result.expect("detached exec returns a handle"),
+        Err(error) => {
+            cancel.cancel(CancelCause::User);
+            worker.join().expect("fixture thread");
+            panic!("the call held the turn while its child ran: {error}");
+        }
+    };
+    let ego_core::mcp::ToolExecution::Complete(result) = result else {
+        panic!("exec must complete the launch call");
+    };
+    assert!(result.model_text().contains("id"), "{result:?}");
+    cancel.cancel(CancelCause::User);
+    worker.join().expect("fixture thread");
+}
+
+#[test]
+fn detached_exec_output_is_bounded_and_cancel_preserves_the_settled_exit() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let ready = directory.path().join("ready");
+    let release = directory.path().join("release");
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(executable_text)],
+                deny: Vec::new(),
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let fs = OsFs;
+    let registry = builtins();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let arguments = serde_json::json!({
+        "argv": [
+            executable_text,
+            "--ignored",
+            "--exact",
+            "exec_contract_fixture_waits_after_large_output",
+            "--nocapture",
+            "--",
+            ready.to_string_lossy(),
+            release.to_string_lossy()
+        ],
+        "background": true
+    });
+    let (tool, call) = tools.prepare("exec", &arguments.to_string()).unwrap();
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("the fixture must be authorized");
+    };
+    let ego_core::mcp::ToolExecution::Complete(started) =
+        block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+    else {
+        panic!("exec launch must complete");
+    };
+    let id = started
+        .model_text()
+        .split_whitespace()
+        .last()
+        .expect("model receives an ID")
+        .to_owned();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready.exists(), "child did not reach its output barrier");
+
+    let inspect = |id: &str| {
+        let (tool, call) = tools
+            .prepare("exec_status", &serde_json::json!({ "id": id }).to_string())
+            .expect("the model can inspect by ID");
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("session-owned status must be authorized");
+        };
+        let ego_core::mcp::ToolExecution::Complete(result) =
+            block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+        else {
+            panic!("status call must complete");
+        };
+        result.model_text()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let running = loop {
+        let status = inspect(&id);
+        if status.contains("last-stdout") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "output did not reach the live tail: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(running.contains("running"), "{running}");
+    assert!(running.contains("last-stdout"), "{running}");
+    assert!(!running.contains("first-stdout"), "{running}");
+    assert!(running.len() < 1024, "running output was not bounded");
+
+    std::fs::write(release, b"release").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let settled = loop {
+        let status = inspect(&id);
+        if status.contains("exited") {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "child did not settle: {status}");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        settled.contains("7"),
+        "nonzero exit code was lost: {settled}"
+    );
+    assert!(
+        settled.contains("last-stderr"),
+        "stderr tail was lost: {settled}"
+    );
+    assert!(
+        settled.contains("read_tool_result"),
+        "full output evidence was unreachable: {settled}"
+    );
+    assert!(settled.len() < 1024, "settled output was not bounded");
+    // Catches cancelling an already-exited ID falsely reporting Cancelled.
+    let (tool, call) = tools
+        .prepare("exec_cancel", &serde_json::json!({"id": id}).to_string())
+        .expect("cancel settled process");
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("session-owned cancellation must be authorized");
+    };
+    let ego_core::mcp::ToolExecution::Complete(result) =
+        block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+    else {
+        panic!("cancel must complete");
+    };
+    assert!(
+        result.model_text().contains("cancellation requested"),
+        "{}",
+        result.model_text()
+    );
+    assert!(
+        !result.model_text().contains(": cancelled"),
+        "{}",
+        result.model_text()
+    );
+    assert!(inspect(&id).contains("exited code 7"));
+}
+
+#[test]
+fn detached_exec_cancel_by_id_settles_cancelled() {
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(executable_text)],
+                deny: Vec::new(),
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let fs = OsFs;
+    let registry = builtins();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let arguments = serde_json::json!({
+        "argv": [executable_text, "--ignored", "--exact",
+            "exec_contract_fixture_emits_until_killed", "--nocapture"],
+        "background": true
+    });
+    let (tool, call) = tools.prepare("exec", &arguments.to_string()).unwrap();
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("the fixture must be authorized");
+    };
+    let ego_core::mcp::ToolExecution::Complete(started) =
+        block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+    else {
+        panic!("exec launch must complete");
+    };
+    let id = started
+        .model_text()
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_owned();
+    let (tool, call) = tools
+        .prepare("exec_cancel", &serde_json::json!({"id": id}).to_string())
+        .expect("model can cancel by ID");
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("session-owned cancellation must be authorized");
+    };
+    let ego_core::mcp::ToolExecution::Complete(cancelled) =
+        block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+    else {
+        panic!("cancel must complete");
+    };
+    assert!(
+        cancelled.model_text().contains("cancelled")
+            || cancelled.model_text().contains("cancellation requested"),
+        "{}",
+        cancelled.model_text()
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (tool, call) = tools
+            .prepare("exec_status", &serde_json::json!({"id": id}).to_string())
+            .unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("status must be authorized");
+        };
+        let ego_core::mcp::ToolExecution::Complete(status) =
+            block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+        else {
+            panic!("status must complete");
+        };
+        if status.model_text().contains("cancelled") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cancellation did not settle: {status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

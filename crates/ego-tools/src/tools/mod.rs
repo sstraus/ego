@@ -28,6 +28,8 @@
 
 mod edit;
 mod exec;
+mod exec_cancel;
+mod exec_status;
 mod glob;
 mod grep;
 mod memory;
@@ -37,6 +39,8 @@ mod write;
 
 pub use edit::{EditParams, EditTool};
 pub use exec::{ExecParams, ExecTool};
+pub use exec_cancel::{ExecCancelParams, ExecCancelTool};
+pub use exec_status::{ExecStatusParams, ExecStatusTool};
 pub use glob::{GlobParams, GlobTool};
 pub use grep::{GrepParams, GrepTool};
 pub use memory::{MemoryEntryType, MemoryLookup, MemoryLookupParams};
@@ -72,6 +76,8 @@ pub fn builtins_with_environment(environment: ego_core::permit::EnvPolicy) -> Ve
         Arc::new(Typed(WriteTool)),
         Arc::new(Typed(EditTool)),
         Arc::new(Typed(ExecTool::with_environment(environment))),
+        Arc::new(Typed(ExecCancelTool)),
+        Arc::new(Typed(ExecStatusTool)),
         Arc::new(Typed(ReadToolResult)),
     ]
 }

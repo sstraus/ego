@@ -16,6 +16,7 @@ use super::foreign::{
 use super::path::CanonPath;
 use super::spawn::SpawnSpec;
 use crate::event::hook::HookId;
+use crate::event::id::DetachedExecId;
 use crate::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
 use crate::store::evidence::EvidenceRead;
 
@@ -56,6 +57,11 @@ pub enum Op {
     Spawn { spec: SpawnSpec },
     /// Complete tool evidence addressed inside the current session.
     ReadEvidence { request: EvidenceRead },
+    /// Inspect or stop one process previously launched in this session.
+    SessionProcess {
+        id: DetachedExecId,
+        action: SessionProcessAction,
+    },
     /// One exact foreign operation and the route on which it may be invoked.
     Opaque {
         tool: ForeignToolId,
@@ -73,6 +79,13 @@ pub enum Op {
     /// One MCP target whose exact request bytes are minted later by the
     /// admitted protocol profile. This does not grant ordinary HTTP.
     ProtocolConnect { target: NetworkTarget },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionProcessAction {
+    Inspect,
+    Cancel,
 }
 
 /// What a [`Op::Write`] does to the file it names.
@@ -138,6 +151,7 @@ pub enum OpName {
     Write,
     Spawn,
     ReadEvidence,
+    SessionProcess,
     Opaque,
     Connect,
     SecretEgress,
@@ -152,6 +166,7 @@ impl fmt::Display for OpName {
             OpName::Write => "write",
             OpName::Spawn => "spawn",
             OpName::ReadEvidence => "read_evidence",
+            OpName::SessionProcess => "session_process",
             OpName::Opaque => "opaque",
             OpName::Connect => "connect",
             OpName::SecretEgress => "secret_egress",
@@ -170,6 +185,7 @@ impl Op {
             Op::Write { .. } => OpName::Write,
             Op::Spawn { .. } => OpName::Spawn,
             Op::ReadEvidence { .. } => OpName::ReadEvidence,
+            Op::SessionProcess { .. } => OpName::SessionProcess,
             Op::Opaque { .. } => OpName::Opaque,
             Op::Connect { .. } | Op::ProtocolConnect { .. } => OpName::Connect,
             Op::SecretEgress { .. } => OpName::SecretEgress,
@@ -190,15 +206,24 @@ impl Op {
     /// write mutates in every build there will ever be.
     pub fn mutates(&self) -> bool {
         match self {
-            Op::Read { .. } | Op::List { .. } | Op::Search { .. } | Op::ReadEvidence { .. } => {
-                false
-            }
+            Op::Read { .. }
+            | Op::List { .. }
+            | Op::Search { .. }
+            | Op::ReadEvidence { .. }
+            | Op::SessionProcess {
+                action: SessionProcessAction::Inspect,
+                ..
+            } => false,
             Op::Write { .. }
             | Op::Spawn { .. }
             | Op::Opaque { .. }
             | Op::Connect { .. }
             | Op::SecretEgress { .. }
             | Op::ProtocolConnect { .. } => true,
+            Op::SessionProcess {
+                action: SessionProcessAction::Cancel,
+                ..
+            } => true,
         }
     }
 
@@ -210,6 +235,7 @@ impl Op {
             Op::List { root, .. } | Op::Search { root, .. } => Some(root),
             Op::Spawn { spec } => spec.cwd(),
             Op::ReadEvidence { .. }
+            | Op::SessionProcess { .. }
             | Op::Opaque { .. }
             | Op::Connect { .. }
             | Op::SecretEgress { .. }
@@ -226,6 +252,7 @@ impl Op {
         match self {
             Op::Spawn { spec } => Some(spec.cwd().unwrap_or(workspace)),
             Op::ReadEvidence { .. }
+            | Op::SessionProcess { .. }
             | Op::Opaque { .. }
             | Op::Connect { .. }
             | Op::SecretEgress { .. }
@@ -241,6 +268,10 @@ impl Op {
             Op::List { root, .. } | Op::Search { root, .. } => Subject::Path(root.clone()),
             Op::Spawn { spec } => Subject::Process(spec.clone()),
             Op::ReadEvidence { request } => Subject::Evidence(request.clone()),
+            Op::SessionProcess { id, action } => Subject::SessionProcess {
+                id: *id,
+                action: *action,
+            },
             Op::Opaque {
                 tool,
                 params_digest,
@@ -318,6 +349,7 @@ impl SecretEgressAuthority {
 pub struct PreparedCall {
     tool: String,
     ops: Vec<Op>,
+    background: Option<DetachedExecId>,
     mcp: Option<Box<McpPreparedEnvelope>>,
     hook_http: Option<Box<HookHttpPreparedEnvelope>>,
     provenance: PreparedCallProvenance,
@@ -400,6 +432,7 @@ impl PreparedCall {
         Self {
             tool: tool.into(),
             ops: vec![first],
+            background: None,
             mcp: None,
             hook_http: None,
             provenance: PreparedCallProvenance::Native,
@@ -409,6 +442,17 @@ impl PreparedCall {
     pub fn with_op(mut self, additional: Op) -> Self {
         self.ops.push(additional);
         self
+    }
+
+    /// A background process keeps the same spawn authority but changes when
+    /// the selected tool call returns.
+    pub fn with_background(mut self) -> Self {
+        self.background = Some(DetachedExecId::new());
+        self
+    }
+
+    pub fn background(&self) -> Option<DetachedExecId> {
+        self.background
     }
 
     pub fn tool(&self) -> &str {
@@ -473,6 +517,7 @@ impl PreparedCall {
         Ok(Self {
             tool: subject.operation_name().to_owned(),
             ops,
+            background: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -523,6 +568,7 @@ impl PreparedCall {
         Ok(Self {
             tool: subject.operation_name().to_owned(),
             ops,
+            background: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -570,6 +616,7 @@ impl PreparedCall {
         Ok(Self {
             tool: subject.operation_name().to_owned(),
             ops,
+            background: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -625,6 +672,7 @@ impl PreparedCall {
         Self {
             tool: format!("hook_http:{hook}"),
             ops,
+            background: None,
             mcp: None,
             hook_http: Some(Box::new(HookHttpPreparedEnvelope {
                 hook,
@@ -660,6 +708,10 @@ impl PreparedCall {
         let mut digest = Sha256::new();
         frame(&mut digest, b"ego:prepared-call:v3");
         frame(&mut digest, self.tool.as_bytes());
+        if let Some(id) = self.background {
+            frame(&mut digest, b"background");
+            frame(&mut digest, id.to_string().as_bytes());
+        }
         frame(
             &mut digest,
             &[match self.provenance {
@@ -757,7 +809,7 @@ impl PreparedCall {
                             .expect("string lists"),
                     );
                 }
-                Op::Read { .. } | Op::ReadEvidence { .. } => {}
+                Op::Read { .. } | Op::ReadEvidence { .. } | Op::SessionProcess { .. } => {}
             }
         }
         frame(&mut digest, &[u8::from(self.mcp.is_some())]);
@@ -814,6 +866,7 @@ impl PreparedCall {
         Self {
             tool: rendered,
             ops,
+            background: None,
             mcp: None,
             hook_http: None,
             provenance: PreparedCallProvenance::CapturedForeign,
@@ -839,6 +892,7 @@ impl PreparedCall {
                 },
                 Op::Spawn { spec },
             ],
+            background: None,
             mcp: None,
             hook_http: None,
             provenance: PreparedCallProvenance::CapturedForeign,
@@ -878,6 +932,7 @@ impl PreparedCall {
         Self {
             tool: rendered,
             ops,
+            background: None,
             mcp: None,
             hook_http: None,
             provenance: PreparedCallProvenance::CapturedForeign,

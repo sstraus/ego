@@ -1,5 +1,112 @@
 mod support;
 
+// Catches: dropping turn-local effects kills a detached command before the next REPL turn.
+#[test]
+fn regression_detached_exec_survives_the_launching_repl_turn() {
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "while [ ! -f release ]; do sleep 0.05; done; printf DETACHED-DONE > completed; printf DETACHED-DONE"],
+        "background": true,
+        "timeout_ms": 15000
+    });
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("DETACHED", "exec", &arguments.to_string())),
+            Reply::Sse(text("DETACHED-LAUNCHED")),
+            Reply::Sse(text("DETACHED-NEXT-TURN")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# detached exec critic fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "--mode",
+        "yolo",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"start the detached command\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "DETACHED-LAUNCHED");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    places.file("release", "continue\n");
+    let completed = places.workspace_path().join("completed");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // Catches the completion-file race: the shell writes the file before its
+    // exit and output evidence settle. Observe delivery at a turn boundary
+    // instead of treating that file as a process-settlement barrier.
+    loop {
+        let start = output.len();
+        input.write_all(b"inspect the completed command\r").unwrap();
+        input.flush().unwrap();
+        while !normalized(&output[start..]).contains("DETACHED-NEXT-TURN") {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            output.extend(
+                reader
+                    .recv_timeout(remaining)
+                    .expect("settlement reply deadline"),
+            );
+        }
+        let start = output.len();
+        until_prompt_from_with_context(
+            &reader,
+            &mut output,
+            start,
+            deadline.saturating_duration_since(Instant::now()),
+            "detached settlement composer",
+        );
+        let generations = stub.generations();
+        let history = generations.last().expect("next generation")["messages"].to_string();
+        if (history.contains("exited code 0") && history.contains("DETACHED-DONE"))
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+    }
+    let completion = std::fs::read_to_string(&completed).ok();
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "REPL exit: {status:?}");
+    assert_eq!(
+        completion.as_deref(),
+        Some("DETACHED-DONE"),
+        "detached command was killed when its launching REPL turn ended"
+    );
+    let generations = stub.generations();
+    let history = generations.last().expect("next generation")["messages"].to_string();
+    assert!(
+        history.contains("exited code 0") && history.contains("DETACHED-DONE"),
+        "next turn lost detached settlement: {history}"
+    );
+}
+
 // Catches: a second cross-root selection rebases a relative store under the selected project.
 #[test]
 fn repeated_cross_root_resume_preserves_relative_session_store() {
@@ -7657,6 +7764,8 @@ fn e_edits_the_call_and_the_amended_call_is_asked_again() {
     session.press(b"\r");
     session.wait("timeout_ms: ");
     session.press(b"\r");
+    session.wait("background: ");
+    session.press(b"false\r");
     session.wait("[d] details");
     let amended = session.screen().join("\n");
     assert!(amended.contains("Allow run seq 1 4?"), "{amended}");

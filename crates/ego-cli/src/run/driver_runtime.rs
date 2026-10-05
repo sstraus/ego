@@ -1963,6 +1963,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 run_deadline,
                             )
                             .await?;
+                            let ports = Arc::new(ports.with_session_processes(&session_hook_ports));
                             let inline = staged_images
                                 .iter()
                                 .filter_map(|staged| match &staged.source {

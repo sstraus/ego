@@ -195,6 +195,9 @@ fn conversation_from_inner(
                 }
                 push(&mut messages, Role::User, text_block(&item.text));
             }
+            ItemKind::DetachedExecNotification => {
+                push(&mut messages, Role::User, text_block(&item.text));
+            }
             ItemKind::Assistant => {
                 push(&mut messages, Role::Assistant, text_block(&item.text));
             }

@@ -22,6 +22,8 @@ pub struct ExecParams {
     pub argv: Vec<String>,
     pub cwd: Option<String>,
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub background: bool,
 }
 
 #[derive(Default)]
@@ -86,7 +88,12 @@ impl TypedTool for ExecTool {
         )
         .map_err(|err| ToolError::InvalidParams(err.to_string()))?;
 
-        Ok(PreparedCall::new(self.name(), Op::Spawn { spec }))
+        let call = PreparedCall::new(self.name(), Op::Spawn { spec });
+        Ok(if params.background {
+            call.with_background()
+        } else {
+            call
+        })
     }
 
     fn execute<'a, 'io>(
@@ -98,6 +105,7 @@ impl TypedTool for ExecTool {
         'io: 'a,
     {
         Box::pin(async move {
+            let background = call.background();
             let (tool, ops) = call.into_parts();
             let mut ops = ops.into_iter();
             let spec = match (ops.next(), ops.next()) {
@@ -108,7 +116,14 @@ impl TypedTool for ExecTool {
                     )));
                 }
             };
-            io.exec(&spec).await.map_err(ToolError::Process)
+            if let Some(id) = background {
+                io.exec_background(id, &spec)
+                    .await
+                    .map_err(ToolError::Process)?;
+                Ok(ToolResult::builtin(format!("background exec id: {id}")))
+            } else {
+                io.exec(&spec).await.map_err(ToolError::Process)
+            }
         })
     }
 }

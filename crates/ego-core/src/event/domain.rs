@@ -9,7 +9,8 @@ use super::hook::{
     HookResult, HookSubject,
 };
 use super::id::{
-    EventId, GoalId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId, TurnId,
+    DetachedExecId, EventId, GoalId, ItemId, Producer, QueuedPromptId, Seq, SessionId,
+    SubagentInvocationId, TurnId,
 };
 use super::skill::{
     SkillCatalogueEvidence, SkillCatalogueGeneration, SkillContentDigest, SkillId,
@@ -21,7 +22,9 @@ use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::capabilities::CapabilityGap;
 use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
 use crate::goal::{GoalOwner, GoalTransition};
-use crate::permit::{Authority, Escalation, ExecObservation, ToolResult, ToolResultProvenance};
+use crate::permit::{
+    Authority, DetachedExecSnapshot, Escalation, ExecObservation, ToolResult, ToolResultProvenance,
+};
 use crate::question::{QuestionOutcome, QuestionRequest, QuestionTarget};
 use crate::run::{CancelReason, DeniedBy, RequestId, RunId, RunSelections, RunSettlement};
 use crate::state::Usage;
@@ -375,6 +378,10 @@ pub enum EventKind {
     /// codec-v6 shape: replacing the old string is deliberately not decoded
     /// as a compatibility spelling.
     ToolCallCompleted { ok: bool, result: ToolResult },
+    /// The launch authority was admitted before the process starts.
+    DetachedExecStarted { id: DetachedExecId },
+    /// One terminal observation, delivered to the model at a generation boundary.
+    DetachedExecSettled { snapshot: DetachedExecSnapshot },
     /// A typed human-input request became durable before any host was asked.
     /// The envelope's item is the sole question identity; `target` names the
     /// closed consumer that can eventually settle the originating tool call.
@@ -658,6 +665,21 @@ impl EventKind {
                     references.push(result.evidence_reference().blob_ref());
                 }
             }
+            Self::DetachedExecSettled { snapshot } => {
+                if let Some(
+                    crate::permit::DetachedExecOutcome::Exited { result, .. }
+                    | crate::permit::DetachedExecOutcome::Signalled { result, .. },
+                ) = &snapshot.outcome
+                {
+                    references.extend(
+                        result
+                            .content
+                            .iter()
+                            .filter_map(|block| block.evidence_reference())
+                            .map(|reference| reference.blob_ref()),
+                    );
+                }
+            }
             Self::HookInvocationSettled { result, .. } => {
                 if let Some(feedback) = result.feedback() {
                     references.push(feedback.reference().blob_ref());
@@ -716,6 +738,8 @@ impl EventKind {
             EventKind::ToolCallStarted { .. } => "tool_call_started",
             EventKind::ToolCallDelta { .. } => "tool_call_delta",
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",
+            EventKind::DetachedExecStarted { .. } => "detached_exec_started",
+            EventKind::DetachedExecSettled { .. } => "detached_exec_settled",
             EventKind::QuestionRequested { .. } => "question_requested",
             EventKind::QuestionSettled { .. } => "question_settled",
             EventKind::PermissionRequested { .. } => "permission_requested",

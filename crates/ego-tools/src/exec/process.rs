@@ -1,18 +1,21 @@
 //! Common process lifecycle: pipes, bounds, cancellation and tree cleanup.
 
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use ego_core::event::domain::CancelCause;
+use ego_core::event::id::DetachedExecId;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::EffectScope;
 use ego_core::permit::{
-    CleanupCertainty, DuplexEnd, DuplexSession, DuplexSettlement, ExecCaps, ProcessError,
-    RunConfinement, SandboxGrant, SandboxGrantPort, SpawnSpec, StreamProvenance, ToolContentBlock,
-    ToolResult, TransportError, TransportFailure,
+    CleanupCertainty, DetachedExecOutcome, DetachedExecSnapshot, DuplexEnd, DuplexSession,
+    DuplexSettlement, ExecCaps, ProcessError, RunConfinement, SandboxGrant, SandboxGrantPort,
+    SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult, TransportError, TransportFailure,
 };
 use ego_core::store::evidence::{EvidenceError, EvidenceStore as _, EvidenceWriter};
 use ego_core::turn::CancelToken;
@@ -49,10 +52,49 @@ pub(crate) struct RunProcessContext {
     limits: ExecLimits,
     confinement: RunConfinement,
     capabilities: ExecCaps,
+    background: Arc<Mutex<BTreeMap<DetachedExecId, BackgroundEntry>>>,
+    background_changed: Arc<Condvar>,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     /// The last profile rendered for a grant list, so a run of commands under
     /// the same grants shares one private profile file.
     widened: Mutex<Option<WidenedBackend>>,
+}
+
+struct BackgroundEntry {
+    cancel: CancelToken,
+    cancelled: bool,
+    outcome: Option<DetachedExecOutcome>,
+    output: Arc<Mutex<LiveOutput>>,
+}
+
+struct ExecutionContext {
+    backend: Arc<dyn Backend>,
+    evidence: SessionEvidenceStore,
+    cancel: CancelToken,
+    limits: ExecLimits,
+}
+
+#[derive(Default)]
+struct LiveOutput {
+    stdout: TailBytes,
+    stderr: TailBytes,
+}
+
+#[derive(Default)]
+struct TailBytes {
+    bytes: Vec<u8>,
+    omitted: u64,
+}
+
+impl TailBytes {
+    fn append(&mut self, chunk: &[u8], limit: usize) {
+        self.bytes.extend_from_slice(chunk);
+        if self.bytes.len() > limit {
+            let excess = self.bytes.len() - limit;
+            self.bytes.drain(..excess);
+            self.omitted = self.omitted.saturating_add(excess as u64);
+        }
+    }
 }
 
 impl RunProcessContext {
@@ -76,13 +118,135 @@ impl RunProcessContext {
             limits,
             confinement,
             capabilities,
+            background: Arc::new(Mutex::new(BTreeMap::new())),
+            background_changed: Arc::new(Condvar::new()),
             sandbox_grants,
             widened: Mutex::new(None),
         }
     }
 
     pub(crate) async fn execute(&self, spec: &SpawnSpec) -> Result<ToolResult, ProcessError> {
-        self.execute_inner(spec, None).await
+        self.execute_inner(spec, None, None, None).await
+    }
+
+    pub(crate) fn start_background(
+        self: &Arc<Self>,
+        id: DetachedExecId,
+        spec: &SpawnSpec,
+    ) -> Result<(), ProcessError> {
+        self.confinement
+            .requirements()
+            .check(self.capabilities)
+            .map_err(ProcessError::MissingCapabilities)?;
+        let cancel = CancelToken::new();
+        let output = Arc::new(Mutex::new(LiveOutput::default()));
+        {
+            let mut entries = self.background.lock().map_err(|_| {
+                ProcessError::Backend("background process registry lock poisoned".into())
+            })?;
+            if entries.contains_key(&id) {
+                return Err(ProcessError::Invariant(
+                    "duplicate background process ID".into(),
+                ));
+            }
+            entries.insert(
+                id,
+                BackgroundEntry {
+                    cancel: cancel.clone(),
+                    cancelled: false,
+                    outcome: None,
+                    output: Arc::clone(&output),
+                },
+            );
+        }
+        let context = Arc::clone(self);
+        let spec = spec.clone();
+        let registry = Arc::clone(&self.background);
+        let changed = Arc::clone(&self.background_changed);
+        super::runtime_handle().spawn(async move {
+            let result = context
+                .execute_inner(&spec, None, Some(cancel), Some(output))
+                .await;
+            if let Ok(mut entries) = registry.lock()
+                && let Some(entry) = entries.get_mut(&id)
+            {
+                entry.outcome = Some(if entry.cancelled {
+                    DetachedExecOutcome::Cancelled
+                } else {
+                    detached_outcome(result)
+                });
+                changed.notify_all();
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) fn background_status(
+        &self,
+        id: DetachedExecId,
+    ) -> Result<DetachedExecSnapshot, ProcessError> {
+        let entries = self.background.lock().map_err(|_| {
+            ProcessError::Backend("background process registry lock poisoned".into())
+        })?;
+        let entry = entries
+            .get(&id)
+            .ok_or(ProcessError::UnknownBackground { id })?;
+        let output = entry
+            .output
+            .lock()
+            .map_err(|_| ProcessError::Backend("background output lock poisoned".into()))?;
+        Ok(DetachedExecSnapshot {
+            id,
+            outcome: entry.outcome.clone(),
+            stdout_tail: output.stdout.bytes.clone(),
+            stderr_tail: output.stderr.bytes.clone(),
+            stdout_omitted: output.stdout.omitted,
+            stderr_omitted: output.stderr.omitted,
+        })
+    }
+
+    pub(crate) fn cancel_background(&self, id: DetachedExecId) -> Result<(), ProcessError> {
+        let mut entries = self.background.lock().map_err(|_| {
+            ProcessError::Backend("background process registry lock poisoned".into())
+        })?;
+        let entry = entries
+            .get_mut(&id)
+            .ok_or(ProcessError::UnknownBackground { id })?;
+        if entry.outcome.is_none() {
+            entry.cancelled = true;
+            entry.cancel.cancel(CancelCause::User);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancel_all_background(&self) {
+        if let Ok(entries) = self.background.lock() {
+            for entry in entries.values() {
+                entry.cancel.cancel(CancelCause::Host);
+            }
+        }
+    }
+
+    pub(crate) fn wait_background_shutdown(&self) {
+        let deadline = Instant::now()
+            + self.limits.termination_grace().saturating_mul(3)
+            + Duration::from_secs(1);
+        let Ok(mut entries) = self.background.lock() else {
+            return;
+        };
+        while entries.values().any(|entry| entry.outcome.is_none()) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                tracing::error!(
+                    "background process cleanup did not settle before shutdown deadline"
+                );
+                break;
+            }
+            let Ok((next, _)) = self.background_changed.wait_timeout(entries, remaining) else {
+                return;
+            };
+            entries = next;
+        }
     }
 
     pub(crate) async fn execute_handler(
@@ -99,7 +263,7 @@ impl RunProcessContext {
                 timeout: scope.timeout(),
             });
         }
-        self.execute_inner(spec, Some((input.to_vec(), scope)))
+        self.execute_inner(spec, Some((input.to_vec(), scope)), None, None)
             .await
     }
 
@@ -107,16 +271,27 @@ impl RunProcessContext {
         &self,
         spec: &SpawnSpec,
         handler: Option<(Vec<u8>, EffectScope)>,
+        background_cancel: Option<CancelToken>,
+        live_output: Option<Arc<Mutex<LiveOutput>>>,
     ) -> Result<ToolResult, ProcessError> {
         self.confinement
             .requirements()
             .check(self.capabilities)
             .map_err(ProcessError::MissingCapabilities)?;
         match (&self.sandbox_grants, &handler) {
-            (Some(grants), None) => self.execute_asking(grants.as_ref(), spec).await,
-            _ => {
-                self.spawn_once(Arc::clone(&self.backend), spec, handler)
+            (Some(grants), None) => {
+                self.execute_asking(grants.as_ref(), spec, background_cancel, live_output)
                     .await
+            }
+            _ => {
+                self.spawn_once(
+                    Arc::clone(&self.backend),
+                    spec,
+                    handler,
+                    background_cancel,
+                    live_output,
+                )
+                .await
             }
         }
     }
@@ -126,13 +301,20 @@ impl RunProcessContext {
         backend: Arc<dyn Backend>,
         spec: &SpawnSpec,
         handler: Option<(Vec<u8>, EffectScope)>,
+        background_cancel: Option<CancelToken>,
+        live_output: Option<Arc<Mutex<LiveOutput>>>,
     ) -> Result<ToolResult, ProcessError> {
-        let evidence = self.evidence.clone();
-        let cancel = self.cancel.clone();
-        let limits = self.limits;
+        let context = ExecutionContext {
+            backend,
+            evidence: self.evidence.clone(),
+            cancel: self.cancel.clone(),
+            limits: self.limits,
+        };
         let spec = spec.clone();
         super::runtime_handle()
-            .spawn(async move { execute(backend, evidence, cancel, limits, &spec, handler).await })
+            .spawn(async move {
+                execute(context, &spec, handler, background_cancel, live_output).await
+            })
             .await
             .map_err(|error| ProcessError::Backend(format!("process task failed: {error}")))?
     }
@@ -148,12 +330,23 @@ impl RunProcessContext {
         &self,
         grants: &dyn SandboxGrantPort,
         spec: &SpawnSpec,
+        background_cancel: Option<CancelToken>,
+        live_output: Option<Arc<Mutex<LiveOutput>>>,
     ) -> Result<ToolResult, ProcessError> {
         let mut questions = 0;
         loop {
             let granted = grants.granted();
             let backend = self.backend_under(&granted)?;
-            let (code, mut result) = match self.spawn_once(backend, spec, None).await {
+            let (code, mut result) = match self
+                .spawn_once(
+                    backend,
+                    spec,
+                    None,
+                    background_cancel.clone(),
+                    live_output.clone(),
+                )
+                .await
+            {
                 Err(ProcessError::Exit { code, result }) => (code, result),
                 other => return other,
             };
@@ -164,7 +357,10 @@ impl RunProcessContext {
                 Some(_) if !self.backend.can_widen() => denial::Outcome::CannotWiden,
                 Some(request) if questions < MAX_SANDBOX_QUESTIONS => {
                     questions += 1;
-                    match self.ask_until_cancelled(grants, request, spec).await {
+                    match self
+                        .ask_until_cancelled(grants, request, spec, background_cancel.as_ref())
+                        .await
+                    {
                         Some(true) => continue,
                         Some(false) => denial::Outcome::Declined,
                         None => return Err(ProcessError::Cancelled),
@@ -189,6 +385,7 @@ impl RunProcessContext {
         grants: &dyn SandboxGrantPort,
         request: &SandboxGrant,
         spec: &SpawnSpec,
+        background_cancel: Option<&CancelToken>,
     ) -> Option<bool> {
         let command = denial::command_line(spec);
         let question = grants.ask_for(request, &command);
@@ -197,7 +394,9 @@ impl RunProcessContext {
             tokio::select! {
                 answer = &mut question => return Some(answer),
                 _ = tokio::time::sleep(Duration::from_millis(5)) => {
-                    if self.cancel.is_cancelled() {
+                    if self.cancel.is_cancelled()
+                        || background_cancel.is_some_and(CancelToken::is_cancelled)
+                    {
                         return None;
                     }
                 }
@@ -250,14 +449,19 @@ impl RunProcessContext {
     }
 }
 
-pub(crate) async fn execute(
-    backend: Arc<dyn Backend>,
-    evidence: SessionEvidenceStore,
-    cancel: CancelToken,
-    limits: ExecLimits,
+async fn execute(
+    context: ExecutionContext,
     spec: &SpawnSpec,
     handler: Option<(Vec<u8>, EffectScope)>,
+    background_cancel: Option<CancelToken>,
+    live_output: Option<Arc<Mutex<LiveOutput>>>,
 ) -> Result<ToolResult, ProcessError> {
+    let ExecutionContext {
+        backend,
+        evidence,
+        cancel,
+        limits,
+    } = context;
     let mut command = prefixed_command(backend.launch_prefix(), spec)?;
     command
         .stdin(Stdio::piped())
@@ -309,12 +513,14 @@ pub(crate) async fn execute(
         StreamProvenance::Stdout,
         stdout_writer,
         limits.preview_bytes(),
+        live_output.clone(),
     ));
     let mut stderr_task = Some(start_drain(
         stderr,
         StreamProvenance::Stderr,
         stderr_writer,
         limits.preview_bytes(),
+        live_output,
     ));
     if let Some((input, scope)) = &handler {
         let Some(mut stdin) = stdin else {
@@ -342,6 +548,9 @@ pub(crate) async fn execute(
 
     loop {
         if cancel.is_cancelled()
+            || background_cancel
+                .as_ref()
+                .is_some_and(CancelToken::is_cancelled)
             || handler
                 .as_ref()
                 .is_some_and(|(_, scope)| scope.is_cancelled())
@@ -596,12 +805,33 @@ async fn spawn_duplex(
                 StreamProvenance::Stderr,
                 stderr_writer,
                 context.limits.preview_bytes(),
+                None,
             ),
             supervisor,
         }),
         delivery,
         _context: context,
     }))
+}
+
+fn detached_outcome(result: Result<ToolResult, ProcessError>) -> DetachedExecOutcome {
+    match result {
+        Ok(result) => DetachedExecOutcome::Exited { code: 0, result },
+        Err(ProcessError::Exit {
+            code: Some(code),
+            result,
+        }) => DetachedExecOutcome::Exited { code, result },
+        Err(ProcessError::Signal { signal, result }) => {
+            DetachedExecOutcome::Signalled { signal, result }
+        }
+        Err(ProcessError::Cancelled) => DetachedExecOutcome::Cancelled,
+        Err(ProcessError::Timeout { timeout }) => DetachedExecOutcome::TimedOut {
+            timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+        },
+        Err(error) => DetachedExecOutcome::Failed {
+            reason: error.to_string(),
+        },
+    }
 }
 
 fn process_before_spawn(error: ProcessError) -> TransportError {
@@ -903,10 +1133,18 @@ fn start_drain(
     stream: StreamProvenance,
     writer: Box<dyn EvidenceWriter>,
     preview_bytes: usize,
+    live_output: Option<Arc<Mutex<LiveOutput>>>,
 ) -> DrainHandle {
     let (abort, cancelled) = oneshot::channel();
     DrainHandle {
-        task: tokio::spawn(drain(pipe, stream, writer, preview_bytes, cancelled)),
+        task: tokio::spawn(drain(
+            pipe,
+            stream,
+            writer,
+            preview_bytes,
+            live_output,
+            cancelled,
+        )),
         abort: Some(abort),
     }
 }
@@ -916,11 +1154,13 @@ async fn drain(
     stream: StreamProvenance,
     writer: Box<dyn EvidenceWriter>,
     preview_bytes: usize,
+    live_output: Option<Arc<Mutex<LiveOutput>>>,
     mut cancelled: oneshot::Receiver<()>,
 ) -> Result<PendingStream, DrainFailure> {
     let (sender, receiver) = mpsc::channel(PIPE_CHANNEL_CHUNKS);
-    let mut worker =
-        tokio::task::spawn_blocking(move || write_stream(receiver, stream, writer, preview_bytes));
+    let mut worker = tokio::task::spawn_blocking(move || {
+        write_stream(receiver, stream, writer, preview_bytes, live_output)
+    });
     let mut chunk = [0_u8; PIPE_CHUNK_BYTES];
     loop {
         let read = tokio::select! {
@@ -991,6 +1231,7 @@ fn write_stream(
     stream: StreamProvenance,
     mut writer: Box<dyn EvidenceWriter>,
     preview_bytes: usize,
+    live_output: Option<Arc<Mutex<LiveOutput>>>,
 ) -> Result<PendingStream, DrainFailure> {
     let secrets = crate::secrets::from_env();
     let mut masking = secrets.stream();
@@ -1005,6 +1246,17 @@ fn write_stream(
                     return Err(DrainFailure::Process(process));
                 }
                 preview.append(&chunk);
+                if let Some(output) = &live_output {
+                    let mut output = output.lock().map_err(|_| {
+                        DrainFailure::Process(ProcessError::Backend(
+                            "background output lock poisoned".into(),
+                        ))
+                    })?;
+                    match stream {
+                        StreamProvenance::Stdout => output.stdout.append(&chunk, preview_bytes),
+                        StreamProvenance::Stderr => output.stderr.append(&chunk, preview_bytes),
+                    }
+                }
             }
             WriterMessage::Finish => {
                 let tail = masking.push(&[], true);
@@ -1409,5 +1661,44 @@ mod sandbox_question_tests {
             "{outcome:?}"
         );
         assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// Catches: merging sandbox questions with detached execution loses the
+    /// command's cancellation token and leaves an unanswered question running.
+    #[test]
+    fn a_cancelled_detached_exec_does_not_wait_for_a_sandbox_answer() {
+        let rig = rig(Arc::new(Widening), true);
+        let executor = super::super::GuardedExec::new(Arc::new(rig.context));
+        use ego_core::permit::ProcessExecutor as _;
+        let id = DetachedExecId::new();
+        block_on(executor.start_background(id, &rig.spec)).expect("start detached exec");
+        block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while rig.seat.asked.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                executor
+                    .cancel_background(id)
+                    .expect("cancel detached exec");
+                loop {
+                    let status = executor.background_status(id).expect("detached status");
+                    if let Some(outcome) = status.outcome {
+                        assert!(
+                            matches!(outcome, DetachedExecOutcome::Cancelled),
+                            "{outcome:?}"
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("cancel must settle without a sandbox answer");
+        });
+        assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 1);
+        assert!(
+            !rig.cancel.is_cancelled(),
+            "command cancellation must not cancel the run"
+        );
     }
 }

@@ -88,6 +88,8 @@ pub enum Authority {
     /// The run's session-bound evidence store intrinsically admitted one
     /// exact evidence reference.
     SessionEvidence,
+    /// An exact ID owned by the current session admits inspection or cancellation.
+    SessionProcess,
     /// One paid judge attempt decided the exact pending call.
     Judge {
         model: ModelRef,

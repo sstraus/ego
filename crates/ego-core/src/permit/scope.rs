@@ -2,12 +2,14 @@
 //! canonical structure — paths, network endpoints and process specs — never over
 //! rendered shell strings (`ARCHITECTURE.md` §3.4 axis 2).
 
+use super::SessionProcessAction;
 use super::path::CanonPath;
 use super::spawn::SpawnSpec;
 use super::{
     ForeignToolId, ForeignTransportTarget, HttpRequestDigest, InvocationDigest, NetworkTarget,
     SecretEgressAuthority,
 };
+use crate::event::id::DetachedExecId;
 use crate::store::evidence::EvidenceRead;
 
 /// The boundaries a [`Permit`](super::Permit) enforces.
@@ -54,6 +56,7 @@ pub struct Scope {
     pub(super) foreign_transport: Option<ForeignTransportTarget>,
     pub(super) spawns: Vec<SpawnSpec>,
     pub(super) evidence: Option<EvidenceRead>,
+    pub(super) session_process: Option<(DetachedExecId, SessionProcessAction)>,
 }
 
 impl Scope {

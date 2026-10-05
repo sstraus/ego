@@ -23,14 +23,14 @@ use super::foreign::{
     Subject, TransportError, TransportFailure,
 };
 use super::path::CanonPath;
-use super::prepared_call::{Change, Op, OpName, PreparedCall};
+use super::prepared_call::{Change, Op, OpName, PreparedCall, SessionProcessAction};
 use super::roots::{ProfileRoot, RootAccess};
 use super::rule::RuleId;
 use super::scope::Scope;
 use super::spawn::SpawnSpec;
 use crate::config::rule_management::{RememberPlan, RuleManagement};
 use crate::config::{ManagedRuleEffect, Mode, OriginSet, Ruleset, Source, SourcedRule};
-use crate::event::id::ItemId;
+use crate::event::id::{DetachedExecId, ItemId};
 use crate::store::evidence::EvidenceRead;
 
 /// A capability token whose constructor only this module can reach. Its
@@ -72,13 +72,31 @@ pub struct Permit {
 /// denial must name what was denied, not just that something was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermitDenied {
-    Write { path: CanonPath },
-    Read { path: CanonPath },
-    List { path: CanonPath },
-    Search { path: CanonPath },
-    Connect { endpoint: String },
-    Spawn { spec: SpawnSpec },
-    Evidence { request: EvidenceRead },
+    Write {
+        path: CanonPath,
+    },
+    Read {
+        path: CanonPath,
+    },
+    List {
+        path: CanonPath,
+    },
+    Search {
+        path: CanonPath,
+    },
+    Connect {
+        endpoint: String,
+    },
+    Spawn {
+        spec: SpawnSpec,
+    },
+    Evidence {
+        request: EvidenceRead,
+    },
+    SessionProcess {
+        id: DetachedExecId,
+        action: SessionProcessAction,
+    },
 }
 
 impl fmt::Display for PermitDenied {
@@ -113,6 +131,12 @@ impl fmt::Display for PermitDenied {
                     f,
                     "evidence read denied: {} at byte {} is outside the permit's scope",
                     request.reference, request.offset
+                )
+            }
+            PermitDenied::SessionProcess { id, action } => {
+                write!(
+                    f,
+                    "session process {id} {action:?} is outside the permit's scope"
                 )
             }
         }
@@ -218,6 +242,18 @@ impl Permit {
             Err(PermitDenied::Evidence {
                 request: request.clone(),
             })
+        }
+    }
+
+    pub fn allows_session_process(
+        &self,
+        id: DetachedExecId,
+        action: SessionProcessAction,
+    ) -> Result<(), PermitDenied> {
+        if self.scope.session_process == Some((id, action)) {
+            Ok(())
+        } else {
+            Err(PermitDenied::SessionProcess { id, action })
         }
     }
 
@@ -890,6 +926,9 @@ impl fmt::Display for PermissionRequest {
                         request.reference, request.offset
                     )?;
                 }
+                Op::SessionProcess { id, action } => {
+                    write!(f, "\n- session process {id} {action:?}")?;
+                }
                 Op::Opaque {
                     tool,
                     params_digest,
@@ -1310,6 +1349,14 @@ impl PolicyEngine {
                 call,
                 permit,
                 by: Authority::SessionEvidence,
+            }));
+        }
+        if matches!(call.ops(), [Op::SessionProcess { .. }]) {
+            let permit = self.mint(scope_of(&call));
+            return Classification::Settled(Ok(Authorized {
+                call,
+                permit,
+                by: Authority::SessionProcess,
             }));
         }
         if call
@@ -1831,6 +1878,7 @@ fn scope_of(call: &PreparedCall) -> Scope {
             Op::Write { path, .. } => scope.write_paths.push(path.clone()),
             Op::Spawn { spec } => scope.spawns.push(spec.clone()),
             Op::ReadEvidence { request } => scope.evidence = Some(request.clone()),
+            Op::SessionProcess { id, action } => scope.session_process = Some((*id, *action)),
             Op::Opaque {
                 tool,
                 params_digest,

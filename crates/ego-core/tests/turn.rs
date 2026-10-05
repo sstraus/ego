@@ -91,6 +91,145 @@ mod turn {
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 
+    fn detached_started_state(id: ego_core::event::id::DetachedExecId) -> SessionState {
+        SessionState::replay([DomainEvent {
+            env: Envelope {
+                seq: Seq::default().next(),
+                id: EventId::new(),
+                turn: TurnId::new(),
+                item: None,
+                parent: None,
+                ts: Timestamp::from_millis(1_000),
+                producer: Producer::Main,
+            },
+            kind: EventKind::DetachedExecStarted { id },
+        }])
+    }
+
+    #[test]
+    fn resumed_unsettled_detached_exec_is_interrupted_before_model_generation() {
+        let id = ego_core::event::id::DetachedExecId::new();
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        let (_, _, state) = run(&fx, detached_started_state(id), "continue");
+        let snapshot = state
+            .detached_execs
+            .get(&id)
+            .and_then(Option::as_ref)
+            .expect("resume settled the lost process");
+        assert!(matches!(
+            snapshot.outcome,
+            Some(ego_core::permit::DetachedExecOutcome::Interrupted)
+        ));
+        let call = &fx.generator.calls()[0];
+        assert!(format!("{:?}", call.messages).contains("interrupted"));
+    }
+
+    #[test]
+    fn completed_detached_exec_reaches_model_at_next_generation_boundary() {
+        use ego_core::permit::{DetachedExecOutcome, DetachedExecSnapshot};
+        struct SettledProcess {
+            id: ego_core::event::id::DetachedExecId,
+        }
+        impl ProcessExecutor for SettledProcess {
+            fn execute<'a>(
+                &'a self,
+                _spec: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                panic!("no foreground process was requested")
+            }
+            fn background_status(
+                &self,
+                id: ego_core::event::id::DetachedExecId,
+            ) -> Result<DetachedExecSnapshot, ProcessError> {
+                assert_eq!(id, self.id);
+                Ok(DetachedExecSnapshot {
+                    id,
+                    outcome: Some(DetachedExecOutcome::Exited {
+                        code: 7,
+                        result: ToolResult::builtin("evidence"),
+                    }),
+                    stdout_tail: b"finished-tail".to_vec(),
+                    stderr_tail: Vec::new(),
+                    stdout_omitted: 0,
+                    stderr_omitted: 0,
+                })
+            }
+        }
+        let id = ego_core::event::id::DetachedExecId::new();
+        let mut fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        fx.with_process(Arc::new(SettledProcess { id }));
+        let (_, _, state) = run(&fx, detached_started_state(id), "continue");
+        assert!(matches!(state.detached_execs.get(&id), Some(Some(_))));
+        let call = &fx.generator.calls()[0];
+        let text = format!("{:?}", call.messages);
+        assert!(text.contains("exited code 7"), "{text}");
+        assert!(text.contains("finished-tail"), "{text}");
+    }
+
+    #[test]
+    fn detached_launch_is_durable_before_the_tool_returns_its_handle() {
+        use ego_core::event::id::DetachedExecId;
+        use ego_core::permit::DetachedExecSnapshot;
+        struct RunningProcess;
+        impl ProcessExecutor for RunningProcess {
+            fn execute<'a>(
+                &'a self,
+                _spec: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                panic!("a detached launch must not run through foreground execution")
+            }
+            fn start_background<'a>(
+                &'a self,
+                _id: DetachedExecId,
+                _spec: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<(), ProcessError>> {
+                Box::pin(futures::future::ready(Ok(())))
+            }
+            fn background_status(
+                &self,
+                id: DetachedExecId,
+            ) -> Result<DetachedExecSnapshot, ProcessError> {
+                Ok(DetachedExecSnapshot {
+                    id,
+                    outcome: None,
+                    stdout_tail: Vec::new(),
+                    stderr_tail: Vec::new(),
+                    stdout_omitted: 0,
+                    stderr_omitted: 0,
+                })
+            }
+        }
+        let mut fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "detached-1".into(),
+                    name: "exec".into(),
+                    args: r#"{"argv":["/bin/echo","hello"],"background":true}"#.into(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_exec_tool();
+        fx.set_mode(Mode::Yolo);
+        fx.with_process(Arc::new(RunningProcess));
+        let (_, _, state) = run(&fx, SessionState::default(), "start a long command");
+        assert_eq!(state.unsettled_detached_execs().len(), 1);
+        let events = fx.store.events();
+        let start = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::DetachedExecStarted { .. }))
+            .expect("launch was recorded");
+        let answer = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::ToolCallCompleted { .. }))
+            .expect("handle was returned");
+        assert!(
+            start < answer,
+            "handle was returned before durable launch admission"
+        );
+    }
+
     struct TurnLoop;
 
     impl TurnLoop {
@@ -887,6 +1026,8 @@ mod turn {
     #[derive(Debug, Deserialize, JsonSchema)]
     struct ExecParams {
         argv: Vec<String>,
+        #[serde(default)]
+        background: bool,
     }
 
     struct FakeExecTool;
@@ -914,10 +1055,12 @@ mod turn {
                 EnvPolicy::Inherited,
             )
             .map_err(|err| ToolError::InvalidParams(err.to_string()))?;
-            Ok(PreparedCall::new(
-                self.name().to_string(),
-                Op::Spawn { spec },
-            ))
+            let call = PreparedCall::new(self.name().to_string(), Op::Spawn { spec });
+            Ok(if params.background {
+                call.with_background()
+            } else {
+                call
+            })
         }
 
         fn execute<'a, 'io>(
@@ -929,10 +1072,18 @@ mod turn {
             'io: 'a,
         {
             Box::pin(async move {
+                let background = call.background();
                 let Some(Op::Spawn { spec }) = call.into_parts().1.into_iter().next() else {
                     return Err(ToolError::InvalidParams("expected one Spawn op".into()));
                 };
-                io.exec(&spec).await.map_err(ToolError::from)
+                if let Some(id) = background {
+                    io.exec_background(id, &spec)
+                        .await
+                        .map_err(ToolError::from)?;
+                    Ok(ToolResult::builtin(format!("background exec id: {id}")))
+                } else {
+                    io.exec(&spec).await.map_err(ToolError::from)
+                }
             })
         }
     }
