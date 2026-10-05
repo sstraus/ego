@@ -1632,6 +1632,200 @@ mod turn {
     /// The fixture quote as the run resolved it: operator-supplied, which is
     /// the only source `models.toml` has and the first of the three §5
     /// consults.
+    struct RoutingJudge {
+        status: ego_core::turn::RouterStatus,
+        calls: AtomicUsize,
+    }
+    impl ego_core::turn::TurnRouter for RoutingJudge {
+        fn route<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, ego_core::turn::RouterOutcome> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(futures::future::ready(ego_core::turn::RouterOutcome {
+                status: self.status,
+                probability: Some(serde_json::from_value(json!(0.9)).unwrap()),
+                cost_usd: Some("0.000012642".into()),
+            }))
+        }
+    }
+
+    // Catches: ignored strong choice, fixed fallback changed, per-generation rejudging,
+    // model choice leaking across turns, or missing durable cost/outcome metadata.
+    #[test]
+    fn router_selects_once_per_turn_and_keeps_fixed_fallback_for_non_strong_outcomes() {
+        use ego_core::turn::RouterStatus;
+        for status in [
+            RouterStatus::Strong,
+            RouterStatus::Cheap,
+            RouterStatus::Grey,
+            RouterStatus::Off,
+            RouterStatus::Uncalibrated,
+            RouterStatus::Timeout,
+            RouterStatus::Error,
+        ] {
+            let script = |call_id: &str| {
+                vec![
+                    vec![
+                        AiEvent::ToolCall {
+                            call_id: call_id.into(),
+                            name: "read".into(),
+                            args: r#"{"path":"/ws/notes.md"}"#.into(),
+                        },
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![
+                        AiEvent::TextDelta {
+                            text: "answer".into(),
+                        },
+                        AiEvent::Stop(StopReason::Stop),
+                    ],
+                ]
+            };
+            let fx = Fixture::new([script("read-1"), script("read-2")].concat()).with_read_tool();
+            fx.fs.file("/ws/notes.md", "notes");
+            let router = Arc::new(RoutingJudge {
+                status,
+                calls: AtomicUsize::new(0),
+            });
+            let mut gate = fx.gate.borrow_mut();
+            let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+            runtime.config.fallbacks = vec![ModelRef("openai/frontier".into())];
+            let fixed = config().model;
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut loop_ = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                runtime,
+                tools,
+            )
+            .with_router(router.clone());
+            for n in 1..=2 {
+                assert!(
+                    block_on(loop_.run("inspect notes")).unwrap().ok,
+                    "{status:?}, turn {n}"
+                );
+                assert_eq!(router.calls.load(Ordering::SeqCst), n);
+            }
+            let expected = if status == RouterStatus::Strong {
+                "openai/frontier"
+            } else {
+                fixed.as_str()
+            };
+            assert_eq!(
+                fx.generator
+                    .calls()
+                    .iter()
+                    .map(|r| r.model.as_str())
+                    .collect::<Vec<_>>(),
+                vec![expected; 4],
+                "{status:?}"
+            );
+            let decisions: Vec<_> = fx
+                .store
+                .events()
+                .into_iter()
+                .filter_map(|event| match event.kind {
+                    EventKind::RouterDecision { model, outcome } => Some((model, outcome)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(decisions.len(), 2);
+            for (model, outcome) in decisions {
+                assert_eq!(
+                    model,
+                    (status == RouterStatus::Strong).then(|| ModelRef("openai/frontier".into()))
+                );
+                assert_eq!(outcome.status, status);
+                assert_eq!(outcome.cost_usd.as_deref(), Some("0.000012642"));
+                let encoded =
+                    serde_json::to_string(&EventKind::RouterDecision { model, outcome }).unwrap();
+                assert!(!encoded.contains("inspect notes"));
+                assert!(serde_json::from_str::<EventKind>(&encoded).is_ok());
+            }
+        }
+    }
+
+    // Catches: a routed strong candidate becoming its own fixed fallback after refusal,
+    // or judging a single-model turn that has no alternative tier to choose.
+    #[test]
+    fn router_safe_strong_refusal_returns_to_fixed_model_and_single_tier_skips_judge() {
+        use ego_core::{generator::attempt::DeliveryCertainty, turn::RouterStatus};
+        for has_tiers in [true, false] {
+            let mut scripts = Vec::new();
+            if has_tiers {
+                scripts.push(vec![
+                    AiEvent::Error {
+                        message: "unavailable".into(),
+                        kind: ErrorKind::Refused,
+                    },
+                    AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                    AiEvent::Stop(StopReason::Error),
+                ]);
+            }
+            scripts.push(vec![
+                AiEvent::TextDelta {
+                    text: "fixed answer".into(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ]);
+            let fx = Fixture::new(scripts);
+            let router = Arc::new(RoutingJudge {
+                status: RouterStatus::Strong,
+                calls: AtomicUsize::new(0),
+            });
+            let mut gate = fx.gate.borrow_mut();
+            let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+            if has_tiers {
+                runtime.config.fallbacks = vec![ModelRef("openai/frontier".into())];
+            }
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut loop_ = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                runtime,
+                tools,
+            )
+            .with_router(router.clone());
+            assert!(block_on(loop_.run("reason about concurrency")).unwrap().ok);
+            assert_eq!(router.calls.load(Ordering::SeqCst), usize::from(has_tiers));
+            let calls = fx.generator.calls();
+            assert_eq!(calls.last().unwrap().model, config().model);
+            if has_tiers {
+                assert_eq!(calls[0].model, "openai/frontier");
+            }
+        }
+    }
+
     fn rates() -> ResolvedRates {
         ResolvedRates {
             quote: quote(),

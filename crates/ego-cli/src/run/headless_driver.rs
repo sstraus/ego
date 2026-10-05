@@ -125,6 +125,7 @@ pub(super) async fn drive_headless_turn(
     let execution_capabilities = observation.capabilities();
     let http =
         Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
+    let router = super::router::compose(Arc::clone(&http), cwd);
     let journal = SharedJournal::new(Journal::new(
         active.id(),
         active.store(),
@@ -237,6 +238,7 @@ pub(super) async fn drive_headless_turn(
     })?
     .with_skill_invocation_port(skill_owner.clone())
     .with_pause_token(pause.clone());
+    let loop_ = super::router::attach(loop_, router);
     let loop_ = match recovered_policy.as_ref() {
         Some(policy) => loop_
             .with_hook_policy(Arc::clone(policy))

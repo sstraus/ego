@@ -1,8 +1,8 @@
 //! Validated probabilities and credential references.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Finite probability validated when deserialized.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Probability(pub(super) f64);
 impl Eq for Probability {}
 impl Probability {
