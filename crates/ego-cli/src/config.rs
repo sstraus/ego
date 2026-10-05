@@ -810,11 +810,24 @@ pub(crate) fn metadata_ceilings(
 
 impl FrozenRunConfig {
     pub(crate) fn capture(workspace: &Path, args: &Args, trust: Trust) -> Result<Self, UsageError> {
-        Ok(Self {
-            layers: base_layers(workspace, trust)?,
+        Ok(Self::from_layers(
+            base_layers(workspace, trust)?,
+            args,
+            trust,
+        ))
+    }
+
+    /// Pin an already captured layer authority for host-facing preparation.
+    pub(crate) fn from_layers(
+        layers: Vec<Sourced<ConfigLayer>>,
+        args: &Args,
+        trust: Trust,
+    ) -> Self {
+        Self {
+            layers,
             profile: profile(args),
             trust,
-        })
+        }
     }
 
     /// The posture this capture pinned.

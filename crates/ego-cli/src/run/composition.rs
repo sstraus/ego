@@ -348,6 +348,20 @@ impl FrozenRuleResolver {
 }
 
 impl FrozenPolicyResolver for FrozenRuleResolver {
+    fn max_mode(&self) -> Result<Option<Mode>, PolicyControlError> {
+        resolve_selected(
+            &self.layers,
+            self.trust,
+            self.selected_profile
+                .as_ref()
+                .map(|(name, source)| (name.as_str(), *source)),
+        )
+        .map(|effective| effective.max_mode)
+        .map_err(|error| PolicyControlError::Resolution {
+            diagnostic: error.to_string(),
+        })
+    }
+
     fn resolve_rule_transaction(
         &self,
         before: &RuleSnapshot,

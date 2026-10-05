@@ -1457,7 +1457,8 @@ candidate retention for every editor result.
 
 System policy can also set `max_mode="edits"`, using the order
 plan < default < edits < auto < yolo. A selected mode above the maximum is
-refused before run effects. `max_mode` is system-only and does not change
+refused before run effects, including live ACP and REPL selections. A refused
+selection preserves the current and pending mode. `max_mode` is system-only and does not change
 the default mode; a plan maximum must be paired with `mode="plan"`.
 A system `sandbox` value is a confinement floor: lower layers and selected
 profiles may tighten it but cannot weaken it.
