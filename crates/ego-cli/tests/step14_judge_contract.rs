@@ -119,20 +119,9 @@ fn marker_plan(marker: &Path, judge: Reply, final_answer: Option<Reply>) -> Plan
     }
 }
 
-// These contracts exercise the current judge, selected by the explicit Jev-off fallback.
-fn current_judge_config(ego: &Ego, permissions: &str) -> std::path::PathBuf {
-    let root = serde_json::to_string(ego.workspace_path().to_str().unwrap()).unwrap();
-    ego.home_file(
-        "config.toml",
-        &format!(
-            "{permissions}\n[jev]\n[[jev.roots]]\npath = {root}\ndestructive = {{ on = false }}\n"
-        ),
-    )
-}
-
 fn auto_run(stub: &Stub) -> Ego {
     let ego = Ego::against(stub);
-    current_judge_config(&ego, "[permissions]\njudge = \"ollama/qwen3\"\n");
+    ego.home_file("config.toml", "[permissions]\njudge = \"ollama/qwen3\"\n");
     ego.args([
         "--model",
         MODEL,
@@ -172,7 +161,10 @@ fn run_without_durable_analysis(ego: Ego) -> support::Finished {
 
 fn hosted_auto_run(stub: &Stub) -> Ego {
     let ego = Ego::against(stub);
-    current_judge_config(&ego, "[permissions]\njudge = \"anthropic/claude-test-5\"\n");
+    ego.home_file(
+        "config.toml",
+        "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
+    );
     ego.home_file("models.toml", ANTHROPIC_FACTS);
     ego.env("ANTHROPIC_API_KEY", "sk-test").args([
         "--model",
@@ -267,7 +259,7 @@ fn auto_allow_uses_one_toolless_judge_and_then_executes_the_exact_call() {
         Some(Reply::Sse(text("done"))),
     ));
     let ego = auto_run(&stub);
-    let config = current_judge_config(&ego, "[permissions]\njudge = \"ollama/qwen3\"\n");
+    let config = ego.home_file("config.toml", "[permissions]\njudge = \"ollama/qwen3\"\n");
     let finished = ego.run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
@@ -343,8 +335,8 @@ fn two_process_sessions_reuse_one_paid_analysis_and_mint_fresh_audit_authority()
             ])
     };
     let first = build();
-    current_judge_config(
-        &first,
+    first.home_file(
+        "config.toml",
         "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
     );
     first.home_file("models.toml", ANTHROPIC_FACTS);
@@ -402,7 +394,10 @@ fn two_process_sessions_reuse_one_paid_analysis_and_mint_fresh_audit_authority()
 fn auto_uses_a_separately_resolved_judge_model_without_inheriting_main_tools() {
     let stub = Stub::start(plan(judge_response("deny", "judge model"), None));
     let ego = Ego::against(&stub);
-    let config = current_judge_config(&ego, "[permissions]\njudge = \"anthropic/claude-test-5\"\n");
+    let config = ego.home_file(
+        "config.toml",
+        "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
+    );
     ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
         .env("ANTHROPIC_API_KEY", "sk-test")
@@ -455,7 +450,10 @@ fn auto_uses_a_separately_resolved_judge_model_without_inheriting_main_tools() {
 fn incompatible_judge_capabilities_refuse_before_generation_or_session_creation() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    let config = current_judge_config(&ego, "[permissions]\njudge = \"anthropic/claude-test-5\"\n");
+    let config = ego.home_file(
+        "config.toml",
+        "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
+    );
     let incompatible_facts = ANTHROPIC_FACTS.replace(
         "reasoning_efforts = \"any\"\ndefault_reasoning_effort = \"off\"",
         "reasoning_efforts = \"unknown\"",
@@ -511,8 +509,8 @@ fn incompatible_judge_capabilities_refuse_before_generation_or_session_creation(
 fn inexpressible_judge_wire_refuses_before_generation_or_session_creation() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    let config = current_judge_config(
-        &ego,
+    let config = ego.home_file(
+        "config.toml",
         &format!("[permissions]\njudge = \"{XAI_JUDGE_MODEL}\"\n"),
     );
     ego.home_file("models.toml", XAI_FACTS);
@@ -595,7 +593,7 @@ fn auto_deny_records_judge_authority_and_never_executes_the_call() {
         None,
     ));
     let ego = auto_run(&stub);
-    let config = current_judge_config(&ego, "[permissions]\njudge = \"ollama/qwen3\"\n");
+    let config = ego.home_file("config.toml", "[permissions]\njudge = \"ollama/qwen3\"\n");
     let finished = ego.run();
 
     assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
@@ -630,7 +628,7 @@ fn auto_escalate_is_headless_permission_exit_without_execution_or_retry() {
         None,
     ));
     let ego = auto_run(&stub);
-    let config = current_judge_config(&ego, "[permissions]\njudge = \"ollama/qwen3\"\n");
+    let config = ego.home_file("config.toml", "[permissions]\njudge = \"ollama/qwen3\"\n");
     let finished = ego.run();
 
     assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
@@ -695,7 +693,7 @@ fn a_judge_tool_call_is_uncertainty_not_permission() {
 fn judge_provider_failure_escalates_once_without_retrying_or_executing() {
     let stub = Stub::start(plan(Reply::Status(500), None));
     let ego = auto_run(&stub);
-    let config = current_judge_config(&ego, "[permissions]\njudge = \"ollama/qwen3\"\n");
+    let config = ego.home_file("config.toml", "[permissions]\njudge = \"ollama/qwen3\"\n");
     let finished = run_without_durable_analysis(ego);
 
     assert_eq!(
@@ -777,7 +775,7 @@ fn judge_reason_is_utf8_safe_and_bounded_in_the_durable_decision() {
     let reason = "€".repeat(500);
     let stub = Stub::start(plan(judge_response("deny", &reason), None));
     let ego = auto_run(&stub);
-    let config = current_judge_config(&ego, "[permissions]\njudge = \"ollama/qwen3\"\n");
+    let config = ego.home_file("config.toml", "[permissions]\njudge = \"ollama/qwen3\"\n");
     let finished = ego.run();
 
     assert_eq!(
