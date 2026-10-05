@@ -186,9 +186,6 @@ impl ObservationPump {
             .ok_or_else(|| io::Error::other("invalid TUIC session list"))?;
         let mut actions = Vec::new();
         for receipt in receipts {
-            if self.cursor.completed(&receipt.name) {
-                self.cursor.settle_spawn(&receipt.session_id);
-            }
             if self.cursor.spawn_settled(&receipt.session_id) {
                 continue;
             }
@@ -312,10 +309,13 @@ impl ObservationPump {
                 .max_by_key(|r| r.name.len())
                 .map(|r| r.name.clone())
                 .or(tracked_peer(&self.children, &path)?);
-            if text.trim().starts_with("RESULT")
-                && let Some(peer) = peer.as_deref()
-            {
-                self.cursor.complete_child(peer);
+            if text.trim().starts_with("RESULT") {
+                // A RESULT settles only a spawn it postdates; a reused name keeps older files.
+                for receipt in self.supervised.iter().filter(|r| {
+                    peer.as_deref() == Some(r.name.as_str()) && millis(modified) > r.spawned_at_ms
+                }) {
+                    self.cursor.settle_spawn(&receipt.session_id);
+                }
             }
             if self.cursor.files.get(&path) == Some(&revision) {
                 continue;

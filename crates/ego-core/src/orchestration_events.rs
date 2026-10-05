@@ -86,15 +86,6 @@ impl Cursor {
         self.seen.insert(format!("spawn-supervised-{session_id}"))
     }
 
-    /// Rebind a result file to its durable native spawn after observer restart.
-    pub fn complete_child(&mut self, name: &str) {
-        self.completed.insert(name.to_owned());
-    }
-
-    pub fn completed(&self, name: &str) -> bool {
-        self.completed.contains(name)
-    }
-
     pub fn spawn_settled(&self, session_id: &str) -> bool {
         self.seen
             .contains(&format!("spawn-supervised-{session_id}"))
