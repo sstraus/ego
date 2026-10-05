@@ -246,6 +246,8 @@ fn run_deadline_during_main_preflight_cleans_the_credential_process_tree() {
 #[test]
 fn judge_preflight_uses_the_same_deadline_and_cleans_its_credential_tree() {
     let body = r#"
+# Read the refresh request before replying, so exit cannot race ego writing stdin.
+cat >/dev/null
 count=0
 if [ -f "$COUNT" ]; then count=$(cat "$COUNT"); fi
 count=$((count + 1))
@@ -283,7 +285,7 @@ printf '%s\n' '{"access":"judge-refresh","refresh":"judge-refresh","expires":0}'
     // This process has only two sequential credential preflights. Bound its
     // fixture workers instead of spending the five-second deadline starting
     // one worker per host core in both Tokio runtimes under parallel load.
-    let running = fixture
+    let mut running = fixture
         .ego()
         .env("TOKIO_WORKER_THREADS", "2")
         .args([
@@ -296,7 +298,28 @@ printf '%s\n' '{"access":"judge-refresh","refresh":"judge-refresh","expires":0}'
             "Ask",
         ])
         .spawn();
-    wait_for_marker(&fixture.descendant_pid);
+    let observation_deadline = Instant::now() + OBSERVATION_WINDOW;
+    while !fixture.descendant_pid.exists() {
+        if running
+            .child
+            .try_wait()
+            .expect("observe ego process")
+            .is_some()
+        {
+            let finished = running.finish();
+            panic!(
+                "ego exited before judge credential startup: {:?}; stderr: {}; invocations: {:?}",
+                finished.code,
+                finished.stderr,
+                fs::read_to_string(&fixture.count)
+            );
+        }
+        assert!(
+            Instant::now() < observation_deadline,
+            "judge credential startup exceeded bounded observation"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let finished = running.finish();
 
     assert_eq!(finished.code, Some(124), "stderr: {}", finished.stderr);

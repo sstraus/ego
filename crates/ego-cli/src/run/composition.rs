@@ -2,6 +2,27 @@
 
 use super::*;
 
+pub(super) fn with_destructive_judge<'session: 'turn, 'turn>(
+    loop_: TurnLoop<'session, 'turn>,
+    http: Arc<dyn ego_ai::http::Http>,
+) -> TurnLoop<'session, 'turn> {
+    let config = crate::config::jev(crate::config::ego_home().as_deref());
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let client = match (config, home) {
+        (Ok(config), Some(home)) => Ok(ego_ai::jev::ConfiguredDecisions::new(
+            config,
+            home,
+            Duration::from_secs(1),
+        )),
+        _ => Err(ego_ai::jev::DecisionError::InvalidConfiguration),
+    };
+    loop_.with_destructive_judge(Arc::new(ego_ai::jev::JevDestructiveJudge::new(
+        client, http,
+    )))
+}
+
 pub(super) fn with_permission_analysis<'session: 'turn, 'turn>(
     loop_: TurnLoop<'session, 'turn>,
     trust: Trust,
@@ -196,12 +217,14 @@ pub(super) fn instructions(
 pub(super) fn tools(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    profile: Option<&str>,
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
     tools_with_mode(
         selected,
         skills,
+        profile,
         history,
         environment,
         ego_core::orchestrator::Mode::Observe,
@@ -223,6 +246,7 @@ pub(super) fn orchestration_mode(effective: &Effective) -> ego_core::orchestrato
 pub(super) fn tools_with_mode(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    profile: Option<&str>,
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
     orchestration: ego_core::orchestrator::Mode,
@@ -231,6 +255,11 @@ pub(super) fn tools_with_mode(
         .into_iter()
         .map(RegisteredTool::Effect)
         .collect();
+    if profile == Some("coordinator") {
+        all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(
+            ego_tools::tools::MemoryLookup,
+        ))));
+    }
     all.extend(
         ego_tools::orchestrator::tools_from_environment_with_mode(orchestration)
             .into_iter()
@@ -952,6 +981,11 @@ pub(super) fn prepared_materials(
         skill_capture
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
+        settings
+            .effective
+            .active_profile
+            .as_ref()
+            .map(|profile| profile.name.as_str()),
         Some(history),
         settings
             .effective

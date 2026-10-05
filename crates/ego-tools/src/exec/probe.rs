@@ -35,15 +35,8 @@ pub(crate) async fn landlock(
     log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
     validate_probe_scope(policy)?;
-    let scratch = tempfile::tempdir().map_err(|error| {
-        ProcessError::Backend(format!("cannot create process scratch: {error}"))
-    })?;
-    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).map_err(|error| {
-        ProcessError::Backend(format!("cannot secure process scratch: {error}"))
-    })?;
-    let scratch_path = CanonPath::new(fs::canonicalize(scratch.path()).map_err(|error| {
-        ProcessError::Backend(format!("cannot resolve process scratch: {error}"))
-    })?);
+    let scratch = private_scratch()?;
+    let scratch_path = canonical_scratch(&scratch)?;
     let mut runtime_roots = derived_runtime_roots()?;
     runtime_roots.extend(policy.exec_paths().iter().cloned());
     let backend = Arc::new(LandlockBackend::prepare(
@@ -51,31 +44,15 @@ pub(crate) async fn landlock(
         &scratch_path,
         &runtime_roots,
     )?);
-    let cache_key = cache_key_async(policy.clone(), backend.clone(), runtime_roots.clone()).await?;
-    let cached = cached_capabilities(cache_key);
-    let measurement = cached
-        .get_or_try_init(|| async {
-            let evidence = probe_evidence()?;
-            let capabilities = measure(
-                backend.clone(),
-                policy,
-                &scratch_path,
-                &runtime_roots,
-                evidence.clone(),
-                cancel.clone(),
-                limits,
-            )
-            .await;
-            if cancel.is_cancelled() {
-                return Err(ProcessError::Cancelled);
-            }
-            clear_scratch(scratch.path())?;
-            Ok(Measurement {
-                capabilities,
-                records: evidence.log.snapshot(),
-            })
-        })
-        .await?;
+    let measurement = measure_cached(
+        backend.clone(),
+        policy,
+        &scratch_path,
+        &runtime_roots,
+        cancel,
+        limits,
+    )
+    .await?;
     log.extend(&measurement.records);
     let capabilities = measurement.capabilities;
     let selected = Arc::new(MeasuredBackend::new(backend, capabilities, Some(scratch))?);
@@ -103,23 +80,93 @@ pub(crate) async fn seatbelt(
         &runtime_roots,
     )?);
     backend.prerequisite(policy)?;
-    let maximum = backend.maximum_demonstrable_caps();
-    let cache_key = cache_key_async(policy.clone(), backend.clone(), runtime_roots.clone()).await?;
+    let measurement = measure_cached(
+        backend.clone(),
+        policy,
+        &scratch_path,
+        &runtime_roots,
+        cancel,
+        limits,
+    )
+    .await?;
+    log.extend(&measurement.records);
+    let capabilities = measurement.capabilities;
+    let selected = Arc::new(MeasuredBackend::new(backend, capabilities, Some(scratch))?);
+    Ok((selected, runtime_roots))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn bwrap(
+    policy: &RunConfinement,
+    cancel: CancelToken,
+    limits: ExecLimits,
+    log: &ProbeLog,
+) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
+    validate_probe_scope(policy)?;
+    let scratch = private_scratch()?;
+    let scratch_path = canonical_scratch(&scratch)?;
+    let mut runtime_roots = derived_runtime_roots()?;
+    runtime_roots.extend(policy.exec_paths().iter().cloned());
+    if policy.offline() && policy.level() != Confinement::Off {
+        // The same controlled network child is used by the shipped binary and
+        // libtest hosts. Bind only its executable, never its parent directory.
+        let executable = std::env::current_exe()
+            .and_then(fs::canonicalize)
+            .map_err(|error| {
+                ProcessError::Backend(format!("cannot locate network probe: {error}"))
+            })?;
+        runtime_roots.push(CanonPath::new(executable));
+    }
+    let backend = Arc::new(super::bwrap::BwrapBackend::prepare(
+        policy,
+        &scratch_path,
+        &runtime_roots,
+    )?);
+    let measurement = measure_cached(
+        backend.clone(),
+        policy,
+        &scratch_path,
+        &runtime_roots,
+        cancel,
+        limits,
+    )
+    .await?;
+    log.extend(&measurement.records);
+    let selected = Arc::new(MeasuredBackend::new(
+        backend,
+        measurement.capabilities,
+        Some(scratch),
+    )?);
+    Ok((selected, runtime_roots))
+}
+
+async fn measure_cached(
+    backend: Arc<dyn Backend>,
+    policy: &RunConfinement,
+    scratch: &CanonPath,
+    runtime_roots: &[CanonPath],
+    cancel: CancelToken,
+    limits: ExecLimits,
+) -> Result<Measurement, ProcessError> {
+    let cache_key =
+        cache_key_async(policy.clone(), backend.clone(), runtime_roots.to_vec()).await?;
     let cached = cached_capabilities(cache_key);
-    let measurement = cached
+    cached
         .get_or_try_init(|| async {
             let evidence = probe_evidence()?;
             let mut capabilities = measure(
                 backend.clone(),
                 policy,
-                &scratch_path,
-                &runtime_roots,
+                scratch,
+                runtime_roots,
                 evidence.clone(),
                 cancel.clone(),
                 limits,
             )
             .await;
-            if maximum.contains(ExecCaps::NO_IP_NETWORK)
+            if backend
+                .maximum_demonstrable_caps()
+                .contains(ExecCaps::NO_IP_NETWORK)
                 && probe_offline(
                     backend.clone(),
                     policy.workspace(),
@@ -134,17 +181,14 @@ pub(crate) async fn seatbelt(
             if cancel.is_cancelled() {
                 return Err(ProcessError::Cancelled);
             }
-            clear_scratch(scratch.path())?;
+            clear_scratch(scratch.as_path())?;
             Ok(Measurement {
                 capabilities,
                 records: evidence.log.snapshot(),
             })
         })
-        .await?;
-    log.extend(&measurement.records);
-    let capabilities = measurement.capabilities;
-    let selected = Arc::new(MeasuredBackend::new(backend, capabilities, Some(scratch))?);
-    Ok((selected, runtime_roots))
+        .await
+        .cloned()
 }
 
 /// The evidence one measurement writes into: the probe children's own output
@@ -179,7 +223,6 @@ struct ProbeSuite<'a> {
     root: &'a std::path::Path,
 }
 
-#[cfg(target_os = "macos")]
 impl<'a> ProbeSuite<'a> {
     /// The unconfined half of a pair. A refusal under the backend proves
     /// nothing until the same command has been seen to work without it.
@@ -320,7 +363,6 @@ fn cache_key_with_hash(
     })
 }
 
-#[cfg(target_os = "macos")]
 fn private_scratch() -> Result<tempfile::TempDir, ProcessError> {
     let scratch = tempfile::tempdir().map_err(|error| {
         ProcessError::Backend(format!("cannot create process scratch: {error}"))
@@ -354,14 +396,12 @@ fn clear_scratch(path: &std::path::Path) -> Result<(), ProcessError> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 fn canonical_scratch(scratch: &tempfile::TempDir) -> Result<CanonPath, ProcessError> {
     fs::canonicalize(scratch.path())
         .map(CanonPath::new)
         .map_err(|error| ProcessError::Backend(format!("cannot resolve process scratch: {error}")))
 }
 
-#[cfg(target_os = "macos")]
 async fn probe_offline(
     backend: Arc<dyn Backend>,
     cwd: &CanonPath,
@@ -376,6 +416,18 @@ async fn probe_offline(
         cwd,
         root: cwd.as_path(),
     };
+    if !probe(
+        backend.clone(),
+        evidence.clone(),
+        cancel.clone(),
+        limits,
+        &network_suite("offline.launch-control"),
+        vec!["/usr/bin/true".into()],
+    )
+    .await
+    {
+        return false;
+    }
     let Some(nonloopback) = local_nonloopback() else {
         return false;
     };
@@ -434,7 +486,6 @@ async fn probe_offline(
         .await
 }
 
-#[cfg(target_os = "macos")]
 fn local_nonloopback() -> Option<std::net::IpAddr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("192.0.2.1:9").ok()?;
@@ -442,7 +493,6 @@ fn local_nonloopback() -> Option<std::net::IpAddr> {
     (!address.is_loopback()).then_some(address)
 }
 
-#[cfg(target_os = "macos")]
 async fn paired_tcp(
     listener: &std::net::TcpListener,
     backend: Arc<dyn Backend>,
@@ -513,7 +563,7 @@ async fn paired_tcp(
     if received != sentinel.as_bytes() {
         return receiver_failure("sentinel mismatch".into());
     }
-    if probe(
+    if !probe_network_denied(
         backend,
         evidence,
         cancel,
@@ -541,7 +591,6 @@ async fn paired_tcp(
     }
 }
 
-#[cfg(target_os = "macos")]
 async fn paired_udp(
     socket: &std::net::UdpSocket,
     backend: Arc<dyn Backend>,
@@ -594,7 +643,10 @@ async fn paired_udp(
     if received[..received_len] != sentinel.as_bytes()[..] {
         return receiver_failure("sentinel mismatch".into());
     }
-    if probe(
+    // UDP send success only means the local kernel accepted the datagram.
+    // A network namespace may discard it without reporting an error. The
+    // paired host receiver is the authority for delivery, not the send result.
+    match probe_result(
         backend,
         evidence,
         cancel,
@@ -604,7 +656,9 @@ async fn paired_udp(
     )
     .await
     {
-        return false;
+        Ok(()) => {}
+        Err(reason) if reason == "exit 125" || reason == "exit 101" => {}
+        Err(_) => return false,
     }
     socket
         .set_read_timeout(Some(Duration::from_millis(100)))
@@ -617,12 +671,10 @@ async fn paired_udp(
         })
 }
 
-#[cfg(target_os = "macos")]
 fn sentinel(endpoint: std::net::SocketAddr) -> String {
     format!("ego-network-probe:{}:{endpoint}", std::process::id())
 }
 
-#[cfg(target_os = "macos")]
 /// The one envelope the control child is ever spawned with.
 ///
 /// It is shaped so that *both* executables that can host this library dispatch
@@ -651,7 +703,6 @@ fn network_probe_argv(
     ]
 }
 
-#[cfg(target_os = "macos")]
 const NETWORK_PROBE_TOKEN: &str = "__ego_internal_network_probe_v1";
 
 /// Dispatch the fixed controlled network probe before the ordinary CLI starts.
@@ -661,7 +712,6 @@ const NETWORK_PROBE_TOKEN: &str = "__ego_internal_network_probe_v1";
 /// Reporting the outcome rather than an exit code is what lets the libtest
 /// host run the very same dispatcher and assert on it: choosing a process exit
 /// status is the binary's job, not this library's.
-#[cfg(target_os = "macos")]
 pub fn dispatch_network_probe<I>(arguments: I) -> Option<bool>
 where
     I: IntoIterator<Item = OsString>,
@@ -1085,6 +1135,31 @@ async fn probe(
     suite: &ProbeSuite<'_>,
     argv: Vec<OsString>,
 ) -> bool {
+    probe_result(backend, evidence, cancel, limits, suite, argv)
+        .await
+        .is_ok()
+}
+
+async fn probe_network_denied(
+    backend: Arc<dyn Backend>,
+    evidence: ProbeEvidence,
+    cancel: CancelToken,
+    limits: ExecLimits,
+    suite: &ProbeSuite<'_>,
+    argv: Vec<OsString>,
+) -> bool {
+    matches!(probe_result(backend, evidence, cancel, limits, suite, argv).await,
+        Err(reason) if reason == "exit 125" || reason == "exit 101")
+}
+
+async fn probe_result(
+    backend: Arc<dyn Backend>,
+    evidence: ProbeEvidence,
+    cancel: CancelToken,
+    limits: ExecLimits,
+    suite: &ProbeSuite<'_>,
+    argv: Vec<OsString>,
+) -> Result<(), String> {
     let attempted = argv
         .iter()
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -1107,7 +1182,7 @@ async fn probe(
             Err(reason) => reason.clone(),
         },
     });
-    outcome.is_ok()
+    outcome
 }
 
 /// How one probe command ended, in the words the transcript records.
@@ -1248,7 +1323,6 @@ mod tests {
     /// it is spelled so libtest runs the `#[ignore]`d fixture named for the
     /// token. Every element is load-bearing: drop one and a libtest host either
     /// skips the fixture or swallows the arguments as a filter.
-    #[cfg(target_os = "macos")]
     #[test]
     fn the_probe_envelope_is_the_one_both_hosts_dispatch() {
         use std::ffi::OsString;
@@ -1286,6 +1360,38 @@ mod tests {
                 "dropping argv[{dropped}] must stop being the probe envelope"
             );
         }
+    }
+
+    #[test]
+    fn offline_rejects_a_wrapper_that_never_reaches_the_target() {
+        // Catches: userns/setup failures are misreported as network isolation,
+        // particularly when filesystem off supplies no positive read probes.
+        struct FailedWrapper;
+        impl Backend for FailedWrapper {
+            fn identity(&self) -> BackendIdentity {
+                BackendIdentity::new("failed-wrapper", "v1")
+            }
+            fn maximum_demonstrable_caps(&self) -> ExecCaps {
+                ExecCaps::NO_IP_NETWORK
+            }
+            fn launch_prefix(&self) -> LaunchPrefix {
+                LaunchPrefix {
+                    program: Some("/usr/bin/false".into()),
+                    args_before_target: Vec::new(),
+                }
+            }
+        }
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+        let evidence = super::probe_evidence().expect("evidence");
+        let denied = futures::executor::block_on(super::probe_offline(
+            Arc::new(FailedWrapper),
+            &cwd,
+            evidence,
+            ego_core::turn::CancelToken::new(),
+            crate::exec::ExecLimits::default(),
+        ));
+        assert!(!denied, "a wrapper failure cannot prove offline");
     }
 
     struct CacheBackend {

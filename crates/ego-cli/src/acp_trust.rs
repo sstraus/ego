@@ -16,15 +16,33 @@ use ego_core::run::RunRoot;
 #[derive(Debug, Default)]
 pub struct CliSessionTrustAdmission {
     home: Option<PathBuf>,
+    host_profile: bool,
 }
 
 impl CliSessionTrustAdmission {
     pub fn new(home: Option<PathBuf>) -> Self {
-        Self { home }
+        Self {
+            home,
+            host_profile: false,
+        }
+    }
+    /// Enable attestations only after the launch profile has been resolved.
+    pub fn with_host_profile(mut self) -> Self {
+        self.host_profile = true;
+        self
     }
 }
 
 impl SessionTrustAdmission for CliSessionTrustAdmission {
+    fn attest_trusted(&self, root: &RunRoot) {
+        if self.host_profile {
+            let surface = crate::trust::executable_surface(root.as_path());
+            if !self.record_answer(root, &surface.fingerprint(), Trust::Trusted) {
+                tracing::warn!("the host workspace trust attestation could not be recorded");
+            }
+        }
+    }
+
     fn status(&self, root: &RunRoot) -> SessionTrustStatus {
         let path = root.as_path();
         let Some(content) = crate::trust::trustable_content(path) else {

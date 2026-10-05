@@ -200,8 +200,9 @@ pub(super) async fn drive_execution<S: EventSink>(
         ($active:expr, $cancel:expr, $ports:expr, $observation:expr, $probe_evidence:expr, $hooks:expr, $journal:expr, $skill_owner:expr) => {{
             let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&$ports)))
                 as Arc<dyn ego_ai::http::Http>;
+            let router = super::router::compose(Arc::clone(&http), &cwd);
             let runtime = GenerationRuntime {
-                source: source.bind(http, $cancel.clone(), run_deadline),
+                source: source.bind(Arc::clone(&http), $cancel.clone(), run_deadline),
                 policy_source: Arc::clone(&policy_source),
                 gate: gate.clone(),
                 config: config.clone(),
@@ -216,6 +217,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 $ports.one_hop_handle(),
                 $ports.duplex_handle(),
             )
+            .with_secret_values(ego_tools::secrets::from_env())
             .with_cancel($cancel.clone());
             let tools = match admitted_tools.as_ref() {
                 Some(source) => Tools::from_registry_with_source(
@@ -256,6 +258,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             .map_err(|error| RunTermination::Failed {
                 message: error.to_string(),
             })?;
+            let loop_ = super::router::attach(loop_, router);
             let skill_owner: Arc<dyn SkillInvocationPort + '_> = ($skill_owner).clone();
             let loop_ = loop_.with_skill_invocation_port(skill_owner);
             let loop_ = match $active.replayed() {
@@ -274,6 +277,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             } else {
                 loop_
             };
+            let loop_ = super::composition::with_destructive_judge(loop_, http);
             super::composition::with_permission_analysis(loop_, skill_trust)
                 .with_execution_observation($observation, $probe_evidence)
         }};
@@ -288,7 +292,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                 $hook_ports.resolver_handle(),
                 $hook_ports.one_hop_handle(),
                 $hook_ports.duplex_handle(),
-            );
+            )
+            .with_secret_values(ego_tools::secrets::from_env());
             let leased_journal =
                 LeasedSharedJournal::new($active.writer(), &clock, sink, Producer::Main, $state);
             let journal = leased_journal.shared();
@@ -1006,6 +1011,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             match super::composition::tools_with_mode(
                                                 args.tools.as_ref(),
                                                 Some(prospective.core()),
+                                                effective
+                                                    .active_profile
+                                                    .as_ref()
+                                                    .map(|profile| profile.name.as_str()),
                                                 Some(Arc::new(jsonl_store.history())),
                                                 exec_environment.clone(),
                                                 super::composition::orchestration_mode(&effective),
@@ -1695,6 +1704,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                     target_skills.as_ref().map(
                                                         crate::skill::SkillCatalogueCapture::core,
                                                     ),
+                                                    effective
+                                                        .active_profile
+                                                        .as_ref()
+                                                        .map(|profile| profile.name.as_str()),
                                                     Some(Arc::new(jsonl_store.history())),
                                                     effective.exec.policy().map_err(|error| {
                                                         CompactionError::Internal(error.to_string())
@@ -1725,7 +1738,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 as Arc<dyn ego_ai::http::Http>;
                                             let runtime = GenerationRuntime {
                                                 source: source.bind(
-                                                    http,
+                                                    Arc::clone(&http),
                                                     compaction_cancel.clone(),
                                                     run_deadline,
                                                 ),
@@ -1743,6 +1756,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 ports.one_hop_handle(),
                                                 ports.duplex_handle(),
                                             )
+                                            .with_secret_values(ego_tools::secrets::from_env())
                                             .with_cancel(compaction_cancel.clone());
                                             let compaction_tools = match admitted_tools.as_ref() {
                                                 Some(source) => Tools::from_registry_with_source(
@@ -1808,6 +1822,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                     exec_caps: observation.capabilities(),
                                                 });
                                             }
+                                            let compaction =
+                                                super::composition::with_destructive_judge(
+                                                    compaction, http,
+                                                );
                                             let mut compaction =
                                                 super::composition::with_permission_analysis(
                                                     compaction,

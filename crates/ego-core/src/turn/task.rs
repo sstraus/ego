@@ -220,6 +220,7 @@ struct TaskExecution<'s, 't> {
     tools: Tools<'t>,
     cancel: CancelToken,
     judge: Option<JudgeContext>,
+    destructive_judge: Option<Arc<dyn crate::permit::analysis::DestructiveJudge>>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
         crate::config::Trust,
@@ -267,6 +268,7 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
             }));
             child.generation_role = GenerationRole::Subagent;
             child.judge = self.judge;
+            child.destructive_judge = self.destructive_judge;
             child.analysis_cache = self.analysis_cache;
             child.analysis_observation = self.analysis_observation;
             child.inherited_effect_tools = self.effect_ceiling;
@@ -296,7 +298,12 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
                     }
                 )
             };
-            Ok((outcome.ok, ToolResult::builtin(bounded_result(text))))
+            Ok((
+                outcome.ok,
+                child
+                    .tools
+                    .masked_result(ToolResult::builtin(bounded_result(text))),
+            ))
         })
     }
 }
@@ -343,7 +350,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                         Some(call.started),
                         EventKind::ToolCallCompleted {
                             ok: false,
-                            result: ToolResult::builtin(error),
+                            result: self.tools.masked_result(ToolResult::builtin(error)),
                         },
                     )?;
                     completed.insert(call.item);
@@ -373,6 +380,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?,
                 cancel: self.cancel.clone(),
                 judge: self.judge.clone(),
+                destructive_judge: self.destructive_judge.clone(),
                 analysis_cache: self.analysis_cache.clone(),
                 analysis_observation: self.analysis_observation.clone(),
                 elicitor: self.elicitor.clone(),

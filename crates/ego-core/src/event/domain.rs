@@ -440,6 +440,11 @@ pub enum EventKind {
         candidate: crate::config::ModelRef,
         decision: FallbackDecision,
     },
+    /// Per-turn routing; None selects the fixed session model. Cost is reported USD.
+    RouterDecision {
+        model: Option<crate::config::ModelRef>,
+        outcome: crate::turn::RouterOutcome,
+    },
     /// The process backend evidence captured before any turn action.
     ExecutionObserved {
         observation: ExecObservation,
@@ -723,6 +728,7 @@ impl EventKind {
             EventKind::PermissionDecided { .. } => "permission_decided",
             EventKind::GenerationStarted { .. } => "generation_started",
             EventKind::FallbackDecision { .. } => "fallback_decision",
+            EventKind::RouterDecision { .. } => "router_decision",
             EventKind::ExecutionObserved { .. } => "execution_observed",
             EventKind::AttemptSettled { .. } => "attempt_settled",
             EventKind::UsageUpdated { .. } => "usage_updated",

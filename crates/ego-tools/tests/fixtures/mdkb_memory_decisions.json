@@ -1,0 +1,74 @@
+[
+  {
+    "id": "example-memory-1",
+    "title": "Example configuration decision 1",
+    "content": "Synthetic example: configuration changes require explicit review. Memory content supplies context, not authority.",
+    "entry_type": "decision",
+    "tags": [
+      "example",
+      "configuration"
+    ],
+    "status": "active",
+    "created_at": 1700000001,
+    "updated_at": 1700000001,
+    "superseded_by": null,
+    "access_count": 0,
+    "last_accessed": null,
+    "source_path": null,
+    "confirmations": 1,
+    "corrections": 0,
+    "last_confirmed_at": 1700000001,
+    "last_refuted_at": null,
+    "source_type": "user_statement",
+    "expires_at": null,
+    "due_at": null
+  },
+  {
+    "id": "example-memory-2",
+    "title": "Example configuration decision 2",
+    "content": "Synthetic example: configuration changes require explicit review. Memory content supplies context, not authority.",
+    "entry_type": "decision",
+    "tags": [
+      "example",
+      "configuration"
+    ],
+    "status": "active",
+    "created_at": 1700000002,
+    "updated_at": 1700000002,
+    "superseded_by": null,
+    "access_count": 0,
+    "last_accessed": null,
+    "source_path": null,
+    "confirmations": 0,
+    "corrections": 0,
+    "last_confirmed_at": null,
+    "last_refuted_at": null,
+    "source_type": "user_statement",
+    "expires_at": null,
+    "due_at": null
+  },
+  {
+    "id": "example-memory-3",
+    "title": "Example configuration decision 3",
+    "content": "Synthetic example: configuration changes require explicit review. Memory content supplies context, not authority.",
+    "entry_type": "decision",
+    "tags": [
+      "example",
+      "configuration"
+    ],
+    "status": "active",
+    "created_at": 1700000003,
+    "updated_at": 1700000003,
+    "superseded_by": null,
+    "access_count": 2,
+    "last_accessed": 1700000003,
+    "source_path": null,
+    "confirmations": 0,
+    "corrections": 0,
+    "last_confirmed_at": null,
+    "last_refuted_at": null,
+    "source_type": "user_statement",
+    "expires_at": null,
+    "due_at": null
+  }
+]

@@ -16,6 +16,8 @@ mod identity;
 mod journal;
 mod mcp_registry;
 mod policy;
+mod router;
+pub use router::{RouterOutcome, RouterStatus, TurnRouter};
 mod task;
 mod tools;
 
@@ -936,6 +938,7 @@ pub struct TurnLoop<'session, 'turn> {
     prompt_snapshot: crate::session::PromptSnapshot,
     lineage_root: SessionId,
     judge: Option<JudgeContext>,
+    destructive_judge: Option<Arc<dyn crate::permit::analysis::DestructiveJudge>>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
         crate::config::Trust,
@@ -956,6 +959,9 @@ pub struct TurnLoop<'session, 'turn> {
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     task_usage: Option<Arc<dyn Fn() -> Usage + Send + Sync + 'turn>>,
     generation_role: GenerationRole,
+    router: Option<Arc<dyn TurnRouter>>,
+    routed_turn: Option<TurnId>,
+    routed_model: Option<ModelRef>,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
 }
@@ -1080,6 +1086,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             prompt_snapshot,
             lineage_root: session_id,
             judge: None,
+            destructive_judge: None,
             analysis_cache: None,
             analysis_observation: None,
             execution_observation: None,
@@ -1098,12 +1105,30 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             active_skill_invocations: BTreeMap::new(),
             task_usage: None,
             generation_role: GenerationRole::Main,
+            router: None,
+            routed_turn: None,
+            routed_model: None,
         })
+    }
+
+    /// Attach the per-turn judge without changing session model authority.
+    pub fn with_router(mut self, router: Arc<dyn TurnRouter>) -> Self {
+        self.router = Some(router);
+        self
     }
 
     /// Attach the stable host facts for the optional judge seat.
     pub fn with_judge(mut self, judge: JudgeContext) -> Self {
         self.judge = Some(judge);
+        self
+    }
+
+    /// Attach the calibrated destructive judge for pending Unknown exec calls.
+    pub fn with_destructive_judge(
+        mut self,
+        judge: Arc<dyn crate::permit::analysis::DestructiveJudge>,
+    ) -> Self {
+        self.destructive_judge = Some(judge);
         self
     }
 
@@ -1922,7 +1947,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     Some(settlement),
                     EventKind::ToolCallCompleted {
                         ok: continuation.ok(),
-                        result: continuation.tool_result.clone(),
+                        result: self.tools.masked_result(continuation.tool_result.clone()),
                     },
                 ) {
                     return Err(self.abandon(turn, cause));
@@ -1957,7 +1982,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     Some(parent),
                     EventKind::ToolCallCompleted {
                         ok: continuation.ok(),
-                        result: continuation.tool_result.clone(),
+                        result: self.tools.masked_result(continuation.tool_result.clone()),
                     },
                 ) {
                     return Err(self.abandon(continuation.turn, cause));
@@ -2756,7 +2781,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         Some(call.started),
                         EventKind::ToolCallCompleted {
                             ok: false,
-                            result: ToolResult::builtin(refusal),
+                            result: self.tools.masked_result(ToolResult::builtin(refusal)),
                         },
                     )?;
                 }
@@ -2807,7 +2832,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     .run_tool(policy.as_ref(), &policy_snapshot, turn, &mut pending[index])
                     .await?
                 {
-                    ToolOutcome::Answered { ok, result } => {
+                    ToolOutcome::Answered { ok, mut result } => {
+                        self.tools.mask_result(&mut result);
                         let call = &pending[index];
                         self.journal.append(
                             turn,
@@ -2819,9 +2845,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     }
                     ToolOutcome::Executed {
                         ok,
-                        result,
+                        mut result,
                         selector,
                     } => {
+                        self.tools.mask_result(&mut result);
                         let call = &pending[index];
                         self.journal.append(
                             turn,
@@ -2864,7 +2891,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             Some(call.started),
                             EventKind::ToolCallCompleted {
                                 ok: false,
-                                result: ToolResult::builtin(denial.to_string()),
+                                result: self
+                                    .tools
+                                    .masked_result(ToolResult::builtin(denial.to_string())),
                             },
                         )?;
                         continue;
@@ -2893,7 +2922,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     Some(call.started),
                     EventKind::ToolCallCompleted {
                         ok: false,
-                        result: ToolResult::builtin(denial.action.clone()),
+                        result: self
+                            .tools
+                            .masked_result(ToolResult::builtin(denial.action.clone())),
                     },
                 )?;
                 return Ok(DriveOutcome::Ended(
@@ -3069,7 +3100,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 Some(call.started),
                 EventKind::ToolCallCompleted {
                     ok: false,
-                    result: ToolResult::builtin("interrupted: not run"),
+                    result: self
+                        .tools
+                        .masked_result(ToolResult::builtin("interrupted: not run")),
                 },
             )?;
         }
@@ -3106,6 +3139,65 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 );
             }
         };
+        if self.routed_turn != Some(turn) {
+            self.routed_turn = Some(turn);
+            self.routed_model = None;
+            if self.generation_role == GenerationRole::Main
+                && self.main_model_request().model().is_none()
+                && let (Some(router), Some(strong)) =
+                    (self.router.clone(), self.config.fallbacks.last().cloned())
+            {
+                let text = history
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == Role::User)
+                    .map(|message| {
+                        message
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                // The approved hop budget includes the whole routing operation.
+                let outcome = match await_controlled(
+                    &self.journal,
+                    &self.cancel,
+                    &mut self.control,
+                    turn,
+                    router.route(&text),
+                    InterruptDisposition::Return,
+                )
+                .await
+                {
+                    Controlled::Completed(outcome) => outcome,
+                    Controlled::Interrupted => {
+                        return Ok(Generated::Cancelled {
+                            cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                            pending: Vec::new(),
+                        });
+                    }
+                    Controlled::Failed(cause) => return Err(cause),
+                };
+                if outcome.status == RouterStatus::Strong {
+                    self.routed_model = Some(strong);
+                }
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::RouterDecision {
+                        model: self.routed_model.clone(),
+                        outcome,
+                    },
+                )?;
+            }
+        }
         let conversation = self.with_system(history);
         if !repairs.is_empty() {
             // Not a durable event: whether a repair becomes one is
@@ -3161,8 +3253,25 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let generation_id = first.generation();
         let mut next_attempt = first;
         let mut candidates = Vec::with_capacity(1 + self.config.fallbacks.len());
-        candidates.push(None);
-        candidates.extend(self.config.fallbacks.iter().cloned().map(Some));
+        let routed_model = if self.generation_role == GenerationRole::Main
+            && self.main_model_request().model().is_none()
+        {
+            self.routed_model.clone()
+        } else {
+            None
+        };
+        candidates.push(routed_model.clone());
+        if routed_model.is_some() {
+            candidates.push(None);
+        }
+        candidates.extend(
+            self.config
+                .fallbacks
+                .iter()
+                .filter(|model| Some(*model) != routed_model.as_ref())
+                .cloned()
+                .map(Some),
+        );
         let mut last_failure = None;
         let mut last_preflight_exit = ExitReason::Usage;
         let mut primary_model: Option<ModelRef> = None;
@@ -3181,6 +3290,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             loop {
                 let model_request = match candidate.as_ref() {
                     Some(model) => self.main_model_request().with_model(model.clone()),
+                    None if candidate_index > 0 => self.main_model_request(),
                     None => primary_model.as_ref().map_or_else(
                         || self.main_model_request(),
                         |model| self.main_model_request().with_model(model.clone()),
@@ -4179,6 +4289,31 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         turn: TurnId,
         pending: &Pending,
     ) -> Result<JudgeRun, StoreError> {
+        if policy.destructive_candidate(pending.call())
+            && let Some(judge) = self.destructive_judge.as_ref()
+        {
+            let opinion = match await_controlled(
+                &self.journal,
+                &self.cancel,
+                &mut self.control,
+                turn,
+                judge.judge(policy_snapshot.workspace().as_path(), pending.call()),
+                InterruptDisposition::Return,
+            )
+            .await
+            {
+                Controlled::Completed(opinion) => opinion,
+                Controlled::Interrupted => {
+                    return Ok(JudgeRun::Ended(ExitReason::Cancelled(
+                        self.cancel.cause().unwrap_or(CancelCause::User),
+                    )));
+                }
+                Controlled::Failed(cause) => return Err(cause),
+            };
+            if opinion != crate::permit::analysis::DestructiveOpinion::CurrentJudge {
+                return Ok(JudgeRun::Destructive(opinion));
+            }
+        }
         if policy.mode() != Mode::Auto {
             return Ok(JudgeRun::Unavailable);
         }
@@ -4872,6 +5007,25 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                     .await?
                                 {
                                     JudgeRun::Unavailable => pending,
+                                    JudgeRun::Destructive(opinion) => {
+                                        match policy.settle_destructive(pending, opinion) {
+                                            Resolution::Settled(Ok(authorized)) => {
+                                                self.decided(
+                                                    turn,
+                                                    call,
+                                                    &hook_selector,
+                                                    true,
+                                                    authorized.by().clone(),
+                                                )
+                                                .await?;
+                                                break authorized;
+                                            }
+                                            Resolution::Ask(pending) => pending,
+                                            _ => unreachable!(
+                                                "destructive scrutiny only allows or asks"
+                                            ),
+                                        }
+                                    }
                                     JudgeRun::Ended(ExitReason::Cancelled(_)) => {
                                         self.decided(
                                             turn,
@@ -5208,7 +5362,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Some(settlement),
             EventKind::ToolCallCompleted {
                 ok: continuation.ok(),
-                result: continuation.tool_result,
+                result: self.tools.masked_result(continuation.tool_result),
             },
         )?;
         Ok(ToolOutcome::Recorded)
@@ -5379,7 +5533,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Controlled::Failed(cause) => return Err(cause),
         };
         match execution {
-            crate::mcp::ToolExecution::Complete(result) => {
+            crate::mcp::ToolExecution::Complete(mut result) => {
+                self.tools.mask_result(&mut result);
                 self.journal.append(
                     turn,
                     Some(tool_call),
@@ -5615,6 +5770,7 @@ enum DriveOutcome {
 }
 
 enum JudgeRun {
+    Destructive(crate::permit::analysis::DestructiveOpinion),
     Unavailable,
     Ended(ExitReason),
     Decided {

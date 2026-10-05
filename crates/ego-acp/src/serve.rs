@@ -491,6 +491,10 @@ pub enum SessionTrustStatus {
 }
 
 pub trait SessionTrustAdmission: Send + Sync {
+    /// The adapter decides whether the process has a host-selected profile.
+    /// Default ports never accept client self-attestation.
+    fn attest_trusted(&self, _root: &RunRoot) {}
+
     fn status(&self, root: &RunRoot) -> SessionTrustStatus;
     /// False means executable authority changed while the question was open.
     fn record_answer(&self, root: &RunRoot, fingerprint: &str, decision: Trust) -> bool;
@@ -1855,6 +1859,13 @@ impl<R: JsonRpcMessage> JsonRpcMessage for McpChecked<R> {
         let request = R::parse_message(method, params)?;
         let raw = serde_json::to_value(params)
             .map_err(|error| Error::internal_error().data(error.to_string()))?;
+        if raw.get("_meta").is_some_and(|meta| {
+            meta.get("jev").is_some() || meta.get("ego").is_some_and(|ego| ego.get("jev").is_some())
+        }) {
+            return Err(refused_params(
+                "jev configuration belongs only to system and user config",
+            ));
+        }
         let supplied = raw
             .get("mcpServers")
             .and_then(serde_json::Value::as_array)
@@ -2585,6 +2596,7 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
+                let trust = trust.clone();
                 async move |McpChecked(request): McpChecked<v1::NewSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let sessions = sessions.clone();
                     let unadmitted = unadmitted.clone();
@@ -2595,6 +2607,7 @@ where
                     let controls = controls.clone();
                     let confinement = confinement.clone();
                     let notices = notices.clone();
+                    let trust = trust.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
@@ -2688,6 +2701,14 @@ where
                     } else {
                         None
                     };
+                    if request.meta.as_ref()
+                        .and_then(|meta| meta.get("ego"))
+                        .and_then(|ego| ego.get("trust"))
+                        .and_then(serde_json::Value::as_str) == Some(TRUST_GRANT)
+                        && let Some(admission) = &trust
+                    {
+                        admission.attest_trusted(&attachment_root);
+                    }
                     drop(hidden);
                     // The response first, the announcement after it. A
                     // `session_info_update` names a session by an id the client

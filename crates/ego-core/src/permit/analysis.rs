@@ -241,3 +241,20 @@ mod tests {
         assert_ne!(before, after);
     }
 }
+
+/// Destructive scrutiny never grants authority on an uncertain answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestructiveOpinion {
+    Safe { model: crate::config::ModelRef },
+    Card,
+    CurrentJudge,
+}
+
+/// External destructive analysis of one canonical exec call; no advisory cache.
+pub trait DestructiveJudge: Send + Sync {
+    fn judge<'a>(
+        &'a self,
+        root: &'a std::path::Path,
+        call: &'a PreparedCall,
+    ) -> BoxFuture<'a, DestructiveOpinion>;
+}

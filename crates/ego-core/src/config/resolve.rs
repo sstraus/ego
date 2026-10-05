@@ -79,6 +79,8 @@ impl ResolvedMcpConfig {
 /// and the trust gate have been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
+    /// Trusted settings; each use remains gated on its calibration.
+    pub jev: super::JevConfig,
     pub cache: crate::generator::capabilities::CacheRetention,
     pub model: Option<ModelRef>,
     pub thinking: Option<ThinkingLevel>,
@@ -168,6 +170,7 @@ impl std::fmt::Display for Discarded {
 /// eligibility, so it is never discarded and saying it was would be false.
 fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     let ConfigLayer {
+        jev,
         cache,
         model,
         thinking,
@@ -190,6 +193,7 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     } = layer;
     let mut settings = Vec::new();
     for (present, name) in [
+        (jev.is_some(), "jev"),
         (cache.is_some(), "cache"),
         (model.is_some(), "model"),
         (thinking.is_some(), "thinking"),
@@ -288,6 +292,20 @@ fn resolve_inner(
     active_profile: Option<&str>,
     selected_by: Option<Source>,
 ) -> Result<Effective, ConfigError> {
+    for layer in layers {
+        if let Some(jev) = &layer.value.jev {
+            if !matches!(layer.source, Source::System | Source::User) {
+                return Err(ConfigError::Invalid {
+                    source: layer.source,
+                    message: "jev may be set only by system or user configuration".into(),
+                });
+            }
+            jev.validate().map_err(|message| ConfigError::Invalid {
+                source: layer.source,
+                message,
+            })?;
+        }
+    }
     let mut ordered: Vec<&Sourced<ConfigLayer>> = layers.iter().collect();
     ordered.sort_by_key(|l| l.source.rank());
 
@@ -347,6 +365,7 @@ fn resolve_inner(
         None
     };
     let mut cache = crate::generator::capabilities::CacheRetention::Short;
+    let mut jev = super::JevConfig::default();
     let mut model = None;
     let mut thinking = None;
     let mut mode = None;
@@ -369,6 +388,9 @@ fn resolve_inner(
     let mut root_restrictions = Vec::new();
 
     for sourced in &eligible {
+        if let Some(settings) = &sourced.value.jev {
+            jev = settings.clone();
+        }
         let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
 
         apply_mcp_entries(
@@ -679,6 +701,7 @@ fn resolve_inner(
     }
 
     Ok(Effective {
+        jev,
         cache,
         model,
         thinking,
