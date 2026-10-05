@@ -720,6 +720,7 @@ mod tests {
         let headers = credential.headers();
         let target = RequestTarget::new(resolved.row.base(), &headers);
         let request = GenRequest {
+            cache: None,
             model: resolved.model.clone(),
             messages: Conversation::new(vec![Message::text(Role::User, "hello")])
                 .expect("valid Codex conversation"),
@@ -801,6 +802,7 @@ mod tests {
             .build_request(
                 &target,
                 &GenRequest {
+                    cache: None,
                     model: resolved.model.clone(),
                     messages: Conversation::new(vec![Message::text(Role::User, "hello")])
                         .expect("a valid Codex conversation"),
@@ -907,6 +909,7 @@ mod tests {
             .build_request(
                 &target,
                 &GenRequest {
+                    cache: None,
                     model: resolved.model.clone(),
                     messages: Conversation::new(vec![Message::text(Role::User, "hello")])
                         .expect("a valid conversation"),

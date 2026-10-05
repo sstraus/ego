@@ -111,6 +111,7 @@ impl Fixture {
                     kind: EventKind::GenerationStarted {
                         attempt: AttemptRef::first(GenerationId::new()),
                         role: GenerationRole::Main,
+                        snapshot: None,
                     },
                 },
             )

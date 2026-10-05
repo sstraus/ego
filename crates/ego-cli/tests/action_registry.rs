@@ -7,7 +7,7 @@ use ego_cli::repl::actions::{
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 
-const NAMES: [&str; 26] = [
+const NAMES: [&str; 27] = [
     "help",
     "model",
     "thinking",
@@ -26,6 +26,7 @@ const NAMES: [&str; 26] = [
     "config",
     "doctor",
     "quit",
+    "refresh",
     "new",
     "name",
     "goal",
@@ -48,7 +49,7 @@ fn final_surface_has_exact_names_in_contract_order_and_stable_ids() {
     assert_eq!(registry.id("config"), Some(ActionId::Config));
     assert_eq!(registry.id("hooks"), Some(ActionId::Hooks));
     assert_eq!(registry.id("version"), Some(ActionId::Version));
-    assert_eq!(registry.len(), 26);
+    assert_eq!(registry.len(), 27);
 }
 
 #[test]

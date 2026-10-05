@@ -1725,6 +1725,7 @@ mod turn {
             source: Arc::new(source),
             gate: gate.clone(),
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system,
                 identity: None,
                 token_ceiling,
@@ -3583,7 +3584,7 @@ mod turn {
     /// the log. Writing it there would make a resumed session rebuild it as a
     /// message someone sent, and then send it twice.
     #[test]
-    fn a_system_prompt_leads_every_generation_and_is_never_logged() {
+    fn a_system_prompt_leads_every_generation_and_is_logged_only_as_an_epoch_snapshot() {
         const HOUSE_STYLE: &str = "the house style: no semicolons";
 
         let fx = Fixture::new(vec![
@@ -3627,16 +3628,26 @@ mod turn {
             );
         }
 
-        // Debug over the whole event rather than a field: the claim is that
-        // *no* kind carries it, and naming the kinds that must not would go
-        // stale the moment `EventKind` grows one.
-        for event in fx.store.events() {
-            assert!(
-                !format!("{:?}", event.kind).contains(HOUSE_STYLE),
-                "the system prompt was written to the log as {:?}",
-                event.kind
-            );
-        }
+        let snapshots: Vec<_> = fx
+            .store
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::GenerationStarted {
+                    snapshot: Some(snapshot),
+                    ..
+                } => Some(snapshot),
+                _ => {
+                    assert!(
+                        !format!("{:?}", event.kind).contains(HOUSE_STYLE),
+                        "system text leaked outside the epoch snapshot"
+                    );
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(snapshots.len(), 1, "one durable snapshot per epoch");
+        assert_eq!(snapshots[0].system.as_ref().unwrap().text, HOUSE_STYLE);
     }
 
     /// No system prompt means no system message — not an empty one. A
@@ -6522,6 +6533,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -6760,6 +6772,7 @@ mod turn {
                 source,
                 gate: fx.gate.borrow().clone(),
                 config: TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -7051,6 +7064,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7113,6 +7127,7 @@ mod turn {
                     EventKind::GenerationStarted {
                         attempt,
                         role: GenerationRole::Judge,
+                        snapshot: None,
                     } => Some(*attempt),
                     _ => None,
                 })
@@ -7178,6 +7193,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7240,6 +7256,7 @@ mod turn {
                         source: source.clone(),
                         gate: gate.clone(),
                         config: TurnConfig {
+                            cache: ego_core::generator::capabilities::CacheRetention::Short,
                             system: None,
                             identity: None,
                             token_ceiling: None,
@@ -7306,6 +7323,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7396,6 +7414,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7494,6 +7513,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7571,6 +7591,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7641,6 +7662,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7722,6 +7744,7 @@ mod turn {
                         source: source.clone(),
                         gate: gate.clone(),
                         config: TurnConfig {
+                            cache: ego_core::generator::capabilities::CacheRetention::Short,
                             system: None,
                             identity: None,
                             token_ceiling: None,
@@ -7827,6 +7850,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7943,6 +7967,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -8058,6 +8083,7 @@ mod turn {
                 "which model answered",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8132,6 +8158,7 @@ mod turn {
                 "which model?",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: Some(ego_core::turn::AgentIdentity {
                         version: "0.0.0".to_owned(),
@@ -8151,9 +8178,22 @@ mod turn {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|request| match &request.messages.messages()[0].content[0] {
-                    ContentBlock::Text { text } => text.clone(),
-                    other => panic!("the first message is not the identity: {other:?}"),
+                .map(|request| {
+                    request
+                        .messages
+                        .messages()
+                        .iter()
+                        .filter(|message| message.role == Role::User)
+                        .flat_map(|message| &message.content)
+                        .find_map(|block| match block {
+                            ContentBlock::Text { text }
+                                if text.starts_with("Current context data.") =>
+                            {
+                                Some(text.clone())
+                            }
+                            _ => None,
+                        })
+                        .expect("live identity data")
                 })
                 .collect();
             assert_eq!(identities.len(), 2);
@@ -8234,6 +8274,7 @@ mod turn {
                 "retry safely",
                 source.clone(),
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8352,6 +8393,7 @@ mod turn {
                 "permanent then fallback",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8398,6 +8440,7 @@ mod turn {
                 "possibly sent",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8478,6 +8521,7 @@ mod turn {
                 "use the fallback",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8585,6 +8629,7 @@ mod turn {
                 "skip the candidate",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8651,6 +8696,7 @@ mod turn {
                     "account missing usage",
                     source,
                     TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -8703,6 +8749,7 @@ mod turn {
                 kind: EventKind::GenerationStarted {
                     attempt,
                     role: ego_core::generation_model_source::GenerationRole::Main,
+                    snapshot: None,
                 },
             };
             let mut state = SessionState::default();
@@ -8727,6 +8774,7 @@ mod turn {
                 "must refuse live replay",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,

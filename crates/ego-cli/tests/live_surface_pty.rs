@@ -4847,7 +4847,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 26] = [
+    const COMMANDS: [&str; 27] = [
         "help",
         "model",
         "thinking",
@@ -4866,6 +4866,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "config",
         "doctor",
         "quit",
+        "refresh",
         "new",
         "name",
         "goal",
@@ -6027,9 +6028,23 @@ fn tool_turn_with_completions(
         }
         gate.release();
         let generations = stub.generations();
-        let parent_system = generations[0]["messages"][0]["content"].as_str().unwrap();
+        let live_context = |generation: &serde_json::Value| {
+            generation["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|message| message["content"].as_str())
+                .find(|content| content.contains("- Posture:"))
+                .expect("the real CLI supplies authoritative live posture")
+                .to_owned()
+        };
+        let parent_system = live_context(&generations[0]);
+        assert!(
+            parent_system.contains("sandbox: off; network: offline"),
+            "{parent_system}"
+        );
         for child in &generations[1..3] {
-            let child_system = child["messages"][0]["content"].as_str().unwrap();
+            let child_system = live_context(child);
             for fact in parent_system.lines().filter(|line| {
                 line.starts_with("- Posture:") || line.starts_with("- Workspace root:")
             }) {

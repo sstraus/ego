@@ -250,7 +250,7 @@ fn target_seed_is_durable_before_publication_and_carries_one_lineage_event() {
     assert_eq!(events[0].env.producer, Producer::Main);
     assert!(matches!(
         &events[0].kind,
-        EventKind::Forked { source: actual, at_seq }
+        EventKind::Forked { source: actual, at_seq , .. }
             if *actual == source && *at_seq == seq(7)
     ));
     drop(open);

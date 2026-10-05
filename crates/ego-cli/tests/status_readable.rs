@@ -204,6 +204,7 @@ fn context_and_cost_follow_the_durable_usage_events_of_the_session() {
         EventKind::GenerationStarted {
             attempt,
             role: GenerationRole::Main,
+            snapshot: None,
         },
     );
     push(

@@ -136,6 +136,7 @@ fn context_checkpoint_frame(text: &str) -> String {
 #[test]
 fn main_checkpoint_baseline_uses_existing_gaps_and_expressibility_ports_only() {
     let request = GenRequest {
+        cache: None,
         model: "main-model".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, checkpoint())])
             .expect("checkpoint baseline history"),
@@ -418,6 +419,7 @@ fn compaction_attempts_settle_in_the_source_ledger_for_every_terminal_boundary()
         state.apply(&event(EventKind::GenerationStarted {
             attempt,
             role: GenerationRole::Compaction,
+            snapshot: None,
         }));
         state.apply(&event(EventKind::UsageUpdated {
             usage,
@@ -501,6 +503,7 @@ fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
         let frame = context_checkpoint_frame(parsed.text());
 
         let request = GenRequest {
+            cache: None,
             model: "main-model".to_string(),
             messages: Conversation::new(vec![Message::text(Role::User, frame)])
                 .expect("size-sweep request history"),
@@ -528,6 +531,7 @@ fn compaction_output_stays_private_from_the_source_conversation() {
         event(EventKind::GenerationStarted {
             attempt: AttemptRef::first(GenerationId::new()),
             role: GenerationRole::Compaction,
+            snapshot: None,
         }),
         event(EventKind::AssistantMessage { text: checkpoint() }),
         event(EventKind::CompactionSeeded {
@@ -806,6 +810,7 @@ fn compaction_turn_with_state(
             source,
             gate,
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system: None,
                 identity: None,
                 token_ceiling: None,
@@ -874,6 +879,7 @@ fn busy_state(busy: &CompactionBusy) -> SessionState {
             EventKind::GenerationStarted {
                 attempt: AttemptRef::first(GenerationId::new()),
                 role: GenerationRole::Main,
+                snapshot: None,
             },
         ),
     };

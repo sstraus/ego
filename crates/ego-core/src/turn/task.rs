@@ -63,6 +63,7 @@ impl SessionStore for TaskStore<'_> {
             EventKind::GenerationStarted { attempt, .. } => Some(EventKind::GenerationStarted {
                 attempt: *attempt,
                 role: GenerationRole::Subagent,
+                snapshot: None,
             }),
             kind @ (EventKind::UsageUpdated { .. }
             | EventKind::UsageCorrected { .. }

@@ -305,6 +305,7 @@ mod public_golden {
                 EventKind::Forked {
                     source: SessionId::new(),
                     at_seq: Seq::default(),
+                    snapshot: None,
                 },
             ),
             ev(
@@ -941,6 +942,7 @@ mod public_golden {
             EventKind::GenerationStarted {
                 attempt,
                 role: GenerationRole::Main,
+                snapshot: None,
             },
             EventKind::AttemptSettled {
                 attempt,

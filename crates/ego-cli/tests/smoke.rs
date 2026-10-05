@@ -439,6 +439,7 @@ async fn smoke(profile: &Profile, when: &str) {
     // every provider owes an answer to and the cheapest to ask for: it is
     // rejected before any generation happens, so it costs nothing.
     let absent = GenRequest {
+        cache: None,
         model: "this-model-does-not-exist".to_string(),
         ..canonical(profile)
     };

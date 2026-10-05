@@ -548,6 +548,7 @@ mod codec {
                 kind: EventKind::GenerationStarted {
                     attempt: golden_attempt(),
                     role: GenerationRole::Main,
+                    snapshot: None,
                 },
             },
             // The attributed twin of the record above: same money shape, now
