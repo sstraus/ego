@@ -329,3 +329,41 @@ mod tests {
         assert!(text.contains("tokens=5000"));
     }
 }
+
+#[cfg(test)]
+mod critic_tests {
+    use super::*;
+    use ego_core::config::{Trust, resolve_selected};
+
+    // Catches: saving a base budget silently ignored by a cross-axis user profile yields no override warning.
+    #[test]
+    fn saved_budget_names_profile_that_replaces_the_other_axis() {
+        for (base, profile) in [("2USD", "20k"), ("20k", "2USD")] {
+            let layers = vec![
+                ConfigLayer::parse(
+                    Source::User,
+                    &format!("budget='{base}'\n[profile.review]\nbudget='{profile}'"),
+                )
+                .unwrap(),
+            ];
+            let effective =
+                resolve_selected(&layers, Trust::Untrusted, Some(("review", Source::Flags)))
+                    .unwrap();
+            if base == "2USD" {
+                assert!(effective.ceilings.money.is_none());
+                assert_eq!(effective.ceilings.tokens, Some(20_000));
+            } else {
+                assert!(effective.ceilings.tokens.is_none());
+                assert!(effective.ceilings.money.is_some());
+            }
+            let set = crate::config::repl_set_args(&format!("set budget '{base}'")).unwrap();
+            let warning = saved_override(&set, &effective, &layers);
+            assert!(
+                warning
+                    .as_deref()
+                    .is_some_and(|text| text.contains("overridden by user profile review")),
+                "saved base {base} is discarded by profile budget {profile}, but receipt warning is {warning:?}"
+            );
+        }
+    }
+}
