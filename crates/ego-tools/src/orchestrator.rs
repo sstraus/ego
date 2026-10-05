@@ -50,10 +50,32 @@ pub fn tools(socket: Option<&std::ffi::OsStr>, home: &Path) -> Vec<Arc<dyn Tool>
 
 /// Bind the operator's environment once when composing the native catalogue.
 pub fn tools_from_environment() -> Vec<Arc<dyn Tool>> {
+    tools_from_environment_with_mode(ego_core::orchestrator::Mode::Observe)
+}
+
+pub fn tools_from_environment_with_mode(mode: ego_core::orchestrator::Mode) -> Vec<Arc<dyn Tool>> {
     let Some(home) = std::env::var_os("HOME") else {
         return Vec::new();
     };
-    tools(std::env::var_os("TUIC_SOCKET").as_deref(), Path::new(&home))
+    tools_with_mode(
+        std::env::var_os("TUIC_SOCKET").as_deref(),
+        Path::new(&home),
+        std::env::var("TUIC_SESSION").ok(),
+        mode,
+    )
+}
+
+pub fn tools_with_mode(
+    socket: Option<&std::ffi::OsStr>,
+    home: &Path,
+    parent: Option<String>,
+    mode: ego_core::orchestrator::Mode,
+) -> Vec<Arc<dyn Tool>> {
+    let mut tools = tools(socket, home);
+    if !tools.is_empty() && mode == ego_core::orchestrator::Mode::Active {
+        tools.push(super::orchestrator_active::tool(mode, home, parent));
+    }
+    tools
 }
 
 impl TypedTool for TuicReadTool {
@@ -188,7 +210,10 @@ impl TypedTool for TuicReadTool {
     }
 }
 
-fn spec(argv: Vec<std::ffi::OsString>, cwd: Option<CanonPath>) -> Result<SpawnSpec, ToolError> {
+pub(super) fn spec(
+    argv: Vec<std::ffi::OsString>,
+    cwd: Option<CanonPath>,
+) -> Result<SpawnSpec, ToolError> {
     SpawnSpec::new(
         argv,
         cwd,
@@ -248,7 +273,7 @@ impl Orchestrator for TuicOrchestrator<'_, '_> {
     }
 }
 
-fn stdout(result: &ToolResult) -> Result<String, String> {
+pub(super) fn stdout(result: &ToolResult) -> Result<String, String> {
     let mut text = String::new();
     for block in &result.content {
         match &block.provenance {

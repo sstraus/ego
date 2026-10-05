@@ -22,6 +22,7 @@ impl Drop for ObserverGuard {
 
 pub(crate) fn start(
     coordinator: bool,
+    mode: ego_core::orchestrator::Mode,
     root: &Path,
     notices: AcpNotices,
     store: Arc<JsonlStore>,
@@ -54,6 +55,16 @@ pub(crate) fn start(
                 pump.failure(error.to_string(), now);
                 if let Err(error) = pump.commit() {
                     tracing::error!(%error, "observer cursor commit failed");
+                    break;
+                }
+            }
+            if registered
+                && mode == ego_core::orchestrator::Mode::Active
+                && let Err(error) = supervise(&store, &root, &mut pump, now).await
+            {
+                pump.failure(error, now);
+                if let Err(error) = pump.commit() {
+                    tracing::error!(%error, "supervisor cursor commit failed");
                     break;
                 }
             }
@@ -100,4 +111,33 @@ pub(crate) fn start(
         }
     });
     Ok(Some(ObserverGuard(task.abort_handle())))
+}
+
+async fn supervise(
+    store: &JsonlStore,
+    root: &Path,
+    pump: &mut ObservationPump,
+    now: u64,
+) -> Result<(), String> {
+    use futures::StreamExt;
+    let mut receipts = Vec::new();
+    for session in store
+        .list()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|s| s.workspace_root == root)
+    {
+        let entries = store
+            .read(&session.id)
+            .map_err(|e| e.to_string())?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        receipts.extend(ego_tools::orchestration_events::spawn_receipts(&entries)?);
+    }
+    pump.supervise(&receipts, now)
+        .await
+        .map_err(|e| e.to_string())
 }

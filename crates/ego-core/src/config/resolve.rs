@@ -90,6 +90,7 @@ pub struct Effective {
     pub sandbox: Option<Confinement>,
     pub exec: super::ExecLayer,
     pub network: super::Network,
+    pub orchestration: crate::orchestrator::Mode,
     /// Winning layer for the selected sandbox, absent for the default.
     pub sandbox_source: Option<Source>,
     /// Winning layer for the active profile roots.
@@ -176,6 +177,7 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         sandbox,
         exec,
         network,
+        orchestration,
         exec_paths,
         permissions,
         budget,
@@ -197,6 +199,7 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (sandbox.is_some(), "sandbox"),
         (exec.is_some(), "exec"),
         (network.is_some(), "network"),
+        (orchestration.is_some(), "orchestration"),
         (exec_paths.is_some(), "exec_paths"),
         (permissions.is_some(), "permissions"),
         (budget.is_some(), "budget"),
@@ -350,6 +353,7 @@ fn resolve_inner(
     let mut sandbox = None;
     let mut exec = super::ExecLayer::default();
     let mut network = super::Network::default();
+    let mut orchestration = crate::orchestrator::Mode::Observe;
     let mut sandbox_source = None;
     let mut roots_source = None;
     let mut exec_paths = Vec::new();
@@ -431,6 +435,12 @@ fn resolve_inner(
             .or(sourced.value.network)
         {
             network = value;
+        }
+        if let Some(config) = profile
+            .and_then(|p| p.orchestration)
+            .or(sourced.value.orchestration)
+        {
+            orchestration = config.mode;
         }
         if let Some(paths) = profile
             .and_then(|profile| profile.exec_paths.as_ref())
@@ -680,6 +690,7 @@ fn resolve_inner(
         network,
         sandbox_source,
         roots_source,
+        orchestration,
         exec_paths,
         permissions: permissions.with_credential_defaults(),
         judge,

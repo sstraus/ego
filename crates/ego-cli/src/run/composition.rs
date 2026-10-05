@@ -192,18 +192,47 @@ pub(super) fn instructions(
 /// is not a builtin is refused rather than ignored, because a run that
 /// silently offered fewer tools than it was told to is a run whose failure has
 /// no visible cause.
+#[cfg(test)]
 pub(super) fn tools(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
+    tools_with_mode(
+        selected,
+        skills,
+        history,
+        environment,
+        ego_core::orchestrator::Mode::Observe,
+    )
+}
+
+pub(super) fn orchestration_mode(effective: &Effective) -> ego_core::orchestrator::Mode {
+    if effective
+        .active_profile
+        .as_ref()
+        .is_some_and(|p| p.name == "coordinator")
+    {
+        effective.orchestration
+    } else {
+        ego_core::orchestrator::Mode::Observe
+    }
+}
+
+pub(super) fn tools_with_mode(
+    selected: Option<&Vec<String>>,
+    skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    history: Option<Arc<dyn ego_core::history::SessionHistory>>,
+    environment: ego_core::permit::EnvPolicy,
+    orchestration: ego_core::orchestrator::Mode,
+) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
         .into_iter()
         .map(RegisteredTool::Effect)
         .collect();
     all.extend(
-        ego_tools::orchestrator::tools_from_environment()
+        ego_tools::orchestrator::tools_from_environment_with_mode(orchestration)
             .into_iter()
             .map(RegisteredTool::Effect),
     );
@@ -918,7 +947,7 @@ pub(super) fn prepared_materials(
         .map(|catalogue| catalogue.capture())
         .transpose()
         .map_err(|error| UsageError(error.to_string()))?;
-    let registry = tools(
+    let registry = tools_with_mode(
         args.tools.as_ref(),
         skill_capture
             .as_ref()
@@ -929,6 +958,7 @@ pub(super) fn prepared_materials(
             .exec
             .policy()
             .map_err(|error| UsageError(error.to_string()))?,
+        orchestration_mode(&settings.effective),
     )?;
     let slug = args
         .model

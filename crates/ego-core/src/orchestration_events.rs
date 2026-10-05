@@ -81,6 +81,25 @@ pub struct Cursor {
 }
 
 impl Cursor {
+    /// A started child or a reserved resend is never submitted again after restart.
+    pub fn settle_spawn(&mut self, session_id: &str) -> bool {
+        self.seen.insert(format!("spawn-supervised-{session_id}"))
+    }
+
+    /// Rebind a result file to its durable native spawn after observer restart.
+    pub fn complete_child(&mut self, name: &str) {
+        self.completed.insert(name.to_owned());
+    }
+
+    pub fn completed(&self, name: &str) -> bool {
+        self.completed.contains(name)
+    }
+
+    pub fn spawn_settled(&self, session_id: &str) -> bool {
+        self.seen
+            .contains(&format!("spawn-supervised-{session_id}"))
+    }
+
     pub fn observe(&mut self, event: Observation, now_ms: u64) -> Salience {
         // File and mail copies share the tracked child and event content;
         // identical completions from different children remain distinct.
