@@ -632,6 +632,8 @@ fn exec_contract_fixture_connects() {
         "udp" => {
             let socket = UdpSocket::bind("0.0.0.0:0").expect("udp socket");
             socket.send_to(b"probe", endpoint).expect("udp control");
+            // Keep the socket alive until local delivery can be observed on macOS.
+            std::thread::sleep(Duration::from_millis(50));
         }
         other => panic!("unknown network fixture protocol: {other}"),
     }
@@ -2748,7 +2750,8 @@ fn linux_bwrap_offline_runs_all_filesystem_levels_when_namespace_controls_work()
                     EnvPolicy::Inherited,
                 )
                 .expect("valid target");
-                let output = execute(&run, spec).expect("offline target must run");
+                let output =
+                    block_on(run.ports.process().execute(&spec)).expect("offline target must run");
                 assert!(format!("{output:?}").contains("offline exact target"));
             }
             Err(ProcessError::MissingCapabilities(missing))
@@ -3170,6 +3173,28 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
             workspace.clone(),
         );
         execute(&baseline, network_spec.clone()).expect("paired network control must work");
+        // Observe and drain the actual host-side positive control before
+        // trying the same endpoint from the isolated child.
+        match &control {
+            NetworkControl::Tcp(listener) => {
+                listener
+                    .set_nonblocking(true)
+                    .expect("nonblocking receiver");
+                let _ = listener
+                    .accept()
+                    .expect("positive TCP control reached the host");
+            }
+            NetworkControl::Udp(socket) => {
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(250)))
+                    .unwrap();
+                let mut bytes = [0_u8; 16];
+                let (length, _) = socket
+                    .recv_from(&mut bytes)
+                    .expect("positive UDP control reached the host");
+                assert_eq!(&bytes[..length], b"probe");
+            }
+        }
 
         // Check every admitted offline child. macOS accepts a precise refusal
         // only when independent non-loopback coverage is unavailable.
@@ -3188,10 +3213,54 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let offline = open_confined_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
         if let Some(offline) = offline {
-            assert!(
-                execute(&offline, network_spec).is_err(),
-                "offline child reached an IP endpoint"
-            );
+            let result = execute(&offline, network_spec);
+            match &control {
+                NetworkControl::Tcp(listener) => {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(ProcessError::Exit {
+                                code: Some(101),
+                                ..
+                            })
+                        ),
+                        "TCP child must report denial: {result:?}"
+                    );
+                    assert!(
+                        listener
+                            .accept()
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+                        "offline TCP reached the host listener"
+                    );
+                }
+                NetworkControl::Udp(socket) => {
+                    // Catches: a send accepted in an isolated namespace is
+                    // mistaken for delivery, or an unconfined send is admitted.
+                    assert!(
+                        matches!(
+                            result,
+                            Ok(())
+                                | Err(ProcessError::Exit {
+                                    code: Some(101),
+                                    ..
+                                })
+                        ),
+                        "UDP child did not complete its bounded attempt: {result:?}"
+                    );
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(100)))
+                        .unwrap();
+                    assert!(
+                        socket
+                            .recv_from(&mut [0_u8; 16])
+                            .is_err_and(|error| matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            )),
+                        "offline UDP reached the host receiver"
+                    );
+                }
+            }
         } else if cfg!(not(any(target_os = "linux", target_os = "macos"))) {
             return;
         }

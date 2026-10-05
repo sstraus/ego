@@ -419,7 +419,7 @@ async fn probe_offline(
         cancel.clone(),
         limits,
         &network_suite("offline.launch-control"),
-        vec!["/bin/true".into()],
+        vec!["/usr/bin/true".into()],
     )
     .await
     {
@@ -640,7 +640,10 @@ async fn paired_udp(
     if received[..received_len] != sentinel.as_bytes()[..] {
         return receiver_failure("sentinel mismatch".into());
     }
-    if !probe_network_denied(
+    // UDP send success only means the local kernel accepted the datagram.
+    // A network namespace may discard it without reporting an error. The
+    // paired host receiver is the authority for delivery, not the send result.
+    match probe_result(
         backend,
         evidence,
         cancel,
@@ -650,7 +653,9 @@ async fn paired_udp(
     )
     .await
     {
-        return false;
+        Ok(()) => {}
+        Err(reason) if reason == "exit 125" || reason == "exit 101" => {}
+        Err(_) => return false,
     }
     socket
         .set_read_timeout(Some(Duration::from_millis(100)))
@@ -1349,7 +1354,7 @@ mod tests {
             }
             fn launch_prefix(&self) -> LaunchPrefix {
                 LaunchPrefix {
-                    program: Some("/bin/false".into()),
+                    program: Some("/usr/bin/false".into()),
                     args_before_target: Vec::new(),
                 }
             }
