@@ -113,6 +113,54 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 acp_management,
             );
             let options = runtime.options()?;
+            if let McpServerConfig::Stdio(config) = request.config()
+                && let Some(session) = runtime.stdio_management.session_stdio()
+            {
+                let spec = stdio_spawn_spec(request.admission().as_ref(), config, runtime.timeout)
+                    .map_err(|error| invalid_candidate(error.to_string()))?;
+                let (child, inventory) = session
+                    .admit(request.name().clone(), spec, options)
+                    .await
+                    .map_err(|error| invalid_candidate(error.to_string()))?;
+                let bootstrap = McpCollapsedBootstrap::detect(&inventory.tools)
+                    .map_err(|error| invalid_candidate(error.to_string()))?;
+                let factory = McpStdioOperationFactory::runtime_session(
+                    Arc::clone(&runtime.continuations),
+                    runtime.max_sse_event_size,
+                    runtime.timeout,
+                    bootstrap,
+                    Arc::clone(&runtime.schemas),
+                    session,
+                    child,
+                )
+                .map_err(|error| invalid_candidate(error.to_string()))?;
+                let capabilities = McpCapabilities::new(
+                    inventory.capabilities.tools.is_some(),
+                    inventory.capabilities.resources.is_some(),
+                    inventory.capabilities.prompts.is_some(),
+                );
+                let cache = cache_metadata(
+                    &inventory.tools,
+                    &inventory.resources,
+                    &inventory.prompts,
+                    inventory.expires_at,
+                )?;
+                return McpAdmittedCandidate::new(
+                    request.admission(),
+                    McpCandidateIdentity::validated(request.name().as_str()),
+                    McpCandidateInventory::new(
+                        capabilities,
+                        inventory.instructions,
+                        inventory.tools,
+                        inventory.resources,
+                        inventory.prompts,
+                        cache,
+                        None,
+                    ),
+                    Arc::new(factory),
+                )
+                .map_err(|error| invalid_candidate(error.to_string()));
+            }
             let server_admission = request.admission();
             let retained_acp = matches!(request.config(), McpServerConfig::Acp { .. });
             let mut acp_session = None;

@@ -11,12 +11,13 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, CancelledNotificationParam, ClientCapabilities,
-    ClientInfo, ClientJsonRpcMessage, ClientRequest, ElicitationCapability,
-    FormElicitationCapability, GetPromptRequestParams, GetPromptResult, Implementation,
-    ListPromptsRequest, ListResourcesRequest, ListToolsRequest, PaginatedRequestParams, Prompt,
-    ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, Resource, ServerCapabilities,
-    ServerJsonRpcMessage, ServerResult,
+    CallToolRequest, CallToolRequestParams, CallToolResponse, CallToolResult,
+    CancelledNotificationParam, ClientCapabilities, ClientInfo, ClientJsonRpcMessage,
+    ClientRequest, ElicitationCapability, FormElicitationCapability, GetPromptRequest,
+    GetPromptRequestParams, GetPromptResponse, GetPromptResult, Implementation, ListPromptsRequest,
+    ListResourcesRequest, ListToolsRequest, PaginatedRequestParams, Prompt, ProtocolVersion,
+    ReadResourceRequest, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
+    RequestId, Resource, ServerCapabilities, ServerJsonRpcMessage, ServerResult,
 };
 use rmcp::service::{PeerRequestOptions, RunningService};
 use rmcp::transport::common::client_side_sse::NeverRetry;
@@ -55,6 +56,10 @@ pub struct McpClientOptions {
 }
 
 impl McpClientOptions {
+    pub(crate) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
     pub fn new(max_sse_event_size: usize, deadline: Instant) -> Result<Self, McpError> {
         if max_sse_event_size == 0 || deadline <= Instant::now() {
             return Err(McpError::new(
@@ -78,6 +83,7 @@ struct ClientControl {
     cancelled: AtomicBool,
     operation_claimed: AtomicBool,
     active: Mutex<Option<ActiveHttpRequest>>,
+    active_protocol_request: Mutex<Option<RequestId>>,
     settlements: Mutex<Vec<McpHttpSettlement>>,
 }
 
@@ -735,6 +741,28 @@ impl McpClient {
         Ok(())
     }
 
+    /// Start one request on a retained stdio channel with fresh cancellation and deadline.
+    pub(crate) fn begin_stdio_operation(
+        &mut self,
+        options: McpClientOptions,
+    ) -> Result<(), McpError> {
+        if !matches!(
+            self.state,
+            ClientState::Running {
+                duplex: Some(_),
+                ..
+            }
+        ) {
+            return Err(McpError::new(
+                McpFailure::Transport,
+                "stdio MCP connection is not running",
+            ));
+        }
+        self.options = options;
+        self.control = Arc::new(ClientControl::default());
+        Ok(())
+    }
+
     pub fn cancellation(&self) -> McpClientCancellation {
         McpClientCancellation {
             control: Arc::clone(&self.control),
@@ -800,6 +828,10 @@ impl McpClient {
                 let duplex = effects.open(self.server.clone()).await?;
                 let shared = SharedDuplex::new(duplex);
                 let transport = shared.clone().compat();
+                // A dropped/timed-out discovery still owns the child for reap.
+                self.state = ClientState::Failed {
+                    duplex: Some(shared.clone()),
+                };
                 match serve_client_with_lifecycle(client_info, transport, lifecycle).await {
                     Ok(service) => {
                         self.state = ClientState::Running {
@@ -944,6 +976,34 @@ impl McpClient {
         params: CallToolRequestParams,
     ) -> Result<McpManualOutcome<CallToolResult>, McpError> {
         self.claim_operation()?;
+        if matches!(
+            self.state,
+            ClientState::Running {
+                duplex: Some(_),
+                ..
+            }
+        ) {
+            let options = self.options;
+            let control = Arc::clone(&self.control);
+            let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
+            let result =
+                Self::send_current_request(self.running_service_mut()?, request, options, control)
+                    .await?;
+            let response = match result {
+                ServerResult::CallToolResult(result) => CallToolResponse::Complete(result),
+                ServerResult::InputRequiredResult(result) => {
+                    CallToolResponse::InputRequired(result)
+                }
+                ServerResult::CreateTaskResult(result) => CallToolResponse::Task(result),
+                _ => {
+                    return Err(McpError::new(
+                        McpFailure::Protocol,
+                        "unexpected stdio MCP response",
+                    ));
+                }
+            };
+            return McpManualOutcome::from_call(response);
+        }
         let service = self.running_service_mut()?;
         let response = service
             .call_tool_once(params)
@@ -959,6 +1019,33 @@ impl McpClient {
         params: ReadResourceRequestParams,
     ) -> Result<McpManualOutcome<ReadResourceResult>, McpError> {
         self.claim_operation()?;
+        if matches!(
+            self.state,
+            ClientState::Running {
+                duplex: Some(_),
+                ..
+            }
+        ) {
+            let options = self.options;
+            let control = Arc::clone(&self.control);
+            let request = ClientRequest::ReadResourceRequest(ReadResourceRequest::new(params));
+            let result =
+                Self::send_current_request(self.running_service_mut()?, request, options, control)
+                    .await?;
+            let response = match result {
+                ServerResult::ReadResourceResult(result) => ReadResourceResponse::Complete(result),
+                ServerResult::InputRequiredResult(result) => {
+                    ReadResourceResponse::InputRequired(result)
+                }
+                _ => {
+                    return Err(McpError::new(
+                        McpFailure::Protocol,
+                        "unexpected stdio MCP response",
+                    ));
+                }
+            };
+            return McpManualOutcome::from_resource(response);
+        }
         let service = self.running_service_mut()?;
         let response = service
             .read_resource_once(params)
@@ -973,6 +1060,33 @@ impl McpClient {
         params: GetPromptRequestParams,
     ) -> Result<McpManualOutcome<GetPromptResult>, McpError> {
         self.claim_operation()?;
+        if matches!(
+            self.state,
+            ClientState::Running {
+                duplex: Some(_),
+                ..
+            }
+        ) {
+            let options = self.options;
+            let control = Arc::clone(&self.control);
+            let request = ClientRequest::GetPromptRequest(GetPromptRequest::new(params));
+            let result =
+                Self::send_current_request(self.running_service_mut()?, request, options, control)
+                    .await?;
+            let response = match result {
+                ServerResult::GetPromptResult(result) => GetPromptResponse::Complete(result),
+                ServerResult::InputRequiredResult(result) => {
+                    GetPromptResponse::InputRequired(result)
+                }
+                _ => {
+                    return Err(McpError::new(
+                        McpFailure::Protocol,
+                        "unexpected stdio MCP response",
+                    ));
+                }
+            };
+            return McpManualOutcome::from_prompt(response);
+        }
         let service = self.running_service_mut()?;
         let response = service
             .get_prompt_once(params)
@@ -1154,18 +1268,25 @@ impl McpClient {
             .await
             .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
         let request_id = handle.id.clone();
-        tokio::select! {
+        if let Ok(mut active) = control.active_protocol_request.lock() {
+            *active = Some(request_id.clone());
+        }
+        let result = tokio::select! {
             response = handle.await_response() => response.map_err(|error| {
                 McpError::new(McpFailure::Protocol, error.to_string())
             }),
-            () = wait_cancelled(control) => {
+            () = wait_cancelled(Arc::clone(&control)) => {
                 let _ = service.notify_cancelled(CancelledNotificationParam::new(
                     Some(request_id),
                     Some("MCP client operation cancelled".to_owned()),
                 )).await;
                 Err(McpError::new(McpFailure::Cancelled, "MCP client was cancelled"))
             }
+        };
+        if let Ok(mut active) = control.active_protocol_request.lock() {
+            *active = None;
         }
+        result
     }
 
     pub async fn settle(mut self) -> Result<McpClientSettlement, McpError> {
@@ -1177,7 +1298,30 @@ impl McpClient {
                 duplex,
                 ..
             } => {
-                let _ = service.close().await;
+                if self.control.cancelled.load(Ordering::Acquire) {
+                    let request_id = self
+                        .control
+                        .active_protocol_request
+                        .lock()
+                        .ok()
+                        .and_then(|mut active| active.take());
+                    if let Some(request_id) = request_id {
+                        // A dropped request future cannot poll its cancellation branch.
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            service.notify_cancelled(CancelledNotificationParam::new(
+                                Some(request_id),
+                                Some("MCP client request abandoned".to_owned()),
+                            )),
+                        )
+                        .await;
+                    }
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(2), service.close())
+                            .await;
+                } else {
+                    let _ = service.close().await;
+                }
                 if let Some(duplex) = duplex {
                     duplex_settlement = Some(if self.control.cancelled.load(Ordering::Acquire) {
                         duplex.interrupt().await?
