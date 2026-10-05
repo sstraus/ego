@@ -59,6 +59,7 @@ pub enum HostCommand {
     /// handler by sending [`ExportSelection::default`].
     Export(ExportSelection),
     Hooks,
+    Config(String),
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
     BusySubmit,

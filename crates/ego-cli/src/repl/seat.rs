@@ -1052,7 +1052,13 @@ impl Seat {
                     }
                     Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
+                    Dispatch::Config(arguments) => {
+                        Line::HostCommand(HostCommand::Config(arguments))
+                    }
                     Dispatch::Refused { reason } => Line::Refused(reason),
+                    Dispatch::Action(ActionId::Config) => {
+                        Line::HostCommand(HostCommand::Action(ActionId::Config))
+                    }
                     Dispatch::Action(_)
                     | Dispatch::Prompt
                     | Dispatch::Immediate

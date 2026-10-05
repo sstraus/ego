@@ -84,6 +84,7 @@ pub enum Dispatch {
     Export(ExportSelection),
     Fork(ego_core::event::id::ItemId),
     Hooks,
+    Config(String),
     Prompt,
     Immediate,
     InteractiveIngress,
@@ -491,7 +492,7 @@ impl ActionRegistry {
             enabled(
                 Config,
                 "config",
-                "Inspect the effective perimeter — /config perimeter",
+                "Inspect configuration — /config [perimeter | set KEY VALUE]",
             ),
             enabled(Doctor, "doctor", "Diagnose local subsystem health"),
             enabled(Quit, "quit", "Exit the interactive session"),
@@ -865,11 +866,19 @@ impl ActionRegistry {
                 };
             }
             if name == "config" && self.resolve_slash(name) == Some(ActionId::Config) {
-                return if raw_arguments.trim() == "perimeter" {
+                if self.availability(ActionId::Config) != Availability::Enabled {
+                    return Dispatch::Refused {
+                        reason: "config is unavailable",
+                    };
+                }
+                let arguments = raw_arguments.trim();
+                return if arguments.is_empty() {
                     Dispatch::Action(ActionId::Config)
+                } else if arguments == "perimeter" || arguments.starts_with("set ") {
+                    Dispatch::Config(arguments.to_owned())
                 } else {
                     Dispatch::Refused {
-                        reason: "usage: /config perimeter",
+                        reason: "usage: /config [perimeter | set KEY TOML_VALUE]",
                     }
                 };
             }
