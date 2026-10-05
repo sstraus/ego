@@ -84,30 +84,65 @@ fn config_ls_json_stays_one_empty_values_object() {
     );
 }
 
+// Catches an empty user document concealing the effective credential defaults.
 #[test]
-fn rules_ls_names_the_allow_command_when_no_rule_is_effective() {
+fn rules_ls_shows_credential_defaults_without_user_configuration() {
     let listed = empty().subcommand("rules").arg("ls").run();
     assert_eq!(listed.code, Some(0), "{}", listed.stderr);
-    assert_eq!(listed.stdout, "", "no rule rows exist");
-    assert!(
-        listed.stderr.contains("ego rules allow"),
-        "the empty rule list names its writer: {}",
-        listed.stderr
+    let rules: Vec<_> = listed
+        .stdout
+        .lines()
+        .map(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 5);
+            assert_eq!(fields[1], "deny");
+            assert_eq!(fields[3], "default");
+            fields[2]
+        })
+        .collect();
+    assert_eq!(
+        rules,
+        vec![
+            "read(/**/*.keychain)",
+            "read(/**/*.keychain-db)",
+            "read(/**/.aws/**)",
+            "read(/**/.env*)",
+            "read(/**/.netrc)",
+            "read(/**/.ssh/**)",
+            "read(/**/Keychains/**)"
+        ]
     );
+    assert!(!listed.stderr.contains("ego rules allow"));
 }
 
+// Catches the JSON listing dropping built-in defaults or presenting them as immutable system rules.
 #[test]
-fn rules_ls_json_stays_one_empty_rules_array() {
+fn rules_ls_json_shows_credential_defaults_without_user_configuration() {
     let listed = empty().subcommand("rules").args(["ls", "--json"]).run();
     assert_eq!(listed.code, Some(0), "{}", listed.stderr);
-    let json: serde_json::Value =
-        serde_json::from_str(listed.stdout.trim()).expect("one version-1 object");
-    assert_eq!(json["rules"].as_array().expect("rules").len(), 0);
-    assert!(
-        !listed.stderr.contains("ego rules allow"),
-        "a machine reader is not given prose: {}",
-        listed.stderr
+    let json: serde_json::Value = serde_json::from_str(listed.stdout.trim()).unwrap();
+    let rows = json["rules"].as_array().unwrap();
+    assert_eq!(rows.len(), 7);
+    for row in rows {
+        assert_eq!(row["effect"], "deny");
+        assert_eq!(row["from"], "default");
+        assert_eq!(row["also"], serde_json::json!([]));
+    }
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["rule"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "read(/**/*.keychain)",
+            "read(/**/*.keychain-db)",
+            "read(/**/.aws/**)",
+            "read(/**/.env*)",
+            "read(/**/.netrc)",
+            "read(/**/.ssh/**)",
+            "read(/**/Keychains/**)"
+        ]
     );
+    assert!(!listed.stderr.contains("ego rules allow"));
 }
 
 #[test]

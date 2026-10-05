@@ -244,6 +244,19 @@ is exit 2, and a collision is exit 1. Copies in other authorities survive and
 are reported. A permissions table is a whole-block override: creating one may
 shadow that layer's base judge/lists or lower-layer allow/judge values; system
 denies remain binding. Receipts report stored and effective change separately.
+Credential reads have built-in `default` deny rules for `.env*`, `.ssh/**`,
+`.aws/**`, `.netrc`, `Keychains/**`, `*.keychain`, and `*.keychain-db`, at any
+depth in the workspace or additional roots. These rules remain when a
+permissions table replaces lower layers. An effective explicit user allow,
+for example `ego rules allow 'read(/absolute/project/.env)'`, lifts the preset
+for matching reads only. Project, local, agent-file, and flag allows do not
+lift it; explicit denies from any file layer still win, including immutable
+system denies. Revoking the user allow restores the default denial. The
+existing path grammar is case-sensitive and matches canonical targets.
+These are `read` permission defaults: they do not mask re-allowed content,
+filter `grep` results, or confine subprocess reads. Key-only projection is
+separate work.
+
 For `allow`, `deny`, and `revoke`, the rule ADR fixes the one-line receipt to
 eight escaped tab-separated fields:
 stored change, effective change, effect, ID, canonical rule, target, surviving

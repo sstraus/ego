@@ -681,7 +681,7 @@ fn resolve_inner(
         sandbox_source,
         roots_source,
         exec_paths,
-        permissions,
+        permissions: permissions.with_credential_defaults(),
         judge,
         posture,
         active_profile: resolved_active_profile,

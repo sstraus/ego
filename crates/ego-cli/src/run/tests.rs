@@ -1272,7 +1272,16 @@ fn frozen_rule_resolver_reuses_startup_layers_and_replaces_only_base_user_permis
         result.next.ruleset.allow[0].origins(),
         ego_core::config::OriginSet::just(ego_core::config::Source::Project)
     );
-    assert_eq!(result.next.ruleset.deny.len(), 1);
+    assert_eq!(
+        result
+            .next
+            .ruleset
+            .deny
+            .iter()
+            .filter(|entry| entry.authority() != ego_core::config::Source::Default)
+            .count(),
+        1
+    );
     assert_eq!(
         result.next.ruleset.deny[0].rule(),
         &ego_core::permit::rule::Rule::load("read(src/**)").unwrap()

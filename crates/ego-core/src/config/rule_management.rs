@@ -211,7 +211,7 @@ impl RuleManagement {
             if let Some(entry) = rules
                 .deny
                 .iter()
-                .find(|entry| entry.rule().matches(op, workspace))
+                .find(|entry| entry.denies(op, workspace, &rules.allow))
             {
                 return RuleExplanation {
                     operations,
