@@ -151,11 +151,10 @@ pub fn ready_prompt_count(output: &[u8]) -> usize {
             screen.screen().contents().trim() == ">"
         })
         .count()
-        .saturating_sub(1)
 }
 
 #[cfg(windows)]
-fn ready_prompt_count(output: &[u8]) -> usize {
+pub fn ready_prompt_count(output: &[u8]) -> usize {
     const DSR_QUERY: &[u8] = b"\x1b[6n";
     const PLAIN_PROMPT: &[u8] = b"> ";
     const ANSI_PROMPT: &[u8] = b">\x1b[K";
@@ -1235,10 +1234,8 @@ impl Ego {
                     eof_sent = true;
                     continue;
                 }
-                // Unix PTYs need the second plain prompt render. ConPTY emits
-                // one ANSI-cleared prompt after its cursor-position query.
-                // `ready_prompt_count` encodes those observed handshakes while
-                // exposing the same monotonically increasing count here.
+                // Submit at the first completed empty editor frame. A later
+                // empty frame still gates EOF after the script is accepted.
                 let mut writer = writer.lock().expect("pty writer lock");
                 writer
                     .write_all(input.expect("the scripted branch has input").as_bytes())

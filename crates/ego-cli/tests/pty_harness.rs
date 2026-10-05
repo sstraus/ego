@@ -14,7 +14,7 @@ fn typed_line_repaint_does_not_signal_an_empty_prompt_for_eof() {
         .position(|window| window == b"/fork")
         .expect("the recorded child echoed the command");
     let before = support::ready_prompt_count(&recorded[..typed]);
-    assert_eq!(before, 1);
+    assert_eq!(before, 2);
     for end in typed..=recorded.len() {
         assert_eq!(support::ready_prompt_count(&recorded[..end]), before);
     }
@@ -31,11 +31,12 @@ fn incomplete_empty_prompt_frame_does_not_signal_readiness() {
         .unwrap()
         + b"\x1b[?25h".len();
     let first = &recorded[..first_end];
+    assert_eq!(support::ready_prompt_count(first), 1);
     let mut frames = first.to_vec();
     frames.extend_from_slice(first);
-    assert_eq!(support::ready_prompt_count(&frames), 1);
-    frames.extend_from_slice(&first[..first.len() - 1]);
-    assert_eq!(support::ready_prompt_count(&frames), 1);
-    frames.push(first[first.len() - 1]);
     assert_eq!(support::ready_prompt_count(&frames), 2);
+    frames.extend_from_slice(&first[..first.len() - 1]);
+    assert_eq!(support::ready_prompt_count(&frames), 2);
+    frames.push(first[first.len() - 1]);
+    assert_eq!(support::ready_prompt_count(&frames), 3);
 }
