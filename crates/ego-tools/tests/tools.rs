@@ -1876,6 +1876,7 @@ mod end_to_end {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 Tools::new(
                     &ws.registry,
@@ -1974,6 +1975,7 @@ mod end_to_end {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 Tools::new(
                     &ws.registry,
@@ -2122,5 +2124,14 @@ mod end_to_end {
             image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
             default_reasoning_effort: None,
         }
+    }
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
     }
 }

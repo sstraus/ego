@@ -519,6 +519,8 @@ impl AttemptStream {
             // and the two are opposite readings of retry safety. The
             // transport says which, with `DeliveryObserved`.
             AiEvent::Error { .. } => {}
+            // Only a provider that answered emits one, so it is content below.
+            AiEvent::ProviderFailure { .. } => {}
         }
 
         // Anything that is provider *content* proves the request arrived,
@@ -550,6 +552,7 @@ impl AttemptStream {
                 | AiEvent::ToolCall { .. }
                 | AiEvent::Usage(_)
                 | AiEvent::ProviderCost { .. }
+                | AiEvent::ProviderFailure { .. }
         ) {
             self.delivery.observe(DeliveryCertainty::PossiblySent);
         }

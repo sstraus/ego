@@ -111,6 +111,26 @@ pub enum AiEvent {
     /// message is not matchable without matching on a provider's prose, and a
     /// kind cannot say which parameter was wrong.
     Error { message: String, kind: ErrorKind },
+    /// What a host may be told about the failure the provider just reported.
+    ///
+    /// Beside [`Error`](Self::Error) and not a field on it, because the two
+    /// have different readers. `Error.message` goes to the session log and
+    /// keeps whatever the provider sent, a raw non-JSON body included, so an
+    /// operator can debug an outage. `cause` is built only from typed provider
+    /// fields — a streamed error's `message`, an error envelope's
+    /// `error.message`, an HTTP status — so it may cross to an ACP host
+    /// without relaying an upstream body.
+    ///
+    /// Emitted only for a failure the provider itself reported: an error
+    /// status, or an error event in an answered stream. A transport that lost
+    /// the exchange emits none, and that absence is what lets the turn tell
+    /// "the provider said it failed" from "nobody knows what the provider did
+    /// with the rest" once output has already arrived.
+    ProviderFailure {
+        cause: String,
+        /// The provider's `Retry-After`, when it stated one in seconds.
+        retry_after: Option<std::time::Duration>,
+    },
 }
 
 /// A permanent, local inability to encode one exact generation request.

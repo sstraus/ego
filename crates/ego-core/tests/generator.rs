@@ -216,7 +216,7 @@ mod generator {
             match event {
                 // Not journalled by this stub assembler: it exists to test
                 // turn assembly, and the reasoning carrier is `turn/drain`'s.
-                AiEvent::ReasoningState(_) => Vec::new(),
+                AiEvent::ReasoningState(_) | AiEvent::ProviderFailure { .. } => Vec::new(),
                 AiEvent::TextDelta { text } => {
                     let item = *self.message_item.get_or_insert_with(ItemId::new);
                     let env = self.envelope(Some(item));

@@ -126,6 +126,7 @@ impl JudgeDecoder {
             | AiEvent::ReasoningState(_)
             | AiEvent::Usage(_)
             | AiEvent::ProviderCost { .. }
+            | AiEvent::ProviderFailure { .. }
             | AiEvent::DeliveryObserved(_) => {}
             AiEvent::TextDelta { .. } => {}
         }
