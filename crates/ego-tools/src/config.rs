@@ -297,6 +297,36 @@ fn apply(
     mutation: UserConfigMutation,
 ) -> Result<bool, UserConfigError> {
     match mutation {
+        UserConfigMutation::Root {
+            target,
+            path,
+            access,
+        } => {
+            let mut roots = match managed_value(parsed, &target, ManagedConfigKey::Roots) {
+                Some(ManagedConfigValue::Roots(roots)) => roots,
+                _ => Vec::new(),
+            };
+            let before = roots.clone();
+            if let Some(access) = access {
+                if let Some(root) = roots.iter_mut().find(|root| root.path == path) {
+                    root.access = access;
+                } else {
+                    roots.push(ego_core::permit::RootCfg { path, access });
+                }
+            } else {
+                roots.retain(|root| root.path != path);
+            }
+            if roots == before {
+                return Ok(false);
+            }
+            apply_managed_set(
+                document,
+                &target,
+                ManagedConfigKey::Roots,
+                &ManagedConfigValue::Roots(roots),
+            )?;
+            Ok(true)
+        }
         UserConfigMutation::ManagedSet { target, key, value } => {
             if managed_value(parsed, &target, key).as_ref() == Some(&value) {
                 return Ok(false);
@@ -633,10 +663,22 @@ fn managed_value(
 ) -> Option<ManagedConfigValue> {
     match target {
         UserConfigTarget::Base => match key {
+            ManagedConfigKey::Roots => parsed.roots.clone().map(ManagedConfigValue::Roots),
             ManagedConfigKey::Model => parsed.model.clone().map(ManagedConfigValue::Model),
             ManagedConfigKey::Thinking => parsed.thinking.map(ManagedConfigValue::Thinking),
             ManagedConfigKey::Mode => parsed.mode.map(ManagedConfigValue::Mode),
             ManagedConfigKey::Sandbox => parsed.sandbox.map(ManagedConfigValue::Sandbox),
+            ManagedConfigKey::ExecEnv => parsed
+                .exec
+                .as_ref()
+                .and_then(|exec| exec.env)
+                .map(ManagedConfigValue::ExecEnv),
+            ManagedConfigKey::ExecEnvAllowlist => parsed
+                .exec
+                .as_ref()
+                .and_then(|exec| exec.env_allowlist.clone())
+                .map(ManagedConfigValue::ExecEnvAllowlist),
+            ManagedConfigKey::Network => parsed.network.map(ManagedConfigValue::Network),
             ManagedConfigKey::Budget => parsed.budget.clone().map(ManagedConfigValue::Budget),
             ManagedConfigKey::Bare => parsed.bare.map(ManagedConfigValue::Bare),
             ManagedConfigKey::PermissionsJudge => parsed
@@ -655,10 +697,22 @@ fn managed_value(
         UserConfigTarget::Profile(name) => {
             let profile = parsed.profile.get(name.as_str())?;
             match key {
+                ManagedConfigKey::Roots => profile.roots.clone().map(ManagedConfigValue::Roots),
                 ManagedConfigKey::Model => profile.model.clone().map(ManagedConfigValue::Model),
                 ManagedConfigKey::Thinking => profile.thinking.map(ManagedConfigValue::Thinking),
                 ManagedConfigKey::Mode => profile.mode.map(ManagedConfigValue::Mode),
                 ManagedConfigKey::Sandbox => profile.sandbox.map(ManagedConfigValue::Sandbox),
+                ManagedConfigKey::ExecEnv => profile
+                    .exec
+                    .as_ref()
+                    .and_then(|exec| exec.env)
+                    .map(ManagedConfigValue::ExecEnv),
+                ManagedConfigKey::ExecEnvAllowlist => profile
+                    .exec
+                    .as_ref()
+                    .and_then(|exec| exec.env_allowlist.clone())
+                    .map(ManagedConfigValue::ExecEnvAllowlist),
+                ManagedConfigKey::Network => profile.network.map(ManagedConfigValue::Network),
                 ManagedConfigKey::Budget => profile.budget.clone().map(ManagedConfigValue::Budget),
                 ManagedConfigKey::PermissionsJudge => profile
                     .permissions
@@ -765,6 +819,10 @@ fn managed_path(key: ManagedConfigKey) -> &'static [&'static str] {
         ManagedConfigKey::Thinking => &["thinking"],
         ManagedConfigKey::Mode => &["mode"],
         ManagedConfigKey::Sandbox => &["sandbox"],
+        ManagedConfigKey::ExecEnv => &["exec", "env"],
+        ManagedConfigKey::ExecEnvAllowlist => &["exec", "env_allowlist"],
+        ManagedConfigKey::Roots => &["roots"],
+        ManagedConfigKey::Network => &["network"],
         ManagedConfigKey::Budget => &["budget"],
         ManagedConfigKey::Bare => &["bare"],
         ManagedConfigKey::PermissionsJudge => &["permissions", "judge"],

@@ -183,6 +183,15 @@ pub(super) fn surface_line(
                     }
                     continue;
                 }
+                Dispatch::History(query) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice =
+                            Some("history is unavailable while a turn is running".to_owned());
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::History(query)), failed);
+                }
                 Dispatch::SessionMetadata(operation) => {
                     if let Some(line) =
                         route_session_metadata(status, operation, phase.get() == EditPhase::Busy)
@@ -228,6 +237,15 @@ pub(super) fn surface_line(
                         continue;
                     }
                     return (Line::HostCommand(HostCommand::Fork(item)), failed);
+                }
+                Dispatch::Config(arguments) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice =
+                            Some("config is unavailable while a turn is running".to_owned());
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::Config(arguments)), failed);
                 }
                 Dispatch::Hooks => {
                     if phase.get() == EditPhase::Busy {
@@ -348,6 +366,12 @@ pub(super) fn surface_line(
                         }
                         continue;
                     }
+                    Dispatch::History(_) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some("history is unavailable while a turn is running".to_owned());
+                        repaint_status(status);
+                        continue;
+                    }
                     Dispatch::SessionMetadata(operation) => {
                         route_session_metadata(status, operation, true);
                         continue;
@@ -378,6 +402,12 @@ pub(super) fn surface_line(
                         status.lock().expect("surface status lock").notice = Some(
                             "switching forks is unavailable while a turn is running".to_owned(),
                         );
+                        repaint_status(status);
+                        continue;
+                    }
+                    Dispatch::Config(_) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some("config is unavailable while a turn is running".to_owned());
                         repaint_status(status);
                         continue;
                     }

@@ -60,13 +60,18 @@ pub const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 
 /// The seven, ready to hand to `Tools::new`.
 pub fn builtins() -> Vec<Arc<dyn Tool>> {
+    builtins_with_environment(ego_core::permit::EnvPolicy::Inherited)
+}
+
+/// The builtins with the run-selected environment applied to exec.
+pub fn builtins_with_environment(environment: ego_core::permit::EnvPolicy) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(Typed(ReadTool)),
         Arc::new(Typed(GlobTool)),
         Arc::new(Typed(GrepTool)),
         Arc::new(Typed(WriteTool)),
         Arc::new(Typed(EditTool)),
-        Arc::new(Typed(ExecTool)),
+        Arc::new(Typed(ExecTool::with_environment(environment))),
         Arc::new(Typed(ReadToolResult)),
     ]
 }

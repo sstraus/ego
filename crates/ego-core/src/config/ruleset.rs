@@ -9,13 +9,15 @@
 
 use super::layer::PermCfg;
 use super::source::Source;
+use crate::permit::Op;
 use crate::permit::rule::Rule;
+use std::path::Path;
 
 /// Which layers carry a rule.
 ///
 /// A **set**, because "the user config denies this" is true or false and
 /// cannot be true twice — so dedup is structural rather than a `contains`
-/// check somebody can forget. One byte over six known layers, which also
+/// check somebody can forget. One byte over eight known origins, which also
 /// keeps [`PolicyDenied`] small enough to return by value.
 ///
 /// Iteration is most-authoritative-first, so the first element is the
@@ -114,6 +116,15 @@ impl SourcedRule {
         self.origins.insert(origin);
     }
 
+    /// Match a deny, allowing only an effective user grant to lift defaults.
+    pub(crate) fn denies(&self, op: &Op, root: &Path, allow: &[SourcedRule]) -> bool {
+        self.rule.matches(op, root)
+            && !(self.origins == OriginSet::just(Source::Default)
+                && allow.iter().any(|entry| {
+                    entry.origins.contains(Source::User) && entry.rule.matches_allow(op, root)
+                }))
+    }
+
     pub fn rule(&self) -> &Rule {
         &self.rule
     }
@@ -129,14 +140,15 @@ impl SourcedRule {
 
     /// The layer whose copy an operator cannot get around — decision 1.
     ///
-    /// **This is the *minimum* rank, and the inversion is deliberate.**
+    /// **Authority order differs from merge precedence.**
     /// [`Source::rank`] orders layers for *merging*, lowest first, so `flags`
     /// beats everything and wins a value. Authority over a deny runs the
     /// other way: `system` is the layer nothing above can lift (`CLI.md` §7,
     /// "non-relaxable deny/budget ceilings — the only source of ceilings"), so
     /// the most authoritative origin is the lowest-ranked one.
     ///
-    /// Two orderings over one enum, pointing opposite ways, is exactly the
+    /// Built-in defaults are least authoritative, below operator rules.
+    /// Two orderings over one enum is exactly the
     /// thing a second call site gets backwards. It is computed here and
     /// nowhere else.
     ///
@@ -178,6 +190,28 @@ pub struct Ruleset {
 }
 
 impl Ruleset {
+    /// Install credential read defaults without replacing operator rules.
+    pub fn with_credential_defaults(mut self) -> Self {
+        // Absolute patterns also cover roots outside the workspace. These are
+        // ordinary read rules, not filesystem or subprocess confinement.
+        for raw in [
+            "read(/**/.env*)",
+            "read(/**/.ssh/**)",
+            "read(/**/.aws/**)",
+            "read(/**/.netrc)",
+            "read(/**/Keychains/**)",
+            "read(/**/*.keychain)",
+            "read(/**/*.keychain-db)",
+        ] {
+            Self::merge(
+                &mut self.deny,
+                Rule::load(raw).expect("valid built-in credential rule"),
+                Source::Default,
+            );
+        }
+        self
+    }
+
     /// The block one layer contributes, every rule attributed to that layer.
     ///
     /// This is what the merge loop does when a layer states `permissions`, and

@@ -26,6 +26,19 @@ use super::catalogue::{
     validate_distinct,
 };
 
+struct TaskToolSource {
+    capture: CapturedToolCatalogue,
+    notes: Vec<String>,
+}
+impl AdmittedToolSource for TaskToolSource {
+    fn capture(&self) -> Result<CapturedToolCatalogue, ToolCatalogueError> {
+        Ok(self.capture.clone())
+    }
+    fn context_notes(&self) -> Vec<String> {
+        self.notes.clone()
+    }
+}
+
 struct EmptyAdmittedToolSource;
 
 impl AdmittedToolSource for EmptyAdmittedToolSource {
@@ -76,12 +89,17 @@ impl GenerationToolCatalogue {
 /// A model call after the mixed registry has selected its typed boundary.
 /// Human input never acquires an effect tool or enters permission policy.
 pub(crate) enum PreparedToolCall {
+    Task(super::task::TaskRequest),
     Effect {
         tool: std::sync::Arc<dyn Tool>,
         call: PreparedCall,
         presentation: PermissionPresentationInput,
     },
     HumanInput(crate::question::QuestionRequest),
+    History {
+        source: std::sync::Arc<dyn crate::history::SessionHistory>,
+        request: crate::history::HistoryRequest,
+    },
     Skill {
         operation: crate::skill::SkillOperation,
         catalogue: std::sync::Arc<crate::skill::SkillCatalogue>,
@@ -207,6 +225,7 @@ pub struct Tools<'a> {
     cwd: CanonPath,
     skill_resource_roots: Option<crate::skill::SkillResourceRoots>,
     resume: Option<std::sync::Arc<ResumeSealer>>,
+    task_context: Option<(String, std::sync::Arc<futures::lock::Mutex<()>>)>,
 }
 
 impl<'a> Tools<'a> {
@@ -230,6 +249,7 @@ impl<'a> Tools<'a> {
             cwd,
             skill_resource_roots: None,
             resume: None,
+            task_context: None,
         }
     }
 
@@ -247,6 +267,7 @@ impl<'a> Tools<'a> {
             cwd,
             skill_resource_roots: None,
             resume: None,
+            task_context: None,
         }
     }
 
@@ -265,6 +286,7 @@ impl<'a> Tools<'a> {
             cwd,
             skill_resource_roots: None,
             resume: None,
+            task_context: None,
         })
     }
 
@@ -280,6 +302,39 @@ impl<'a> Tools<'a> {
 
     pub(crate) fn mask_result(&self, result: &mut crate::permit::ToolResult) {
         result.mask_secrets(&self.effects.secrets);
+    }
+
+    pub(crate) fn masked_result(
+        &self,
+        mut result: crate::permit::ToolResult,
+    ) -> crate::permit::ToolResult {
+        self.mask_result(&mut result);
+        result
+    }
+
+    pub(crate) fn task_child(
+        &self,
+        name: String,
+        serial: std::sync::Arc<futures::lock::Mutex<()>>,
+        cancel: super::CancelToken,
+    ) -> Result<Self, ToolCatalogueError> {
+        Ok(Self {
+            registry: self
+                .registry
+                .iter()
+                .filter(|entry| !matches!(entry, RegisteredTool::Task))
+                .cloned()
+                .collect(),
+            source: std::sync::Arc::new(TaskToolSource {
+                capture: self.source.capture()?,
+                notes: self.source.context_notes(),
+            }),
+            effects: self.effects.clone().with_cancel(cancel),
+            cwd: self.cwd.clone(),
+            skill_resource_roots: self.skill_resource_roots.clone(),
+            resume: self.resume.clone(),
+            task_context: Some((name, serial)),
+        })
     }
 
     pub(crate) fn blob_store(&self) -> &dyn BlobStore {
@@ -299,7 +354,10 @@ impl<'a> Tools<'a> {
             .iter()
             .find_map(|registered| match registered {
                 RegisteredTool::Skill(catalogue) => Some(std::sync::Arc::clone(catalogue)),
-                RegisteredTool::Effect(_) | RegisteredTool::HumanInput(_) => None,
+                RegisteredTool::Effect(_)
+                | RegisteredTool::HumanInput(_)
+                | RegisteredTool::Task
+                | RegisteredTool::History { .. } => None,
             })
     }
 
@@ -308,6 +366,9 @@ impl<'a> Tools<'a> {
         let mut registry = Vec::with_capacity(self.registry.len() + dynamic.tools().len());
         registry.extend(self.registry.iter().cloned());
         registry.extend(dynamic.tools().iter().cloned());
+        if self.task_context.is_some() {
+            registry.retain(|tool| !matches!(tool, RegisteredTool::Task));
+        }
         validate_distinct(&registry)?;
         let descriptors = registry.iter().map(RegisteredTool::descriptor).collect();
         Ok(GenerationToolCatalogue {
@@ -482,6 +543,11 @@ impl<'a> Tools<'a> {
                 call: self.prepare_params(tool.as_ref(), params.clone())?,
                 presentation: PermissionPresentationInput::new(params, descriptor.parameters),
             }),
+            RegisteredTool::Task => super::task::parse(params).map(PreparedToolCall::Task),
+            RegisteredTool::History { source, tool } => Ok(PreparedToolCall::History {
+                source: std::sync::Arc::clone(source),
+                request: tool.parse(params)?,
+            }),
             RegisteredTool::HumanInput(tool) => {
                 tool.parse(params).map(PreparedToolCall::HumanInput)
             }
@@ -637,7 +703,20 @@ impl<'a> Tools<'a> {
         item: ItemId,
         pending: Pending,
     ) -> Resolution {
-        policy.decide(item, pending).await
+        if let Some((name, serial)) = &self.task_context {
+            let _guard = serial.lock().await;
+            if self
+                .effects
+                .cancel
+                .as_ref()
+                .is_some_and(super::CancelToken::is_cancelled)
+            {
+                return Resolution::Ask(pending);
+            }
+            policy.decide_named(item, pending, Some(name)).await
+        } else {
+            policy.decide(item, pending).await
+        }
     }
 
     /// Stage three: run it, under the grant policy issued and through the

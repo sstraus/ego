@@ -468,8 +468,14 @@ impl CliCompactionCommand {
             compiled: _,
             text: _,
             slug,
-        } = prepared_materials(&settings, &self.args, String::new(), &Stderr)
-            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        } = prepared_materials(
+            &settings,
+            &self.args,
+            String::new(),
+            Arc::new(self.store.history()),
+            &Stderr,
+        )
+        .map_err(|error| CompactionError::Internal(error.to_string()))?;
         let Settings {
             run_deadline,
             root,

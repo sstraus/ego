@@ -406,6 +406,7 @@ pub async fn compact(
                 state: SessionState::default(),
                 result: serde_json::to_value(CompactOutput::from(&receipt))
                     .expect("the typed compaction receipt is serializable"),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             }
         }
@@ -449,6 +450,7 @@ async fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> 
         session: target,
         state: SessionState::default(),
         result: Value::String(target.to_string()),
+        selected_session: None,
         mcp_errors: Vec::new(),
     };
     let rendered = match args.output {

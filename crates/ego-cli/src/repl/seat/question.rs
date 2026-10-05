@@ -104,6 +104,15 @@ pub(super) fn answer_control(
         control => control,
     };
     let control = match control {
+        Control::SessionPicker { sessions, reply } => {
+            let selected =
+                super::session_picker::run_session_picker(editor, phase, surface.status, sessions);
+            let _ = reply.send(selected);
+            return true;
+        }
+        control => control,
+    };
+    let control = match control {
         Control::StartupModel {
             picker,
             notice,
@@ -328,6 +337,9 @@ pub(super) fn answer_control(
         Control::Activate { .. } => unreachable!("activation is handled before modal entry"),
         Control::ConfirmRemember { .. } => {
             unreachable!("remember confirmation is handled before modal entry")
+        }
+        Control::SessionPicker { .. } => {
+            unreachable!("session selection is handled before modal entry")
         }
         Control::StartupModel { .. } => {
             unreachable!("startup model selection is handled before modal entry")

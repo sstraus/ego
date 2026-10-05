@@ -185,7 +185,14 @@ impl CliPrepared {
             compiled,
             text: _,
             slug,
-        } = prepared_materials(&settings, &args, String::new(), &Stderr).map_err(usage)?;
+        } = prepared_materials(
+            &settings,
+            &args,
+            String::new(),
+            Arc::new(store.history()),
+            &Stderr,
+        )
+        .map_err(usage)?;
         let system = if child { None } else { system };
         let compiled = if child { None } else { compiled };
         let Settings {
@@ -381,7 +388,8 @@ impl CliPrepared {
         // an escalation becomes a question the operator can answer instead of
         // an internal error the host can only render as a failure.
         let profile_roots =
-            super::profile_roots::admit(&self.effective).map_err(RunExecutorError::new)?;
+            super::profile_roots::admit(&self.effective, self.confinement.workspace())
+                .map_err(RunExecutorError::new)?;
         let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
             CliGenerationPolicySource::new(
                 policy_selection,
@@ -731,6 +739,7 @@ pub(super) async fn execution_preflight(
         &settings,
         args,
         matches!(driver, Driver::Interactive { .. }),
+        Arc::new(chosen.store.history()),
         diagnostics,
     )
     .map_err(usage)?;

@@ -20,7 +20,7 @@ pub enum RootAccess {
 }
 
 /// One root as written in a profile: a path, before resolution.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootCfg {
     pub path: PathBuf,
@@ -52,6 +52,12 @@ impl ProfileRoot {
 /// Why a profile's roots were refused at load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootsError {
+    NestedReadOnly {
+        path: CanonPath,
+    },
+    OutsideCeiling {
+        path: CanonPath,
+    },
     NotAbsolute {
         path: PathBuf,
     },
@@ -68,6 +74,13 @@ pub enum RootsError {
 impl std::fmt::Display for RootsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RootsError::NestedReadOnly { path } => write!(
+                f,
+                "nested-read-only-root: {path} is beneath a read-write root; Landlock cannot enforce it"
+            ),
+            RootsError::OutsideCeiling { path } => {
+                write!(f, "extra root {path} exceeds the system roots ceiling")
+            }
             RootsError::NotAbsolute { path } => write!(
                 f,
                 "profile root {} must be an absolute path or start with `~/`",
@@ -103,7 +116,7 @@ pub fn admit_roots(
     home: &CanonPath,
     resolver: &dyn PathResolver,
 ) -> Result<Vec<ProfileRoot>, RootsError> {
-    roots
+    let admitted = roots
         .iter()
         .map(|root| {
             let expanded = expand(&root.path, home)?;
@@ -127,7 +140,19 @@ pub fn admit_roots(
             }
             Ok(ProfileRoot::new(path, root.access))
         })
-        .collect()
+        .collect::<Result<Vec<_>, RootsError>>()?;
+    for root in &admitted {
+        if root.access() == RootAccess::Read
+            && admitted.iter().any(|other| {
+                other.access() == RootAccess::ReadWrite && root.path().is_or_under(other.path())
+            })
+        {
+            return Err(RootsError::NestedReadOnly {
+                path: root.path().clone(),
+            });
+        }
+    }
+    Ok(admitted)
 }
 
 const ADMIN_DIR: &str = "/etc/ego";
@@ -143,4 +168,41 @@ fn expand(path: &Path, home: &CanonPath) -> Result<PathBuf, RootsError> {
             path: path.to_path_buf(),
         })
     }
+}
+
+/// Refuse extra canonical roots outside any independently declared system bound.
+pub fn check_root_ceilings(
+    roots: &[ProfileRoot],
+    ceilings: &[Vec<RootCfg>],
+    home: &CanonPath,
+    workspace: &CanonPath,
+    resolver: &dyn PathResolver,
+) -> Result<(), RootsError> {
+    for ceiling in ceilings {
+        let allowed = admit_roots(ceiling, home, resolver)?;
+        for root in roots {
+            if root.path().is_or_under(workspace) {
+                continue;
+            }
+            let containing = allowed
+                .iter()
+                .filter(|bound| root.path().is_or_under(bound.path()))
+                .max_by_key(|bound| bound.path().as_path().components().count());
+            let access_allowed = containing.is_some_and(|bound| {
+                root.access() == RootAccess::Read || bound.access() == RootAccess::ReadWrite
+            });
+            let covers_read_only = root.access() == RootAccess::ReadWrite
+                && allowed.iter().any(|bound| {
+                    bound.access() == RootAccess::Read
+                        && bound.path().is_or_under(root.path())
+                        && !bound.path().is_or_under(workspace)
+                });
+            if !access_allowed || covers_read_only {
+                return Err(RootsError::OutsideCeiling {
+                    path: root.path().clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }

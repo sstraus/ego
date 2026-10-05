@@ -1937,7 +1937,10 @@ fn quiet_drops_the_tool_reports_and_keeps_the_answer() {
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     assert_eq!(finished.stdout.trim(), "I read it.");
-    assert!(finished.stderr.is_empty(), "{}", finished.stderr);
+    assert_eq!(
+        finished.stderr,
+        "εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter\nεgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access\n"
+    );
 }
 
 // --- a ceiling that does not do what its spelling says ---
