@@ -1,5 +1,7 @@
 //! One Decisions client for router, destructive and wake questions.
+mod configured;
 use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method, bearer_header, public_header};
+pub use configured::ConfiguredDecisions;
 use ego_core::credentials::SecretMaterial;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -10,6 +12,7 @@ use url::Url;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionError {
     InvalidConfiguration,
+    CredentialsUnavailable,
     InvalidRequest,
     Transport,
     Timeout,
@@ -21,6 +24,7 @@ impl std::fmt::Display for DecisionError {
         match self {
             Self::HttpStatus(status) => write!(f, "Decisions endpoint answered {status}"),
             other => f.write_str(match other {
+                Self::CredentialsUnavailable => "Decisions credential is unavailable",
                 Self::InvalidConfiguration => "invalid Decisions configuration",
                 Self::InvalidRequest => "invalid Decisions request",
                 Self::Transport => "Decisions transport failed",

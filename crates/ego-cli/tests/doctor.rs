@@ -363,3 +363,20 @@ fn a_detail_may_name_a_visible_root_and_nothing_else_on_the_machine() {
     ego_core::health::HealthDetail::sanitized("probe", PRIVATE_MACHINE_PATH, &roots)
         .expect_err("a path outside every visible root must be refused, not printed");
 }
+
+// Catches: doctor reading a credential or silently treating a gateway as verified ZDR.
+#[test]
+fn jev_doctor_names_uses_and_gateway_without_reading_or_showing_auth() {
+    let tmp = scratch();
+    let workspace = tmp.path();
+    let home = home_in(workspace);
+    fs::write(home.join("config.toml"), "[jev]\nendpoint='https://gateway.example/jev/decisions'\nauth={kind='header',name='X-User-Email',value='private-identity@example.test'}").unwrap();
+    let roots = doctor::visible_roots(workspace, Some(&home));
+    let snapshot = doctor::snapshot(workspace.into(), Some(home), &roots);
+    let text = doctor::text(&snapshot);
+    assert!(text.contains("unverified-ZDR"), "{text}");
+    for use_name in ["wake=true", "destructive=true", "router=true"] {
+        assert!(text.contains(use_name), "{text}");
+    }
+    assert!(!text.contains("private-identity@example.test"));
+}
