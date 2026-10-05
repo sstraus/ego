@@ -383,6 +383,8 @@ mod registration {
             [
                 "edit",
                 "exec",
+                "exec_cancel",
+                "exec_status",
                 "glob",
                 "grep",
                 "read",
@@ -448,7 +450,10 @@ mod registration {
         // — a tool that asked for a *different* op shape depending on its
         // parameters would be a tool whose authority is unpredictable, which
         // `mod rogue` is the place to catch.
+        let id = ego_core::event::id::DetachedExecId::new().to_string();
         let samples = [
+            ("exec_cancel", json!({ "id": id })),
+            ("exec_status", json!({ "id": id })),
             ("read", json!({ "path": "src/main.rs" })),
             ("glob", json!({ "pattern": "src/**/*.rs" })),
             ("grep", json!({ "query": "TODO", "path": "src" })),
@@ -501,6 +506,11 @@ mod registration {
         assert!(
             produced.contains(&OpName::ReadEvidence),
             "read_tool_result must produce the session-evidence operation"
+        );
+
+        assert!(
+            produced.contains(&OpName::SessionProcess),
+            "detached controls must produce the session-process operation"
         );
 
         for (head, op) in [

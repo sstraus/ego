@@ -1,4 +1,4 @@
-error[E0451]: fields `write_paths`, `read_paths`, `list_paths`, `search_paths`, `endpoints`, `network`, `http_request_digest`, `secret_egress`, `foreign_invocations`, `foreign_transport`, `spawn` and `evidence` of struct `ego_core::permit::Scope` are private
+error[E0451]: fields `write_paths`, `read_paths`, `list_paths`, `search_paths`, `endpoints`, `network`, `http_request_digest`, `secret_egress`, `foreign_invocations`, `foreign_transport`, `spawn`, `evidence` and `session_process` of struct `ego_core::permit::Scope` are private
  --> tests/ui/scope_construction_is_private.rs:7:9
   |
 6 |     let _ = Scope {
@@ -6,4 +6,4 @@ error[E0451]: fields `write_paths`, `read_paths`, `list_paths`, `search_paths`, 
 7 |         read_paths: Vec::new(),
   |         ^^^^^^^^^^^^^^^^^^^^^^ private field
 8 |         ..Scope::default()
-  |           ^^^^^^^^^^^^^^^^ fields `write_paths`, `list_paths`, `search_paths`, `endpoints`, `network`, `http_request_digest`, `secret_egress`, `foreign_invocations`, `foreign_transport`, `spawn` and `evidence` are private
+  |           ^^^^^^^^^^^^^^^^ fields `write_paths`, `list_paths`, `search_paths`, `endpoints`, `network`, `http_request_digest`, `secret_egress`, `foreign_invocations`, `foreign_transport`, `spawn`, `evidence` and `session_process` are private
