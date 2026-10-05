@@ -195,6 +195,7 @@ pub(super) fn instructions(
 pub(super) fn tools(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
@@ -202,6 +203,18 @@ pub(super) fn tools(
         .map(RegisteredTool::Effect)
         .collect();
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
+    if let Some(source) = history {
+        for tool in [
+            ego_core::history::HistoryTool::Search,
+            ego_core::history::HistoryTool::Open,
+        ] {
+            all.push(RegisteredTool::History {
+                source: Arc::clone(&source),
+                tool,
+            });
+        }
+    }
+
     if let Some(skills) = skills.filter(|catalogue| !catalogue.specs().is_empty()) {
         all.push(RegisteredTool::skill(skills));
     }
@@ -844,6 +857,7 @@ pub(super) fn materials(
     settings: &Settings,
     args: &Args,
     seeded: bool,
+    history: Arc<dyn ego_core::history::SessionHistory>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Materials, UsageError> {
     let text = if let Some(agent_file) = &args.agent_file {
@@ -857,13 +871,14 @@ pub(super) fn materials(
     } else {
         prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
     };
-    prepared_materials(settings, args, text, diagnostics)
+    prepared_materials(settings, args, text, history, diagnostics)
 }
 
 pub(super) fn prepared_materials(
     settings: &Settings,
     args: &Args,
     text: String,
+    history: Arc<dyn ego_core::history::SessionHistory>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Materials, UsageError> {
     let schema_spec = args.schema.as_deref().map(|spec| (spec, None)).or_else(|| {
@@ -902,6 +917,7 @@ pub(super) fn prepared_materials(
         skill_capture
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
+        Some(history),
         settings
             .effective
             .exec
@@ -979,7 +995,7 @@ pub(super) fn discover_skills_at(
 
 /// The store this run logs through, and which session in it.
 pub(super) struct Chosen {
-    pub(super) store: JsonlStore,
+    pub(super) store: Arc<JsonlStore>,
     pub(super) id: SessionId,
 }
 
@@ -1007,8 +1023,8 @@ pub(super) fn chosen(
     // The same `root` that derives a named session's id below, so "the session
     // called build in this workspace" and "the sessions belonging to this
     // workspace" cannot disagree about which workspace that is.
-    let store = session::jsonl(store_root, root.to_path_buf());
-    let id = session::id_for(&args.session, root, &store)?;
+    let store = Arc::new(session::jsonl(store_root, root.to_path_buf()));
+    let id = session::id_for(&args.session, root, store.as_ref())?;
 
     Ok(Chosen { store, id })
 }

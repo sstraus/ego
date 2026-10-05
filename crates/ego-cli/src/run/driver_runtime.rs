@@ -411,6 +411,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 session: active.id(),
                 state,
                 result,
+                selected_session: None,
                 mcp_errors: mcp_errors.clone(),
             };
             if let Some(artifact_store) = artifact_store.as_ref() {
@@ -425,6 +426,23 @@ pub(super) async fn drive_execution<S: EventSink>(
             Ok(ended)
         }
         Driver::Interactive { seat, between } => {
+            if seat.has_human()
+                && matches!(&args.session, crate::cli::SessionChoice::Resume(_))
+                && let Some(output) = text_output
+            {
+                let environment = crate::render::caps::Environment::read();
+                let capabilities = crate::render::Capabilities::of(
+                    &crate::render::caps::Terminal::from_process(args.no_color, &environment),
+                );
+                if let Err(error) = crate::render::replay::replay(
+                    active.writer(),
+                    active.id(),
+                    output,
+                    capabilities,
+                ) {
+                    diagnostics.note(&format!("the transcript could not be replayed: {error}"));
+                }
+            }
             let interactive_metadata =
                 SessionMetadata::new(Arc::clone(jsonl_store), Arc::new(clock));
             type CompactionRuntime = (
@@ -448,6 +466,9 @@ pub(super) async fn drive_execution<S: EventSink>(
             }
 
             enum EpochTransition<'store> {
+                Resume {
+                    meta: ego_core::store::session_store::SessionMeta,
+                },
                 Exit,
                 New {
                     target: ActiveSession<'store>,
@@ -475,6 +496,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 session: active.id(),
                 state: state.clone(),
                 result: Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: mcp_errors.clone(),
             };
 
@@ -983,6 +1005,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         let next_registry = match tools(
                                             args.tools.as_ref(),
                                             Some(prospective.core()),
+                                            Some(Arc::new(jsonl_store.history())),
                                             exec_environment.clone(),
                                         ) {
                                             Ok(registry) => registry,
@@ -1290,22 +1313,113 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         }
                                         continue;
                                     }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Sessions,
-                                    )) => {
-                                        match crate::catalogue::listing(
-                                            jsonl_store.as_ref(),
-                                            &root,
-                                            false,
-                                        ) {
-                                            Ok(metas) => diagnostics.note(
-                                                &crate::catalogue::table(&metas, false).join("\n"),
-                                            ),
-                                            Err(error) => diagnostics.note(&format!(
-                                                "the session catalogue could not be read: {error}"
-                                            )),
+                                    repl::Line::HostCommand(
+                                        command @ (repl::HostCommand::Action(
+                                            repl::actions::ActionId::Sessions,
+                                        )
+                                        | repl::HostCommand::History(_)),
+                                    ) => {
+                                        if !seat.has_human() {
+                                            match crate::catalogue::listing(jsonl_store.as_ref(), &root, true) {
+                                                Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
+                                                Err(error) => diagnostics.note(&format!("the session catalogue could not be read: {error}")),
+                                            }
+                                            continue;
                                         }
-                                        continue;
+                                        if pending_work {
+                                            diagnostics.note("a session cannot be selected while source work is pending");
+                                            continue;
+                                        }
+                                        let mut metas: Vec<_> =
+                                            match crate::catalogue::saved_sessions(
+                                                jsonl_store.as_ref(),
+                                            ) {
+                                                Ok(metas) => metas
+                                                    .into_iter()
+                                                    .filter(|meta| meta.id != active.id())
+                                                    .collect(),
+                                                Err(error) => {
+                                                    diagnostics.note(&format!("the session catalogue could not be read: {error}"));
+                                                    continue;
+                                                }
+                                            };
+                                        if let repl::HostCommand::History(query) = command {
+                                            let history = jsonl_store.history();
+                                            let hits =
+                                                match tokio::task::spawn_blocking(move || {
+                                                    history.matches(&query)
+                                                })
+                                                .await
+                                                {
+                                                    Ok(Ok(hits)) => hits,
+                                                    result => {
+                                                        diagnostics.note(&format!(
+                                                        "history could not be searched: {result:?}"
+                                                    ));
+                                                        continue;
+                                                    }
+                                                };
+                                            metas.retain(|meta| {
+                                                hits.iter().any(|hit| hit.id == meta.id)
+                                            });
+                                        }
+                                        let Some(target) = seat.pick_session(metas.clone()) else {
+                                            continue;
+                                        };
+                                        let Some(meta) =
+                                            metas.into_iter().find(|meta| meta.id == target)
+                                        else {
+                                            continue;
+                                        };
+                                        if !meta.workspace_root.is_dir() {
+                                            diagnostics
+                                                .note("the selected session root is unavailable");
+                                            continue;
+                                        }
+                                        let opened = match session::open(
+                                            jsonl_store.as_ref(),
+                                            &target,
+                                            &clock,
+                                        ) {
+                                            Ok(opened) => opened,
+                                            Err(error) => {
+                                                diagnostics.note(&format!("the selected session could not be opened: {error}"));
+                                                continue;
+                                            }
+                                        };
+                                        let target_state = opened.state.clone();
+                                        // Interrupted work requires the full `ego resume` recovery path.
+                                        if target_state.turns.values().any(|turn| !turn.completed)
+                                            || !target_state.unacknowledged_prompts().is_empty()
+                                            || target_state.pending_question().is_some()
+                                            || !target_state.live_attempts.is_empty()
+                                        {
+                                            diagnostics.note(&format!("session {target} has unfinished work; use ego resume {target}"));
+                                            continue;
+                                        }
+                                        if meta.workspace_root != root {
+                                            drop(opened);
+                                            break 'epoch EpochTransition::Resume { meta };
+                                        }
+                                        let target_owner = match ActiveSession::durable(
+                                            opened,
+                                            target_state,
+                                            EVIDENCE_CAP,
+                                        ) {
+                                            Ok(owner) => owner,
+                                            Err(error) => {
+                                                diagnostics.note(&format!("the selected session could not be replayed: {error}"));
+                                                continue;
+                                            }
+                                        };
+                                        if !seat.activate_session(target) {
+                                            diagnostics.note("the terminal could not activate the selected session");
+                                            continue;
+                                        }
+                                        diagnostics.note(&format!("resumed session {target}"));
+                                        break 'epoch EpochTransition::New {
+                                            target: target_owner,
+                                        };
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Usage,
@@ -1578,6 +1692,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 target_skills
                                                     .as_ref()
                                                     .map(crate::skill::SkillCatalogueCapture::core),
+                                                Some(Arc::new(jsonl_store.history())),
                                                 effective.exec.policy().map_err(|error| {
                                                     CompactionError::Internal(error.to_string())
                                                 })?,
@@ -2050,6 +2165,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 session: active.id(),
                                 state: state.clone(),
                                 result,
+                                selected_session: None,
                                 mcp_errors: mcp_errors.clone(),
                             };
 
@@ -2102,6 +2218,17 @@ pub(super) async fn drive_execution<S: EventSink>(
                         last.state = source_state;
                         if let Err(termination) = session_end {
                             last.termination = termination;
+                        }
+                        break 'sessions Ok(last);
+                    }
+                    EpochTransition::Resume { meta } => {
+                        active.replace_state(source_state.clone());
+                        last.state = source_state;
+                        if let Err(termination) = session_end {
+                            last.termination = termination;
+                        } else {
+                            last.selected_session = Some(meta);
+                            seat.restore_control(control);
                         }
                         break 'sessions Ok(last);
                     }

@@ -77,6 +77,7 @@ impl Submission {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     Action(ActionId),
+    History(String),
     SessionMetadata(SessionMetadataOperation),
     Skill(AdmittedSkillOperation),
     Skills(SkillSurfaceAction),
@@ -476,7 +477,7 @@ impl ActionRegistry {
             )
             .unavailable("the interactive permission controller"),
             enabled(Mcp, "mcp", "Inspect admitted MCP connections"),
-            enabled(Sessions, "sessions", "Browse durable sessions"),
+            enabled(Sessions, "sessions", "Browse durable sessions").alias("history"),
             enabled(Fork, "fork", "Fork a durable session"),
             enabled(Compact, "compact", "Compact the active context")
                 .unavailable("the compaction service"),
@@ -661,6 +662,12 @@ impl ActionRegistry {
         Ok(())
     }
 
+    /// A completed root redirect releases the old admitted catalogue.
+    pub(crate) fn release_skill_view(&self) {
+        *self.skill_view.lock().expect("skill view lock") = None;
+        self.set_availability(ActionId::Skills, Availability::Busy);
+    }
+
     fn skill_capture(&self) -> Result<Option<SkillCatalogueCapture>, RegistryError> {
         let view = self.skill_view.lock().expect("skill view lock").clone();
         view.map(|view| {
@@ -783,6 +790,20 @@ impl ActionRegistry {
             let boundary = command.find(char::is_whitespace).unwrap_or(command.len());
             let name = &command[..boundary];
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
+            if name == "history" && self.resolve_alias(name) == Some(ActionId::Sessions) {
+                if self.availability(ActionId::Sessions) != Availability::Enabled {
+                    return Dispatch::Refused {
+                        reason: "history is unavailable while a turn is running",
+                    };
+                }
+                return if raw_arguments.trim().is_empty() {
+                    Dispatch::Refused {
+                        reason: "usage: /history QUERY",
+                    }
+                } else {
+                    Dispatch::History(raw_arguments.trim().to_owned())
+                };
+            }
             if name == "name" && self.resolve_slash(name) == Some(ActionId::Name) {
                 return parse_name_action(raw_arguments);
             }

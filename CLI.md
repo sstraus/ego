@@ -29,7 +29,7 @@ proposed.
 ```
 ego [PROMPT]                  interactive session (prompt submitted if given)
 ego run [PROMPT]              headless one-shot; PROMPT from argv, -f FILE, or stdin
-ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspace;
+ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or headless latest;
                               --answer QUESTION_ID=JSON answers pending input;
                               --name and --goal are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
@@ -146,7 +146,7 @@ omitted when empty: two states, identical bytes.
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
 | `ego [PROMPT]` | **yes** | asks once whether to trust project files before ambient reads, then runs the line-oriented session. Permission questions accept `allow`, `deny`, or `amend`; amended raw JSON parameters are prepared and classified again from the beginning |
-| `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
+| `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it a human terminal shows the session picker across roots; headless execution takes the most recently updated session of this workspace. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | **yes** | creates a durable lineage branch at the idle tip or after the completed turn containing `--at ITEM_ID`, without copying source spend or run state |
 | `ego compact` | **yes** | a required request ID derives one idempotent clean target from the existing idle compaction operation and supports later continuation |
@@ -457,6 +457,18 @@ Every surface that opens a session takes them, from one declaration: `ego run`,
 `crates/ego-cli/src/cli/commands.rs`) and converted once
 (`SessionShape`), so the served surface cannot drift into a `--tools` that
 means something else.
+
+The builtins `history.search` (`{"query":"acp trust"}`) and `history.open`
+(`{"session":"<id>"}`) read prior conversations across the admitted session
+store's workspace roots. Search returns at most 1 KiB of JSON with session ids,
+titles, UTC updated dates and conversational snippets. Open returns at most
+8 KiB of user/assistant text, with an omission notice when bounded. Tool results
+and streamed deltas are excluded. `--tools` and `--no-tools` control their
+availability like the other builtins. SQLite FTS5 lives in a derived
+`history.sqlite` cache beside the JSONL sessions; a missing or corrupt cache is
+rebuilt from those logs. First use may build the index; later searches update
+changed sessions. The cache is never needed to resume a session.
+
 
 On `ego acp` this is how a caller shapes the sessions the served process will
 open, before any client connects. Naming none of them is the unshaped session
@@ -931,8 +943,8 @@ the composer appears retain their Enter boundaries without cooked terminal
 echo. The first starts a turn; further submitted lines enter the busy FIFO.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
-/name /goal /tools /expand /skills /hooks /version`. These 25 commands are the complete
+/sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
+/name /goal /tools /expand /skills /hooks /version`. These 27 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
@@ -1710,6 +1722,31 @@ a cached row is never handed to a request
 Only supplied rows come from this file, and they are rebuilt on every
 invocation rather than cached at all; the cache holds only *discovered* rows,
 from providers that enumerate themselves.
+
+### Interactive session picker
+
+On a human terminal, `/sessions` and `ego resume` without an ID open the saved
+sessions across project roots, newest first. `/sessions` excludes the active
+session. Rows show title, model, updated local time, recorded root, and summary.
+Type to filter title, model, or summary, use Up/Down to select, Enter to resume,
+and Esc to cancel. Missing roots remain visible as `[unavailable]` and cannot
+be selected. `/history QUERY` searches the conversational FTS5 index and opens
+the same picker with the matching sessions.
+
+The next prompt uses the selected session's durable context. Switching to another
+root re-enters normal run admission with that root: project instructions, config,
+trust, and tool confinement are rebuilt. Within the current root, the active model
+selection stays in effect. Sessions with unfinished work require `ego resume ID`,
+which owns recovery. Pending source work prevents switching. Sequential stdin keeps
+the `/sessions` table; headless `ego resume` without an ID keeps latest-in-workspace
+selection. `ego ls` and machine output keep their existing format.
+
+On human-terminal resume, the transcript replays the most recent 10 user turns
+before the composer, using canonical final answers and the live compact tool
+renderer. A line reports how many earlier turns were omitted. Display replay
+adds no events or usage. Known transcript items that cannot be rendered show
+`[transcript item unavailable]`; unknown durable records keep the store's
+existing recovery refusal.
 
 ### Perimeter roots and profile presets
 
