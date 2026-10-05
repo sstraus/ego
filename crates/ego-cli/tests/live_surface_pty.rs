@@ -4160,6 +4160,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
     waiter.join().expect("waiter thread");
 }
 
+// Catches: registered slash commands abort startup or fail to render locally without model calls.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
     const COMMANDS: [&str; 26] = [
@@ -4266,6 +4267,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("clear", None),
         ("usage", Some("usage as of")),
         ("export", None),
+        ("config perimeter", Some("capabilities")),
         ("doctor", Some("acp.extension:hold")),
         ("new", None),
         ("name", None),
