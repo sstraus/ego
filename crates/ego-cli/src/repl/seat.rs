@@ -395,7 +395,12 @@ struct SurfaceStatus {
     model_selection: Option<Arc<GenerationSelection>>,
     question_selector: Option<Arc<Mutex<Selector>>>,
     permission_modal: bool,
+    permission_capabilities: crate::render::Capabilities,
     permission_rules: Option<Arc<dyn PermissionRuleApplication>>,
+    /// Rows committed straight to the transcript by the terminal owner, for
+    /// receipts that have no run output to travel with. `None` without a live
+    /// terminal.
+    transcript: Option<Sender<String>>,
     /// What the host is told around a modal wait, and whether `-q` is on.
     signals: Option<(Osc, bool)>,
     cursor_selectors: bool,
@@ -440,7 +445,9 @@ impl Default for SurfaceStatus {
             model_selection: None,
             question_selector: None,
             permission_modal: false,
+            permission_capabilities: crate::render::Capabilities::plain(),
             permission_rules: None,
+            transcript: None,
             signals: None,
             cursor_selectors: false,
             mcp_actions: None,
@@ -921,6 +928,7 @@ impl Seat {
             status.cursor_selectors = true;
         }
         let printer = ExternalPrinter::new(CHANNEL_CAPACITY);
+        status.lock().expect("surface status lock").transcript = Some(printer.sender());
         let reply_started = Arc::clone(&status.lock().expect("surface status lock").reply_started);
         let (output, output_owner) =
             SurfaceOutput::pumped(printer.sender(), cancel.clone(), reply_started);
@@ -1029,6 +1037,7 @@ impl Seat {
                     Dispatch::Export(selection) => {
                         Line::HostCommand(HostCommand::Export(selection))
                     }
+                    Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Refused { reason } => Line::Refused(reason),
                     Dispatch::Action(_)
@@ -1209,9 +1218,11 @@ impl Seat {
     }
 
     /// Let the terminal owner tell the host when it is waiting on a person.
-    pub fn announce_waits(&self, osc: Osc, quiet: bool) {
+    pub fn announce_waits(&self, capabilities: crate::render::Capabilities, quiet: bool) {
         if let SeatKind::Live(live) = &self.kind {
-            live.status.lock().expect("surface status lock").signals = Some((osc, quiet));
+            let mut status = live.status.lock().expect("surface status lock");
+            status.signals = Some((Osc::new(capabilities), quiet));
+            status.permission_capabilities = capabilities;
         }
     }
 
@@ -1834,6 +1845,7 @@ fn own_terminal(
 mod action_execution;
 mod edit_mode;
 mod permission;
+mod permission_modal;
 mod picker_surface;
 mod question;
 mod suspend;

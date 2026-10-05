@@ -32,6 +32,7 @@ pub mod diff;
 pub mod line;
 pub mod markdown;
 pub mod osc;
+pub mod permission_diff;
 pub mod stream;
 pub mod style;
 pub mod table;

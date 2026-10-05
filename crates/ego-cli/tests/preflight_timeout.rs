@@ -242,6 +242,7 @@ fn run_deadline_during_main_preflight_cleans_the_credential_process_tree() {
 }
 
 #[cfg(unix)]
+// Catches: judge preflight escaping the run deadline or retaining credential descendants.
 #[test]
 fn judge_preflight_uses_the_same_deadline_and_cleans_its_credential_tree() {
     let body = r#"
@@ -279,8 +280,12 @@ printf '%s\n' '{"access":"judge-refresh","refresh":"judge-refresh","expires":0}'
         ),
     )
     .expect("judge config");
+    // This process has only two sequential credential preflights. Bound its
+    // fixture workers instead of spending the five-second deadline starting
+    // one worker per host core in both Tokio runtimes under parallel load.
     let running = fixture
         .ego()
+        .env("TOKIO_WORKER_THREADS", "2")
         .args([
             "--model",
             "openai-codex/gpt-5.1",

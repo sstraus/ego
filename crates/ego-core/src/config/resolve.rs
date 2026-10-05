@@ -87,6 +87,8 @@ pub struct Effective {
     pub sandbox_source: Option<Source>,
     /// Winning layer for the active profile roots.
     pub roots_source: Option<Source>,
+    /// Additional user-selected read and executable roots, before canonicalization.
+    pub exec_paths: Vec<PathBuf>,
     pub permissions: Ruleset,
     pub judge: Option<ModelRef>,
     pub posture: Posture,
@@ -162,6 +164,7 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         thinking,
         mode,
         sandbox,
+        exec_paths,
         permissions,
         budget,
         bare: _,
@@ -177,6 +180,7 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (thinking.is_some(), "thinking"),
         (mode.is_some(), "mode"),
         (sandbox.is_some(), "sandbox"),
+        (exec_paths.is_some(), "exec_paths"),
         (permissions.is_some(), "permissions"),
         (budget.is_some(), "budget"),
         (!profile.is_empty(), "profile tables"),
@@ -328,6 +332,7 @@ fn resolve_inner(
     let mut sandbox = None;
     let mut sandbox_source = None;
     let mut roots_source = None;
+    let mut exec_paths = Vec::new();
     let mut permissions = Ruleset::default();
     let mut judge = None;
     let mut ceilings = Ceilings::default();
@@ -380,6 +385,12 @@ fn resolve_inner(
         {
             sandbox = Some(value);
             sandbox_source = Some(sourced.source);
+        }
+        if let Some(paths) = profile
+            .and_then(|profile| profile.exec_paths.as_ref())
+            .or(sourced.value.exec_paths.as_ref())
+        {
+            exec_paths = paths.clone();
         }
         if let Some(perm) = profile
             .and_then(|p| p.permissions.clone())
@@ -507,6 +518,32 @@ fn resolve_inner(
     // guarantees a `/etc/ego` entry is present in the list at all, which no
     // per-call evaluation can supply if the merge dropped it.
 
+    // A repository replacement must not inherit an operator's blanket grant.
+    // Keep denies intact: losing server authority cannot relax a restriction.
+    permissions.allow.retain(|entry| {
+        let Rule::Tool { server, .. } = entry.rule() else {
+            return true;
+        };
+        if !entry.rule().is_tool_wildcard() {
+            return true;
+        }
+        let Ok(name) = server.parse::<McpServerName>() else {
+            return false;
+        };
+        matches!(
+            mcp.entry(&name),
+            Some(ResolvedMcpEntry::Configured {
+                provenance: McpConfigProvenance::Layer {
+                    source: Source::User
+                } | McpConfigProvenance::Profile {
+                    source: Source::System | Source::User,
+                    ..
+                },
+                ..
+            })
+        )
+    });
+
     // The same construction one field over: a `system` ceiling is gathered
     // outside the ordinary merge and re-applied after it, so no
     // higher-precedence layer and no profile override can raise it. `min`
@@ -534,6 +571,7 @@ fn resolve_inner(
         sandbox,
         sandbox_source,
         roots_source,
+        exec_paths,
         permissions,
         judge,
         posture,

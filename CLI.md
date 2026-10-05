@@ -33,7 +33,7 @@ ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspa
                               --answer QUESTION_ID=JSON answers pending input;
                               --name and --goal are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
-ego fork <ID>                 branch a session
+ego fork <ID> [--at ITEM_ID]   branch after a completed turn
 ego compact <ID> [--request-id UUID]
                               publish one idempotent checkpoint target
 ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
@@ -147,7 +147,7 @@ omitted when empty: two states, identical bytes.
 | `ego [PROMPT]` | **yes** | asks once whether to trust project files before ambient reads, then runs the line-oriented session. Permission questions accept `allow`, `deny`, or `amend`; amended raw JSON parameters are prepared and classified again from the beginning |
 | `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
-| `ego fork` | **yes** | creates a durable lineage branch at an explicit valid source boundary without copying source spend or run state |
+| `ego fork` | **yes** | creates a durable lineage branch at the idle tip or after the completed turn containing `--at ITEM_ID`, without copying source spend or run state |
 | `ego compact` | **yes** | a required request ID derives one idempotent clean target from the existing idle compaction operation and supports later continuation |
 | `ego export` | **yes** | local transcript export plus the producer-only version-1 structural bundle under `--sanitize`; Markdown, JSON, JSONL, stdout, and atomic file publication follow §2.1 |
 | `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME` is typed but refuses before network access until the product CIMD origin and loopback redirect are published |
@@ -207,6 +207,21 @@ explicit profile `ci`. Permission arrays, credentials, MCP, and hooks remain
 owned by their dedicated commands. `unset` is the only null operation and
 prunes empty managed tables. There are no table fragments, list indices,
 aliases, or arbitrary dotted keys.
+
+The standalone runner also accepts `exec_paths = ["/absolute/tools/root"]`
+in `~/.ego/config.toml` (or `$EGO_HOME/config.toml`), selected user/system
+profiles, and explicit `-c` overrides. Edit the TOML with `ego config edit`;
+`config set` does not manage this key. Higher layers replace the whole list;
+an explicit empty list clears configured roots. Project and project-local
+configuration cannot add exec roots. Paths must be absolute and must exist;
+the runner canonicalizes symlinks before creating the confinement policy.
+On macOS and Linux these roots add read and execute access, never write access.
+On macOS an installed `/opt/homebrew` is also a default runtime root, including
+its `bin` symlinks, Cellar targets and libraries. Other installation prefixes
+must be listed explicitly. Git can also read existing `~/.gitconfig` and
+`$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) on macOS; this
+does not grant access to the rest of the home directory. Writes remain limited by `--sandbox`: workspace
+and private scratch for `workspace`, no writes for `ro`.
 
 `config get|ls --json` emits
 `{"v":1,"scope":"user","profile":string|null,"values":{...}}`; JSON
@@ -343,11 +358,33 @@ clicks, navigation, or other work performed behind that boundary. Running the
 same program through native shell remains an `exec(...)` operation and gains
 no tool authority by its name.
 
+`tool(server/*)` covers every tool of that one server and never another
+server's. It is accepted only in the system and user layers (including their
+profiles); a project, local, agent-file, environment or flags layer is rejected
+at load, so a repository cannot grant itself every tool of a server. A matching
+deny still wins over the wildcard. A wildcard grant applies only when the
+resolved server is defined in user config or a system/user profile. A project
+or local redefinition of the server disables that grant, including profile
+redefinitions. Missing servers and tombstones grant no wildcard authority;
+exact tool rules remain unchanged. Wildcard denies remain restrictive.
+
 Rules follow a published formal grammar matched against the *canonical* call
 (resolved paths, argv, endpoints — never rendered shell strings); the
 mode × sandbox matrix is published and contradictory combinations are
 rejected, not guessed. Every control is individually disableable; hard
 ceilings come only from an administrator's `/etc/ego`.
+
+**Launcher precondition:** a launcher of ego, or of an application that hosts
+`ego-tools`, must not leak inheritable file descriptors numbered 3 or higher.
+Close those descriptors or set close-on-exec (`FD_CLOEXEC`) before launching
+the host. Ego does not sweep or close launcher-inherited descriptors and adds
+no unsafe code to do so. With `--sandbox off`, leaked descriptors can reach
+tool children. On Linux, the Landlock helper instead refuses confined execs
+with `unexpected inherited file descriptor N`; `ro` and `workspace` execution
+can therefore fail before the command starts. In the 2026-09-29 `rb-run`
+incident (regression case), the launcher leaked lock descriptors 8 and 9 without
+close-on-exec: sandbox-off children inherited them and Landlock refused
+confined execs. The launcher was subsequently fixed.
 
 **Session**
 
@@ -489,7 +526,7 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--tools`, `--no-tools` | **yes** | part of §3's general session shape, so `ego acp` takes them too. `--no-tools` there is the session that can never ask for a permission seat |
 | `-C`, `-c/--set`, `--profile` | **yes** | `--profile` is part of §3's general session shape, so `ego acp` takes it too. `-C` it already shared; `-c/--set` it does not take |
 | `-q`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §1 |
-| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--allow`/`--deny` are part of §3's general session shape, so `ego acp` takes them too; `--mode` and its two spellings are not part of it. `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. All seven rule heads enforce: `read`, `write`, `list`, `search`, `exec`, `net`, and `tool` — `net` matches `Op::Connect`/`Op::ProtocolConnect` and `tool` matches `Op::Opaque`, both of which this build now produces. This sentence is derived from `parse.rs`'s `OPERATIONS` table by `the_documents_name_the_rule_heads_the_parser_actually_enforces`, not maintained beside it. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
+| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--allow`/`--deny` are part of §3's general session shape, so `ego acp` takes them too; `--mode` and its two spellings are not part of it. `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. All seven rule heads enforce: `read`, `write`, `list`, `search`, `exec`, `net`, and `tool` — `net` matches `Op::Connect`/`Op::ProtocolConnect` and `tool` matches `Op::Opaque`, both of which this build now produces. This sentence is derived from `parse.rs`'s `OPERATIONS` table by `the_documents_name_the_rule_heads_the_parser_actually_enforces`, not maintained beside it. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; a matching `write(pattern)` allow covers its same-file replacement read without a separate `read(pattern)` allow. The glob still limits the target; explicit read/write denies, workspace boundaries, and plan mode still apply. A standalone read still needs read authorization; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
 | `--sandbox` | **yes** | `ro\|workspace\|off`, default `workspace`, enforced by the measured platform backend before a prepared process can launch; an unavailable required capability fails closed |
 | `-f`, `--file`, `--var` | **yes** | strict version-1 agent files load through the existing bounded YAML implementation, apply their configuration layer below flags, and substitute declared body variables. M4 extracts the shared envelope for skills and still owns the direct executable shebang end-to-end proof, not these flags' availability |
 | `--attach` | **yes** | repeatable local-path or HTTPS image input; bytes enter the durable session-blob/content path before model-specific projection and unsupported model/profile combinations refuse before acquisition |
@@ -889,7 +926,7 @@ use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /fork /compact /clear /usage /statusline /export /doctor /quit /new
+/sessions /fork [message-id] /compact /clear /usage /statusline /export /doctor /quit /new
 /name /goal /tools /expand /skills /hooks /version`. These 25 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
@@ -935,14 +972,44 @@ then edit its schema-derived fields with exact values prefilled; nested shapes
 remain in one prefilled JSON fallback instead of requiring a whole call to be
 typed as JSON.
 
-An unresolved permission modal separates the call, reason, canonical
-operations, risk, exact parameters, derived rule candidates, and every
-widening. `y`, `n`, `e`, and `r` act immediately. `e` edits the same prefilled
-schema-derived form and sends the result through full preparation and policy
-classification again. `r` applies the displayed allow-rule plan through the
-single atomic config owner and then allows the current call; it never asks for
-the tool, JSON, or a second confirmation. A write or staging failure is shown
-and denies the call.
+An unresolved permission modal is at most four rows: the call as a readable
+command, its risk in plain words, and the keys `[y] yes`, `[a] yes, do not ask
+again for <rules>`, `[n] no, say what to do instead`, `[e] edit`, `[d]
+details`. The risk row never shows an internal name; a limited risk (changes
+inside the workspace) and an unknown one (a program ego cannot inspect) read
+differently. `d` shows the rest: the reason, the canonical operations, the exact
+parameters, and what `a` would store with every widening. `y`, `a`, `n`, `e`,
+and `d` act at once. `e` edits the same prefilled schema-derived form and sends
+the result through full preparation and policy classification again. `a`
+applies the displayed allow-rule plan through the single atomic config owner and
+then allows the current call; it never asks for the tool, JSON, or a second
+confirmation. Its rules are the narrowest the grammar can express that still
+match the next call: a program-plus-subcommand prefix for recognized `exec`
+programs (`exec(git commit *)`, `exec(npm run *)`), the workspace glob
+for writes (`write(<workspace>/**)`), and the exact form for everything else.
+A command whose prefix would authorise code the operator never saw keeps its
+exact form: a shell, interpreter, or launcher (`bash -c`, `python3 -c`,
+`env`, `sudo`, `xargs`, ...), a program given by path, or a name carrying shell
+metacharacters or `*`. A bare program, a leading option or toolchain selector,
+and programs without recognized subcommands also keep exact argv. Suggestions
+never offer a generic `exec(program *)` rule. The named subcommand prefix
+allows later arguments to that action, as displayed before storage; it does
+not infer whether those arguments mutate configuration or run another program.
+Deny rules, including system ones, are still evaluated first. No allow rule,
+including an exact rule or one from user or project config, covers a canonical
+filesystem path containing a `.git`, `.ego`, or `.claude` component at any depth
+(ASCII case-insensitive on every platform),
+including nested repositories. The remembered write glob stays workspace-wide;
+control paths remain uncovered and follow the existing mode/judge/human approval
+path. In default mode a control-path write still asks on each call; remembering
+cannot suppress that question. Other modes keep their existing settlement
+semantics. The receipt is one sentence naming each stored rule, committed to
+the transcript. A write or
+staging failure is shown there and denies the call. `n` asks `What should it do
+instead?`: words typed there answer the call as a failed tool result, so the
+model reads them and the run continues; an empty answer is a plain refusal,
+which ends the run as before. The plain non-terminal prompt (`allow`, `deny`,
+`amend`) is unchanged.
 
 A mode or rule change takes effect only at the next generation boundary,
 after the preceding provider attempt, complete sibling tool batch, permission
@@ -995,6 +1062,14 @@ The permission prompt has a plain representation that works in every terminal
 and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
 JSON object of replacement tool parameters, then re-runs prepare and policy
 from the beginning. Invalid answers re-prompt; Ctrl-C and EOF deny.
+
+The permission details view shows pending `edit` changes as a unified diff of
+replacement fragments with real line breaks. Pending `write` content appears
+as additions; the prompt does not read previous file content and states that
+an existing file is overwritten. Diffs show at most 30 lines, clipped to
+terminal width, with an explicit omitted-line count. Colour follows terminal
+capabilities, `--no-color`, and `NO_COLOR`; redirected output has no colour
+escapes. Binary whole-file content shows its byte count instead of a text diff.
 
 ### 6.1 Paste
 
@@ -1108,7 +1183,11 @@ current effort the same way. Arrow keys navigate, a digit selects by number
 while no filter is typed, and typing narrows the list by substring (`Backspace`
 edits; no match shows an empty state and `Enter` does nothing). `Enter` at the
 reasoning step sets the default for new sessions, `s` there applies only to this
-session, and `Esc` cancels. A completed change writes a `Model: <slug>` line to
+session, and `Esc` cancels. Interactive startup with a selected model whose
+reasoning default is unknown opens the reasoning step directly. The operator
+must choose a supported effort; `Enter` saves the model and effort, and `Esc`
+cancels startup. Headless runs still require an explicit `--thinking` value.
+A completed change writes a `Model: <slug>` line to
 the transcript. A selection made while a request is in flight applies at the next
 generation boundary, never by mutating an active request.
 
@@ -1273,6 +1352,17 @@ MCP `isError: true`; published uncertainty is a successful non-retryable tool
 result, and `status` projects the durable `context_overflow` settlement. The
 source session owns every compaction generation's usage and cost,
 and the target receives no copied ledger or run state.
+
+### 6.7 Conversation forks
+
+`ego fork ID --at ITEM_ID` and `/fork [message-id]` branch after the successful
+completed turn containing that durable user or assistant message. The full answer
+is included. Unknown or foreign items, non-message items, failed or incomplete
+turns, and compaction checkpoints are refused without creating a target. Messages
+hidden behind a compaction checkpoint cannot be selected. An inherited message
+branches its owning ancestor at that ancestor's completion sequence. Title and
+active goal come from the selected boundary. An explicit completed boundary can
+be read while the source writer runs; a tip fork requires an inactive source.
 
 ## 7. Configuration
 

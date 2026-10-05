@@ -1374,9 +1374,11 @@ fn presented_remember_uses_the_atomic_owner_once_and_stages_the_written_rule() {
         .remember_allow(preview.plan().clone())
         .expect("the displayed plan is one atomic transaction");
 
+    // Catches the machine receipt reaching the operator: one sentence that
+    // names the stored rule, never the tab-separated RESULT header.
     assert_eq!(
         receipt,
-        "RESULT\tstored_changed\teffective_changed\tuser\tpublished_durably"
+        "Remembered: you will not be asked again for read(/workspace/src/main.rs)."
     );
     let stored = std::fs::read_to_string(&path).unwrap();
     assert!(stored.contains("read(/workspace/src/main.rs)"));

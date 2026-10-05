@@ -711,3 +711,79 @@ fn durable_actual_executor_creates_a_manifest_and_one_observation() {
     );
     assert_execution_observation_count(&finished, &home, 1);
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn standalone_exec_paths_catches_user_config_root_not_reaching_process_policy() {
+    use std::os::unix::fs::PermissionsExt;
+    let tools = tempfile::tempdir().unwrap();
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("tool-root");
+    std::os::unix::fs::symlink(tools.path(), &alias).unwrap();
+    let script = tools.path().join("tool");
+    std::fs::write(&script, "#!/bin/sh\nprintf user-root-admitted\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for configured in [false, true] {
+        let params = serde_json::json!({"argv": [script], "cwd": null, "timeout_ms": 1000});
+        let stub = Stub::start(Plan {
+            completions: vec![
+                Reply::Sse(tool_call("user-exec-root", "exec", &params.to_string())),
+                Reply::Sse(text("the model saw the process result")),
+            ],
+            ..Plan::default()
+        });
+        let ego = Ego::against(&stub);
+        if configured {
+            ego.home_file(
+                "config.toml",
+                &format!(
+                    "exec_paths = [{}]\n",
+                    serde_json::to_string(&alias).unwrap()
+                ),
+            );
+        }
+        let rule = format!("exec('{}' *)", script.display());
+        let finished = ego
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--output",
+                "jsonl",
+                "--allow",
+                &rule,
+                "Ask",
+            ])
+            .run();
+        assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+        let event = completed_tool_event(&finished);
+        assert_eq!(event["ok"], configured, "config={configured}: {event}");
+        if configured {
+            assert!(
+                serde_json::to_string(&stub.generations())
+                    .unwrap()
+                    .contains("user-root-admitted")
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn standalone_exec_paths_catches_missing_root_silently_ignored_before_provider_start() {
+    let missing = tempfile::tempdir().unwrap();
+    let path = missing.path().join("missing");
+    let ego = Ego::nowhere();
+    ego.home_file(
+        "config.toml",
+        &format!("exec_paths = [{}]\n", serde_json::to_string(&path).unwrap()),
+    );
+    let finished = ego.args(["--model", "ollama/qwen3", "Ask"]).run();
+    assert_eq!(finished.code, Some(2), "{}", finished.stderr);
+    assert!(
+        finished.stderr.contains("cannot resolve exec root"),
+        "{}",
+        finished.stderr
+    );
+}

@@ -41,6 +41,25 @@ fn paste_chips(images: &[StagedPasteImage]) -> Vec<String> {
     images.iter().map(|image| image.label.clone()).collect()
 }
 
+/// A successor session opened inside this process needs its own run context
+/// before its first generation can be admitted.
+fn admit_successor_context(
+    admission: &EvidenceAdmissionService,
+    active: &ActiveSession<'_>,
+    run_context: &Option<RunContextEvidence>,
+) -> Result<(), RunTermination> {
+    let context = run_context
+        .as_ref()
+        .expect("the admitted run context outlives its first session")
+        .for_session(active.id());
+    admission
+        .admit_run_context(active.run_evidence(), context)
+        .map(|_| ())
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })
+}
+
 pub(super) struct DriverExecution<'host, 'store, S: EventSink> {
     pub(super) args: Args,
     pub(super) cancel: CancelToken,
@@ -102,7 +121,7 @@ pub(super) async fn drive_execution<S: EventSink>(
         currency,
         child_root,
         child_executor,
-        context: _,
+        context: run_context,
         mode: _,
         policy_selection,
         policy_source,
@@ -822,7 +841,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     // else. Someone who pressed it to stop a turn must not
                                     // lose the session by pressing it once more.
                                     repl::Line::Interrupted => continue,
-                                    repl::Line::Ended => break 'epoch EpochTransition::Exit,
+                                    repl::Line::Ended => {
+                                        // The last turn's provider/model refusal was already shown.
+                                        // Preserve cancellation, permission, and other outcomes.
+                                        if matches!(
+                                            &last.termination,
+                                            RunTermination::Provider { .. }
+                                                | RunTermination::UsageError { .. }
+                                        ) {
+                                            last.termination = RunTermination::Done;
+                                        }
+                                        break 'epoch EpochTransition::Exit;
+                                    }
                                     repl::Line::Refused(why) => {
                                         diagnostics.note(why);
                                         continue;
@@ -1316,20 +1346,36 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             target: target_owner,
                                         };
                                     }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Fork,
-                                    )) => {
+                                    repl::Line::HostCommand(
+                                        command @ (repl::HostCommand::Action(
+                                            repl::actions::ActionId::Fork,
+                                        )
+                                        | repl::HostCommand::Fork(_)),
+                                    ) => {
                                         if pending_work {
-                                            diagnostics.note(
-                                    "the session cannot be forked while source work is pending",
-                                );
+                                            diagnostics.note("the session cannot switch forks while source work is pending");
                                             continue;
                                         }
-                                        let prepared = match ego_core::session::PreparedFork::new(
-                                            active.id(),
-                                            &state,
-                                            session::now(&clock),
-                                        ) {
+                                        let lifecycle =
+                                            ego_core::session_lifecycle::SessionLifecycle::new(
+                                                Arc::clone(jsonl_store),
+                                                Arc::new(super::session_commands::NoLiveRuns),
+                                                Arc::new(SystemClock),
+                                            );
+                                        let prepared = match command {
+                                            repl::HostCommand::Fork(item) => {
+                                                lifecycle.prepare_fork_at(active.id(), item)
+                                            }
+                                            _ => ego_core::session::PreparedFork::new(
+                                                active.id(),
+                                                &state,
+                                                session::now(&clock),
+                                            )
+                                            .map_err(
+                                                ego_core::session_lifecycle::LifecycleError::from,
+                                            ),
+                                        };
+                                        let prepared = match prepared {
                                             Ok(prepared) => prepared,
                                             Err(error) => {
                                                 diagnostics.note(&format!(
@@ -1338,16 +1384,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 continue;
                                             }
                                         };
-                                        let replayed = match active.replay_seed(prepared.seed()) {
-                                            Ok(replayed) => replayed,
+                                        let target = SessionId::new();
+                                        let publication = match lifecycle
+                                            .publish_prepared_fork(target, &prepared)
+                                        {
+                                            Ok(publication) => publication,
                                             Err(error) => {
                                                 diagnostics.note(&format!(
-                                        "the fork source context could not be replayed: {error}"
-                                    ));
+                                                    "the fork target was not published: {error}"
+                                                ));
                                                 continue;
                                             }
                                         };
-                                        let target = SessionId::new();
                                         let target_opened = match session::open(
                                             jsonl_store.as_ref(),
                                             &target,
@@ -1355,44 +1403,25 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         ) {
                                             Ok(opened) => opened,
                                             Err(error) => {
-                                                diagnostics.note(&format!(
-                                                    "the fork target could not be opened: {error}"
-                                                ));
+                                                diagnostics.note(&format!("the published fork target {target} could not be opened: {error}"));
                                                 continue;
                                             }
                                         };
                                         let target_state =
                                             SessionState::replay(prepared.seed().events().cloned());
-                                        let mut target_owner = match ActiveSession::durable(
+                                        let target_owner = match ActiveSession::durable(
                                             target_opened,
                                             target_state,
                                             EVIDENCE_CAP,
                                         ) {
                                             Ok(owner) => owner,
                                             Err(error) => {
-                                                diagnostics.note(&format!(
-                                        "the fork target evidence could not be opened: {error}"
-                                    ));
+                                                diagnostics.note(&format!("the published fork target {target} could not be replayed: {error}"));
                                                 continue;
                                             }
                                         };
-                                        target_owner.replace_replayed(replayed);
-                                        let publication =
-                                            target_owner.publish_target(prepared.seed());
                                         let diagnostic =
                                             publication.diagnostic().map(str::to_string);
-                                        if matches!(
-                                            &publication,
-                                            ego_core::session::TargetPublication::NotPublished { .. }
-                                        ) {
-                                            diagnostics.note(&format!(
-                                                "the fork target was not published: {}",
-                                                diagnostic
-                                                    .as_deref()
-                                                    .unwrap_or("publication was refused")
-                                            ));
-                                            continue;
-                                        }
                                         break 'epoch EpochTransition::Fork {
                                             target: target_owner,
                                             publication,
@@ -1903,8 +1932,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 ));
                             }
 
-                            let queue_abandoned =
-                                matches!(&termination, RunTermination::Failed { .. });
+                            if let RunTermination::Failed { message } = &termination {
+                                diagnostics.note(&format!(
+                                    "{message}; fix the error and retry, or use /quit"
+                                ));
+                            }
                             last = Ended {
                                 termination,
                                 session: active.id(),
@@ -1917,9 +1949,6 @@ pub(super) async fn drive_execution<S: EventSink>(
                             // the process. A broken stdout or a SIGTERM is not a turn to
                             // return to a prompt from.
                             if cancel.is_cancelled() {
-                                break 'epoch EpochTransition::Exit;
-                            }
-                            if queue_abandoned {
                                 break 'epoch EpochTransition::Exit;
                             }
                         }
@@ -1977,6 +2006,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                             ));
                         }
                         active = target;
+                        admit_successor_context(&evidence, &active, &run_context)?;
                         epoch_start = EpochStart::New;
                     }
                     EpochTransition::Fork {
@@ -1994,6 +2024,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 ),
                             });
                         }
+                        admit_successor_context(&evidence, &active, &run_context)?;
                         if let Err(error) = session_end {
                             diagnostics.note(&format!(
                                 "the fork source session-end hook failed: {}",
@@ -2020,6 +2051,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     .to_owned(),
                             });
                         }
+                        admit_successor_context(&evidence, &active, &run_context)?;
                         if let Err(error) = session_end {
                             diagnostics.note(&format!(
                                 "the compacted source session-end hook failed: {}",

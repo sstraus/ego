@@ -548,7 +548,7 @@ pub(super) async fn interactive_through(
         inner: &text_sink,
         announce: &announce,
     };
-    seat.announce_waits(Osc::new(capabilities), quiet);
+    seat.announce_waits(capabilities, quiet);
     let interactive_seat: Arc<dyn InteractiveSeat> = seat.clone();
     let elicitor: Arc<dyn Elicitor> = seat.clone();
     let human = interactive_seat.has_human();

@@ -7,7 +7,7 @@
 //!     events.jsonl        # the log; first line is a versioned header record
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -998,7 +998,7 @@ impl JsonlStore {
     /// repair may remove an `ExecutionObserved` event without changing the
     /// surviving last event's timestamp relative to the cached manifest.
     fn rebuild_manifest_from_log(&self, id: &SessionId, log: &[u8]) -> Result<bool, StoreError> {
-        let Some(facts) = log_manifest_facts(log)? else {
+        let Some(facts) = self.catalogue_facts(log)? else {
             return Ok(false);
         };
 
@@ -1023,9 +1023,8 @@ impl JsonlStore {
             // recovery path that loses the manifest is the one directly
             // above.
             workspace_root: projected_meta.workspace_root,
-            // Only the latest authoritative main-generation admission owns
-            // this projection. A prior cache value is not evidence and must
-            // disappear when the log no longer supplies its source.
+            // Main-generation evidence owns the model, including inherited
+            // evidence at the durable lineage cutoff before the first turn.
             model: projected_meta.model,
             // `created` comes from the log header rather than the old
             // manifest: the header is written once, at session creation, and
@@ -1104,7 +1103,7 @@ impl JsonlStore {
         );
         let log_facts = if (previous.is_none() && !is_new_session) || refresh_synopsis {
             match self.io.read(&self.log_path(id))? {
-                Some(bytes) => log_manifest_facts(&bytes)?,
+                Some(bytes) => self.catalogue_facts(&bytes)?,
                 None => None,
             }
         } else {
@@ -1136,7 +1135,11 @@ impl JsonlStore {
                         .rfind(|admission| admission.role() == GenerationRole::Main)
                         .map(|admission| admission.target().canonical_model().0.clone())
                 })
-                .or_else(|| log_facts.as_ref().and_then(|facts| facts.model.clone())),
+                .or_else(|| log_facts.as_ref().and_then(|facts| facts.model.clone()))
+                .map(|model| Ok(Some(model)))
+                .unwrap_or_else(|| {
+                    self.inherited_model(previous.as_ref().and_then(|m| m.meta.lineage))
+                })?,
             created: previous
                 .as_ref()
                 .map(|m| m.meta.created)
@@ -1944,6 +1947,80 @@ impl SessionStore for JsonlStore {
 }
 
 impl JsonlStore {
+    fn catalogue_facts(&self, log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError> {
+        let Some(mut facts) = log_manifest_facts(log)? else {
+            return Ok(None);
+        };
+        if facts.model.is_none() {
+            facts.model = self.inherited_model(facts.lineage)?;
+        }
+        Ok(Some(facts))
+    }
+
+    /// Project the last main model visible at each durable ancestry cutoff.
+    /// Target admissions take precedence; manifests never supply authority.
+    fn inherited_model(
+        &self,
+        mut lineage: Option<SessionLineage>,
+    ) -> Result<Option<String>, StoreError> {
+        let mut visited = HashSet::new();
+        while let Some(edge) = lineage {
+            let (source, cutoff) = match edge {
+                SessionLineage::Fork { source, at_seq } => (source, at_seq),
+                SessionLineage::Compaction {
+                    source, source_seq, ..
+                } => (source, source_seq),
+            };
+            if !visited.insert(source) {
+                return Err(invalid_log("model projection encountered a lineage cycle"));
+            }
+            let Some(entries) = ReplaySource::entries(self, &source)
+                .map_err(|error| invalid_log(error.to_string()))?
+            else {
+                return Ok(None);
+            };
+            lineage = None;
+            let mut model = None;
+            for entry in entries {
+                match entry {
+                    SessionEntry::Event(event) => {
+                        if event.env.seq > cutoff {
+                            break;
+                        }
+                        match event.kind {
+                            EventKind::Forked { source, at_seq } => {
+                                lineage = Some(SessionLineage::Fork { source, at_seq });
+                            }
+                            EventKind::CompactionSeeded {
+                                source,
+                                source_seq,
+                                prompt_revision,
+                                ..
+                            } => {
+                                lineage = Some(SessionLineage::Compaction {
+                                    source,
+                                    source_seq,
+                                    prompt_revision,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    SessionEntry::Evidence(EvidenceRecord::GenerationAdmission(admission))
+                        if admission.role() == GenerationRole::Main =>
+                    {
+                        model = Some(admission.target().canonical_model().0.clone());
+                    }
+                    _ => {}
+                }
+            }
+            if model.is_some() {
+                return Ok(model);
+            }
+        }
+        Ok(None)
+    }
+
     /// The listing facts of the session in `dir`, projected from the valid
     /// prefix of its log. `None` when there is no readable log; a torn tail
     /// is ignored rather than refused, because listing never edits a session.
@@ -1954,7 +2031,7 @@ impl JsonlStore {
             return None;
         }
         let (valid_len, _) = valid_prefix(&bytes, start);
-        let facts = log_manifest_facts(&bytes[..valid_len]).ok()??;
+        let facts = self.catalogue_facts(&bytes[..valid_len]).ok()??;
         Some((meta_from_log_facts(header.session, &facts), facts.deleted))
     }
 
@@ -2117,7 +2194,9 @@ impl SessionLifecycleStore for JsonlStore {
         if valid_len != bytes.len() {
             return Err(invalid_log("session log has a corrupt or torn tail"));
         }
-        Ok(log_manifest_facts(&bytes)?.map(|facts| meta_from_log_facts(id, &facts)))
+        Ok(self
+            .catalogue_facts(&bytes)?
+            .map(|facts| meta_from_log_facts(id, &facts)))
     }
 
     fn acquire_inactive_lease(
@@ -2198,6 +2277,27 @@ impl ReplaySource for JsonlStore {
     }
 
     fn entries(&self, session: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
+        if !self.io.exists(&self.log_path(session)).map_err(|error| {
+            ReplaySourceError::Unavailable {
+                session: *session,
+                reason: error.to_string(),
+            }
+        })? {
+            return Ok(None);
+        }
+        // Share the short append lock, never the long-lived source writer lease.
+        let lock =
+            self.open_events_lock(session)
+                .map_err(|error| ReplaySourceError::Unavailable {
+                    session: *session,
+                    reason: error.to_string(),
+                })?;
+        let _guard = lock
+            .read()
+            .map_err(|error| ReplaySourceError::Unavailable {
+                session: *session,
+                reason: error.to_string(),
+            })?;
         let bytes = self.io.read(&self.log_path(session)).map_err(|error| {
             ReplaySourceError::Unavailable {
                 session: *session,
@@ -2207,75 +2307,81 @@ impl ReplaySource for JsonlStore {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        let (header, start) = decoded_header(&bytes)
-            .map_err(|error| ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: error.to_string(),
-            })?
-            .ok_or_else(|| ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: "session log has no complete header".to_string(),
-            })?;
-        if header.v != CODEC_VERSION || header.session != *session {
-            return Err(ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: "session log header has the wrong codec or identity".to_string(),
-            });
-        }
-        let (valid_len, _) = valid_prefix(&bytes, start);
-        if valid_len != bytes.len() {
-            return Err(ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: "session log has a corrupt or torn tail".to_owned(),
-            });
-        }
-
-        let mut entries = Vec::new();
-        let mut expected = Seq::ZERO;
-        for line in split_lines(&bytes[start..]) {
-            let position = expected.next();
-            let record = match decode_line(line) {
-                Ok(StoreLine::Record(record)) if record.seq == position => record,
-                Ok(StoreLine::Record(record)) => {
-                    return Err(ReplaySourceError::CorruptSession {
-                        session: *session,
-                        reason: format!(
-                            "physical position {} followed {}, so the session \
-                             file is out of order",
-                            record.seq, expected
-                        ),
-                    });
-                }
-                Ok(StoreLine::Unknown(_)) => {
-                    return Err(ReplaySourceError::UnknownEntry {
-                        session: *session,
-                        position,
-                    });
-                }
-                Ok(StoreLine::Header(_)) => {
-                    return Err(ReplaySourceError::CorruptSession {
-                        session: *session,
-                        reason: "session log contains a second header".to_string(),
-                    });
-                }
-                Err(error) => {
-                    return Err(ReplaySourceError::CorruptSession {
-                        session: *session,
-                        reason: error.to_string(),
-                    });
-                }
-            };
-            let entry =
-                serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
-                    ReplaySourceError::UnknownEntry {
-                        session: *session,
-                        position: record.seq,
-                    }
-                })?;
-            entries.push(entry);
-        }
-        Ok(Some(entries))
+        decode_session_entries(session, &bytes).map(Some)
     }
+}
+
+fn decode_session_entries(
+    session: &SessionId,
+    bytes: &[u8],
+) -> Result<Vec<SessionEntry>, ReplaySourceError> {
+    let (header, start) = decoded_header(bytes)
+        .map_err(|error| ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: error.to_string(),
+        })?
+        .ok_or_else(|| ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: "session log has no complete header".to_string(),
+        })?;
+    if header.v != CODEC_VERSION || header.session != *session {
+        return Err(ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: "session log header has the wrong codec or identity".to_string(),
+        });
+    }
+    let (valid_len, _) = valid_prefix(bytes, start);
+    if valid_len != bytes.len() {
+        return Err(ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: "session log has a corrupt or torn tail".to_owned(),
+        });
+    }
+
+    let mut entries = Vec::new();
+    let mut expected = Seq::ZERO;
+    for line in split_lines(&bytes[start..]) {
+        let position = expected.next();
+        let record = match decode_line(line) {
+            Ok(StoreLine::Record(record)) if record.seq == position => record,
+            Ok(StoreLine::Record(record)) => {
+                return Err(ReplaySourceError::CorruptSession {
+                    session: *session,
+                    reason: format!(
+                        "physical position {} followed {}, so the session \
+                             file is out of order",
+                        record.seq, expected
+                    ),
+                });
+            }
+            Ok(StoreLine::Unknown(_)) => {
+                return Err(ReplaySourceError::UnknownEntry {
+                    session: *session,
+                    position,
+                });
+            }
+            Ok(StoreLine::Header(_)) => {
+                return Err(ReplaySourceError::CorruptSession {
+                    session: *session,
+                    reason: "session log contains a second header".to_string(),
+                });
+            }
+            Err(error) => {
+                return Err(ReplaySourceError::CorruptSession {
+                    session: *session,
+                    reason: error.to_string(),
+                });
+            }
+        };
+        let entry = serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
+            ReplaySourceError::UnknownEntry {
+                session: *session,
+                position: record.seq,
+            }
+        })?;
+        entries.push(entry);
+    }
+    Ok(entries)
 }
 
 impl CompactionTargetPort for JsonlStore {
@@ -2366,14 +2472,11 @@ impl JsonlStore {
             ));
         }
 
-        let entries = ReplaySource::entries(self, target).map_err(|error| {
+        let entries = decode_session_entries(target, &bytes).map_err(|error| {
             invalid_log(format!(
                 "the deterministic compaction target could not be decoded: {error}"
             ))
         })?;
-        let Some(entries) = entries else {
-            return Ok(CompactionTargetInspection::Missing);
-        };
         let Some(SessionEntry::Event(first_event)) = entries.first() else {
             return Ok(CompactionTargetInspection::Occupied);
         };

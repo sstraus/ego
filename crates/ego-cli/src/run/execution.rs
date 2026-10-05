@@ -64,6 +64,21 @@ async fn resolve_invocation_phase(
                 });
             }
             let chosen_session = chosen(args, &settings.root, None).map_err(usage)?;
+            if matches!(args.session, crate::cli::SessionChoice::Resume(_))
+                && settings.effective.model.is_none()
+                && args.model.is_none()
+            {
+                settings.effective.model = chosen_session
+                    .store
+                    .list()
+                    .map_err(|error| RunTermination::Failed {
+                        message: format!("could not read the resumed session model: {error}"),
+                    })?
+                    .into_iter()
+                    .find(|session| session.id == chosen_session.id)
+                    .and_then(|session| session.model)
+                    .map(ModelRef);
+            }
             select_startup_model(args, &mut settings, driver, cancel, diagnostics).await?;
             let selected_mcp =
                 config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
@@ -559,7 +574,7 @@ async fn admit_run_phase<'store>(
                 .expect("the materialized run owns its opened session"),
             materialized
                 .context
-                .take()
+                .clone()
                 .expect("the run context is admitted exactly once"),
         )?,
         (
@@ -581,7 +596,7 @@ async fn admit_run_phase<'store>(
                     .expect("the materialized run owns its opened session"),
                 materialized
                     .context
-                    .take()
+                    .clone()
                     .expect("the foreign run context is admitted after recovery"),
             )?;
             resume = Some(RuntimeResume::Foreign {
@@ -622,7 +637,7 @@ async fn admit_run_phase<'store>(
     {
         seat.busy();
     }
-    debug_assert!(materialized.context.is_none());
+    debug_assert!(materialized.context.is_some());
     let mcp_status = scoped.mcp_registry.status();
     Ok(AdmittedRun {
         opened: materialized

@@ -122,6 +122,8 @@ pub struct ProfileLayer {
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    /// Additional read and executable roots; absence preserves lower authority.
+    pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
@@ -809,6 +811,8 @@ pub struct ConfigLayer {
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    /// Additional read and executable roots; absence preserves lower authority.
+    pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
@@ -869,7 +873,45 @@ impl ConfigLayer {
                 ),
             });
         }
+        let exec_paths = value.exec_paths.iter().flatten().chain(
+            value
+                .profile
+                .values()
+                .flat_map(|profile| profile.exec_paths.iter().flatten()),
+        );
+        for path in exec_paths {
+            if !matches!(source, Source::System | Source::User | Source::Flags) {
+                return Err(ConfigError::Invalid {
+                    source,
+                    message: "`exec_paths` may be set only by system, user or flags authority"
+                        .to_owned(),
+                });
+            }
+            if !path.is_absolute() {
+                return Err(ConfigError::Invalid {
+                    source,
+                    message: format!("exec root {} is not absolute", path.display()),
+                });
+            }
+        }
+        if !matches!(source, Source::System | Source::User)
+            && value.permission_rules().any(Rule::is_tool_wildcard)
+        {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "a `tool(<server>/*)` rule is allowed only in the system and user layers; name each tool in this layer"
+                    .to_string(),
+            });
+        }
         Ok(Sourced { source, value })
+    }
+
+    /// Every permission rule this layer declares, in its own list and in each profile.
+    fn permission_rules(&self) -> impl Iterator<Item = &Rule> {
+        self.permissions
+            .iter()
+            .chain(self.profile.values().filter_map(|p| p.permissions.as_ref()))
+            .flat_map(|perm| perm.allow.iter().chain(&perm.deny))
     }
 }
 

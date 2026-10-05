@@ -339,3 +339,41 @@ fn the_resume_floor_changes_when_the_roots_do() {
 
     assert_ne!(base.resume_floor(), widened.resume_floor());
 }
+
+const WILDCARD_TOML: &str = r#"
+permissions = { allow = ["tool(tuicommander/*)"] }
+
+[profile.coordinator]
+permissions = { allow = ["tool(tuicommander/*)"] }
+"#;
+
+/// Catches: a repository (or any non-operator layer) granting itself every MCP
+/// tool of a server with one checked-in `tool(server/*)` rule.
+#[test]
+fn a_tool_wildcard_is_rejected_at_load_outside_the_operator_layers() {
+    for source in [
+        Source::Project,
+        Source::Local,
+        Source::AgentFile,
+        Source::Env,
+        Source::Flags,
+    ] {
+        let error = ConfigLayer::parse(source, WILDCARD_TOML)
+            .expect_err(&format!("{source} must not grant a server wildcard"));
+        assert!(
+            matches!(&error, ConfigError::Invalid { source: s, message } if *s == source && message.contains("tool(<server>/*)")),
+            "{source}: {error:?}"
+        );
+    }
+    let profile_only = "[profile.other]\npermissions = { deny = [\"tool(tuicommander/*)\"] }\n";
+    assert!(ConfigLayer::parse(Source::Project, profile_only).is_err());
+    for source in [Source::System, Source::User] {
+        ConfigLayer::parse(source, WILDCARD_TOML)
+            .unwrap_or_else(|error| panic!("{source} may grant a server wildcard: {error}"));
+    }
+    ConfigLayer::parse(
+        Source::Project,
+        "permissions = { allow = [\"tool(tuicommander/session)\"] }\n",
+    )
+    .expect("an exact tool rule stays valid in a project layer");
+}

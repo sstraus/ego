@@ -414,17 +414,8 @@ pub fn settled_cost_for_delivery(
     settlement: CurrencyCode,
     delivery: DeliveryCertainty,
 ) -> CostDelta {
-    if matches!(usage, UsageReport::Missing) {
-        return if delivery == DeliveryCertainty::DefinitelyUnsent {
-            CostDelta::free(settlement, CostAttribution::DefinitelyUnsent)
-        } else {
-            CostDelta::Unknown(match metering {
-                Metering::Currency {
-                    settlement: SettlementSource::ProviderReported { .. },
-                } => UnknownCost::ProviderReportedCostMissing,
-                _ => UnknownCost::ProviderReportedNoUsage,
-            })
-        };
+    if matches!(usage, UsageReport::Missing) && delivery == DeliveryCertainty::DefinitelyUnsent {
+        return CostDelta::free(settlement, CostAttribution::DefinitelyUnsent);
     }
     settled_cost(metering, rates, usage, provider_cost, settlement)
 }

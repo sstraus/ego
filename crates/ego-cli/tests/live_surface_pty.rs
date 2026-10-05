@@ -13,6 +13,209 @@ use support::{
     Ego, Plan, ReleaseGate, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
 };
 
+// Catches: the replacement session has no evidence authority for its next turn.
+#[test]
+fn successor_fork_accepts_next_turn_and_resumes() {
+    successor_accepts_next_turn("fork");
+}
+
+// Catches: compact activation skips admission and kills the next prompt.
+#[test]
+fn successor_compact_accepts_next_turn_and_resumes() {
+    successor_accepts_next_turn("compact");
+}
+
+// Catches: the shared store-write failure path used by generation admission exits the REPL.
+#[test]
+fn failed_session_log_write_keeps_repl_alive() {
+    successor_accepts_next_turn("admission-failure");
+}
+
+fn successor_accepts_next_turn(action: &str) {
+    let failing = action == "admission-failure";
+    let gate = support::ReleaseGate::new();
+    let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
+    let mut replies = vec![Reply::Sse(text("REGRESSION-MARKER-ANSWER"))];
+    if action == "compact" {
+        replies.push(Reply::Sse(text(checkpoint)));
+    }
+    replies.extend([
+        Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
+        Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
+    ]);
+    let stub = Stub::start(Plan {
+        completions: replies,
+        subsequent_resolution_gate: failing.then(|| gate.clone()),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# successor fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"first prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    if !failing {
+        let start = output.len();
+        input.write_all(format!("/{action}\r").as_bytes()).unwrap();
+        input.flush().unwrap();
+        until_local_action_completed(&reader, &mut output, start, action, PROGRESS_DEADLINE);
+        drain_until_quiet(&reader, &mut output);
+    }
+    let requests_before = stub.requests().len();
+    let start = output.len();
+    input.write_all(b"second prompt\r").unwrap();
+    input.flush().unwrap();
+    if failing {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !stub.requests()[requests_before..]
+            .iter()
+            .any(|request| request.path == "/api/ps")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "second turn did not resolve its model"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let session = std::fs::read_dir(places.home_path().join("sessions"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let log = session.join("events.jsonl");
+        let saved = session.join("events.saved");
+        std::fs::rename(&log, &saved).unwrap();
+        std::fs::create_dir(&log).unwrap();
+        gate.release();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "fix the error and retry, or use /quit",
+        );
+        let start = output.len();
+        until_prompt_from(&reader, &mut output, start);
+        let shown = normalized(&output);
+        assert!(
+            shown.contains("the session log could not be written")
+                && shown.contains("Is a directory"),
+            "wrong failure: {shown}"
+        );
+        assert_eq!(
+            shown
+                .matches("fix the error and retry, or use /quit")
+                .count(),
+            1
+        );
+        assert_eq!(
+            stub.generations().len(),
+            1,
+            "failed admission sent a generation"
+        );
+        std::fs::remove_dir(&log).unwrap();
+        std::fs::rename(&saved, &log).unwrap();
+    } else {
+        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+        let start = output.len();
+        until_prompt_from(&reader, &mut output, start);
+    }
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    if !failing {
+        assert!(status.success(), "successor process failed: {status:?}");
+    }
+    if failing {
+        return;
+    }
+    let listing = places
+        .ego(&stub)
+        .subcommand("ls")
+        .args(["--output", "json"])
+        .run()
+        .report();
+    let target = listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] != support::FIXTURE_SESSION_ID)
+        .unwrap_or_else(|| {
+            panic!(
+                "successor catalogue row missing: {listing}; PTY: {}",
+                normalized(&output)
+            )
+        });
+    assert_eq!(target["model"], "ollama/qwen3");
+    let resumed = places
+        .ego(&stub)
+        .subcommand("resume")
+        .args(["--sandbox", "off"]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resume pty");
+    let child = pair
+        .slave
+        .spawn_command(resumed.pty_command())
+        .expect("resume");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    // Trust was remembered by the first process; resume must reach input
+    // without either a trust question or a model picker.
+    until_prompt_from(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"resume prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "resume failed: {status:?}");
+}
+
 // portable-pty transports bytes but does not emulate a terminal. Keep the
 // reported cursor inside both 80x24 and 12x8; painter geometry is proven by
 // the vendor unit test, while this test needs only a live DSR response.
@@ -1591,6 +1794,7 @@ fn submit_local_action(
     command: &str,
     expected: Option<&str>,
 ) {
+    let generation_count = stub.generations().len();
     let start = output.len();
     input
         .write_all(format!("/{command}\r").as_bytes())
@@ -1605,15 +1809,16 @@ fn submit_local_action(
             start,
             expected,
             stub,
-            0,
+            generation_count,
             (SLASH_ACTION_DEADLINE, &format!("/{command} action output")),
         );
     }
     if expected.is_none() {
         until_local_action_completed(receiver, output, start, command, SLASH_ACTION_DEADLINE);
     }
-    assert!(
-        stub.generations().is_empty(),
+    assert_eq!(
+        stub.generations().len(),
+        generation_count,
         "/{command} leaked into a provider generation"
     );
     if expected.is_none() {
@@ -1942,7 +2147,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     until_from(&reader, &mut output, older_restore_start, b"older_draft");
     provider_gate.release();
     until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
-    until_with_context(&reader, &mut output, b"[y] allow [n] deny [e] edit", || {
+    until_with_context(&reader, &mut output, b"[d] details", || {
         let requests = stub.requests();
         let paths: Vec<_> = requests
             .iter()
@@ -1965,12 +2170,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             pixel_height: 0,
         })
         .expect("resize");
-    until_from(
-        &reader,
-        &mut output,
-        resize_start,
-        b"[y] allow [n] deny [e] edit",
-    );
+    until_from(&reader, &mut output, resize_start, b"[d] details");
     input.write_all(b"y").expect("immediate permission answer");
     input.flush().expect("permission answer flush");
     until(&reader, &mut output, b"NEWEST-DRAFT-RECEIVED");
@@ -2029,16 +2229,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     assert!(output.windows(8).any(|window| window == b"\x1b[?2004l"));
 
     let rendered = normalized(&output);
-    for fact in [
-        "Call: \"write\"",
-        "✓ write notes.md",
-        "Reason:",
-        "Operations:",
-        "Risk: Bounded",
-        "Parameters:",
-        "Remember would add:",
-        "widening for operation 0",
-    ] {
+    for fact in ["Allow write ", "✓ write notes.md", "Risk: limited"] {
         assert!(
             rendered.contains(fact),
             "permission presentation omitted {fact:?}: {rendered}"
@@ -2046,7 +2237,7 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     }
 
     let streamed = find(&output, b"STREAMED-BEFORE-TOOL");
-    let permission = find(&output, b"[y] allow [n] deny [e] edit");
+    let permission = find(&output, b"[d] details");
     let draft_received = find(&output, b"NEWEST-DRAFT-RECEIVED");
     let older_draft_received = find(&output, b"OLDER-DRAFT-RECEIVED");
     assert!(streamed < permission);
@@ -2131,7 +2322,7 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
     assert_eq!(finished.code, Some(0), "{}", finished.stdout);
     assert!(finished.stdout.contains("LOCAL-PATH-EXEC-DONE"));
     assert!(
-        !finished.stdout.contains("[y] allow"),
+        !finished.stdout.contains("[y] yes"),
         "yolo must not stop for a second confirmation: {}",
         finished.stdout
     );
@@ -3155,6 +3346,143 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
     writer_join.join().expect("writer thread");
 }
 
+/// Catches: cancelling an unmetered stream marks known session cost unknown and hides its status cell.
+#[test]
+fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("KNOWN-USAGE")),
+            paced_line("PARTIAL-REPLY\n", Duration::from_secs(5)),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((40, 100)),
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input
+        .write_all(b"first turn\r")
+        .expect("submit completed turn");
+    input.flush().expect("completed turn flush");
+    until_normalized(&reader, &mut output, 0, "KNOWN-USAGE");
+    until_normalized(&reader, &mut output, 0, "$0.000");
+    let turn_start = output.len();
+    input.write_all(b"cancel check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, turn_start, "PARTIAL-REPLY");
+    drain_until_quiet(&reader, &mut output);
+    let mut streaming_screen = vt100::Parser::new(40, 100, 0);
+    streaming_screen.process(&output);
+    assert!(
+        streaming_screen.screen().contents().contains("Esc cancels"),
+        "reply must still be streaming when Esc is sent: {:?}",
+        streaming_screen.screen().contents()
+    );
+    let cancel_start = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    until_prompt_from(&reader, &mut output, cancel_start);
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(40, 100, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+
+    let log = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("session log");
+    assert!(
+        log.contains(r#""exit_reason":{"Cancelled":"User"}"#),
+        "Esc must cancel the streamed turn: {log}"
+    );
+    let status = visible
+        .lines()
+        .rev()
+        .find(|line| line.contains("qwen3 · "))
+        .expect("idle status row");
+    assert!(
+        status.contains("$0.000"),
+        "cancel must retain status cost: {visible:?}"
+    );
+    let usage_start = output.len();
+    input.write_all(b"/usage\r").expect("usage command");
+    input.flush().expect("usage flush");
+    until_normalized(&reader, &mut output, usage_start, "workspace");
+    until_local_action_completed(
+        &reader,
+        &mut output,
+        usage_start,
+        "usage",
+        SLASH_ACTION_DEADLINE,
+    );
+    drain_until_quiet(&reader, &mut output);
+    let usage = normalized(&output[usage_start..]);
+    assert!(usage.contains("0.0000 USD"), "known usage cost: {usage:?}");
+    assert!(
+        !usage.contains("unknown"),
+        "cancelled local turn is still free: {usage:?}"
+    );
+    assert!(
+        usage.lines().any(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            fields
+                .windows(3)
+                .any(|values| values == ["main", "10", "4"])
+        }),
+        "completed token counts survive: {usage:?}"
+    );
+
+    let quit_start = output.len();
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    until_normalized(&reader, &mut output, quit_start, "unsent drafts");
+    bounded_exit(child);
+    drain(&reader, &mut output);
+    assert!(
+        normalized(&output[quit_start..]).contains("unsent drafts"),
+        "/quit must be accepted before the process exits: {:?}",
+        normalized(&output[quit_start..]),
+    );
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+}
+
 /// catches: Esc on a running tool leaving no tool row and no receipt, and its
 /// `thinking for` row staying in the scrollback.
 #[cfg(unix)]
@@ -3340,7 +3668,7 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"run slow tool\r").expect("submit turn");
     input.flush().expect("submit flush");
-    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    until(&reader, &mut output, b"[d] details");
     thread::sleep(Duration::from_secs(5));
     let allowed = output.len();
     input.write_all(b"y").expect("allow");
@@ -3429,7 +3757,7 @@ fn esc_on_the_permission_modal_denies_the_call_and_leaves_one_receipt() {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"run a tool\r").expect("submit turn");
     input.flush().expect("submit flush");
-    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    until(&reader, &mut output, b"[d] details");
     drain_until_quiet(&reader, &mut output);
     let escaped = output.len();
     input.write_all(b"\x1b").expect("escape");
@@ -3881,6 +4209,154 @@ fn bounded_exit(mut child: Box<dyn portable_pty::Child + Send + Sync>) -> portab
     status
 }
 
+// Catches: a missing model default terminating interactive startup before the
+// existing reasoning picker can obtain a real operator choice.
+#[test]
+fn regression_case_missing_default_opens_effort_picker_and_generates_with_choice() {
+    regression_case_terminal(false);
+}
+
+// Catches: a displayed provider refusal surviving idle EOF as a second error
+// after the resume hint, and incorrectly making an ordinary exit fail.
+#[test]
+fn regression_case_provider_refusal_is_not_repeated_after_idle_eof() {
+    regression_case_terminal(true);
+}
+
+fn regression_case_terminal(provider_refuses: bool) {
+    let stub = Stub::start(Plan {
+        completions: vec![if provider_refuses {
+            Reply::Status(400)
+        } else {
+            Reply::Sse(text("EFFORT-CHOICE-ANSWER"))
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .without_fixture_thinking()
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--mode",
+            "default",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    ego.file("AGENTS.md", "# effort picker fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("trust flush");
+    until_normalized(&reader, &mut output, 0, "Select reasoning for");
+    assert!(!normalized(&output).contains("Select model"));
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"1\r").expect("choose off explicitly");
+    input.flush().expect("choice flush");
+    let choice_start = output.len();
+    until_prompt_from(&reader, &mut output, choice_start);
+    let turn_start = output.len();
+    input.write_all(b"hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        turn_start,
+        if provider_refuses {
+            "the provider returned HTTP 400"
+        } else {
+            "EFFORT-CHOICE-ANSWER"
+        },
+    );
+    until_prompt_from(&reader, &mut output, turn_start);
+    let quit_start = output.len();
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader");
+    writer_join.join().expect("writer");
+    drain(&reader, &mut output);
+    assert!(status.success(), "interactive exit: {status:?}");
+    let after_quit = normalized(&output[quit_start..]);
+    assert!(after_quit.contains("To resume: ego resume"), "{after_quit}");
+    assert!(
+        !after_quit.contains("the provider returned HTTP 400"),
+        "{after_quit}"
+    );
+    assert!(
+        !after_quit.contains("the model does not accept"),
+        "{after_quit}"
+    );
+    let config =
+        std::fs::read_to_string(ego.home_path().join("config.toml")).expect("saved choice");
+    assert!(config.contains("thinking = \"off\""), "{config}");
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["thinking"]["type"], "disabled");
+}
+
+// Catches: headless startup reaching a human picker or silently inventing Off
+// when the selected row states accepted efforts but no default.
+#[test]
+fn regression_case_headless_missing_default_keeps_thinking_remedy() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .without_fixture_thinking()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--sandbox",
+            "off",
+            "hello",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    let finished = ego.run();
+    assert_eq!(finished.code, Some(2), "{}", finished.stderr);
+    assert!(
+        finished
+            .stderr
+            .contains("does not state a default reasoning effort"),
+        "{}",
+        finished.stderr
+    );
+    assert!(
+        finished.stderr.contains("--thinking"),
+        "{}",
+        finished.stderr
+    );
+    assert!(stub.generations().is_empty());
+}
+
 #[test]
 fn startup_picker_escape_exits_without_saving_a_model() {
     let stub = Stub::start(Plan::default());
@@ -4160,7 +4636,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
     waiter.join().expect("waiter thread");
 }
 
-// Catches: registered slash commands abort startup or fail to render locally without model calls.
+// Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
     const COMMANDS: [&str; 26] = [
@@ -4262,7 +4738,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("mcp", Some("mcp:")),
         ("sessions", Some("UPDATED")),
         ("fork", None),
-        // This empty fixture cannot prepare compaction; wait for its outcome.
+        // The inherited model permits a checkpoint request; its empty reply must fail.
         ("compact", Some("compaction failed")),
         ("clear", None),
         ("usage", Some("usage as of")),
@@ -4278,7 +4754,31 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("hooks", Some("no hooks are admitted")),
         ("version", Some("ego 0.1.0")),
     ] {
-        submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
+        if command == "compact" {
+            let start = output.len();
+            input.write_all(b"/compact\r").expect("compact command");
+            input.flush().expect("compact command flush");
+            until_normalized(
+                &reader,
+                &mut output,
+                start,
+                "compaction failed: compaction preparation failed: checkpoint must start with # Objective",
+            );
+            until_local_action_completed(
+                &reader,
+                &mut output,
+                start,
+                command,
+                SLASH_ACTION_DEADLINE,
+            );
+            assert_eq!(
+                stub.generations().len(),
+                1,
+                "compact must send one checkpoint"
+            );
+        } else {
+            submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
+        }
     }
 
     let quit_start = output.len();
@@ -4291,7 +4791,28 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         normalized(&output[quit_start..]).contains("unsent drafts"),
         "/quit did not render its explicit exit accounting"
     );
-    assert!(stub.generations().is_empty());
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        1,
+        "local actions must not submit chat prompts"
+    );
+    let messages = generations[0]["messages"]
+        .as_array()
+        .expect("checkpoint messages");
+    assert!(
+        messages.iter().any(|message| {
+            message["role"] == "system"
+                && message["content"].as_str().is_some_and(|content| {
+                    content.contains("Produce one self-contained context checkpoint")
+                })
+        }),
+        "compact must request a checkpoint"
+    );
+    assert!(
+        messages.iter().all(|message| message["role"] != "user"),
+        "slash commands must not become chat prompts"
+    );
     drop(input);
     drop(pair);
     reader_join.join().expect("reader thread panicked");
@@ -5614,8 +6135,8 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     ego.file("AGENTS.md", "# live surface fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows: 40,
+            cols: 100,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -5623,9 +6144,10 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
+    let (reader, reader_join) = stream_with_screen(
         pair.master.try_clone_reader().expect("reader"),
         dsr_responder,
+        Some((40, 100)),
     );
     let mut input = input;
     let mut output = Vec::new();
@@ -5637,7 +6159,7 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     until_prompt_from(&reader, &mut output, idle_start);
     input.write_all(b"initial\r").expect("initial prompt");
     input.flush().expect("initial prompt flush");
-    until(&reader, &mut output, b"[y] allow [n] deny [e] edit");
+    until(&reader, &mut output, b"[d] details");
     drain_until_quiet(&reader, &mut output);
     let edit_start = output.len();
     input.write_all(b"e").expect("open the edit form");
@@ -5652,7 +6174,7 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     drain_until_quiet(&reader, &mut output);
     // The raw stream repeats the receipt on every repaint; the screen shows
     // what the person sees.
-    let mut screen = vt100::Parser::new(24, 80, 0);
+    let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
     let visible = screen.screen().contents();
     assert_eq!(
@@ -5669,6 +6191,281 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+}
+
+const MODAL_ROWS: u16 = 40;
+const MODAL_COLS: u16 = 120;
+
+/// One conversational session in default mode whose model asks for a single
+/// tool call and then says `TOOLS-DONE`, read back through an emulated screen.
+///
+/// The oracle is the screen and never the bytes ego wrote, for the reason
+/// `tool_turn` gives: wrapped rows and overwritten rows are visible only there.
+struct ModalSession {
+    ego: Ego,
+    stub: Stub,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    pair: portable_pty::PtyPair,
+    input: PtyWriter,
+    reader: mpsc::Receiver<Vec<u8>>,
+    output: Vec<u8>,
+    /// Where the last key was sent: waits look only after it, so a row drawn
+    /// before the key cannot satisfy them.
+    mark: usize,
+    joins: [thread::JoinHandle<()>; 2],
+}
+
+fn modal_session(call: (&str, &str)) -> ModalSession {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("call-0", call.0, call.1)),
+            Reply::Sse(text(TOOL_TURN_DONE)),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "default",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# permission modal fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: MODAL_ROWS,
+            cols: MODAL_COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((MODAL_ROWS, MODAL_COLS)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    ModalSession {
+        ego,
+        stub,
+        child,
+        pair,
+        input,
+        reader,
+        output,
+        mark: 0,
+        joins: [reader_join, writer_join],
+    }
+}
+
+impl ModalSession {
+    fn press(&mut self, keys: &[u8]) {
+        drain_until_quiet(&self.reader, &mut self.output);
+        self.mark = self.output.len();
+        self.input.write_all(keys).expect("keys");
+        self.input.flush().expect("keys flush");
+    }
+
+    fn wait(&mut self, needle: &str) {
+        until_normalized(&self.reader, &mut self.output, self.mark, needle);
+    }
+
+    fn screen(&mut self) -> Vec<String> {
+        drain_until_quiet(&self.reader, &mut self.output);
+        let mut screen = vt100::Parser::new(MODAL_ROWS, MODAL_COLS, 0);
+        screen.process(&self.output);
+        screen
+            .screen()
+            .contents()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Quit, and return what the model was sent and what the user config holds.
+    fn finish(mut self) -> (Vec<serde_json::Value>, String) {
+        self.input.write_all(b"/quit\r").expect("quit");
+        self.input.flush().expect("quit flush");
+        assert!(bounded_exit(self.child).success());
+        drop(self.input);
+        drop(self.pair);
+        for join in self.joins {
+            join.join().expect("terminal thread");
+        }
+        let config =
+            std::fs::read_to_string(self.ego.home_path().join("config.toml")).unwrap_or_default();
+        (self.stub.generations(), config)
+    }
+}
+
+const SEQ_ASK: (&str, &str) = ("exec", r#"{"argv":["seq","1","3"],"timeout_ms":5000}"#);
+
+#[test]
+fn exec_permission_is_a_compact_modal_and_the_detail_sits_behind_d() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+
+    let compact = session.screen();
+    let first = compact
+        .iter()
+        .position(|line| line.starts_with("Allow "))
+        .unwrap_or_else(|| panic!("no headline row: {compact:?}"));
+    let last = compact
+        .iter()
+        .rposition(|line| line.contains("[d] details"))
+        .expect("the key row");
+    let modal = compact[first..=last].join("\n");
+    assert!(last - first < 4, "the modal is more than 4 rows:\n{modal}");
+    assert!(modal.contains("Allow run seq 1 3?"), "{modal}");
+    assert!(modal.contains("Risk: unknown - "), "{modal}");
+    assert!(modal.contains("[y] yes"), "{modal}");
+    assert!(
+        modal.contains("[a] yes, do not ask again for exec(seq 1 3)"),
+        "{modal}"
+    );
+    assert!(modal.contains("[n] no, say what to do instead"), "{modal}");
+    assert!(modal.contains("[e] edit"), "{modal}");
+    for developer_text in [
+        "ProcessEffectsUnknown",
+        "DynamicCode",
+        "IdentityIncomplete",
+        "Parameters:",
+        "Operations:",
+        "widening",
+        "\"argv\"",
+    ] {
+        assert!(
+            !modal.contains(developer_text),
+            "{developer_text:?} is on the compact modal:\n{modal}"
+        );
+    }
+
+    session.press(b"d");
+    session.wait("Parameters:");
+    let details = session.screen().join("\n");
+    for fact in [
+        "Operations:",
+        "- spawn",
+        "Remembering would add:",
+        "exec(seq 1 3)",
+        "widening for operation 0: omits Cwd",
+        "Parameters:",
+        "\"argv\"",
+    ] {
+        assert!(
+            details.contains(fact),
+            "{fact:?} missing after d:\n{details}"
+        );
+    }
+
+    session.press(b"y");
+    session.wait(TOOL_TURN_DONE);
+    let (generations, _) = session.finish();
+    assert_eq!(generations.len(), 2, "allowing once runs the call");
+}
+
+#[test]
+fn n_asks_what_to_do_instead_and_the_words_reach_the_model_as_the_tool_result() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+    session.press(b"n");
+    session.wait("What should it do instead?");
+    session.press(b"count with a loop instead\r");
+    session.wait(TOOL_TURN_DONE);
+
+    let screen = session.screen().join("\n");
+    assert!(
+        !screen.contains("✓ $ seq"),
+        "a declined call must not run:\n{screen}"
+    );
+    let (generations, config) = session.finish();
+    assert_eq!(generations.len(), 2, "the run continues after the words");
+    assert!(
+        generations[1]
+            .to_string()
+            .contains("declined it and said: count with a loop instead"),
+        "the instruction never reached the model: {}",
+        generations[1]
+    );
+    assert!(!config.contains("exec("), "a decline stores nothing");
+}
+
+#[test]
+fn a_stores_the_prefix_rule_and_commits_one_plain_receipt_to_the_transcript() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+    session.press(b"a");
+    session.wait(TOOL_TURN_DONE);
+
+    let screen = session.screen();
+    let joined = screen.join("\n");
+    assert!(
+        screen.iter().any(|line| {
+            line.trim_end() == "Remembered: you will not be asked again for exec(seq 1 3)."
+        }),
+        "the receipt is not a transcript row of its own:\n{joined}"
+    );
+    assert!(
+        !joined.contains("RESULT") && !joined.contains("stored_changed"),
+        "the machine receipt reached the screen:\n{joined}"
+    );
+    assert!(
+        screen.iter().any(|line| line.starts_with("✓ $ seq 1 3")),
+        "remembering still allows the call:\n{joined}"
+    );
+    let (_, config) = session.finish();
+    assert!(
+        config.contains("exec(seq 1 3)"),
+        "the prefix rule was not stored:\n{config}"
+    );
+}
+
+// Catches: blind Enter retries consuming the reclassified modal before its
+// observation mark, and an edit that executes the original argv instead.
+#[test]
+fn e_edits_the_call_and_the_amended_call_is_asked_again() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+    session.press(b"e");
+    session.wait("argv: ");
+    session.press(b"\x15seq 1 4\r");
+    session.wait("cwd: ");
+    session.press(b"\r");
+    session.wait("timeout_ms: ");
+    session.press(b"\r");
+    session.wait("[d] details");
+    let amended = session.screen().join("\n");
+    assert!(amended.contains("Allow run seq 1 4?"), "{amended}");
+    assert_eq!(session.stub.generations().len(), 1, "edit must ask again");
+    session.press(b"y");
+    session.wait(TOOL_TURN_DONE);
+    let (generations, _) = session.finish();
+    assert_eq!(generations.len(), 2);
+    let result = generations[1]["messages"]
+        .as_array()
+        .expect("provider messages")
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .expect("the amended call's tool result");
+    assert!(result.contains("1\n2\n3\n4\n"), "{result}");
 }
 
 /// The parent a job-control test needs. `ego` is spawned as a session leader
@@ -6052,7 +6849,7 @@ fn ctrl_z_at_a_permission_modal_leaves_it_unresolved_after_resume() {
     let notes = ego.workspace_path().join("notes.md");
     let mut job = Job::start(&ego, 40, 100);
     job.send(b"write the notes\r");
-    until(&job.reader, &mut job.output, b"[y] allow [n] deny [e] edit");
+    until(&job.reader, &mut job.output, b"[d] details");
     drain_until_quiet(&job.reader, &mut job.output);
     let requests_before = stub.requests().len();
 
@@ -6060,12 +6857,7 @@ fn ctrl_z_at_a_permission_modal_leaves_it_unresolved_after_resume() {
     assert!(job.cooked(), "ego stopped at the modal with a raw terminal");
     let resume_mark = job.output.len();
     job.resume();
-    until_from(
-        &job.reader,
-        &mut job.output,
-        resume_mark,
-        b"[y] allow [n] deny [e] edit",
-    );
+    until_from(&job.reader, &mut job.output, resume_mark, b"[d] details");
     thread::sleep(Duration::from_millis(500));
     drain_until_quiet(&job.reader, &mut job.output);
     assert_eq!(
@@ -6131,4 +6923,237 @@ fn ctrl_z_reports_that_windows_cannot_suspend_it() {
     drop(pair);
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
+}
+
+// Catches: startup effort navigation or session-only selection publishes defaults before Enter.
+#[test]
+fn regression_startup_effort_navigation_and_escape_preserve_existing_config() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .without_fixture_thinking()
+        .conversing()
+        .args(["--model", "anthropic/fixture-vision", "--sandbox", "off"])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    let original = "# Keep operator settings intact until confirmation.\nmode = \"default\"\n";
+    ego.home_file("config.toml", original);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_normalized(&reader, &mut output, 0, "Select reasoning");
+    drain_until_quiet(&reader, &mut output);
+    input
+        .write_all(b"1s")
+        .expect("select without persistent confirmation");
+    input.flush().expect("selection flush");
+    drain_until_quiet(&reader, &mut output);
+    assert_eq!(
+        std::fs::read_to_string(ego.home_path().join("config.toml")).expect("existing config"),
+        original
+    );
+    assert!(stub.generations().is_empty());
+    input.write_all(b"\x1b").expect("cancel reasoning");
+    input.flush().expect("cancel flush");
+    assert_eq!(bounded_exit(child).exit_code(), 130);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+    assert_eq!(
+        std::fs::read_to_string(ego.home_path().join("config.toml")).expect("preserved config"),
+        original
+    );
+    assert!(stub.generations().is_empty());
+}
+
+// Catches: EOF repeats a provider refusal even when startup already has an explicit effort.
+#[test]
+fn regression_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Status(400)],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--thinking",
+            "off",
+            "--model",
+            "anthropic/fixture-vision",
+            "--mode",
+            "default",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    ego.file("AGENTS.md", "# effort picker fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("trust flush");
+    let trust_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, trust_start);
+    let turn_start = output.len();
+    input.write_all(b"hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        turn_start,
+        "the provider returned HTTP 400",
+    );
+    until_prompt_from(&reader, &mut output, turn_start);
+    let quit_start = output.len();
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader");
+    writer_join.join().expect("writer");
+    drain(&reader, &mut output);
+    assert!(status.success(), "interactive exit: {status:?}");
+    let after_quit = normalized(&output[quit_start..]);
+    assert!(after_quit.contains("To resume: ego resume"), "{after_quit}");
+    assert!(
+        !after_quit.contains("the provider returned HTTP 400"),
+        "{after_quit}"
+    );
+    assert!(
+        !after_quit.contains("the model does not accept"),
+        "{after_quit}"
+    );
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["thinking"]["type"], "disabled");
+}
+
+// Catches: a fork only acquires its catalogue model after its first generation.
+#[test]
+fn critic_fork_model_is_present_before_first_successor_prompt() {
+    critic_successor_model_before_generation("fork");
+}
+
+// Catches: quitting directly after compaction leaves resume without a model.
+#[test]
+fn critic_compact_model_is_present_before_first_successor_prompt() {
+    critic_successor_model_before_generation("compact");
+}
+
+fn critic_successor_model_before_generation(action: &str) {
+    let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
+    let mut replies = vec![Reply::Sse(text("CRITIC-SOURCE-ANSWER"))];
+    if action == "compact" {
+        replies.push(Reply::Sse(text(checkpoint)));
+    }
+    let stub = Stub::start(Plan {
+        completions: replies,
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# critic successor fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"first prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "CRITIC-SOURCE-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(format!("/{action}\r").as_bytes()).unwrap();
+    input.flush().unwrap();
+    until_local_action_completed(&reader, &mut output, start, action, PROGRESS_DEADLINE);
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "successor process failed: {status:?}");
+    let listing = places
+        .ego(&stub)
+        .subcommand("ls")
+        .args(["--output", "json"])
+        .run()
+        .report();
+    let target = listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] != support::FIXTURE_SESSION_ID)
+        .expect("successor catalogue row");
+    assert_eq!(
+        target["model"], "ollama/qwen3",
+        "{action} successor lost its model before its first prompt: {listing}"
+    );
 }
