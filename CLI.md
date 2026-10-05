@@ -1336,13 +1336,15 @@ ordinary output length or generic invalid input, and is never blindly retried.
 The operator then invokes `/compact` or `ego compact`; M3 introduced no
 automatic threshold.
 
-ACP v1 advertises only the optional `_ego/compact` extension in
-`AgentCapabilities._meta`. Its request is
+ACP v1 advertises the optional `_ego/compact` extension in
+`AgentCapabilities._meta`. The durable lifecycle adapter also advertises
+standard load, list, tip fork, resume, delete, and close. Its request is
 `{"v":1,"sessionId":"...","requestId":"..."}`; its response carries
 `v`, `sourceSessionId`, `sourceSeq`, `targetSessionId`, `publication`, and
 `successorStartRequestId`. A successful response registers the target so the
-next standard `session/prompt` adopts it. It does not advertise `session/load`
-or add standard list, fork, resume, or delete operations. Because ACP has no
+next standard `session/prompt` adopts it. The extension itself adds no standard
+lifecycle operation; those are served separately by the durable M5 adapter.
+Because ACP has no
 standard context-overflow stop reason, the preceding `session/prompt` returns a
 structured application error naming `_ego/compact` after the typed settlement
 is durable; it does not report max tokens or refusal.
@@ -1368,6 +1370,14 @@ hidden behind a compaction checkpoint cannot be selected. An inherited message
 branches its owning ancestor at that ancestor's completion sequence. Title and
 active goal come from the selected boundary. An explicit completed boundary can
 be read while the source writer runs; a tip fork requires an inactive source.
+
+Standard ACP `session/fork` currently serves the tip. The message selector
+`_meta.ego.atMessageId`, lineage metadata, and inherited-message replay are
+planned extensions. The accepted cache design snapshots only the system prompt
+per epoch; resume/fork inherit it, and compaction or explicit refresh replaces
+it. Tool admission remains current. Snapshot/refresh and provider cache fields
+are planned in regression case and 248, with decisions in
+`docs/decisions/2026-09-30-conversation-fork-cache-prefix.md`.
 
 ## 7. Configuration
 
