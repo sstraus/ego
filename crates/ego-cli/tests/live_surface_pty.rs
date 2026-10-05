@@ -1,5 +1,140 @@
 mod support;
 
+// Catches: a second cross-root selection rebases a relative store under the selected project.
+#[test]
+fn repeated_cross_root_resume_preserves_relative_session_store() {
+    let stub = support::Stub::start(support::Plan {
+        completions: vec![
+            support::Reply::Sse(support::text("CRITIC-SEED-A")),
+            support::Reply::Sse(support::text("CRITIC-SEED-B")),
+            support::Reply::Sse(support::text("CRITIC-RETURNED-A")),
+        ],
+        ..support::Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# critic root A\n");
+    places.file("other/AGENTS.md", "# critic root B\n");
+    let root_b = places.workspace_path().join("other");
+    let store = places.workspace_path().join("critic-sessions");
+    let id_b = "0192a600-0000-7000-8000-000000000174";
+    for (root, id, prompt, title) in [
+        (
+            places.workspace_path(),
+            support::FIXTURE_SESSION_ID,
+            "critic original conversation",
+            "CriticAlpha",
+        ),
+        (
+            root_b.as_path(),
+            id_b,
+            "critic other conversation",
+            "CriticBeta",
+        ),
+    ] {
+        let seeded = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--session-id",
+                id,
+                "--session-dir",
+                store.to_str().unwrap(),
+                "-C",
+                root.to_str().unwrap(),
+            ])
+            .arg(prompt)
+            .run();
+        assert_eq!(seeded.code, Some(0), "{}", seeded.stderr);
+        let named = places
+            .ego(&stub)
+            .without_fixture_thinking()
+            .subcommand("resume")
+            .args([id, "--session-dir", store.to_str().unwrap(), "--name"])
+            .arg(&format!("set={title}"))
+            .run();
+        assert_eq!(named.code, Some(0), "{}", named.stderr);
+    }
+    let ego = places.ego(&stub).subcommand("resume").args([
+        support::FIXTURE_SESSION_ID,
+        "--model",
+        "ollama/qwen3",
+        "--sandbox",
+        "off",
+        "--session-dir",
+        "critic-sessions",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    for (title, id, needs_trust) in [
+        ("CriticBeta", id_b, true),
+        ("CriticAlpha", support::FIXTURE_SESSION_ID, false),
+    ] {
+        drain_until_quiet(&reader, &mut output);
+        let start = output.len();
+        input.write_all(b"/sessions\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, title);
+        input.write_all(format!("{title}\r").as_bytes()).unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            &format!("resumed session {id}"),
+        );
+        if needs_trust {
+            until_normalized(&reader, &mut output, start, "Trust project files");
+            input.write_all(b"yes\r").unwrap();
+            input.flush().unwrap();
+        }
+        drain_until_quiet(&reader, &mut output);
+    }
+    let start = output.len();
+    input
+        .write_all(b"continue original conversation\r")
+        .unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "CRITIC-RETURNED-A");
+    let generations = stub.generations();
+    let request = generations.last().unwrap().to_string();
+    assert!(
+        request.contains("critic original conversation"),
+        "{request}"
+    );
+    assert!(!request.contains("critic other conversation"), "{request}");
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "{}", normalized(&output));
+    assert!(
+        !root_b.join("critic-sessions").exists(),
+        "store was rebased into root B"
+    );
+}
+
 use ego_cli::repl::actions::ActionRegistry;
 use portable_pty::{ExitStatus, NativePtySystem, PtySize, PtySystem};
 use std::{

@@ -94,10 +94,10 @@ pub(super) fn run_session_picker(
                         .iter()
                         .filter(|meta| matches_filter(meta, &filter))
                         .collect();
-                    if let Some(meta) = filtered.get(cursor.min(filtered.len().saturating_sub(1))) {
-                        if meta.workspace_root.is_dir() {
-                            break 'picker Some(meta.id);
-                        }
+                    if let Some(meta) = filtered.get(cursor.min(filtered.len().saturating_sub(1)))
+                        && meta.workspace_root.is_dir()
+                    {
+                        break 'picker Some(meta.id);
                     }
                 }
                 "up" => cursor = cursor.saturating_sub(1),
