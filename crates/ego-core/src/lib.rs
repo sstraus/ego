@@ -26,6 +26,7 @@ pub mod goal;
 pub mod health;
 pub mod hook;
 pub mod mcp;
+pub mod orchestration_events;
 pub mod orchestrator;
 pub mod permit;
 pub mod public;

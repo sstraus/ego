@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod mcp_continuation;
 pub mod mcp_registry;
 pub mod model_catalogue_cache;
+pub mod orchestration_events;
 pub mod orchestrator;
 pub mod permission_analysis_cache;
 pub mod pricing;
