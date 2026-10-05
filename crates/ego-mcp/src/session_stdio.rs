@@ -182,7 +182,12 @@ impl McpStdioSession {
             return Err(unsent("stdio executable identity is incomplete"));
         }
         let child = self.child(&server)?;
-        let mut state = child.lock().await;
+        let mut state = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(options.deadline()),
+            child.lock(),
+        )
+        .await
+        .map_err(|_| unsent("stdio admission expired waiting for the channel"))?;
         self.open()?;
         if state.reap.is_some() {
             state.stop().await;
