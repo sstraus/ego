@@ -164,7 +164,14 @@ impl JevConfig {
                 (JevUse::Router, &root.router),
             ] {
                 if let Some(overrides) = overrides {
-                    apply(self.default_policy(usage), overrides, usage)?;
+                    let mut policy = apply(self.default_policy(usage), overrides);
+                    // A partial band inherits its missing bound after root selection.
+                    if overrides.low.is_none() || overrides.high.is_none() {
+                        let default = self.default_policy(usage);
+                        policy.low = default.low;
+                        policy.high = default.high;
+                    }
+                    validate_policy(policy, usage)?;
                 }
             }
         }
@@ -211,19 +218,17 @@ impl JevConfig {
                 (JevUse::Router, &entry.router),
             ] {
                 if let Some(overrides) = overrides {
-                    selected.policies[index(usage)] =
-                        apply(selected.policy(usage), overrides, usage)?;
+                    selected.policies[index(usage)] = apply(selected.policy(usage), overrides);
                 }
             }
+        }
+        for usage in [JevUse::Wake, JevUse::Destructive, JevUse::Router] {
+            validate_policy(selected.policy(usage), usage)?;
         }
         Ok(selected)
     }
 }
-fn apply(
-    mut policy: JevPolicy,
-    overrides: &JevUseOverride,
-    usage: JevUse,
-) -> Result<JevPolicy, String> {
+fn apply(mut policy: JevPolicy, overrides: &JevUseOverride) -> JevPolicy {
     if let Some(v) = overrides.on {
         policy.on = v;
     }
@@ -236,6 +241,9 @@ fn apply(
     if let Some(v) = overrides.fail {
         policy.fail = v;
     }
+    policy
+}
+fn validate_policy(policy: JevPolicy, usage: JevUse) -> Result<(), String> {
     let name = match usage {
         JevUse::Wake => "wake",
         JevUse::Destructive => "destructive",
@@ -252,7 +260,7 @@ fn apply(
     if !valid {
         return Err(format!("jev.roots.{name}.fail is invalid"));
     }
-    Ok(policy)
+    Ok(())
 }
 fn validate_endpoint(value: &str) -> Result<(), String> {
     let url = Url::parse(value).map_err(|_| "jev.endpoint is invalid")?;
