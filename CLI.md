@@ -1263,7 +1263,12 @@ steps. An earlier checkpoint is part of the input, so repeated compaction must
 preserve every still-relevant fact.
 
 A successful response creates a new durable session and switches the
-interactive surface to it. The new session resolves ordinary system, project,
+interactive surface to it. The receipt names both session IDs, reports the
+source context reading, and gives the command to resume the source. The
+successor occupancy remains unknown until its next generation; checkpoint
+length does not measure its freshly resolved provider baseline. A tip `/fork`
+prints the same session identities and preserves the measured source context.
+The new session resolves ordinary system, project,
 runtime, model, and tool context afresh. The only conversation material carried
 from the source is one distinct context-checkpoint block containing the
 compaction response: no old user, assistant, reasoning, tool-call, tool-result,

@@ -1362,6 +1362,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 Arc::new(super::session_commands::NoLiveRuns),
                                                 Arc::new(SystemClock),
                                             );
+                                        let fork_at_message =
+                                            matches!(command, repl::HostCommand::Fork(_));
                                         let prepared = match command {
                                             repl::HostCommand::Fork(item) => {
                                                 lifecycle.prepare_fork_at(active.id(), item)
@@ -1407,8 +1409,13 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 continue;
                                             }
                                         };
-                                        let target_state =
+                                        // Only a tip fork preserves the measured source context.
+                                        // An earlier message has a different provider baseline.
+                                        let mut target_state =
                                             SessionState::replay(prepared.seed().events().cloned());
+                                        if !fork_at_message {
+                                            target_state.context = state.context;
+                                        }
                                         let target_owner = match ActiveSession::durable(
                                             target_opened,
                                             target_state,
@@ -2015,6 +2022,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                         diagnostic,
                         projected,
                     } => {
+                        let parent = active.id();
                         active.replace_state(source_state);
                         if !active.apply_publication(target, &publication) {
                             return Err(RunTermination::Failed {
@@ -2031,6 +2039,13 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 error.exit_reason()
                             ));
                         }
+                        diagnostics.note(&format!(
+                            "forked session {parent} into {}; this is now session {}. \
+                             To return to the source: ego resume {parent} ({})",
+                            active.id(),
+                            active.id(),
+                            crate::usage::context_line(active.state().context)
+                        ));
                         epoch_start = EpochStart::Fork {
                             diagnostic,
                             projected: projected.map(Box::new),
@@ -2044,6 +2059,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                         request,
                         parent,
                     } => {
+                        let parent_id = active.id();
+                        let parent_context = source_state.context;
                         active.replace_state(source_state);
                         if !active.apply_publication(target, &publication) {
                             return Err(RunTermination::Failed {
@@ -2090,6 +2107,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                             registry = target_registry;
                             config.system = target_system;
                         }
+                        diagnostics.note(&format!(
+                            "compacted session {parent_id} into {}; this is now session {}. \
+                             Before: {}; after: known once the next reply is generated. \
+                             To return to the source: ego resume {parent_id}",
+                            active.id(),
+                            active.id(),
+                            crate::usage::context_line(parent_context)
+                        ));
                         epoch_start = EpochStart::Compact {
                             diagnostic,
                             request,

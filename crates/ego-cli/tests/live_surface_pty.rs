@@ -85,7 +85,17 @@ fn successor_accepts_next_turn(action: &str) {
         let start = output.len();
         input.write_all(format!("/{action}\r").as_bytes()).unwrap();
         input.flush().unwrap();
-        until_local_action_completed(&reader, &mut output, start, action, PROGRESS_DEADLINE);
+        // A redraw can precede publication; follow-up input would cancel compaction.
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            if action == "compact" {
+                "compacted session"
+            } else {
+                "forked session"
+            },
+        );
         drain_until_quiet(&reader, &mut output);
     }
     let requests_before = stub.requests().len();
@@ -4902,6 +4912,213 @@ fn a_clean_quit_leaves_a_session_that_opens_without_a_repair() {
     );
 }
 
+/// One answered turn, then `/fork`: the text printed from the fork onwards.
+fn fork_after_a_turn() -> String {
+    const ROWS: u16 = 24;
+    const COLS: u16 = 120;
+    let stub = Stub::start(Plan {
+        installed: vec![support::MODEL.to_owned()],
+        context_length: Some(32_768),
+        completions: vec![Reply::Sse(text("FORK-RECEIPT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# fork receipt fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: ROWS,
+            cols: COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((ROWS, COLS)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    let turn_start = output.len();
+    input.write_all(b"hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(&reader, &mut output, turn_start, "FORK-RECEIPT-ANSWER");
+    until_prompt_from(&reader, &mut output, turn_start);
+    drain_until_quiet(&reader, &mut output);
+    let fork_start = output.len();
+    input.write_all(b"/fork\r").expect("fork");
+    input.flush().expect("fork flush");
+    until_normalized(&reader, &mut output, fork_start, "forked session");
+    drain_until_quiet(&reader, &mut output);
+    let receipt = normalized(&output[fork_start..]);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    receipt
+}
+
+// Catches: a successful fork switches sessions silently or names the wrong parent.
+#[test]
+fn fork_prints_a_receipt_naming_the_source_session() {
+    let receipt = fork_after_a_turn();
+    assert!(
+        receipt.contains(&format!("forked session {}", support::FIXTURE_SESSION_ID))
+            && receipt.contains("ego resume"),
+        "no fork receipt naming the parent: {receipt:?}"
+    );
+    assert_eq!(receipt.matches("forked session").count(), 1, "{receipt}");
+    let successor = receipt
+        .split(" into ")
+        .nth(1)
+        .expect("successor id")
+        .split(';')
+        .next()
+        .unwrap();
+    let successor: ego_core::event::id::SessionId = successor.parse().expect("receipt session id");
+    assert_ne!(successor.to_string(), support::FIXTURE_SESSION_ID);
+    assert!(
+        receipt.contains(&format!("this is now session {successor}")),
+        "{receipt}"
+    );
+}
+
+/// Resume a stored session that already holds a context reading, `/fork` it,
+/// and return the status row left on screen.
+fn status_row_after_forking_a_session_with_a_context_reading() -> String {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, OccupancyProvenance};
+    use ego_core::event::id::{EventId, Producer, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    const ROWS: u16 = 24;
+    const COLS: u16 = 120;
+    let stub = Stub::start(Plan {
+        installed: vec![support::MODEL.to_owned()],
+        context_length: Some(32_768),
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing();
+    let root = std::fs::canonicalize(ego.workspace_path()).expect("canonical workspace");
+    let store = JsonlStore::new(
+        ego.home_path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    );
+    let source: SessionId = support::FIXTURE_SESSION_ID.parse().expect("a session id");
+    store
+        .publish_empty_session(source, &root, Timestamp::from_millis(1))
+        .expect("seed session");
+    let mut seq = ego_core::state::SessionState::replay(std::iter::empty()).last_seq;
+    seq.next();
+    store
+        .append(
+            &source,
+            &DomainEvent {
+                env: Envelope {
+                    seq,
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::from_millis(2),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::ContextWindowUpdated {
+                    used_tokens: 3_000,
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                    window: Some(32_768),
+                },
+            },
+        )
+        .expect("seed context reading");
+    let ego = ego
+        .subcommand("resume")
+        .arg(support::FIXTURE_SESSION_ID)
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# fork status fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: ROWS,
+            cols: COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((ROWS, COLS)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    drain_until_quiet(&reader, &mut output);
+    let before = screen_rows(&output, ROWS, COLS);
+    let fork_start = output.len();
+    input.write_all(b"/fork\r").expect("fork");
+    input.flush().expect("fork flush");
+    until_normalized(&reader, &mut output, fork_start, "forked session");
+    drain_until_quiet(&reader, &mut output);
+    let after = screen_rows(&output, ROWS, COLS);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    let status = |rows: &[String]| {
+        rows.iter()
+            .find(|row| row.contains("ctx"))
+            .cloned()
+            .unwrap_or_else(|| panic!("no status row on screen: {rows:?}"))
+    };
+    assert!(
+        !status(&before).contains("ctx ?"),
+        "precondition: the resumed source shows its context reading: {before:?}"
+    );
+    status(&after)
+}
+
+// Catches: a tip fork discards the measured occupancy and renders ctx ?.
+#[test]
+fn the_forked_session_keeps_the_context_reading_in_its_status_row() {
+    let status = status_row_after_forking_a_session_with_a_context_reading();
+    assert!(
+        status.contains("ctx 9.2%"),
+        "the fork lost or changed the measured context reading: {status:?}"
+    );
+}
+
 #[test]
 fn quitting_after_a_turn_prints_the_resume_hint_for_that_session() {
     let after_quit = output_after_quit(Some("hello"));
@@ -7078,13 +7295,37 @@ fn critic_fork_model_is_present_before_first_successor_prompt() {
     critic_successor_model_before_generation("fork");
 }
 
-// Catches: quitting directly after compaction leaves resume without a model.
+// Catches: silent compaction, a receipt naming the wrong successor, or claiming unmeasured occupancy.
 #[test]
-fn critic_compact_model_is_present_before_first_successor_prompt() {
-    critic_successor_model_before_generation("compact");
+fn compact_prints_a_receipt_naming_the_successor_and_reports_context_availability() {
+    let (receipt, target) = critic_successor_model_before_generation("compact");
+    assert_eq!(receipt.matches("compacted session").count(), 1, "{receipt}");
+    assert!(
+        receipt.contains(&format!(
+            "compacted session {} into {target}",
+            support::FIXTURE_SESSION_ID
+        )),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!("this is now session {target}")),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains("Before: context 14 of 32768 tokens"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains("after: known once the next reply is generated"),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!("ego resume {}", support::FIXTURE_SESSION_ID)),
+        "{receipt}"
+    );
 }
 
-fn critic_successor_model_before_generation(action: &str) {
+fn critic_successor_model_before_generation(action: &str) -> (String, String) {
     let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
     let mut replies = vec![Reply::Sse(text("CRITIC-SOURCE-ANSWER"))];
     if action == "compact" {
@@ -7092,6 +7333,7 @@ fn critic_successor_model_before_generation(action: &str) {
     }
     let stub = Stub::start(Plan {
         completions: replies,
+        context_length: Some(32_768),
         ..Plan::default()
     });
     let places = support::Places::new();
@@ -7130,8 +7372,20 @@ fn critic_successor_model_before_generation(action: &str) {
     let start = output.len();
     input.write_all(format!("/{action}\r").as_bytes()).unwrap();
     input.flush().unwrap();
-    until_local_action_completed(&reader, &mut output, start, action, PROGRESS_DEADLINE);
+    // A prompt redraw can occur while the checkpoint generation is still running.
+    // Wait for the actual publication receipt before quitting the successor.
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        if action == "compact" {
+            "compacted session"
+        } else {
+            "forked session"
+        },
+    );
     drain_until_quiet(&reader, &mut output);
+    let receipt = normalized(&output[start..]);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     let status = bounded_exit(child);
@@ -7156,4 +7410,8 @@ fn critic_successor_model_before_generation(action: &str) {
         target["model"], "ollama/qwen3",
         "{action} successor lost its model before its first prompt: {listing}"
     );
+    (
+        receipt,
+        target["id"].as_str().expect("successor id").to_owned(),
+    )
 }

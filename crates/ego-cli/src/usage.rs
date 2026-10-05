@@ -142,7 +142,7 @@ where
 }
 
 /// The active session's context occupancy against its window.
-fn context_line(context: ContextWindow) -> String {
+pub(crate) fn context_line(context: ContextWindow) -> String {
     match (context.used_tokens, context.window) {
         (Some(used), Some(window)) if window > 0 => format!(
             "context {used} of {window} tokens ({:.1}%)",
