@@ -17,6 +17,12 @@ use super::vocabulary::{ManagedConfigKey, ManagedConfigValue, UserConfigTarget};
 /// One complete, atomic change to the user configuration authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserConfigMutation {
+    /// Add/update or remove one root under the adapter's atomic lock.
+    Root {
+        target: UserConfigTarget,
+        path: std::path::PathBuf,
+        access: Option<crate::permit::RootAccess>,
+    },
     /// Set one field from the closed managed configuration vocabulary.
     ManagedSet {
         target: UserConfigTarget,
@@ -73,6 +79,7 @@ impl UserConfigMutation {
     /// ambiguous configuration and therefore fails as a whole.
     pub fn validate(&self) -> Result<(), UserConfigError> {
         match self {
+            Self::Root { .. } => Ok(()),
             Self::ManagedSet { target, key, value } => {
                 validate_managed_target_key(target, *key)?;
                 if !managed_value_matches_key(*key, value) {
@@ -143,7 +150,8 @@ impl UserConfigMutation {
     /// The exact user-owned authority this mutation addresses.
     pub fn target(&self) -> UserConfigTarget {
         match self {
-            Self::ManagedSet { target, .. }
+            Self::Root { target, .. }
+            | Self::ManagedSet { target, .. }
             | Self::ManagedUnset { target, .. }
             | Self::McpSet { target, .. }
             | Self::McpDeleteUserEntry { target, .. }
@@ -158,6 +166,10 @@ impl UserConfigMutation {
     /// Canonical facts returned after this mutation succeeds.
     pub fn facts(&self) -> UserConfigMutationFacts {
         match self {
+            Self::Root { path, access, .. } => UserConfigMutationFacts::Root {
+                path: path.clone(),
+                access: *access,
+            },
             Self::ManagedSet { key, value, .. } => UserConfigMutationFacts::Set {
                 key: *key,
                 value: value.clone(),
@@ -214,10 +226,17 @@ fn validate_managed_target_key(
 fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) -> bool {
     matches!(
         (key, value),
-        (ManagedConfigKey::Model, ManagedConfigValue::Model(_))
+        (ManagedConfigKey::Roots, ManagedConfigValue::Roots(_))
+            | (ManagedConfigKey::Model, ManagedConfigValue::Model(_))
             | (ManagedConfigKey::Thinking, ManagedConfigValue::Thinking(_))
             | (ManagedConfigKey::Mode, ManagedConfigValue::Mode(_))
             | (ManagedConfigKey::Sandbox, ManagedConfigValue::Sandbox(_))
+            | (ManagedConfigKey::ExecEnv, ManagedConfigValue::ExecEnv(_))
+            | (
+                ManagedConfigKey::ExecEnvAllowlist,
+                ManagedConfigValue::ExecEnvAllowlist(_)
+            )
+            | (ManagedConfigKey::Network, ManagedConfigValue::Network(_))
             | (ManagedConfigKey::Budget, ManagedConfigValue::Budget(_))
             | (ManagedConfigKey::Bare, ManagedConfigValue::Bare(_))
             | (
@@ -238,6 +257,10 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
 /// Canonical description of the successfully requested user-config change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserConfigMutationFacts {
+    Root {
+        path: std::path::PathBuf,
+        access: Option<crate::permit::RootAccess>,
+    },
     Set {
         key: ManagedConfigKey,
         value: ManagedConfigValue,

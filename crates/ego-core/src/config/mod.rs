@@ -21,10 +21,10 @@ pub use discovery::{
 };
 pub use error::ConfigError;
 pub use layer::{
-    AuthProviderLayer, ConfigLayer, FORBIDDEN_AUTH_HEADER_NAMES, McpEnvironmentName, McpHttpAuth,
-    McpHttpConfig, McpHttpUrl, McpLayer, McpLayerEntry, McpServerConfig, McpServerName,
-    McpStdioConfig, McpValueError, Mode, ModelRef, PermCfg, ProfileLayer, StatusSegmentName,
-    StatuslineLayer, UiLayer, is_forbidden_auth_header,
+    AuthProviderLayer, ConfigLayer, ExecEnvironment, ExecLayer, FORBIDDEN_AUTH_HEADER_NAMES,
+    McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpLayer, McpLayerEntry,
+    McpServerConfig, McpServerName, McpStdioConfig, McpValueError, Mode, ModelRef, Network,
+    PermCfg, ProfileLayer, StatusSegmentName, StatuslineLayer, UiLayer, is_forbidden_auth_header,
 };
 pub use mutation::{
     ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigEditHandle,

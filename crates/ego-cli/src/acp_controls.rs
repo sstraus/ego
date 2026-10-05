@@ -78,6 +78,7 @@ pub struct AcpSessionControls {
     model: Option<ModelRef>,
     effort: Option<ThinkingLevel>,
     mode: Mode,
+    max_mode: Option<Mode>,
     judge: bool,
     /// The weakest confinement this connection may run at, and the value a
     /// session starts on.
@@ -107,14 +108,16 @@ impl AcpSessionControls {
         ceiling: Confinement,
         catalogue: Option<ModelCatalogueSnapshot>,
     ) -> Self {
-        Self::seeded(
+        let mut controls = Self::seeded(
             effective.model.clone(),
             effective.thinking,
             effective.mode.unwrap_or(Mode::Default),
             effective.judge.is_some(),
             ceiling,
             catalogue,
-        )
+        );
+        controls.max_mode = effective.max_mode;
+        controls
     }
 
     /// The resolved values and whether a judge exists, without the rest of
@@ -132,6 +135,7 @@ impl AcpSessionControls {
             model,
             effort,
             mode,
+            max_mode: None,
             judge,
             sandbox_ceiling,
             catalogue,
@@ -434,6 +438,14 @@ impl SessionControls for AcpSessionControls {
                 chosen.effort = Some(effort);
             }
             SessionControlChange::Mode(mode) => {
+                if let Some(maximum) = self.max_mode
+                    && !mode.within(maximum)
+                {
+                    return Err(ControlError::Refused {
+                        control: "mode",
+                        why: format!("mode {mode} exceeds system max_mode {maximum}"),
+                    });
+                }
                 if !self.modes().contains(&mode) {
                     return Err(ControlError::Refused {
                         control: "mode",

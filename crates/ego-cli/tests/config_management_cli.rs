@@ -349,3 +349,83 @@ fn profile_names_follow_the_shared_validation_boundary() {
     ]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", error(&output));
 }
+
+// Catches: opt-in child controls are writable but ignored by effective inspection,
+// or invalid allowlist names overwrite the existing user config.
+#[test]
+fn child_environment_and_network_controls_are_durable_and_strict() {
+    let fixture = Fixture::new();
+    fixture.write_config("# preserve this comment\nmodel = 'provider/example'\n");
+    for assignment in [
+        "exec.env='core'",
+        "network='off'",
+        "exec.env_allowlist=['PATH']",
+    ] {
+        let output = fixture.run(&["config", "set", assignment]);
+        assert!(output.status.success(), "{}", error(&output));
+    }
+    let output = fixture.run(&["config", "get", "exec.env"]);
+    assert!(text(&output).contains("core"));
+    let output = fixture.run(&["config", "ls", "--effective", "--json"]);
+    assert!(output.status.success(), "{}", error(&output));
+    let effective: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(effective["network"], "offline");
+    let before = std::fs::read(fixture.config_path()).unwrap();
+    assert_usage_failure(
+        &fixture.run(&["config", "set", "exec.env_allowlist=['BAD=NAME']"]),
+        "exec.env_allowlist",
+    );
+    assert_eq!(std::fs::read(fixture.config_path()).unwrap(), before);
+    assert!(
+        String::from_utf8(before)
+            .unwrap()
+            .contains("# preserve this comment")
+    );
+    for key in ["exec.env", "exec.env_allowlist", "network"] {
+        assert!(fixture.run(&["config", "unset", key]).status.success());
+    }
+    let output = fixture.run(&["config", "ls", "--effective", "--json"]);
+    let effective: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(effective["network"], "online");
+}
+
+// Catches: roots are not writable through the managed vocabulary or add/rm overwrite sibling fields.
+#[test]
+fn roots_commands_update_exact_user_target_without_erasing_other_settings() {
+    let fixture = Fixture::new();
+    fixture.write_config("model='ollama/qwen3'\n");
+    let path = fixture.workspace.path().to_str().unwrap();
+    for args in [
+        vec!["roots", "add", "--access", "read-write", path],
+        vec!["roots", "add", "--access", "read-write", path],
+        vec!["roots", "add", "--profile", "strict", path],
+    ] {
+        let output = fixture.run(&args);
+        assert!(output.status.success(), "{}", error(&output));
+    }
+    let output = fixture.run(&["roots", "ls"]);
+    assert!(text(&output).contains("read-write"));
+    let original = std::fs::read_to_string(fixture.config_path()).unwrap();
+    assert!(original.contains("ollama/qwen3"));
+    assert!(
+        fixture
+            .run(&["roots", "rm", "--profile", "strict", path])
+            .status
+            .success()
+    );
+    assert!(
+        fixture
+            .run(&["config", "set", "--profile", "strict", "roots=[]"])
+            .status
+            .success()
+    );
+    let output = fixture.run(&["roots", "ls", "--profile", "strict"]);
+    assert_eq!(text(&output).trim(), "[]");
+    let before_invalid = std::fs::read_to_string(fixture.config_path()).unwrap();
+    let output = fixture.run(&["config", "set", "roots=[{path='relative',access='read'}]"]);
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(fixture.config_path()).unwrap(),
+        before_invalid
+    );
+}

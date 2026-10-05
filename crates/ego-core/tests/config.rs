@@ -1769,3 +1769,25 @@ fn exec_paths_catches_project_widening_and_relative_root_acceptance() {
     }
     assert!(ConfigLayer::parse(Source::User, "exec_paths = ['relative']").is_err());
 }
+
+// Catches: selecting a profile loses lower-layer allowlist names, or invalid
+// environment names pass strict config validation.
+#[test]
+fn child_controls_merge_per_field_and_validate_inactive_profiles() {
+    use ego_core::config::{ExecEnvironment, Network};
+    let user = ConfigLayer::parse(Source::User,
+        "network='off'\n[exec]\nenv='allowlist'\nenv_allowlist=['PATH']\n[profile.dev.exec]\nenv='core'"
+    ).unwrap();
+    let flags = ConfigLayer::parse(Source::Flags, "network='on'").unwrap();
+    let effective = resolve(&[user, flags], Trust::Untrusted, Some("dev")).unwrap();
+    assert_eq!(effective.network, Network::On);
+    assert_eq!(effective.exec.env, Some(ExecEnvironment::Core));
+    assert_eq!(effective.exec.env_allowlist, Some(vec!["PATH".into()]));
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            "[profile.inactive.exec]\nenv_allowlist=['BAD=NAME']"
+        )
+        .is_err()
+    );
+}
