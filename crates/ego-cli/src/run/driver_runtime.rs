@@ -2030,7 +2030,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                             } else {
                                 Vec::new()
                             };
-                            let unsettled_before = state.unsettled_detached_execs();
+                            let settled_before = state
+                                .detached_execs
+                                .iter()
+                                .filter_map(|(id, snapshot)| snapshot.is_some().then_some(*id))
+                                .collect::<std::collections::HashSet<_>>();
                             let loop_ = build!(
                                 active,
                                 &turn_cancel,
@@ -2140,8 +2144,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                             };
                             drop(loop_);
                             state = session_hooks.state.state();
-                            for id in unsettled_before {
-                                if let Some(Some(snapshot)) = state.detached_execs.get(&id) {
+                            for (id, snapshot) in &state.detached_execs {
+                                if let Some(snapshot) = snapshot
+                                    && !settled_before.contains(id)
+                                {
                                     diagnostics.note(&snapshot.model_text());
                                 }
                             }
