@@ -822,9 +822,13 @@ fn analysis_identity_ignores_only_the_session_read_pin_and_keeps_live_boundaries
             path: CanonPath::new("/sessions/first/mcp-output/result.txt"),
         },
     );
+    let policy = first.policy();
+    let Classification::Ask(pending) = policy.classify(own_read) else {
+        panic!("an admitted read reaches mode settlement without an explicit allow rule");
+    };
     assert!(matches!(
-        first.policy().classify(own_read),
-        Classification::Settled(Ok(_))
+        futures::executor::block_on(policy.settle(pending)),
+        ego_core::permit::Resolution::Settled(Ok(_))
     ));
     for access in [RootAccess::Read, RootAccess::ReadWrite] {
         let operator_root = if access == RootAccess::Read {
