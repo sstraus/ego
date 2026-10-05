@@ -33,6 +33,7 @@ pub struct ObservationPump {
     cursor_path: PathBuf,
     results: PathBuf,
     children: PathBuf,
+    supervised: Vec<ego_core::orchestrator::SpawnReceipt>,
     _lease: Lease,
 }
 
@@ -63,6 +64,7 @@ impl ObservationPump {
             cursor_path,
             results: home.join("Gits/.tmp/results"),
             children: state.join("children.tsv"),
+            supervised: Vec::new(),
             _lease: lease,
         };
         pump.persist()?;
@@ -131,6 +133,83 @@ impl ObservationPump {
         )
         .await?;
         Ok(())
+    }
+
+    /// Supervision runs on the existing pump tick, outside any model turn.
+    pub async fn supervise(
+        &mut self,
+        receipts: &[ego_core::orchestrator::SpawnReceipt],
+        now_ms: u64,
+    ) -> io::Result<()> {
+        self.supervised = receipts.to_vec();
+        if receipts
+            .iter()
+            .all(|r| self.cursor.spawn_settled(&r.session_id))
+        {
+            return Ok(());
+        }
+        let sessions = self.call("session", json!({"action":"list"})).await?;
+        let actions = self.supervise_sessions(receipts, &sessions, now_ms)?;
+        let mut failures = Vec::new();
+        for receipt in actions {
+            let response = self.call("session", json!({"action":"submit", "session_id":receipt.session_id, "input":receipt.prompt})).await;
+            match response {
+                Ok(response) if response["acknowledged"] == true => {}
+                Ok(_) => failures.push(format!(
+                    "spawn resend was not acknowledged for {}; no further resend",
+                    receipt.name
+                )),
+                Err(error) => failures.push(format!(
+                    "spawn resend failed for {}: {error}; no further resend",
+                    receipt.name
+                )),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(failures.join("\n")))
+        }
+    }
+
+    /// Reserve at most one resend durably before submission. Missing/unknown peers are not idle.
+    pub fn supervise_sessions(
+        &mut self,
+        receipts: &[ego_core::orchestrator::SpawnReceipt],
+        sessions: &Value,
+        now_ms: u64,
+    ) -> io::Result<Vec<ego_core::orchestrator::SpawnReceipt>> {
+        self.supervised = receipts.to_vec();
+        self.scan_results(now_ms)?;
+        let sessions = sessions
+            .as_array()
+            .ok_or_else(|| io::Error::other("invalid TUIC session list"))?;
+        let mut actions = Vec::new();
+        for receipt in receipts {
+            if self.cursor.spawn_settled(&receipt.session_id) {
+                continue;
+            }
+            let Some(session) = sessions
+                .iter()
+                .find(|s| s["session_id"].as_str() == Some(&receipt.session_id))
+            else {
+                continue;
+            };
+            match session["agent_state"].as_str() {
+                Some("working" | "awaiting_input" | "completed") => {
+                    self.cursor.settle_spawn(&receipt.session_id);
+                }
+                Some("idle")
+                    if now_ms.saturating_sub(receipt.spawned_at_ms) >= 60_000
+                        && self.cursor.settle_spawn(&receipt.session_id) =>
+                {
+                    actions.push(receipt.clone());
+                }
+                _ => {}
+            }
+        }
+        self.persist()?;
+        Ok(actions)
     }
 
     pub async fn poll(&mut self, now_ms: u64) -> io::Result<()> {
@@ -218,10 +297,29 @@ impl ObservationPump {
                 String::from_utf8(bytes).map_err(io::Error::other)?
             };
             let revision = content_id(&text);
+            let peer = self
+                .supervised
+                .iter()
+                .filter(|receipt| {
+                    path.file_name().is_some_and(|file| {
+                        file.to_string_lossy()
+                            .starts_with(&format!("{}-", receipt.name))
+                    })
+                })
+                .max_by_key(|r| r.name.len())
+                .map(|r| r.name.clone())
+                .or(tracked_peer(&self.children, &path)?);
+            if text.trim().starts_with("RESULT") {
+                // A RESULT settles only a spawn it postdates; a reused name keeps older files.
+                for receipt in self.supervised.iter().filter(|r| {
+                    peer.as_deref() == Some(r.name.as_str()) && millis(modified) > r.spawned_at_ms
+                }) {
+                    self.cursor.settle_spawn(&receipt.session_id);
+                }
+            }
             if self.cursor.files.get(&path) == Some(&revision) {
                 continue;
             }
-            let peer = tracked_peer(&self.children, &path)?;
             self.cursor.files.insert(path.clone(), revision);
             self.observe(
                 Observation {
@@ -306,6 +404,49 @@ pub fn millis(time: SystemTime) -> u64 {
         .map_or(0, |elapsed| {
             elapsed.as_millis().try_into().unwrap_or(u64::MAX)
         })
+}
+
+/// Only native active-tool completions can introduce supervised children.
+pub fn spawn_receipts(
+    entries: &[ego_core::store::session_store::SessionEntry],
+) -> Result<Vec<ego_core::orchestrator::SpawnReceipt>, String> {
+    use ego_core::event::domain::EventKind;
+    use ego_core::store::session_store::SessionEntry;
+    let mut started = std::collections::BTreeSet::new();
+    let mut receipts = Vec::new();
+    for entry in entries {
+        let SessionEntry::Event(event) = entry else {
+            continue;
+        };
+        match &event.kind {
+            EventKind::ToolCallStarted { name, args, .. } if name == "orchestrator_active" => {
+                if let Ok(
+                    ego_core::orchestrator::ActiveRequest::Spawn { .. }
+                    | ego_core::orchestrator::ActiveRequest::Consult { .. },
+                ) = serde_json::from_str::<ego_core::orchestrator::ActiveRequest>(args)
+                    && let Some(item) = event.env.item
+                {
+                    started.insert(item);
+                }
+            }
+            EventKind::ToolCallCompleted { ok: true, result }
+                if result.is_pure() && event.env.item.is_some_and(|item| started.remove(&item)) =>
+            {
+                for block in &result.content {
+                    if let Ok(value) = serde_json::from_str::<Value>(&block.text)
+                        && let Some(receipt) = value.get("orchestration_spawn")
+                    {
+                        receipts.push(
+                            serde_json::from_value(receipt.clone())
+                                .map_err(|e| format!("invalid durable spawn receipt: {e}"))?,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(receipts)
 }
 
 #[cfg(test)]

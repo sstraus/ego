@@ -1019,7 +1019,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     // scope this server already opened rather than a second egress: an `ego
     // acp` invocation is online by construction, so this adds no reach it did
     // not already have.
-    let (controls, ceiling, rule_target, coordinator) =
+    let (controls, ceiling, rule_target, coordinator, orchestration_mode) =
         match run::protocol_effective(root.as_path(), args.session_dir.clone(), args.shape.clone())
         {
             Ok(effective) => {
@@ -1073,6 +1073,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                         .active_profile
                         .as_ref()
                         .is_some_and(|profile| profile.name == "coordinator"),
+                    effective.orchestration,
                 )
             }
             Err(error) => {
@@ -1151,6 +1152,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     let notices = ego_acp::serve::AcpNotices::default();
     let _observer = match crate::orchestration_observer::start(
         coordinator,
+        orchestration_mode,
         &root,
         notices.clone(),
         Arc::clone(&store),

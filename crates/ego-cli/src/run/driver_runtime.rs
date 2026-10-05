@@ -1007,26 +1007,28 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             prospective.retained_last_good(),
                                             !published
                                         );
-                                        let next_registry = match tools(
-                                            args.tools.as_ref(),
-                                            Some(prospective.core()),
-                                            effective
-                                                .active_profile
-                                                .as_ref()
-                                                .map(|profile| profile.name.as_str()),
-                                            Some(Arc::new(jsonl_store.history())),
-                                            exec_environment.clone(),
-                                        ) {
-                                            Ok(registry) => registry,
-                                            Err(error) => {
-                                                last.termination = RunTermination::Failed {
-                                                    message: format!(
-                                                        "the rescanned skill catalogue could not rebuild model tools: {error}"
-                                                    ),
-                                                };
-                                                break 'epoch EpochTransition::Exit;
-                                            }
-                                        };
+                                        let next_registry =
+                                            match super::composition::tools_with_mode(
+                                                args.tools.as_ref(),
+                                                Some(prospective.core()),
+                                                effective
+                                                    .active_profile
+                                                    .as_ref()
+                                                    .map(|profile| profile.name.as_str()),
+                                                Some(Arc::new(jsonl_store.history())),
+                                                exec_environment.clone(),
+                                                super::composition::orchestration_mode(&effective),
+                                            ) {
+                                                Ok(registry) => registry,
+                                                Err(error) => {
+                                                    last.termination = RunTermination::Failed {
+                                                        message: format!(
+                                                            "the rescanned skill catalogue could not rebuild model tools: {error}"
+                                                        ),
+                                                    };
+                                                    break 'epoch EpochTransition::Exit;
+                                                }
+                                            };
                                         let capture = match catalogue.commit_rescan(prepared) {
                                             Ok(capture) => capture,
                                             Err(error) => {
@@ -1696,23 +1698,27 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             let target_skills = prepared_skills
                                                 .as_ref()
                                                 .map(crate::skill::PreparedSkillRescan::capture);
-                                            let target_registry = tools(
-                                                args.tools.as_ref(),
-                                                target_skills
-                                                    .as_ref()
-                                                    .map(crate::skill::SkillCatalogueCapture::core),
-                                                effective
-                                                    .active_profile
-                                                    .as_ref()
-                                                    .map(|profile| profile.name.as_str()),
-                                                Some(Arc::new(jsonl_store.history())),
-                                                effective.exec.policy().map_err(|error| {
+                                            let target_registry =
+                                                super::composition::tools_with_mode(
+                                                    args.tools.as_ref(),
+                                                    target_skills.as_ref().map(
+                                                        crate::skill::SkillCatalogueCapture::core,
+                                                    ),
+                                                    effective
+                                                        .active_profile
+                                                        .as_ref()
+                                                        .map(|profile| profile.name.as_str()),
+                                                    Some(Arc::new(jsonl_store.history())),
+                                                    effective.exec.policy().map_err(|error| {
+                                                        CompactionError::Internal(error.to_string())
+                                                    })?,
+                                                    super::composition::orchestration_mode(
+                                                        &effective,
+                                                    ),
+                                                )
+                                                .map_err(|error| {
                                                     CompactionError::Internal(error.to_string())
-                                                })?,
-                                            )
-                                            .map_err(|error| {
-                                                CompactionError::Internal(error.to_string())
-                                            })?;
+                                                })?;
                                             let target_tools: Vec<ToolDescriptor> = target_registry
                                                 .iter()
                                                 .map(RegisteredTool::descriptor)

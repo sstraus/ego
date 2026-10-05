@@ -196,6 +196,8 @@ pub struct ProfileLayer {
     pub sandbox: Option<Confinement>,
     pub exec: Option<ExecLayer>,
     pub network: Option<Network>,
+    /// Active orchestration is an explicit operator choice.
+    pub orchestration: Option<crate::orchestrator::Config>,
     /// Additional read and executable roots; absence preserves lower authority.
     pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
@@ -895,6 +897,8 @@ pub struct ConfigLayer {
     pub roots: Option<Vec<crate::permit::RootCfg>>,
     pub exec: Option<ExecLayer>,
     pub network: Option<Network>,
+    /// Active orchestration is an explicit operator choice.
+    pub orchestration: Option<crate::orchestrator::Config>,
     /// Additional read and executable roots; absence preserves lower authority.
     pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
