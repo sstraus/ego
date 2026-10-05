@@ -5202,7 +5202,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Controlled::Failed(cause) => return Err(cause),
         };
         match execution {
-            crate::mcp::ToolExecution::Complete(result) => {
+            crate::mcp::ToolExecution::Complete(mut result) => {
+                self.tools.mask_result(&mut result);
                 self.journal.append(
                     turn,
                     Some(tool_call),

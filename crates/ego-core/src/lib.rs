@@ -40,3 +40,5 @@ pub mod subagent;
 pub mod suspension;
 pub mod turn;
 pub mod usage;
+
+pub mod secrets;

@@ -209,6 +209,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 $ports.one_hop_handle(),
                 $ports.duplex_handle(),
             )
+            .with_secret_values(ego_tools::secrets::from_env())
             .with_cancel($cancel.clone());
             let tools = match admitted_tools.as_ref() {
                 Some(source) => Tools::from_registry_with_source(
@@ -281,7 +282,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                 $hook_ports.resolver_handle(),
                 $hook_ports.one_hop_handle(),
                 $hook_ports.duplex_handle(),
-            );
+            )
+            .with_secret_values(ego_tools::secrets::from_env());
             let leased_journal =
                 LeasedSharedJournal::new($active.writer(), &clock, sink, Producer::Main, $state);
             let journal = leased_journal.shared();
@@ -1541,6 +1543,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 ports.one_hop_handle(),
                                                 ports.duplex_handle(),
                                             )
+                                            .with_secret_values(ego_tools::secrets::from_env())
                                             .with_cancel(compaction_cancel.clone());
                                             let compaction_tools = match admitted_tools.as_ref() {
                                                 Some(source) => Tools::from_registry_with_source(

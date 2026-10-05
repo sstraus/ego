@@ -581,7 +581,8 @@ impl CliCompactionCommand {
             ports.resolver_handle(),
             ports.one_hop_handle(),
             ports.duplex_handle(),
-        );
+        )
+        .with_secret_values(ego_tools::secrets::from_env());
         let tools = Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd));
         let mut loop_ = TurnLoop::new(session, runtime, tools)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;

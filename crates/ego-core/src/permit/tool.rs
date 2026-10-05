@@ -365,6 +365,16 @@ pub enum ToolResultProvenance {
 }
 
 impl ToolResult {
+    /// Mask disclosure text without changing tool identity or evidence references.
+    pub fn mask_secrets(&mut self, values: &crate::secrets::SecretValues) {
+        for block in &mut self.content {
+            block.text = values.mask(&block.text);
+        }
+        if let ToolResultProvenance::Foreign { result } = &mut self.provenance {
+            result.mask_secrets(values);
+        }
+    }
+
     pub fn builtin(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolContentBlock::builtin(text)],

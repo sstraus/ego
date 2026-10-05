@@ -105,6 +105,7 @@ pub struct ToolEffectPorts<'a> {
     one_hop: std::sync::Arc<dyn OneHop>,
     duplex: std::sync::Arc<dyn DuplexSpawner>,
     cancel: Option<super::CancelToken>,
+    secrets: crate::secrets::SecretValues,
 }
 
 impl<'a> ToolEffectPorts<'a> {
@@ -124,7 +125,14 @@ impl<'a> ToolEffectPorts<'a> {
             one_hop,
             duplex,
             cancel: None,
+            secrets: crate::secrets::SecretValues::default(),
         }
+    }
+
+    /// Bind the adapter's known environment values to result publication.
+    pub fn with_secret_values(mut self, values: crate::secrets::SecretValues) -> Self {
+        self.secrets = values;
+        self
     }
 
     pub fn with_cancel(mut self, cancel: super::CancelToken) -> Self {
@@ -268,6 +276,10 @@ impl<'a> Tools<'a> {
     pub fn with_skill_resource_roots(mut self, roots: crate::skill::SkillResourceRoots) -> Self {
         self.skill_resource_roots = Some(roots);
         self
+    }
+
+    pub(crate) fn mask_result(&self, result: &mut crate::permit::ToolResult) {
+        result.mask_secrets(&self.effects.secrets);
     }
 
     pub(crate) fn blob_store(&self) -> &dyn BlobStore {
@@ -664,6 +676,10 @@ impl<'a> Tools<'a> {
             std::sync::Arc::clone(&self.effects.duplex),
             resume,
         );
-        tool.execute(call, &guarded).await
+        let mut execution = tool.execute(call, &guarded).await?;
+        if let ToolExecution::Complete(result) = &mut execution {
+            self.mask_result(result);
+        }
+        Ok(execution)
     }
 }

@@ -23,3 +23,5 @@ mod stdio;
 pub mod store;
 pub mod suspension;
 pub mod tools;
+
+pub mod secrets;

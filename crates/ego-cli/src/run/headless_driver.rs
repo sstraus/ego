@@ -151,6 +151,7 @@ pub(super) async fn drive_headless_turn(
         ports.one_hop_handle(),
         ports.duplex_handle(),
     )
+    .with_secret_values(ego_tools::secrets::from_env())
     .with_cancel(cancel.clone());
     let hook_policy = match recovered_policy.as_ref() {
         Some(policy) => Arc::clone(policy),
