@@ -879,6 +879,8 @@ where
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigLayer {
+    /// Complete Jev settings, accepted from system/user authority only.
+    pub jev: Option<super::JevConfig>,
     /// Prompt caching: short (default), none, or explicit user opt-in long.
     pub cache: Option<crate::generator::capabilities::CacheRetention>,
     pub model: Option<ModelRef>,
@@ -937,6 +939,16 @@ impl ConfigLayer {
                 message: "`max_mode` and base `roots` ceilings belong only to the system layer"
                     .into(),
             });
+        }
+        if let Some(jev) = &value.jev {
+            if !matches!(source, Source::System | Source::User) {
+                return Err(ConfigError::Invalid {
+                    source,
+                    message: "jev may be set only by system or user configuration".into(),
+                });
+            }
+            jev.validate()
+                .map_err(|message| ConfigError::Invalid { source, message })?;
         }
         if value.cache == Some(crate::generator::capabilities::CacheRetention::Long)
             && source != Source::User
