@@ -5964,7 +5964,11 @@ fn tool_turn_with_completions(
             "--mode",
             "yolo",
             "--sandbox",
-            "off",
+            if children_gate.is_some() {
+                "workspace"
+            } else {
+                "off"
+            },
         ])
         .env("TERM", "xterm-256color");
     let ego = if children_gate.is_some() {
@@ -6040,7 +6044,7 @@ fn tool_turn_with_completions(
         };
         let parent_system = live_context(&generations[0]);
         assert!(
-            parent_system.contains("sandbox: off; network: offline"),
+            parent_system.contains("sandbox: workspace; network: offline"),
             "{parent_system}"
         );
         for child in &generations[1..3] {
