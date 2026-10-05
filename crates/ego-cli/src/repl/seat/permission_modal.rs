@@ -189,6 +189,7 @@ fn risk_words(risk: &RiskAssessment) -> String {
             RiskReason::ForeignEffectsUnknown => "calls an outside tool",
             RiskReason::NetworkEffectsUnknown => "uses the network",
             RiskReason::SecretRelease => "sends a secret",
+            RiskReason::OrchestrationPolicy => "coordinator operation",
         })
         .collect::<Vec<_>>()
         .join(", ");

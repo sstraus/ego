@@ -203,7 +203,7 @@ impl Permit {
 
     /// Checks the whole process specification against the one policy admitted.
     pub fn allows_spawn(&self, spec: &SpawnSpec) -> Result<(), PermitDenied> {
-        if self.scope.spawn.as_ref() == Some(spec) {
+        if self.scope.spawns.contains(spec) {
             Ok(())
         } else {
             Err(PermitDenied::Spawn { spec: spec.clone() })
@@ -1058,6 +1058,7 @@ pub struct PolicyEngine {
     /// Extra roots a profile opened, beyond the workspace. Empty for a run
     /// with no profile roots, which keeps the single-boundary behaviour.
     roots: Vec<ProfileRoot>,
+    coordinator: bool,
     mode: Mode,
     /// Both lists intact, matched per call. `resolve` no longer subtracts one
     /// from the other — that comparison was string equality between two lists
@@ -1094,6 +1095,7 @@ impl PolicyEngine {
             approver: Box::new(ModeApprover::new(mode, workspace.clone())),
             workspace,
             roots: Vec::new(),
+            coordinator: false,
             mode,
             allow: permissions.allow,
             deny: permissions.deny,
@@ -1109,6 +1111,26 @@ impl PolicyEngine {
     /// read-write.
     pub fn with_profile_roots(self, roots: Vec<ProfileRoot>) -> Self {
         Self { roots, ..self }
+    }
+
+    /// Apply the operator-selected coordinator profile's deterministic risk policy.
+    pub fn with_coordinator_profile(self, coordinator: bool) -> Self {
+        Self {
+            coordinator,
+            ..self
+        }
+    }
+
+    pub(crate) fn risk(&self, call: &PreparedCall) -> super::analysis::RiskAssessment {
+        if self.coordinator {
+            super::orchestration::assess(call)
+        } else {
+            super::analysis::assess(call)
+        }
+    }
+
+    fn coordinator_high(&self, call: &PreparedCall) -> bool {
+        self.coordinator && self.risk(call).class == super::analysis::RiskClass::High
     }
 
     /// What this engine lets a run do at `path`: the most specific containing
@@ -1161,7 +1183,7 @@ impl PolicyEngine {
                 pending.ask.presentation = Some(Box::new(PermissionPresentation {
                     parameters: input.parameters,
                     schema: input.schema,
-                    risk: super::analysis::assess(&pending.call),
+                    risk: self.risk(&pending.call),
                     remember,
                     suggested,
                 }));
@@ -1304,6 +1326,16 @@ impl PolicyEngine {
                 return Classification::Settled(Err(*denied));
             }
         }
+        // High belongs to the human, even with an allow rule or yolo mode.
+        if self.coordinator_high(&call) {
+            let op = &call.ops()[0];
+            let why = Escalation::ModeAsksSubject {
+                mode: self.mode,
+                op: op.name(),
+                subject: op.subject(&self.workspace),
+            };
+            return Classification::Ask(self.pending(call, why));
+        }
         // Every rule that covered an independent op, not the first one to
         // match. A foreign transport structurally supporting wholly allowed
         // opaque identities contributes no second rule authority. A denial is
@@ -1386,6 +1418,21 @@ impl PolicyEngine {
     /// the two parties means a crash while the human is thinking cannot erase
     /// the fact that the request was raised.
     pub async fn settle(&self, pending: Pending) -> Resolution {
+        if self.coordinator_high(pending.call()) {
+            return Resolution::Ask(pending);
+        }
+        if self.coordinator
+            && self.mode != Mode::Plan
+            && self.risk(pending.call()).class <= super::analysis::RiskClass::Bounded
+        {
+            let call = pending.call;
+            let permit = self.mint(scope_of(&call));
+            return Resolution::Settled(Ok(Authorized {
+                call,
+                permit,
+                by: Authority::Mode { mode: self.mode },
+            }));
+        }
         match self.approver.approve(&pending).await {
             Verdict::Allow { by } => {
                 let call = pending.call;
@@ -1399,8 +1446,7 @@ impl PolicyEngine {
             ))),
             Verdict::Escalate { why } => {
                 if self.mode == Mode::Auto
-                    && super::analysis::assess(pending.call()).class
-                        <= super::analysis::RiskClass::Bounded
+                    && self.risk(pending.call()).class <= super::analysis::RiskClass::Bounded
                 {
                     let call = pending.call;
                     let permit = self.mint(scope_of(&call));
@@ -1425,7 +1471,7 @@ impl PolicyEngine {
         by: Authority,
     ) -> Resolution {
         if self.mode != Mode::Auto
-            || super::analysis::assess(pending.call()).class == super::analysis::RiskClass::High
+            || self.risk(pending.call()).class == super::analysis::RiskClass::High
         {
             return Resolution::Ask(pending);
         }
@@ -1783,7 +1829,7 @@ fn scope_of(call: &PreparedCall) -> Scope {
             Op::List { root, .. } => scope.list_paths.push(root.clone()),
             Op::Search { root, .. } => scope.search_paths.push(root.clone()),
             Op::Write { path, .. } => scope.write_paths.push(path.clone()),
-            Op::Spawn { spec } => scope.spawn = Some(spec.clone()),
+            Op::Spawn { spec } => scope.spawns.push(spec.clone()),
             Op::ReadEvidence { request } => scope.evidence = Some(request.clone()),
             Op::Opaque {
                 tool,
@@ -2514,7 +2560,7 @@ mod tests {
             list_paths: vec![CanonPath::new("/ws/listable")],
             search_paths: vec![CanonPath::new("/ws/searchable")],
             endpoints: vec!["api.example.com:443".to_string()],
-            spawn: Some(allowed_spawn.clone()),
+            spawns: vec![allowed_spawn.clone()],
             ..Scope::default()
         });
 

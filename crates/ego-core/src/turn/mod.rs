@@ -4182,10 +4182,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if policy.mode() != Mode::Auto {
             return Ok(JudgeRun::Unavailable);
         }
-        use crate::permit::analysis::{
-            AnalysisOpinion, RiskClass, assess, cache_key, complete_identity,
-        };
-        if assess(pending.call()).class == RiskClass::High {
+        use crate::permit::analysis::{AnalysisOpinion, RiskClass, cache_key, complete_identity};
+        if policy.risk(pending.call()).class == RiskClass::High {
             return Ok(JudgeRun::Unavailable);
         }
         let Some(judge) = self.judge.as_ref() else {

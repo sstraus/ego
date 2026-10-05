@@ -105,7 +105,7 @@ fn resolve(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPath, ToolError> {
 /// *reach*. A single helper would have to belong to one of those two moments,
 /// and the seam re-deriving the target independently of what a tool claimed
 /// is the whole reason the seam is there.
-fn resolve_target(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPath, ToolError> {
+pub(crate) fn resolve_target(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPath, ToolError> {
     let named = Path::new(path);
     let joined: PathBuf = if named.is_absolute() {
         named.to_path_buf()

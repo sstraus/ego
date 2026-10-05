@@ -52,7 +52,7 @@ pub struct Scope {
     pub(super) secret_egress: Option<SecretEgressAuthority>,
     pub(super) foreign_invocations: Vec<(ForeignToolId, InvocationDigest)>,
     pub(super) foreign_transport: Option<ForeignTransportTarget>,
-    pub(super) spawn: Option<SpawnSpec>,
+    pub(super) spawns: Vec<SpawnSpec>,
     pub(super) evidence: Option<EvidenceRead>,
 }
 
@@ -97,9 +97,9 @@ impl Scope {
         self.foreign_transport.as_ref()
     }
 
-    /// The exact process specification this scope may spawn.
-    pub fn spawn(&self) -> Option<&SpawnSpec> {
-        self.spawn.as_ref()
+    /// The exact process specifications this scope may spawn.
+    pub fn spawns(&self) -> &[SpawnSpec] {
+        &self.spawns
     }
 
     /// The exact session evidence object this scope may read.
