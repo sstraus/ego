@@ -131,10 +131,59 @@ fn unadmitted_perimeter_fails_closed_without_raw_doctor_paths() {
             .output()
             .unwrap()
     };
-    assert!(!run(&["config", "ls", "--effective"]).status.success());
+    let inspection = run(&["config", "ls", "--effective"]);
+    assert!(!inspection.status.success());
+    let warning = String::from_utf8(inspection.stderr).unwrap();
+    assert!(warning.contains("warning: configured perimeter roots"));
+    assert!(warning.contains("cannot be resolved"));
     let doctor = run(&["doctor", "--json"]);
     assert!(!doctor.status.success());
     let output = String::from_utf8(doctor.stdout).unwrap();
     assert!(output.contains("the effective perimeter could not be resolved or admitted"));
     assert!(!output.contains(missing.to_str().unwrap()));
+}
+
+// Catches: redundant roots are presented without warning, including through a symlink.
+#[cfg(unix)]
+#[test]
+fn overlapping_perimeter_roots_warn_without_changing_admitted_access() {
+    let scratch = tempfile::tempdir().unwrap();
+    let workspace = scratch.path().join("workspace");
+    let home = scratch.path().join("ego-home");
+    let nested = workspace.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    let alias = scratch.path().join("alias");
+    std::os::unix::fs::symlink(&nested, &alias).unwrap();
+    std::fs::write(home.join("config.toml"), format!(
+        "[profile.inspect]\nroots = [{{path = '{}', access = 'read-write'}}, {{path = '{}', access = 'read'}}]\n",
+        workspace.display(), alias.display()
+    )).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ego"))
+        .args(["config", "ls", "--effective", "--json"])
+        .current_dir(&workspace)
+        .env("EGO_HOME", &home)
+        .env("EGO_PROFILE", "inspect")
+        .env_remove("EGO_MODEL")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let warnings = value["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 3);
+    assert!(warnings.iter().any(|warning| {
+        warning
+            .as_str()
+            .unwrap()
+            .contains("covered by a read-write root")
+    }));
+    assert_eq!(
+        value["roots"][1]["path"],
+        nested.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(value["roots"][1]["access"], "read");
 }

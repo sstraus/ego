@@ -15,6 +15,7 @@ pub struct Perimeter {
     backend: &'static str,
     capabilities: &'static str,
     network: &'static str,
+    warnings: Vec<String>,
 }
 
 /// One canonical root admitted by the profile's permission policy.
@@ -33,6 +34,7 @@ impl Perimeter {
         roots: &[ProfileRoot],
     ) -> Self {
         Self {
+            warnings: root_warnings(confinement.workspace().as_path(), roots),
             workspace: confinement.workspace().as_path().to_path_buf(),
             roots: roots
                 .iter()
@@ -90,6 +92,11 @@ impl Perimeter {
             format!("  capabilities\t{}", self.capabilities),
             format!("  network\t{}\tinvocation", self.network),
         ]);
+        lines.extend(
+            self.warnings
+                .iter()
+                .map(|warning| format!("  warning\t{warning}")),
+        );
         lines.join("\n")
     }
 }
@@ -103,4 +110,28 @@ fn display_path(path: &Path) -> String {
         .chars()
         .flat_map(|character| character.escape_debug())
         .collect()
+}
+
+fn root_warnings(workspace: &Path, roots: &[ProfileRoot]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for root in roots {
+        let path = root.path().as_path();
+        if path.starts_with(workspace) || workspace.starts_with(path) {
+            warnings.push(format!(
+                "root {} overlaps the workspace",
+                display_path(path)
+            ));
+        }
+        if root.access() == RootAccess::Read
+            && roots.iter().any(|other| {
+                other.access() == RootAccess::ReadWrite && path.starts_with(other.path().as_path())
+            })
+        {
+            warnings.push(format!(
+                "read root {} is covered by a read-write root",
+                display_path(path)
+            ));
+        }
+    }
+    warnings
 }

@@ -28,8 +28,11 @@ pub fn observe(
         .or_else(|| env_profile.as_deref().map(|name| (name, Source::Env)));
     let effective = resolve_selected(&layers, Trust::Untrusted, selected)
         .map_err(|error| UsageError(error.to_string()))?;
-    let roots = crate::run::profile_roots::admit(&effective)
-        .map_err(|_| UsageError("the profile roots could not be admitted".into()))?;
+    let roots = crate::run::profile_roots::admit(&effective).map_err(|error| {
+        UsageError(format!(
+            "warning: configured perimeter roots could not be admitted: {error}"
+        ))
+    })?;
     let confinement = RunConfinement::new(effective.sandbox.unwrap_or_default(), false, workspace)
         .map_err(|error| UsageError(error.to_string()))?;
     Ok(Perimeter::session(&confinement, &effective, &roots))

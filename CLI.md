@@ -1438,6 +1438,11 @@ Orphan candidates from a crashed parent are never silently removed.
 The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
 candidate retention for every editor result.
 
+Effective perimeter inspection warns when canonical roots overlap the workspace
+or a read root is covered by a read-write root. These warnings do not change
+access. A missing or unresolvable configured path is reported as a warning and
+remains an admission error; it is never shown as an admitted root.
+
 `ego config ls --effective` and `/config perimeter` show the same perimeter
 block as doctor: canonical workspace, admitted profile roots and their access
 and origin layer, sandbox selection and backend, capability evidence, and
