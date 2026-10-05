@@ -388,7 +388,8 @@ impl CliPrepared {
                 CanonPath::new(&self.root),
                 bindings.human(),
             )
-            .with_profile_roots(profile_roots),
+            .with_profile_roots(profile_roots)
+            .with_coordinator_profile(self.effective.active_profile.as_ref()),
         );
         let config = TurnConfig {
             system: self.system,

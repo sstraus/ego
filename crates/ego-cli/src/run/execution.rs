@@ -256,7 +256,8 @@ fn prepare_resume_phase<'store>(
             CanonPath::new(&settings.root),
             human,
         )
-        .with_profile_roots(profile_roots),
+        .with_profile_roots(profile_roots)
+        .with_coordinator_profile(settings.effective.active_profile.as_ref()),
     );
     let invocation = RunInvocationId::new();
     let run_id = RunId::new(scoped.session_id, invocation.uuid());

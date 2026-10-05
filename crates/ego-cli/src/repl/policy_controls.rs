@@ -184,6 +184,7 @@ pub(crate) struct CliGenerationPolicySource {
     selection: GenerationPolicySelection,
     workspace: CanonPath,
     roots: Vec<ProfileRoot>,
+    coordinator: bool,
     human: Option<Arc<dyn HumanApprover>>,
 }
 
@@ -197,6 +198,7 @@ impl CliGenerationPolicySource {
             selection,
             workspace,
             roots: Vec::new(),
+            coordinator: false,
             human,
         }
     }
@@ -204,6 +206,14 @@ impl CliGenerationPolicySource {
     /// The same source, reaching the profile's admitted roots too.
     pub(crate) fn with_profile_roots(mut self, roots: Vec<ProfileRoot>) -> Self {
         self.roots = roots;
+        self
+    }
+
+    pub(crate) fn with_coordinator_profile(
+        mut self,
+        profile: Option<&ego_core::config::ActiveProfileProvenance>,
+    ) -> Self {
+        self.coordinator = profile.is_some_and(|profile| profile.name == "coordinator");
         self
     }
 
@@ -218,7 +228,8 @@ impl CliGenerationPolicySource {
                 ),
                 None => PolicyEngine::new(self.workspace.clone(), snapshot.mode, snapshot.ruleset),
             }
-            .with_profile_roots(self.roots.clone()),
+            .with_profile_roots(self.roots.clone())
+            .with_coordinator_profile(self.coordinator),
         )
     }
 }
@@ -236,7 +247,12 @@ impl GenerationPolicySource for CliGenerationPolicySource {
             .selection
             .capture()
             .map_err(|error| error.to_string())?;
-        GenerationPolicyCapture::with_profile_roots(
+        let capture = if self.coordinator {
+            GenerationPolicyCapture::with_coordinator_profile
+        } else {
+            GenerationPolicyCapture::with_profile_roots
+        };
+        capture(
             self.workspace.clone(),
             self.roots.clone(),
             snapshot.mode,

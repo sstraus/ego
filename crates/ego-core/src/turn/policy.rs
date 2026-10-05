@@ -43,6 +43,7 @@ pub struct GenerationPolicySnapshot {
     workspace: CanonPath,
     roots: Vec<ProfileRoot>,
     mode: Mode,
+    coordinator: bool,
     ruleset: Ruleset,
     canonical: SecretMaterial,
     digest: GenerationPolicyDigest,
@@ -79,6 +80,7 @@ impl GenerationPolicySnapshot {
             workspace,
             roots,
             mode,
+            coordinator,
             allow,
             deny,
         } = serde_json::from_slice(encoded)
@@ -91,7 +93,7 @@ impl GenerationPolicySnapshot {
             allow: decode_rules(allow)?,
             deny: decode_rules(deny)?,
         };
-        let snapshot = Self::from_semantics(workspace, roots, mode, ruleset)?;
+        let snapshot = Self::from_semantics(workspace, roots, mode, coordinator, ruleset)?;
         if snapshot.canonical.expose_secret_bytes() != encoded {
             return Err(GenerationPolicyCaptureError::NonCanonicalSnapshot);
         }
@@ -102,9 +104,10 @@ impl GenerationPolicySnapshot {
         workspace: CanonPath,
         roots: Vec<ProfileRoot>,
         mode: Mode,
+        coordinator: bool,
         ruleset: Ruleset,
     ) -> Result<Self, GenerationPolicyCaptureError> {
-        let wire = PolicyWire::from_semantics(&workspace, &roots, mode, &ruleset);
+        let wire = PolicyWire::from_semantics(&workspace, &roots, mode, coordinator, &ruleset);
         let canonical =
             serde_json::to_vec(&wire).map_err(|_| GenerationPolicyCaptureError::EncodingFailed)?;
         if canonical.len() > MAX_GENERATION_POLICY_SNAPSHOT_BYTES {
@@ -115,6 +118,7 @@ impl GenerationPolicySnapshot {
             workspace,
             roots,
             mode,
+            coordinator,
             ruleset,
             canonical: SecretMaterial::new(canonical),
             digest,
@@ -159,7 +163,23 @@ impl GenerationPolicyCapture {
     ) -> Result<Self, GenerationPolicyCaptureError> {
         Self::restore(
             Arc::new(GenerationPolicySnapshot::from_semantics(
-                workspace, roots, mode, ruleset,
+                workspace, roots, mode, false, ruleset,
+            )?),
+            human,
+        )
+    }
+
+    /// Capture the coordinator policy together with roots, rules and mode.
+    pub fn with_coordinator_profile(
+        workspace: CanonPath,
+        roots: Vec<ProfileRoot>,
+        mode: Mode,
+        ruleset: Ruleset,
+        human: Option<Arc<dyn HumanApprover>>,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        Self::restore(
+            Arc::new(GenerationPolicySnapshot::from_semantics(
+                workspace, roots, mode, true, ruleset,
             )?),
             human,
         )
@@ -182,7 +202,8 @@ impl GenerationPolicyCapture {
                 snapshot.ruleset.clone(),
             ),
         }
-        .with_profile_roots(snapshot.roots.clone());
+        .with_profile_roots(snapshot.roots.clone())
+        .with_coordinator_profile(snapshot.coordinator);
         Ok(Self {
             policy: Arc::new(policy),
             snapshot,
@@ -360,6 +381,8 @@ struct PolicyWire {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     roots: Vec<ProfileRoot>,
     mode: Mode,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    coordinator: bool,
     allow: Vec<RuleWire>,
     deny: Vec<RuleWire>,
 }
@@ -369,6 +392,7 @@ impl PolicyWire {
         workspace: &CanonPath,
         roots: &[ProfileRoot],
         mode: Mode,
+        coordinator: bool,
         ruleset: &Ruleset,
     ) -> Self {
         Self {
@@ -376,6 +400,7 @@ impl PolicyWire {
             workspace: workspace.clone(),
             roots: roots.to_vec(),
             mode,
+            coordinator,
             allow: encode_rules(&ruleset.allow),
             deny: encode_rules(&ruleset.deny),
         }
