@@ -96,6 +96,10 @@ pub(crate) enum PreparedToolCall {
         presentation: PermissionPresentationInput,
     },
     HumanInput(crate::question::QuestionRequest),
+    History {
+        source: std::sync::Arc<dyn crate::history::SessionHistory>,
+        request: crate::history::HistoryRequest,
+    },
     Skill {
         operation: crate::skill::SkillOperation,
         catalogue: std::sync::Arc<crate::skill::SkillCatalogue>,
@@ -332,7 +336,8 @@ impl<'a> Tools<'a> {
                 RegisteredTool::Skill(catalogue) => Some(std::sync::Arc::clone(catalogue)),
                 RegisteredTool::Effect(_)
                 | RegisteredTool::HumanInput(_)
-                | RegisteredTool::Task => None,
+                | RegisteredTool::Task
+                | RegisteredTool::History { .. } => None,
             })
     }
 
@@ -519,6 +524,10 @@ impl<'a> Tools<'a> {
                 presentation: PermissionPresentationInput::new(params, descriptor.parameters),
             }),
             RegisteredTool::Task => super::task::parse(params).map(PreparedToolCall::Task),
+            RegisteredTool::History { source, tool } => Ok(PreparedToolCall::History {
+                source: std::sync::Arc::clone(source),
+                request: tool.parse(params)?,
+            }),
             RegisteredTool::HumanInput(tool) => {
                 tool.parse(params).map(PreparedToolCall::HumanInput)
             }

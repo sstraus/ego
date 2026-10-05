@@ -43,7 +43,11 @@ impl EditMode for SurfaceEditMode {
                 .expect("surface status lock")
                 .model_picker
                 .clone();
-            picker.is_some_and(|picker| picker.lock().expect("model picker lock").is_open())
+            self.status
+                .lock()
+                .expect("surface status lock")
+                .session_picker_open
+                || picker.is_some_and(|picker| picker.lock().expect("model picker lock").is_open())
         } else {
             false
         };

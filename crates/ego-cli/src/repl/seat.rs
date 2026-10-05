@@ -390,6 +390,7 @@ struct SurfaceStatus {
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
+    session_picker_open: bool,
     /// Keys the picker has been sent and not yet applied. The editor parses a
     /// whole burst of input before running its first command and drops the
     /// rest, so typed keys wait here instead of riding on that command.
@@ -443,6 +444,7 @@ impl Default for SurfaceStatus {
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             model_picker: None,
+            session_picker_open: false,
             picker_keys: Vec::new(),
             model_selection: None,
             question_selector: None,
@@ -772,6 +774,10 @@ impl SurfaceOutput {
 }
 
 enum Control {
+    SessionPicker {
+        sessions: Vec<ego_core::store::session_store::SessionMeta>,
+        reply: Sender<Option<SessionId>>,
+    },
     InsertPasteText {
         text: String,
     },
@@ -1035,6 +1041,7 @@ impl Seat {
                     .registry
                     .classify(self.registry.submit(text.clone(), InputOrigin::Typed))
                 {
+                    Dispatch::History(query) => Line::HostCommand(HostCommand::History(query)),
                     Dispatch::SessionMetadata(operation) => {
                         Line::HostCommand(HostCommand::SessionMetadata(operation))
                     }
@@ -1589,6 +1596,18 @@ impl crate::run::InteractiveSeat for Seat {
             .expect("the session takes its interactive coordinator once")
     }
 
+    fn restore_control(&self, control: InteractiveControl) {
+        let mut owner = self
+            .coordinator
+            .lock()
+            .expect("interactive coordinator lock");
+        assert!(
+            owner.is_none(),
+            "only the completed driver restores its coordinator"
+        );
+        *owner = Some(control);
+    }
+
     fn refresh_queue(&self, queue: QueueStatus) {
         if let SeatKind::Live(live) = &self.kind {
             let mut status = live.status.lock().expect("surface status lock");
@@ -1607,6 +1626,13 @@ impl crate::run::InteractiveSeat for Seat {
 
     fn confirm_compaction(&self, source: SessionId) -> bool {
         self.request(|reply| Control::ConfirmCompaction { source, reply }, false)
+    }
+
+    fn pick_session(
+        &self,
+        sessions: Vec<ego_core::store::session_store::SessionMeta>,
+    ) -> Option<SessionId> {
+        self.request(|reply| Control::SessionPicker { sessions, reply }, None)
     }
 
     fn activate_session(&self, target: SessionId) -> bool {
@@ -1885,3 +1911,5 @@ use question::{PermissionWord, parse_permission};
 
 #[cfg(test)]
 mod tests;
+
+mod session_picker;

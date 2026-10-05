@@ -321,6 +321,7 @@ fn one_sorted_sanitized_mcp_error_set_reaches_event_text_and_completion_json() {
         session,
         state: SessionState::default(),
         result: serde_json::Value::String("done".to_owned()),
+        selected_session: None,
         mcp_errors: errors.clone(),
     };
     let completion = serde_json::to_value(report(&ended)).expect("completion report serializes");
@@ -346,6 +347,7 @@ fn one_sorted_sanitized_mcp_error_set_reaches_event_text_and_completion_json() {
         session,
         state: SessionState::default(),
         result: serde_json::Value::String("done".to_owned()),
+        selected_session: None,
         mcp_errors: Vec::new(),
     };
     assert!(
