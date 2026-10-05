@@ -768,3 +768,84 @@ fn capture_store_errors_are_closed_stable_and_confidentially_redacted() {
 // implementation exists; each rejection above must return this redacted type.
 #[allow(dead_code)]
 fn _error_is_named(_: GenerationPolicyCaptureError) {}
+
+// Catches: normalizing a cache key also widening execution authority to sibling outputs.
+#[test]
+fn analysis_identity_ignores_only_the_session_read_pin_and_keeps_live_boundaries() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let first_root = CanonPath::new("/sessions/first/mcp-output");
+    let second_root = CanonPath::new("/sessions/second/mcp-output");
+    let base = capture(Mode::Auto, Ruleset::default()).snapshot();
+    let first = capture(Mode::Auto, Ruleset::default())
+        .with_session_read_root(first_root.clone())
+        .unwrap();
+    let second = capture(Mode::Auto, Ruleset::default())
+        .with_session_read_root(second_root.clone())
+        .unwrap();
+    let full_digest = first.snapshot().digest();
+    assert_ne!(full_digest, second.snapshot().digest());
+    assert_eq!(
+        first
+            .snapshot()
+            .analysis_cache_digest(Some(&first_root))
+            .unwrap(),
+        base.digest()
+    );
+    assert_eq!(
+        second
+            .snapshot()
+            .analysis_cache_digest(Some(&second_root))
+            .unwrap(),
+        base.digest()
+    );
+    assert_eq!(first.snapshot().digest(), full_digest);
+    assert_ne!(
+        first
+            .snapshot()
+            .analysis_cache_digest(Some(&second_root))
+            .unwrap(),
+        base.digest()
+    );
+    let sibling_read = PreparedCall::new(
+        "read",
+        Op::Read {
+            path: CanonPath::new("/sessions/second/mcp-output/result.txt"),
+        },
+    );
+    assert!(matches!(
+        first.policy().classify(sibling_read),
+        Classification::Settled(Err(_))
+    ));
+    let own_read = PreparedCall::new(
+        "read",
+        Op::Read {
+            path: CanonPath::new("/sessions/first/mcp-output/result.txt"),
+        },
+    );
+    assert!(matches!(
+        first.policy().classify(own_read),
+        Classification::Settled(Ok(_))
+    ));
+    for access in [RootAccess::Read, RootAccess::ReadWrite] {
+        let operator_root = if access == RootAccess::Read {
+            second_root.clone()
+        } else {
+            first_root.clone()
+        };
+        let changed = GenerationPolicyCapture::with_profile_roots(
+            CanonPath::new(WORKSPACE),
+            vec![ProfileRoot::new(operator_root, access)],
+            Mode::Auto,
+            Ruleset::default(),
+            None,
+        )
+        .unwrap();
+        assert_ne!(
+            changed
+                .snapshot()
+                .analysis_cache_digest(Some(&first_root))
+                .unwrap(),
+            base.digest()
+        );
+    }
+}

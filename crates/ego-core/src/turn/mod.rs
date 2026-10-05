@@ -4427,11 +4427,21 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             max_output_tokens: profile.output_ceiling(),
         };
         let cache = self.analysis_cache.clone();
+        // Classification already enforced the full policy's roots and denies.
+        // Cache only an opinion: the live policy still mints the call-bound permit.
+        let analysis_policy =
+            match policy_snapshot.analysis_cache_digest(self.tools.mcp_output_root()) {
+                Ok(digest) => digest,
+                Err(error) => {
+                    tracing::warn!(%error, "permission analysis policy could not be encoded");
+                    return Ok(JudgeRun::Unavailable);
+                }
+            };
         let key = cache.as_ref().zip(self.analysis_observation.as_ref()).map(
             |((_, trust), observation)| {
                 cache_key(
                     pending.call(),
-                    &policy_snapshot.digest(),
+                    &analysis_policy,
                     observation,
                     *trust,
                     &config,

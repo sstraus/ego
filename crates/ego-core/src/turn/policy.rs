@@ -54,6 +54,36 @@ impl GenerationPolicySnapshot {
         self.digest.clone()
     }
 
+    /// Cache identity excludes only the session-owned read-only MCP output pin.
+    /// Execution and continuation authority retain the complete snapshot digest.
+    pub fn analysis_cache_digest(
+        &self,
+        session_read_root: Option<&CanonPath>,
+    ) -> Result<GenerationPolicyDigest, GenerationPolicyCaptureError> {
+        let Some(root) = session_read_root else {
+            return Ok(self.digest());
+        };
+        let roots: Vec<_> = self
+            .roots
+            .iter()
+            .filter(|entry| {
+                entry.path() != root || entry.access() != crate::permit::RootAccess::Read
+            })
+            .cloned()
+            .collect();
+        if roots.len() == self.roots.len() {
+            return Ok(self.digest());
+        }
+        Ok(Self::from_semantics(
+            self.workspace.clone(),
+            roots,
+            self.mode,
+            self.coordinator,
+            self.ruleset.clone(),
+        )?
+        .digest())
+    }
+
     pub fn workspace(&self) -> &CanonPath {
         &self.workspace
     }
