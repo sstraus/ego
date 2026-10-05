@@ -223,6 +223,7 @@ pub struct Tools<'a> {
     /// authorised call; there is no permit to swap into a shared one.
     effects: ToolEffectPorts<'a>,
     cwd: CanonPath,
+    mcp_output_root: Option<CanonPath>,
     skill_resource_roots: Option<crate::skill::SkillResourceRoots>,
     resume: Option<std::sync::Arc<ResumeSealer>>,
     task_context: Option<(String, std::sync::Arc<futures::lock::Mutex<()>>)>,
@@ -245,6 +246,7 @@ impl<'a> Tools<'a> {
                 .map(RegisteredTool::Effect)
                 .collect(),
             source: std::sync::Arc::new(EmptyAdmittedToolSource),
+            mcp_output_root: effects.evidence.mcp_output_root().ok().flatten(),
             effects,
             cwd,
             skill_resource_roots: None,
@@ -263,6 +265,7 @@ impl<'a> Tools<'a> {
         Self {
             registry: registry.to_vec(),
             source: std::sync::Arc::new(EmptyAdmittedToolSource),
+            mcp_output_root: effects.evidence.mcp_output_root().ok().flatten(),
             effects,
             cwd,
             skill_resource_roots: None,
@@ -282,6 +285,7 @@ impl<'a> Tools<'a> {
         Ok(Self {
             registry: registry.to_vec(),
             source,
+            mcp_output_root: effects.evidence.mcp_output_root().ok().flatten(),
             effects,
             cwd,
             skill_resource_roots: None,
@@ -298,6 +302,24 @@ impl<'a> Tools<'a> {
     pub fn with_skill_resource_roots(mut self, roots: crate::skill::SkillResourceRoots) -> Self {
         self.skill_resource_roots = Some(roots);
         self
+    }
+
+    pub(crate) fn mcp_output_root(&self) -> Option<&CanonPath> {
+        self.mcp_output_root.as_ref()
+    }
+
+    pub(crate) fn finish_result(
+        &self,
+        result: &mut crate::permit::ToolResult,
+        run: crate::evidence::RunInvocationId,
+        call: ItemId,
+    ) {
+        self.mask_result(result);
+        result.spill_mcp_output(
+            self.mcp_output_root.as_ref().map(|_| self.effects.evidence),
+            run,
+            call,
+        );
     }
 
     pub(crate) fn mask_result(&self, result: &mut crate::permit::ToolResult) {
@@ -331,6 +353,7 @@ impl<'a> Tools<'a> {
             }),
             effects: self.effects.clone().with_cancel(cancel),
             cwd: self.cwd.clone(),
+            mcp_output_root: self.mcp_output_root.clone(),
             skill_resource_roots: self.skill_resource_roots.clone(),
             resume: self.resume.clone(),
             task_context: Some((name, serial)),

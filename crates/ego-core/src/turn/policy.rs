@@ -141,6 +141,7 @@ impl fmt::Debug for GenerationPolicySnapshot {
 pub struct GenerationPolicyCapture {
     policy: Arc<PolicyEngine>,
     snapshot: Arc<GenerationPolicySnapshot>,
+    human: Option<Arc<dyn HumanApprover>>,
 }
 
 impl GenerationPolicyCapture {
@@ -189,7 +190,7 @@ impl GenerationPolicyCapture {
         snapshot: Arc<GenerationPolicySnapshot>,
         human: Option<Arc<dyn HumanApprover>>,
     ) -> Result<Self, GenerationPolicyCaptureError> {
-        let policy = match human {
+        let policy = match human.clone() {
             Some(human) => PolicyEngine::with_human(
                 snapshot.workspace.clone(),
                 snapshot.mode,
@@ -207,7 +208,31 @@ impl GenerationPolicyCapture {
         Ok(Self {
             policy: Arc::new(policy),
             snapshot,
+            human,
         })
+    }
+
+    /// Pin the session's public MCP output directory with read-only authority.
+    pub fn with_session_read_root(
+        self,
+        root: CanonPath,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        let mut roots = self.snapshot.roots.clone();
+        if roots.iter().any(|existing| {
+            existing.path() == &root && existing.access() == crate::permit::RootAccess::Read
+        }) {
+            return Ok(self);
+        }
+        roots.retain(|existing| existing.path() != &root);
+        roots.push(ProfileRoot::new(root, crate::permit::RootAccess::Read));
+        let snapshot = GenerationPolicySnapshot::from_semantics(
+            self.snapshot.workspace.clone(),
+            roots,
+            self.snapshot.mode,
+            self.snapshot.coordinator,
+            self.snapshot.ruleset.clone(),
+        )?;
+        Self::restore(Arc::new(snapshot), self.human)
     }
 
     pub fn policy(&self) -> Arc<PolicyEngine> {

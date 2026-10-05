@@ -1759,6 +1759,11 @@ mod rogue {
 mod end_to_end {
     use super::*;
 
+    mod mcp_output_spill {
+        use super::*;
+        include!("support/mcp_output_spill.rs");
+    }
+
     struct FixedPolicySource {
         policy: Arc<PolicyEngine>,
         snapshot: Arc<GenerationPolicySnapshot>,

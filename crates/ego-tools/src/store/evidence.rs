@@ -86,6 +86,24 @@ impl EvidenceStore for SessionEvidenceStore {
         &self.blobs
     }
 
+    fn mcp_output_root(&self) -> Result<Option<ego_core::permit::CanonPath>, EvidenceError> {
+        self.blobs
+            .mcp_output_root()
+            .map(Some)
+            .map_err(EvidenceError::from)
+    }
+
+    fn spill_mcp_output(
+        &self,
+        run: ego_core::evidence::RunInvocationId,
+        call: ego_core::event::id::ItemId,
+        bytes: &[u8],
+    ) -> Result<PathBuf, EvidenceError> {
+        self.blobs
+            .spill_mcp_output(run, call, bytes)
+            .map_err(EvidenceError::from)
+    }
+
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
         Ok(Box::new(EvidenceBlobWriter {
             inner: self.blobs.begin().map_err(evidence_error)?,
