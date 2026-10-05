@@ -195,9 +195,27 @@ pub(super) fn instructions(
 pub(super) fn tools(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    history: Option<Arc<dyn ego_core::history::SessionHistory>>,
+    environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
-    let mut all: Vec<_> = builtins().into_iter().map(RegisteredTool::Effect).collect();
+    let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
+        .into_iter()
+        .map(RegisteredTool::Effect)
+        .collect();
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
+    all.push(RegisteredTool::Task);
+    if let Some(source) = history {
+        for tool in [
+            ego_core::history::HistoryTool::Search,
+            ego_core::history::HistoryTool::Open,
+        ] {
+            all.push(RegisteredTool::History {
+                source: Arc::clone(&source),
+                tool,
+            });
+        }
+    }
+
     if let Some(skills) = skills.filter(|catalogue| !catalogue.specs().is_empty()) {
         all.push(RegisteredTool::skill(skills));
     }
@@ -344,6 +362,20 @@ impl FrozenRuleResolver {
 }
 
 impl FrozenPolicyResolver for FrozenRuleResolver {
+    fn max_mode(&self) -> Result<Option<Mode>, PolicyControlError> {
+        resolve_selected(
+            &self.layers,
+            self.trust,
+            self.selected_profile
+                .as_ref()
+                .map(|(name, source)| (name.as_str(), *source)),
+        )
+        .map(|effective| effective.max_mode)
+        .map_err(|error| PolicyControlError::Resolution {
+            diagnostic: error.to_string(),
+        })
+    }
+
     fn resolve_rule_transaction(
         &self,
         before: &RuleSnapshot,
@@ -644,6 +676,7 @@ pub(super) fn admit_windows_unconfined_start(
     let Some(confinement) = windows_unconfined::admit(
         args,
         settings.effective.sandbox,
+        settings.confinement.offline(),
         driver,
         &settings.root,
         home,
@@ -654,9 +687,14 @@ pub(super) fn admit_windows_unconfined_start(
     };
 
     settings.effective.sandbox = Some(confinement);
-    settings.confinement =
-        RunConfinement::new(confinement, args.offline, CanonPath::new(&settings.root))
-            .map_err(|error| UsageError(error.to_string()))?;
+    settings.confinement = RunConfinement::new(
+        confinement,
+        settings.confinement.offline(),
+        CanonPath::new(&settings.root),
+    )
+    .map_err(|error| UsageError(error.to_string()))?
+    .with_roots(settings.confinement.roots().to_vec())
+    .with_exec_paths(settings.confinement.exec_paths().to_vec());
     Ok(())
 }
 
@@ -722,7 +760,7 @@ pub(super) fn frozen_rooted_settings(
 pub(super) fn finish_rooted_settings(
     args: &Args,
     cwd: PathBuf,
-    effective: Effective,
+    mut effective: Effective,
     trust: Trust,
     profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
     diagnostics: &dyn Diagnostics,
@@ -756,6 +794,14 @@ pub(super) fn finish_rooted_settings(
         ));
     }
 
+    if let Some(home) = std::env::var_os("HOME") {
+        for warning in super::profile_roots::defaults(&mut effective, Path::new(&home)) {
+            diagnostics.note(&warning);
+        }
+    }
+    let roots =
+        super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
+
     let exec_paths = effective
         .exec_paths
         .iter()
@@ -773,11 +819,12 @@ pub(super) fn finish_rooted_settings(
 
     let confinement = RunConfinement::new(
         effective.sandbox.unwrap_or_default(),
-        args.offline,
+        args.offline || effective.network == ego_core::config::Network::Off,
         CanonPath::new(&root),
     )
     .map_err(|err| UsageError(err.to_string()))?
-    .with_exec_paths(exec_paths);
+    .with_exec_paths(exec_paths)
+    .with_roots(roots);
 
     Ok(Settings {
         run_deadline,
@@ -811,6 +858,7 @@ pub(super) fn materials(
     settings: &Settings,
     args: &Args,
     seeded: bool,
+    history: Arc<dyn ego_core::history::SessionHistory>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Materials, UsageError> {
     let text = if let Some(agent_file) = &args.agent_file {
@@ -824,13 +872,14 @@ pub(super) fn materials(
     } else {
         prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
     };
-    prepared_materials(settings, args, text, diagnostics)
+    prepared_materials(settings, args, text, history, diagnostics)
 }
 
 pub(super) fn prepared_materials(
     settings: &Settings,
     args: &Args,
     text: String,
+    history: Arc<dyn ego_core::history::SessionHistory>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Materials, UsageError> {
     let schema_spec = args.schema.as_deref().map(|spec| (spec, None)).or_else(|| {
@@ -869,6 +918,12 @@ pub(super) fn prepared_materials(
         skill_capture
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
+        Some(history),
+        settings
+            .effective
+            .exec
+            .policy()
+            .map_err(|error| UsageError(error.to_string()))?,
     )?;
     let slug = args
         .model
@@ -941,7 +996,7 @@ pub(super) fn discover_skills_at(
 
 /// The store this run logs through, and which session in it.
 pub(super) struct Chosen {
-    pub(super) store: JsonlStore,
+    pub(super) store: Arc<JsonlStore>,
     pub(super) id: SessionId,
 }
 
@@ -969,8 +1024,8 @@ pub(super) fn chosen(
     // The same `root` that derives a named session's id below, so "the session
     // called build in this workspace" and "the sessions belonging to this
     // workspace" cannot disagree about which workspace that is.
-    let store = session::jsonl(store_root, root.to_path_buf());
-    let id = session::id_for(&args.session, root, &store)?;
+    let store = Arc::new(session::jsonl(store_root, root.to_path_buf()));
+    let id = session::id_for(&args.session, root, store.as_ref())?;
 
     Ok(Chosen { store, id })
 }

@@ -7,6 +7,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
+    /// Built-in credential rules, below operator-written authority.
+    Default,
     System,
     User,
     Project,
@@ -18,14 +20,13 @@ pub enum Source {
 }
 
 impl Source {
-    /// Every layer, in rank order.
+    /// Every origin, most authoritative first (built-in defaults last).
     ///
-    /// Declaration order and rank order are the same, and [`OriginSet`] relies
-    /// on that to iterate a set of layers most-authoritative-first without
-    /// sorting.
+    /// [`OriginSet`] uses this order for attribution; merge precedence
+    /// places defaults before every file layer instead.
     ///
     /// [`OriginSet`]: super::OriginSet
-    pub const ALL: [Source; 7] = [
+    pub const ALL: [Source; 8] = [
         Source::System,
         Source::User,
         Source::Project,
@@ -33,19 +34,21 @@ impl Source {
         Source::Env,
         Source::AgentFile,
         Source::Flags,
+        Source::Default,
     ];
 
     /// Precedence rank, lowest first. Used to order layers before merging —
     /// `resolve` does not trust the caller's slice order.
     pub(super) fn rank(self) -> u8 {
         match self {
-            Source::System => 0,
-            Source::User => 1,
-            Source::Project => 2,
-            Source::Local => 3,
-            Source::Env => 4,
-            Source::AgentFile => 5,
-            Source::Flags => 6,
+            Source::Default => 0,
+            Source::System => 1,
+            Source::User => 2,
+            Source::Project => 3,
+            Source::Local => 4,
+            Source::Env => 5,
+            Source::AgentFile => 6,
+            Source::Flags => 7,
         }
     }
 }
@@ -53,6 +56,7 @@ impl Source {
 impl std::fmt::Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
+            Source::Default => "default",
             Source::System => "system",
             Source::User => "user",
             Source::Project => "project",

@@ -45,6 +45,21 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Whether this mode stays under the approved system maximum.
+    pub const fn within(self, maximum: Self) -> bool {
+        self.ceiling_rank() <= maximum.ceiling_rank()
+    }
+
+    const fn ceiling_rank(self) -> u8 {
+        match self {
+            Self::Plan => 0,
+            Self::Default => 1,
+            Self::Edits => 2,
+            Self::Auto => 3,
+            Self::Yolo => 4,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Plan => "plan",
@@ -112,6 +127,63 @@ where
         .collect()
 }
 
+/// Environment inherited by built-in exec children.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecEnvironment {
+    #[default]
+    Inherit,
+    Core,
+    Allowlist,
+}
+
+/// Opt-in child environment controls. Absent fields preserve lower-layer values.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecLayer {
+    pub env: Option<ExecEnvironment>,
+    pub env_allowlist: Option<Vec<String>>,
+}
+
+impl ExecLayer {
+    /// Derive the existing process policy without capturing environment values.
+    pub fn policy(&self) -> Result<crate::permit::EnvPolicy, crate::permit::EnvNameError> {
+        use crate::permit::EnvPolicy;
+        match self.env.unwrap_or_default() {
+            ExecEnvironment::Inherit => Ok(EnvPolicy::Inherited),
+            ExecEnvironment::Core => EnvPolicy::allow_only([
+                "PATH",
+                "HOME",
+                "USER",
+                "LOGNAME",
+                "SHELL",
+                "TMPDIR",
+                "TMP",
+                "TEMP",
+                "LANG",
+                "LC_ALL",
+                "LC_CTYPE",
+                "SYSTEMROOT",
+                "WINDIR",
+                "COMSPEC",
+                "PATHEXT",
+            ]),
+            ExecEnvironment::Allowlist => {
+                EnvPolicy::allow_only(self.env_allowlist.iter().flatten().map(String::as_str))
+            }
+        }
+    }
+}
+
+/// Networking posture; off is the existing offline contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Network {
+    #[default]
+    On,
+    Off,
+}
+
 /// The overrides a `[profile.NAME]` table may apply on top of the layer that
 /// defines it (`CLI.md` §7, `--profile NAME`).
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -122,6 +194,8 @@ pub struct ProfileLayer {
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    pub exec: Option<ExecLayer>,
+    pub network: Option<Network>,
     /// Additional read and executable roots; absence preserves lower authority.
     pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
@@ -135,7 +209,7 @@ pub struct ProfileLayer {
     pub artifact_dir: Option<std::path::PathBuf>,
     /// Extra directories this profile opens to the run, beyond the workspace.
     #[serde(default)]
-    pub roots: Vec<crate::permit::RootCfg>,
+    pub roots: Option<Vec<crate::permit::RootCfg>>,
     /// Complete MCP entries contributed by this profile. Entries replace the
     /// same name from the layer's base table; their fields never merge.
     #[serde(default)]
@@ -813,6 +887,12 @@ pub struct ConfigLayer {
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    /// System-only maximum permission mode, independent of the default mode.
+    pub max_mode: Option<Mode>,
+    /// Extra roots; system declarations additionally cap lower layers.
+    pub roots: Option<Vec<crate::permit::RootCfg>>,
+    pub exec: Option<ExecLayer>,
+    pub network: Option<Network>,
     /// Additional read and executable roots; absence preserves lower authority.
     pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
@@ -851,6 +931,13 @@ impl ConfigLayer {
     pub fn parse(source: Source, text: &str) -> Result<Sourced<ConfigLayer>, ConfigError> {
         let value: ConfigLayer =
             toml::from_str(text).map_err(|err| classify_parse_error(source, &err))?;
+        if source != Source::System && value.max_mode.is_some() {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "`max_mode` and base `roots` ceilings belong only to the system layer"
+                    .into(),
+            });
+        }
         if value.cache == Some(crate::generator::capabilities::CacheRetention::Long)
             && source != Source::User
         {
@@ -870,11 +957,13 @@ impl ConfigLayer {
                 ),
             });
         }
-        if !matches!(source, Source::System | Source::User)
-            && let Some((name, _)) = value
-                .profile
-                .iter()
-                .find(|(_, profile)| !profile.roots.is_empty())
+        if !matches!(
+            source,
+            Source::System | Source::User | Source::Project | Source::Local
+        ) && let Some((name, _)) = value
+            .profile
+            .iter()
+            .find(|(_, profile)| profile.roots.is_some())
         {
             return Err(ConfigError::Invalid {
                 source,
@@ -882,6 +971,54 @@ impl ConfigLayer {
                     "profile `{name}` cannot declare `roots`; only the system and user layers may widen where a run can reach"
                 ),
             });
+        }
+        let declarations = value
+            .roots
+            .iter()
+            .chain(value.profile.values().filter_map(|p| p.roots.as_ref()));
+        for roots in declarations {
+            if !matches!(source, Source::System | Source::User)
+                && (!matches!(source, Source::Project | Source::Local)
+                    || roots
+                        .iter()
+                        .any(|root| root.access == crate::permit::RootAccess::ReadWrite))
+            {
+                return Err(ConfigError::Invalid {
+                    source,
+                    message: "roots in project/local layers may only restrict read access".into(),
+                });
+            }
+            for root in roots {
+                if !root.path.is_absolute() && !root.path.starts_with("~") {
+                    return Err(ConfigError::Invalid {
+                        source,
+                        message: "roots paths must be absolute or start with ~/".into(),
+                    });
+                }
+                if root.access == crate::permit::RootAccess::Read
+                    && roots.iter().any(|other| {
+                        other.access == crate::permit::RootAccess::ReadWrite
+                            && root.path.starts_with(&other.path)
+                    })
+                {
+                    return Err(ConfigError::Invalid { source, message: "nested-read-only-root: a read root beneath a read-write root cannot be enforced by Landlock".into() });
+                }
+            }
+        }
+        for exec in value.exec.iter().chain(
+            value
+                .profile
+                .values()
+                .filter_map(|profile| profile.exec.as_ref()),
+        ) {
+            if let Some(names) = &exec.env_allowlist {
+                crate::permit::EnvPolicy::allow_only(names.iter().map(String::as_str)).map_err(
+                    |error| ConfigError::Invalid {
+                        source,
+                        message: error.to_string(),
+                    },
+                )?;
+            }
         }
         let exec_paths = value.exec_paths.iter().flatten().chain(
             value

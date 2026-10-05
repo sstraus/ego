@@ -75,8 +75,19 @@ fn slash_perimeter_is_local_and_rejects_unknown_arguments() {
     use ego_cli::repl::actions::{ActionId, ActionRegistry, Dispatch, InputOrigin};
     let registry = ActionRegistry::final_surface();
     assert!(matches!(
-        registry.classify(registry.submit("/config perimeter", InputOrigin::Typed)),
+        registry.classify(registry.submit("/config", InputOrigin::Typed)),
         Dispatch::Action(ActionId::Config)
+    ));
+    assert!(
+        matches!(registry.classify(registry.submit("/config set mode 'plan'", InputOrigin::Typed)), Dispatch::Config(arguments) if arguments == "set mode 'plan'")
+    );
+    assert!(matches!(
+        registry.classify(registry.submit("/config set mode 'plan'", InputOrigin::BracketedPaste)),
+        Dispatch::Prompt
+    ));
+    assert!(matches!(
+        registry.classify(registry.submit("/config perimeter", InputOrigin::Typed)),
+        Dispatch::Config(arguments) if arguments == "perimeter"
     ));
     assert!(matches!(
         registry.classify(registry.submit("/config unknown", InputOrigin::Typed)),
@@ -131,10 +142,69 @@ fn unadmitted_perimeter_fails_closed_without_raw_doctor_paths() {
             .output()
             .unwrap()
     };
-    assert!(!run(&["config", "ls", "--effective"]).status.success());
+    let inspection = run(&["config", "ls", "--effective"]);
+    assert!(!inspection.status.success());
+    let warning = String::from_utf8(inspection.stderr).unwrap();
+    assert!(warning.contains("warning: configured perimeter roots"));
+    assert!(warning.contains("cannot be resolved"));
     let doctor = run(&["doctor", "--json"]);
     assert!(!doctor.status.success());
     let output = String::from_utf8(doctor.stdout).unwrap();
     assert!(output.contains("the effective perimeter could not be resolved or admitted"));
     assert!(!output.contains(missing.to_str().unwrap()));
+}
+
+// Catches: a canonical alias bypasses nested-read-only refusal; workspace overlap stays visible.
+#[cfg(unix)]
+#[test]
+fn overlapping_roots_refuse_read_nesting_and_warn_on_workspace_overlap() {
+    let scratch = tempfile::tempdir().unwrap();
+    let workspace = scratch.path().join("workspace");
+    let home = scratch.path().join("ego-home");
+    let nested = workspace.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    let alias = scratch.path().join("alias");
+    std::os::unix::fs::symlink(&nested, &alias).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_ego"))
+            .args(["config", "ls", "--effective", "--json"])
+            .current_dir(&workspace)
+            .env("EGO_HOME", &home)
+            .env("EGO_PROFILE", "inspect")
+            .env_remove("EGO_MODEL")
+            .output()
+            .unwrap()
+    };
+    let config = |access| {
+        format!(
+            "[profile.inspect]\nroots=[{{path='{}',access='read-write'}},{{path='{}',access='{access}'}}]\n",
+            workspace.display(),
+            alias.display()
+        )
+    };
+    std::fs::write(home.join("config.toml"), config("read")).unwrap();
+    let refused = run();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("nested-read-only-root"));
+    std::fs::write(home.join("config.toml"), config("read-write")).unwrap();
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap().contains("overlaps the workspace"))
+    );
+    assert_eq!(
+        value["roots"][1]["path"],
+        nested.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(value["roots"][1]["access"], "read-write");
 }

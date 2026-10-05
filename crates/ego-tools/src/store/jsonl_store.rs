@@ -515,11 +515,16 @@ impl JsonlStore {
         }
     }
 
+    /// Conversational search is a derived cache beside the authoritative logs.
+    pub fn history(self: &Arc<Self>) -> super::HistoryIndex {
+        super::HistoryIndex::new(self.root.join("history.sqlite"), Arc::clone(self))
+    }
+
     pub(super) fn session_dir(&self, id: &SessionId) -> PathBuf {
         self.root.join(session_dir_name(id))
     }
 
-    fn log_path(&self, id: &SessionId) -> PathBuf {
+    pub(super) fn log_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("events.jsonl")
     }
 

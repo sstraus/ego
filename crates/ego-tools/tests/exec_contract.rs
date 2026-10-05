@@ -3418,3 +3418,178 @@ fn macos_exec_paths_default_python_catches_runtime_root_widening_writes() {
     );
     assert!(!target.exists());
 }
+
+// Catches: the selected environment policy is lost between config resolution,
+// builtin preparation and the actual child process.
+#[test]
+fn configured_exec_environment_reaches_real_builtin_children() {
+    use ego_core::config::{ConfigLayer, Trust, resolve};
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().unwrap();
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(executable_text)],
+                deny: vec![],
+                judge: None,
+            },
+            Source::User,
+        ),
+    );
+    let fs = OsFs;
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    for (config, expected) in [
+        ("", "PATH=present"),
+        ("[exec]\nenv='core'", "PATH=present"),
+        ("[exec]\nenv='allowlist'\nenv_allowlist=[]", "PATH=absent"),
+        (
+            "[exec]\nenv='allowlist'\nenv_allowlist=['PATH']",
+            "PATH=present",
+        ),
+    ] {
+        let effective = resolve(
+            &[ConfigLayer::parse(Source::User, config).unwrap()],
+            Trust::Untrusted,
+            None,
+        )
+        .unwrap();
+        let registry =
+            ego_tools::tools::builtins_with_environment(effective.exec.policy().unwrap());
+        let tools = TurnTools::new(
+            &registry,
+            ToolEffectPorts::new(
+                &fs,
+                run.ports.process(),
+                &run.evidence,
+                run.ports.resolver_handle(),
+                run.ports.one_hop_handle(),
+                run.ports.duplex_handle(),
+            ),
+            root.clone(),
+        );
+        let params = serde_json::json!({
+            "argv": [executable_text, "--ignored", "--exact",
+                "exec_contract_fixture_reports_environment_presence_without_values",
+                "--nocapture", "--", "PATH"],
+            "timeout_ms": 10000
+        });
+        let (tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("fixture command must be authorized");
+        };
+        let output = block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap();
+        assert!(
+            format!("{output:?}").contains(expected),
+            "{config}: {output:?}"
+        );
+    }
+}
+
+// Catches: roots reach permission policy but are ignored by the real exec sandbox,
+// or a single-file read root grants its sibling or write access.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn perimeter_roots_reach_real_children_without_widening_single_file_access() {
+    use ego_core::permit::RootAccess;
+    let tree = tempfile::tempdir().unwrap();
+    let base = tree.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let home = base.join("home");
+    let writable = home.join("Gits");
+    let allowlist = home.join("instructions");
+    for dir in [&workspace, &writable, &allowlist] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let file = allowlist.join("allowed.md");
+    let sibling = allowlist.join("private.md");
+    std::fs::write(&file, "allowed").unwrap();
+    std::fs::write(&sibling, "private").unwrap();
+    let alias = home.join("instructions-link");
+    std::os::unix::fs::symlink(&file, &alias).unwrap();
+    let roots = ego_core::permit::admit_roots(
+        &[
+            ego_core::permit::RootCfg {
+                path: writable.clone(),
+                access: RootAccess::ReadWrite,
+            },
+            ego_core::permit::RootCfg {
+                path: alias,
+                access: RootAccess::Read,
+            },
+        ],
+        &CanonPath::new(&home),
+        &OsFs,
+    )
+    .unwrap();
+    let cwd = CanonPath::new(&workspace);
+    let read = |path: &std::path::Path| {
+        SpawnSpec::new(
+            vec!["/bin/cat".into(), path.as_os_str().to_owned()],
+            Some(cwd.clone()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap()
+    };
+    for level in [Confinement::Workspace, Confinement::Ro] {
+        let policy = run_confinement(level, false, cwd.clone()).with_roots(roots.clone());
+        let run = open_policy(policy, 1024 * 1024, 1024).expect("real perimeter backend");
+        execute(&run, read(&file)).expect("single file read allowed");
+        assert!(
+            execute(&run, read(&sibling)).is_err(),
+            "single file must not expose sibling"
+        );
+        let source = workspace.join("overwrite-source");
+        std::fs::write(&source, "changed").unwrap();
+        assert!(
+            execute(
+                &run,
+                mutation_spec("overwrite", &[&source, &file], cwd.clone())
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "allowed");
+        let target = writable.join(if level == Confinement::Workspace {
+            "rw-create"
+        } else {
+            "ro-create"
+        });
+        let outcome = execute(&run, mutation_spec("create", &[&target], cwd.clone()));
+        assert_eq!(
+            outcome.is_ok(),
+            level == Confinement::Workspace,
+            "{outcome:?}"
+        );
+        assert_eq!(target.exists(), level == Confinement::Workspace);
+    }
+}
+
+// Catches: a tree preset publishes unproven capabilities when TMPDIR is inside its RW root.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn perimeter_probe_temp_overlap_is_a_named_startup_refusal() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let workspace = tempfile::tempdir().unwrap();
+    let tmp = std::env::temp_dir().canonicalize().unwrap();
+    let policy = run_confinement(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(workspace.path().canonicalize().unwrap()),
+    )
+    .with_roots(vec![ProfileRoot::new(
+        CanonPath::new(tmp),
+        RootAccess::ReadWrite,
+    )]);
+    let attempt = attempt_policy(policy, 1024 * 1024, 1024);
+    let error = match attempt.outcome {
+        Err(error) => error,
+        Ok(_) => panic!("overlapping probe scope was admitted"),
+    };
+    assert!(
+        error.to_string().contains("perimeter-probe-temp-overlap"),
+        "{error}"
+    );
+}

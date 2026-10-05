@@ -526,6 +526,10 @@ impl fmt::Display for PolicyDenied {
                 // and least expects — every other layer is theirs to edit, so
                 // the default assumption is that this one is too.
                 match from {
+                    Source::Default => write!(
+                        f,
+                        "credential defaults; an explicit user read rule can lift this preset"
+                    )?,
                     Source::System => write!(
                         f,
                         "system config, which no --allow and no higher layer can lift"
@@ -723,6 +727,7 @@ pub struct PermissionRequest {
     ops: Vec<Op>,
     why: Escalation,
     presentation: Option<Box<PermissionPresentation>>,
+    child_name: Option<String>,
 }
 
 /// Display-only facts retained for a human permission decision.
@@ -793,7 +798,13 @@ impl PermissionRequest {
             ops,
             why,
             presentation: None,
+            child_name: None,
         }
+    }
+
+    /// The child requesting this permission, when the call is delegated.
+    pub fn child_name(&self) -> Option<&str> {
+        self.child_name.as_deref()
     }
 
     pub fn tool(&self) -> &str {
@@ -819,6 +830,9 @@ impl PermissionRequest {
 impl fmt::Display for PermissionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let why = self.why.to_string();
+        if let Some(name) = &self.child_name {
+            write!(f, "Child {}: ", TerminalSafe(name))?;
+        }
         write!(
             f,
             "{} needs permission: {}",
@@ -992,7 +1006,10 @@ pub enum Classification {
 /// `Ask` means the current party escalated. The turn records that question
 /// before it asks the human seat, if one exists. `Reclassify` carries raw
 /// params and never a scope or prepared call.
+/// Like `Classification`, this short-lived decision keeps the prepared call
+/// inline; adding human display context does not warrant boxing authorizations.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Resolution {
     /// Decided. The party allowed it, or refused it.
     Settled(Result<Authorized, PolicyDenied>),
@@ -1072,6 +1089,7 @@ impl PolicyEngine {
     /// A policy that decides `mode`'s way, under `permissions`, inside
     /// `workspace`.
     pub fn new(workspace: CanonPath, mode: Mode, permissions: Ruleset) -> Self {
+        let permissions = permissions.with_credential_defaults();
         Self {
             approver: Box::new(ModeApprover::new(mode, workspace.clone())),
             workspace,
@@ -1431,10 +1449,20 @@ impl PolicyEngine {
     /// Crate-private because only the turn loop owns the durable ordering
     /// boundary. A headless engine preserves the pending question unchanged.
     pub(crate) async fn decide(&self, item: ItemId, pending: Pending) -> Resolution {
+        self.decide_named(item, pending, None).await
+    }
+
+    pub(crate) async fn decide_named(
+        &self,
+        item: ItemId,
+        pending: Pending,
+        child_name: Option<&str>,
+    ) -> Resolution {
         let Some(human) = &self.human else {
             return Resolution::Ask(pending);
         };
-        let request = pending.request().clone();
+        let mut request = pending.request().clone();
+        request.child_name = child_name.map(str::to_owned);
         match human.decide(item, &request).await {
             PermissionDecision::Allow => {
                 let call = pending.call;
@@ -1479,6 +1507,7 @@ impl PolicyEngine {
                 ops: call.ops().to_vec(),
                 why,
                 presentation: None,
+                child_name: None,
             },
             call,
         }
@@ -1574,7 +1603,7 @@ impl PolicyEngine {
     fn matching<'r>(&self, rules: &'r [SourcedRule], op: &Op) -> Option<&'r SourcedRule> {
         rules
             .iter()
-            .find(|entry| entry.rule().matches(op, self.workspace.as_path()))
+            .find(|entry| entry.denies(op, self.workspace.as_path(), &self.allow))
     }
 
     /// Mint a permit for an explicit scope.
@@ -2140,6 +2169,7 @@ mod tests {
                 path: CanonPath::new("/ws/out.txt"),
             },
             presentation: None,
+            child_name: None,
         };
 
         assert_eq!(
@@ -2182,6 +2212,7 @@ mod tests {
                 path: CanonPath::new("/ws/read.txt"),
             },
             presentation: None,
+            child_name: None,
         };
 
         assert_eq!(

@@ -23,7 +23,9 @@ use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
     ProviderCostRevision, RateSource, UnknownCost,
 };
-use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, ExitReason};
+use ego_core::event::domain::{
+    CancelCause, DomainEvent, Envelope, EventKind, ExitReason, GenerationRole,
+};
 use ego_core::event::hook::{HookDecision, HookLifecycle, HookOutcome};
 use ego_core::event::id::{
     EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId, TurnId,
@@ -1911,6 +1913,93 @@ mod turn {
                 "an envelope read a clock this test did not inject"
             );
         }
+    }
+
+    // Catches: task batching moves a child read ahead of an earlier parent write,
+    // making the child analyze stale workspace contents.
+    #[test]
+    fn task_child_reads_the_write_that_precedes_it_in_the_parent_batch() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "parent-write".into(),
+                    name: "fake_write".into(),
+                    args: json!({"path":"/ws/note.txt", "contents":"new contents"}).to_string(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "child-task".into(),
+                    name: "task".into(),
+                    args: json!({"name":"reviewer", "prompt":"Read note.txt"}).to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_rules(&["write(*)"], &[]);
+        fx.fs.file("/ws/note.txt", "old contents");
+        let registry = vec![
+            RegisteredTool::Effect(Arc::new(Typed(FakeWriteTool))),
+            RegisteredTool::Effect(Arc::new(Typed(FakeReadTool))),
+            RegisteredTool::Task,
+        ];
+        let tools = Tools::from_registry(
+            &registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        );
+        let outcome = block_on(turn.run("Update note.txt, then ask the reviewer to read it"))
+            .expect("store accepts the batch");
+        assert!(outcome.ok);
+        let calls = fx.generator.calls();
+        assert_eq!(calls.len(), 2, "a refused mixed batch must not run a child");
+        let feedback: Vec<_> = calls[1]
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                    ..
+                } => Some((call_id.as_str(), output.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(feedback.len(), 2, "every mixed-batch call needs feedback");
+        for (call_id, output, is_error) in feedback {
+            assert!(matches!(call_id, "parent-write" | "child-task"));
+            assert!(is_error);
+            assert_eq!(
+                output,
+                "task calls cannot be mixed with other tool calls in one provider response"
+            );
+        }
+        assert_eq!(
+            fx.fs.read(&CanonPath::new("/ws/note.txt")).unwrap(),
+            b"old contents",
+            "a refused batch must not write"
+        );
     }
 
     #[test]
@@ -9966,5 +10055,412 @@ mod turn {
                 .iter()
                 .all(|kind| kind != "tool_call_started")
         );
+    }
+    mod task_tool {
+        use super::*;
+
+        fn call(id: &str, name: &str, args: serde_json::Value) -> AiEvent {
+            AiEvent::ToolCall {
+                call_id: id.into(),
+                name: name.into(),
+                args: args.to_string(),
+            }
+        }
+
+        fn run_tasks<G: Generator + 'static>(
+            fx: &Fixture,
+            generator: &Arc<G>,
+            cancel: CancelToken,
+            ceiling: Option<u64>,
+        ) -> (ExitReason, SessionState) {
+            let mut registry: Vec<_> = fx
+                .registry
+                .iter()
+                .cloned()
+                .map(RegisteredTool::Effect)
+                .collect();
+            registry.push(RegisteredTool::Task);
+            let tools = Tools::from_registry(
+                &registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                )
+                .with_cancel(cancel.clone()),
+                CanonPath::new("/ws"),
+            );
+            let mut settings = config();
+            settings.parallel_tool_calls = true;
+            let mut runtime = model_with(
+                generator,
+                &mut fx.gate.borrow_mut(),
+                metering(),
+                Some(rates()),
+                ceiling,
+                settings,
+            );
+            runtime.policy_source = fx.policy_source.clone();
+            runtime.config.identity = Some(ego_core::turn::AgentIdentity {
+                version: "test".into(),
+                sandbox: Confinement::Workspace,
+                offline: true,
+                host: None,
+            });
+            let mut loop_ = CoreTurnLoop::new(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    cancel,
+                ),
+                runtime,
+                tools,
+            )
+            .unwrap();
+            let outcome = block_on(loop_.run("parent")).unwrap();
+            (outcome.exit_reason, loop_.into_state().unwrap())
+        }
+
+        #[test]
+        fn task_child_cannot_escape_workspace_mode_or_recursively_delegate() {
+            // Catches: a child widening the parent workspace/mode or retaining task.
+            let fx = Fixture::new(vec![]).with_write_tool();
+            fx.fs.file("/outside/stolen", "original");
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call("task1", "task", json!({"name":"review", "prompt":"child"})),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "escape",
+                        "fake_write",
+                        json!({"path":"/outside/stolen", "contents":"bad"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (exit, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            assert_eq!(exit, ExitReason::Completed);
+            assert!(generator.calls()[1].tools.iter().all(|t| t.name != "task"));
+            let task = state
+                .items
+                .values()
+                .find(|i| i.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert_eq!(task.ok, Some(false));
+            assert!(
+                state
+                    .items
+                    .values()
+                    .all(|i| i.tool_name.as_deref() != Some("fake_write")),
+                "child transcript leaked into parent"
+            );
+        }
+
+        struct NetworkAttempt;
+        impl TypedTool for NetworkAttempt {
+            type Params = ReadParams;
+            fn name(&self) -> &str {
+                "network_attempt"
+            }
+            fn description(&self) -> &str {
+                "attempt a network effect"
+            }
+            fn prepare_typed(
+                &self,
+                params: ReadParams,
+                _: &PrepareCtx<'_>,
+            ) -> Result<PreparedCall, ToolError> {
+                Ok(PreparedCall::new(
+                    self.name(),
+                    Op::ProtocolConnect {
+                        target: ego_core::permit::NetworkTarget::parse(&params.path)
+                            .map_err(|error| ToolError::InvalidParams(error.to_string()))?,
+                    },
+                ))
+            }
+            fn execute<'a, 'io>(
+                &'a self,
+                _: PreparedCall,
+                _: &'a dyn GuardedIo<'io>,
+            ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+            where
+                'io: 'a,
+            {
+                panic!("offline parent's denied network effect reached execution")
+            }
+        }
+
+        #[test]
+        fn task_child_keeps_offline_posture_and_cannot_drop_parent_network_denial() {
+            // Catches: offline child advertising online posture or losing the parent network ceiling.
+            let mut fx = Fixture::new(vec![]).with_rules(&[], &["net(*)"]);
+            fx.registry.push(Arc::new(Typed(NetworkAttempt)));
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"offline", "prompt":"try network"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "net1",
+                        "network_attempt",
+                        json!({"path":"api.example.test:443"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            let requests = generator.calls();
+            for request in &requests[..2] {
+                assert!(request.messages.messages().iter().flat_map(|message| &message.content).any(|block| {
+                    matches!(block, ContentBlock::Text { text } if text.contains("sandbox: workspace; network: offline"))
+                }), "parent and child must both receive the authoritative offline context");
+            }
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .find(|item| item.tool_name.as_deref() == Some("task"))
+                    .unwrap()
+                    .ok,
+                Some(false)
+            );
+        }
+
+        #[derive(Debug, Default)]
+        struct NamedHuman(Mutex<Vec<PermissionRequest>>);
+        impl HumanApprover for NamedHuman {
+            fn decide<'a>(
+                &'a self,
+                _: ItemId,
+                request: &'a PermissionRequest,
+            ) -> BoxFuture<'a, PermissionDecision> {
+                self.0.lock().unwrap().push(request.clone());
+                Box::pin(futures::future::ready(PermissionDecision::Deny))
+            }
+        }
+
+        #[test]
+        fn task_child_permission_reaches_parent_human_with_name_without_autoapproval() {
+            // Catches: a dropped, unnamed or automatically approved child permission.
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let human = Arc::new(NamedHuman::default());
+            fx.policy_source = Arc::new(FixedPolicySource {
+                mode: Mode::Default,
+                permissions: Ruleset::default(),
+                human: Some(human.clone()),
+            });
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call("task1", "task", json!({"name":"review", "prompt":"child"})),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "write1",
+                        "fake_write",
+                        json!({"path":"/ws/note.txt", "contents":"bad"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            let requests = human.0.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].child_name(), Some("review"));
+            assert_eq!(requests[0].tool(), "fake_write");
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .find(|i| i.tool_name.as_deref() == Some("task"))
+                    .unwrap()
+                    .ok,
+                Some(false)
+            );
+        }
+
+        #[test]
+        fn task_books_child_usage_once_and_returns_only_bounded_final_text() {
+            // Catches: unmetered/double-booked child spend and child transcript in parent context.
+            let fx = Fixture::new(vec![]);
+            let child_text = "é".repeat(40_000);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call("task1", "task", json!({"name":"review", "prompt":"child"})),
+                    AiEvent::Usage(tokens(1, 0, 0, 1)),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    AiEvent::TextDelta { text: child_text },
+                    AiEvent::Usage(tokens(3, 0, 0, 2)),
+                    AiEvent::Stop(StopReason::Stop),
+                ],
+                vec![
+                    AiEvent::Usage(tokens(0, 0, 0, 0)),
+                    AiEvent::Stop(StopReason::Stop),
+                ],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            assert_eq!(state.usage.uncached_input_tokens, 4);
+            assert_eq!(state.usage.output_tokens, 3);
+            assert_eq!(state.cost.known(), Some(&usd("0.000057")));
+            let task = state
+                .items
+                .values()
+                .find(|i| i.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert!(task.tool_result.as_ref().unwrap().model_text().len() <= 65_536);
+            assert!(
+                task.tool_result
+                    .as_ref()
+                    .unwrap()
+                    .model_text()
+                    .contains("truncated")
+            );
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .filter(|i| i.kind == ItemKind::Assistant)
+                    .count(),
+                0
+            );
+            assert_eq!(
+                fx.store
+                    .events()
+                    .iter()
+                    .filter(|ev| matches!(
+                        ev.kind,
+                        EventKind::GenerationStarted {
+                            role: GenerationRole::Subagent,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+            assert!(state.refusals.is_empty());
+        }
+
+        #[test]
+        fn task_cumulative_token_ceiling_includes_parent_spend() {
+            // Catches: a child resetting the cumulative token allowance.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call("task1", "task", json!({"name":"review", "prompt":"child"})),
+                    AiEvent::Usage(tokens(10, 0, 0, 0)),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (exit, state) = run_tasks(&fx, &generator, CancelToken::new(), Some(10));
+            assert_eq!(exit, ExitReason::Budget);
+            assert_eq!(
+                generator.calls().len(),
+                1,
+                "child spent beyond the parent token ceiling"
+            );
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .find(|i| i.tool_name.as_deref() == Some("task"))
+                    .unwrap()
+                    .ok,
+                Some(false)
+            );
+        }
+        struct ConcurrentCancelGenerator {
+            calls: AtomicUsize,
+            cancel: CancelToken,
+        }
+        impl Generator for ConcurrentCancelGenerator {
+            fn ensure_expressible(
+                &self,
+                _: &GenRequest,
+            ) -> Result<(), ego_core::generator::port::RequestExpressibilityError> {
+                Ok(())
+            }
+            fn generate(&self, _: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return AttemptStream::new(
+                        attempt,
+                        Box::pin(futures::stream::iter(vec![
+                            call("one", "task", json!({"name":"one","prompt":"first"})),
+                            call("two", "task", json!({"name":"two","prompt":"second"})),
+                            AiEvent::Stop(StopReason::ToolUse),
+                        ])),
+                    );
+                }
+                if n == 2 {
+                    self.cancel.cancel(CancelCause::User);
+                }
+                AttemptStream::new(attempt, Box::pin(futures::stream::pending()))
+            }
+        }
+
+        #[test]
+        fn task_batch_starts_both_children_and_cancellation_settles_every_attempt() {
+            // Catches: sequential children deadlocking, orphan streams or unpaid cancellation.
+            let fx = Fixture::new(vec![]);
+            let cancel = CancelToken::new();
+            let generator = Arc::new(ConcurrentCancelGenerator {
+                calls: AtomicUsize::new(0),
+                cancel: cancel.clone(),
+            });
+            let watchdog_cancel = cancel.clone();
+            let (stop, watchdog_rx) = std::sync::mpsc::channel();
+            let watchdog = std::thread::spawn(move || {
+                if watchdog_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .is_err()
+                {
+                    watchdog_cancel.cancel(CancelCause::User);
+                }
+            });
+            let (exit, state) = run_tasks(&fx, &generator, cancel, None);
+            let _ = stop.send(());
+            watchdog.join().unwrap();
+            assert_eq!(
+                generator.calls.load(Ordering::SeqCst),
+                3,
+                "both children must reach generation before cancellation"
+            );
+            assert_eq!(exit, ExitReason::Cancelled(CancelCause::User));
+            assert!(state.live_attempts.is_empty());
+            let tasks: Vec<_> = state
+                .items
+                .values()
+                .filter(|i| i.tool_name.as_deref() == Some("task"))
+                .collect();
+            assert_eq!(tasks.len(), 2);
+            assert!(tasks.iter().all(|task| {
+                task.ok == Some(false)
+                    && task
+                        .tool_result
+                        .as_ref()
+                        .unwrap()
+                        .model_text()
+                        .contains("Cancelled")
+            }));
+            assert!(state.refusals.is_empty());
+        }
     }
 }
