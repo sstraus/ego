@@ -723,6 +723,7 @@ pub struct PermissionRequest {
     ops: Vec<Op>,
     why: Escalation,
     presentation: Option<Box<PermissionPresentation>>,
+    child_name: Option<String>,
 }
 
 /// Display-only facts retained for a human permission decision.
@@ -793,7 +794,13 @@ impl PermissionRequest {
             ops,
             why,
             presentation: None,
+            child_name: None,
         }
+    }
+
+    /// The child requesting this permission, when the call is delegated.
+    pub fn child_name(&self) -> Option<&str> {
+        self.child_name.as_deref()
     }
 
     pub fn tool(&self) -> &str {
@@ -819,6 +826,9 @@ impl PermissionRequest {
 impl fmt::Display for PermissionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let why = self.why.to_string();
+        if let Some(name) = &self.child_name {
+            write!(f, "Child {}: ", TerminalSafe(name))?;
+        }
         write!(
             f,
             "{} needs permission: {}",
@@ -1431,10 +1441,20 @@ impl PolicyEngine {
     /// Crate-private because only the turn loop owns the durable ordering
     /// boundary. A headless engine preserves the pending question unchanged.
     pub(crate) async fn decide(&self, item: ItemId, pending: Pending) -> Resolution {
+        self.decide_named(item, pending, None).await
+    }
+
+    pub(crate) async fn decide_named(
+        &self,
+        item: ItemId,
+        pending: Pending,
+        child_name: Option<&str>,
+    ) -> Resolution {
         let Some(human) = &self.human else {
             return Resolution::Ask(pending);
         };
-        let request = pending.request().clone();
+        let mut request = pending.request().clone();
+        request.child_name = child_name.map(str::to_owned);
         match human.decide(item, &request).await {
             PermissionDecision::Allow => {
                 let call = pending.call;
@@ -1479,6 +1499,7 @@ impl PolicyEngine {
                 ops: call.ops().to_vec(),
                 why,
                 presentation: None,
+                child_name: None,
             },
             call,
         }
@@ -2140,6 +2161,7 @@ mod tests {
                 path: CanonPath::new("/ws/out.txt"),
             },
             presentation: None,
+            child_name: None,
         };
 
         assert_eq!(
@@ -2182,6 +2204,7 @@ mod tests {
                 path: CanonPath::new("/ws/read.txt"),
             },
             presentation: None,
+            child_name: None,
         };
 
         assert_eq!(

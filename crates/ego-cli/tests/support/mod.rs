@@ -28,6 +28,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -401,21 +402,26 @@ enum StubMode {
 
 impl Stub {
     pub fn start(plan: Plan) -> Self {
-        Self::start_mode(plan, StubMode::Provider)
+        Self::start_mode(plan, StubMode::Provider, false)
     }
 
     /// Start the same provider fixture with a minimal streamable MCP endpoint
     /// on the same listener, so tests can observe discovery without a second
     /// network adapter.
     pub fn start_mcp(plan: Plan) -> Self {
-        Self::start_mode(plan, StubMode::Mcp)
+        Self::start_mode(plan, StubMode::Mcp, false)
     }
 
     pub fn start_mcp_tool(plan: Plan) -> Self {
-        Self::start_mode(plan, StubMode::McpTool)
+        Self::start_mode(plan, StubMode::McpTool, false)
     }
 
-    fn start_mode(plan: Plan, mode: StubMode) -> Self {
+    /// Serve concurrent generations without one gated response blocking admission.
+    pub fn start_concurrent(plan: Plan) -> Self {
+        Self::start_mode(plan, StubMode::Provider, true)
+    }
+
+    fn start_mode(plan: Plan, mode: StubMode, concurrent: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
         let address = listener
             .local_addr()
@@ -425,13 +431,20 @@ impl Stub {
 
         let thread_seen = Arc::clone(&seen);
         std::thread::spawn(move || {
-            let mut generation = 0usize;
+            let generation = Arc::new(AtomicUsize::new(0));
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
                 // One request per connection, then closed. Keep-alive would
                 // buy nothing here and would make the reply logic guess where
                 // one exchange ends.
-                if serve(stream, &plan, &thread_seen, &mut generation, mode).is_err() {
+                if concurrent {
+                    let plan = plan.clone();
+                    let seen = thread_seen.clone();
+                    let generation = generation.clone();
+                    std::thread::spawn(move || {
+                        let _ = serve(stream, &plan, &seen, &generation, mode);
+                    });
+                } else if serve(stream, &plan, &thread_seen, &generation, mode).is_err() {
                     break;
                 }
             }
@@ -463,7 +476,7 @@ fn serve(
     mut stream: TcpStream,
     plan: &Plan,
     seen: &Arc<Mutex<Vec<Recorded>>>,
-    generation: &mut usize,
+    generation: &AtomicUsize,
     mode: StubMode,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -533,7 +546,7 @@ fn serve(
             json(&mut stream, &serde_json::json!({ "models": models }))
         }
         "/api/ps" => {
-            if *generation > 0
+            if generation.load(Ordering::SeqCst) > 0
                 && let Some(gate) = plan.subsequent_resolution_gate.as_ref()
             {
                 gate.wait();
@@ -549,11 +562,10 @@ fn serve(
         _ => {
             let reply = plan
                 .completions
-                .get(*generation)
+                .get(generation.fetch_add(1, Ordering::SeqCst))
                 .or_else(|| plan.completions.last())
                 .cloned()
                 .unwrap_or(Reply::Status(500));
-            *generation += 1;
             sse(&mut stream, reply, &path)
         }
     }

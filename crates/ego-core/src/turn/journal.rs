@@ -134,6 +134,10 @@ impl<'s> SharedJournal<'s> {
         }
     }
 
+    pub(crate) fn clock(&self) -> &'s dyn Clock {
+        self.lock().expect("journal clock").clock
+    }
+
     pub fn same_owner(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }

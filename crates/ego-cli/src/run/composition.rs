@@ -198,6 +198,7 @@ pub(super) fn tools(
 ) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = builtins().into_iter().map(RegisteredTool::Effect).collect();
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
+    all.push(RegisteredTool::Task);
     if let Some(skills) = skills.filter(|catalogue| !catalogue.specs().is_empty()) {
         all.push(RegisteredTool::skill(skills));
     }

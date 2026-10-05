@@ -1,0 +1,426 @@
+//! Ephemeral, depth-one children over the ordinary turn loop.
+
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
+
+use futures::future::{BoxFuture, join_all};
+use futures::stream::BoxStream;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use super::*;
+use crate::event::domain::DomainEvent;
+use crate::run::{RunAppend, RunRevision, RunTransaction};
+use crate::sink::EventSink;
+use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TaskRequest {
+    name: String,
+    prompt: String,
+}
+
+pub(super) fn descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        name: "task".into(),
+        description: "Run an isolated child agent with your tools, permissions, sandbox, offline posture and shared budget. Children cannot delegate. Returns only its bounded final answer.".into(),
+        parameters: json!({"type":"object", "additionalProperties":false,
+            "required":["name","prompt"], "properties": {
+                "name":{"type":"string", "minLength":1,"maxLength":80},
+                "prompt":{"type":"string", "minLength":1,"maxLength":65536}
+            }}),
+    }
+}
+
+pub(super) fn parse(params: Value) -> Result<TaskRequest, String> {
+    let request: TaskRequest = serde_json::from_value(params)
+        .map_err(|error| format!("task was called with invalid arguments: {error}"))?;
+    if request.name.trim().is_empty()
+        || request.name.chars().count() > 80
+        || request.name.chars().any(char::is_control)
+        || request.name.contains('›')
+        || request.prompt.trim().is_empty()
+        || request.prompt.len() > crate::mcp::FOREIGN_VISIBLE_BYTES
+    {
+        return Err("task requires a printable name of 1–80 characters and a nonempty prompt of at most 64 KiB".into());
+    }
+    Ok(request)
+}
+
+/// Only accounting crosses into the parent's durable log. Conversation and
+/// tool details belong to the child's ephemeral store and reduction.
+struct TaskStore<'s> {
+    parent: SharedJournal<'s>,
+    turn: TurnId,
+    started: EventId,
+    events: Mutex<Vec<DomainEvent>>,
+}
+
+impl SessionStore for TaskStore<'_> {
+    fn append(&self, _: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+        let kind = match &event.kind {
+            EventKind::GenerationStarted { attempt, .. } => Some(EventKind::GenerationStarted {
+                attempt: *attempt,
+                role: GenerationRole::Subagent,
+            }),
+            kind @ (EventKind::UsageUpdated { .. }
+            | EventKind::UsageCorrected { .. }
+            | EventKind::AttemptSettled { .. }) => Some(kind.clone()),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            self.parent
+                .append(self.turn, None, Some(self.started), kind)?;
+        }
+        self.events
+            .lock()
+            .map_err(|_| StoreError::Io(std::io::Error::other("child journal lock")))?
+            .push(event.clone());
+        Ok(())
+    }
+
+    fn read(
+        &self,
+        _: &SessionId,
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+        let entries = self
+            .events
+            .lock()
+            .map_err(|_| StoreError::Io(std::io::Error::other("child journal lock")))?
+            .iter()
+            .cloned()
+            .map(|event| Ok(SessionEntry::Event(event)))
+            .collect::<Vec<_>>();
+        Ok(Box::pin(futures::stream::iter(entries)))
+    }
+
+    fn compare_and_append_run(
+        &self,
+        _: &SessionId,
+        _: Option<RunRevision>,
+        _: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "task children cannot create durable runs",
+        )))
+    }
+
+    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        Ok(Vec::new())
+    }
+}
+
+/// The parent journal serializes publication to the existing terminal writer.
+/// No child transcript is appended to the parent conversation.
+struct TaskSink<'s> {
+    parent: SharedJournal<'s>,
+    turn: TurnId,
+    name: String,
+}
+impl EventSink for TaskSink<'_> {
+    fn publish(&self, event: &PublicEvent, _: &SessionState) {
+        let event = match event {
+            PublicEvent::ItemStarted {
+                item,
+                kind: crate::public::ItemKind::Tool,
+                name,
+                text,
+                ..
+            } => PublicEvent::ItemStarted {
+                turn: self.turn,
+                item: *item,
+                kind: crate::public::ItemKind::Tool,
+                name: name.as_ref().map(|tool| format!("{} › {tool}", self.name)),
+                text: text.clone(),
+            },
+            PublicEvent::ItemCompleted {
+                item,
+                kind: crate::public::ItemKind::Tool,
+                ok,
+                text,
+                ..
+            } => PublicEvent::ItemCompleted {
+                turn: self.turn,
+                item: *item,
+                kind: crate::public::ItemKind::Tool,
+                ok: *ok,
+                text: text.clone(),
+            },
+            // ACP needs the child call id to attach its existing permission modal.
+            PublicEvent::ItemStarted {
+                item,
+                kind: crate::public::ItemKind::Permission,
+                name,
+                text,
+                ..
+            } => PublicEvent::ItemStarted {
+                turn: self.turn,
+                item: *item,
+                kind: crate::public::ItemKind::Permission,
+                name: name.clone(),
+                text: text
+                    .as_ref()
+                    .map(|text| format!("Child {}: {text}", self.name)),
+            },
+            PublicEvent::ItemCompleted {
+                item,
+                kind: crate::public::ItemKind::Permission,
+                ok,
+                text,
+                ..
+            } => PublicEvent::ItemCompleted {
+                turn: self.turn,
+                item: *item,
+                kind: crate::public::ItemKind::Permission,
+                ok: *ok,
+                text: text.clone(),
+            },
+            _ => return,
+        };
+        // Publication has no persistence path. Accounting failures instead
+        // propagate from TaskStore::append and abandon the child's turn.
+        if let Err(error) = self.parent.publish(&event) {
+            tracing::error!(%error, "child progress publication failed");
+        }
+    }
+}
+
+struct TaskPolicySource {
+    owner: Arc<dyn GenerationPolicySource>,
+    snapshot: Arc<GenerationPolicySnapshot>,
+}
+impl GenerationPolicySource for TaskPolicySource {
+    fn current(&self) -> Result<Arc<PolicyEngine>, String> {
+        Ok(self.capture()?.policy())
+    }
+    fn capture(&self) -> Result<GenerationPolicyCapture, String> {
+        self.owner.restore(self.snapshot.clone())
+    }
+    fn restore(
+        &self,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<GenerationPolicyCapture, String> {
+        if snapshot.digest() != self.snapshot.digest() {
+            return Err("task cannot widen its captured parent policy".into());
+        }
+        self.capture()
+    }
+}
+
+struct TaskExecution<'s, 't> {
+    session: SessionId,
+    parent: SharedJournal<'s>,
+    turn: TurnId,
+    evidence: &'s dyn EvidenceStore,
+    clock: &'s dyn Clock,
+    runtime: GenerationRuntime,
+    tools: Tools<'t>,
+    cancel: CancelToken,
+    judge: Option<JudgeContext>,
+    analysis_cache: Option<(
+        Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
+        crate::config::Trust,
+    )>,
+    analysis_observation: Option<ExecObservation>,
+    effect_ceiling: Option<Arc<BTreeSet<String>>>,
+    elicitor: Option<Arc<dyn Elicitor>>,
+}
+
+impl<'s: 't, 't> TaskExecution<'s, 't> {
+    fn run(
+        self,
+        started: EventId,
+        request: TaskRequest,
+    ) -> BoxFuture<'t, Result<(bool, ToolResult), StoreError>> {
+        Box::pin(async move {
+            let store = TaskStore {
+                parent: self.parent.clone(),
+                turn: self.turn,
+                started,
+                events: Mutex::new(Vec::new()),
+            };
+            let sink = TaskSink {
+                parent: self.parent.clone(),
+                turn: self.turn,
+                name: request.name,
+            };
+            let mut child = TurnLoop::new(
+                Session {
+                    id: self.session,
+                    state: SessionState::default(),
+                    store: &store,
+                    evidence: self.evidence,
+                    clock: self.clock,
+                    sink: &sink,
+                    cancel: self.cancel.clone(),
+                },
+                self.runtime,
+                self.tools,
+            )
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            let parent = self.parent.clone();
+            child.task_usage = Some(Arc::new(move || {
+                parent.inspect(|state| state.usage).expect("parent usage")
+            }));
+            child.generation_role = GenerationRole::Subagent;
+            child.judge = self.judge;
+            child.analysis_cache = self.analysis_cache;
+            child.analysis_observation = self.analysis_observation;
+            child.inherited_effect_tools = self.effect_ceiling;
+            child.elicitor = self.elicitor;
+            let outcome = child
+                .run(&request.prompt)
+                .await
+                .map_err(|error| error.cause)?;
+            let state = child.state();
+            let final_text = state
+                .items
+                .values()
+                .filter(|item| item.kind == crate::state::ItemKind::Assistant)
+                .max_by_key(|item| item.seq)
+                .map(|item| item.text.clone())
+                .unwrap_or_default();
+            let text = if outcome.ok {
+                final_text
+            } else {
+                format!(
+                    "Child ended: {:?}{}",
+                    outcome.exit_reason,
+                    if final_text.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n{final_text}")
+                    }
+                )
+            };
+            Ok((outcome.ok, ToolResult::builtin(bounded_result(text))))
+        })
+    }
+}
+
+fn bounded_result(mut text: String) -> String {
+    let limit = crate::mcp::FOREIGN_VISIBLE_BYTES;
+    let marker = "\n… [task result truncated]";
+    if text.len() > limit {
+        let mut end = limit - marker.len();
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(marker);
+    }
+    text
+}
+
+impl<'s: 't, 't> TurnLoop<'s, 't> {
+    pub(super) async fn run_tasks(
+        &mut self,
+        turn: TurnId,
+        snapshot: &Arc<GenerationPolicySnapshot>,
+        pending: &mut [PendingCall],
+    ) -> Result<BTreeSet<ItemId>, StoreError> {
+        let mut completed = BTreeSet::new();
+        let serial = Arc::new(futures::lock::Mutex::new(()));
+        let mut work = Vec::new();
+        for call in pending {
+            if !matches!(call.selected.as_ref(), Some(Ok(RegisteredTool::Task))) {
+                continue;
+            }
+            call.selected.take();
+            let request = self
+                .tools
+                .prepare_selected(RegisteredTool::Task, &call.args);
+            let request = match request {
+                Ok(PreparedToolCall::Task(request)) => request,
+                Ok(_) => unreachable!("task registry entry prepares a task"),
+                Err(error) => {
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted {
+                            ok: false,
+                            result: ToolResult::builtin(error),
+                        },
+                    )?;
+                    completed.insert(call.item);
+                    continue;
+                }
+            };
+            let task = TaskExecution {
+                session: self.session_id,
+                parent: self.journal.clone(),
+                turn,
+                evidence: self.evidence,
+                clock: self.journal.clock(),
+                runtime: GenerationRuntime {
+                    source: self.source.clone(),
+                    policy_source: Arc::new(TaskPolicySource {
+                        owner: self.policy_source.clone(),
+                        snapshot: snapshot.clone(),
+                    }),
+                    gate: self.gate.clone(),
+                    config: self.config.clone(),
+                    admission: self.admission.clone(),
+                    invocation: self.invocation,
+                },
+                tools: self
+                    .tools
+                    .task_child(request.name.clone(), serial.clone(), self.cancel.clone())
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?,
+                cancel: self.cancel.clone(),
+                judge: self.judge.clone(),
+                analysis_cache: self.analysis_cache.clone(),
+                analysis_observation: self.analysis_observation.clone(),
+                elicitor: self.elicitor.clone(),
+                effect_ceiling: self
+                    .active_skill_scope
+                    .as_ref()
+                    .map(|scope| {
+                        Arc::new(
+                            scope
+                                .effect_tools()
+                                .into_iter()
+                                .map(str::to_owned)
+                                .collect(),
+                        )
+                    })
+                    .or_else(|| self.inherited_effect_tools.clone()),
+            };
+            let journal = self.journal.clone();
+            let item = call.item;
+            let started = call.started;
+            work.push(async move {
+                let (ok, result) = task.run(started, request).await?;
+                journal.append(
+                    turn,
+                    Some(item),
+                    Some(started),
+                    EventKind::ToolCallCompleted { ok, result },
+                )?;
+                Ok::<_, StoreError>(item)
+            });
+        }
+        let results = await_controlled(
+            &self.journal,
+            &self.cancel,
+            &mut self.control,
+            turn,
+            join_all(work),
+            InterruptDisposition::AwaitEffect,
+        )
+        .await;
+        match results {
+            Controlled::Completed(results) => {
+                for result in results {
+                    completed.insert(result?);
+                }
+            }
+            Controlled::Failed(cause) => return Err(cause),
+            Controlled::Interrupted => unreachable!("task batch awaits child settlement"),
+        }
+        Ok(completed)
+    }
+}

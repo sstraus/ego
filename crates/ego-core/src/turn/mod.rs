@@ -16,6 +16,7 @@ mod identity;
 mod journal;
 mod mcp_registry;
 mod policy;
+mod task;
 mod tools;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -113,11 +114,14 @@ pub enum RegisteredTool {
     Effect(Arc<dyn crate::permit::Tool>),
     HumanInput(Arc<dyn crate::question::HumanInputTool>),
     Skill(Arc<crate::skill::SkillCatalogue>),
+    /// One isolated in-process child; children do not receive this entry.
+    Task,
 }
 
 impl RegisteredTool {
     pub fn descriptor(&self) -> crate::generator::types::ToolDescriptor {
         match self {
+            Self::Task => task::descriptor(),
             Self::Effect(tool) => {
                 let descriptor = tool.descriptor();
                 crate::generator::types::ToolDescriptor {
@@ -178,14 +182,14 @@ impl RegisteredTool {
     pub fn as_effect(&self) -> Option<&Arc<dyn crate::permit::Tool>> {
         match self {
             Self::Effect(tool) => Some(tool),
-            Self::HumanInput(_) | Self::Skill(_) => None,
+            Self::HumanInput(_) | Self::Skill(_) | Self::Task => None,
         }
     }
 
     pub fn as_human_input(&self) -> Option<&Arc<dyn crate::question::HumanInputTool>> {
         match self {
             Self::HumanInput(tool) => Some(tool),
-            Self::Effect(_) | Self::Skill(_) => None,
+            Self::Effect(_) | Self::Skill(_) | Self::Task => None,
         }
     }
 }
@@ -213,19 +217,34 @@ where
 /// `tokio_util::sync::CancellationToken` either — `ego-core` has no tokio
 /// dependency, and this needs an atomic and a `clone`, not a runtime.
 ///
-/// Checked before each generation and after each stream event. The limit is
-/// worth stating rather than discovering: a provider that has gone silent
-/// delays cancellation until its transport gives up. Racing the await instead
-/// would mean dropping a stream that owns an unsettled reservation, which is
-/// precisely the leak [`AttemptStream`] exists to prevent.
-///
-/// Carries *who* asked, not just that someone did: a timeout and a `SIGINT`
-/// are different process exits (124 and 130), and a token that only said
-/// "cancelled" would make them the same value. An `AtomicU8` rather than a
-/// second field, so the promise above — an atomic and a `clone`, no runtime —
-/// still holds.
-#[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicU8>);
+/// Checked at generation boundaries and wakes interruptible awaits. The stream
+/// is still settled by its owner after interruption, preserving paid accounting.
+#[derive(Clone)]
+pub struct CancelToken(Arc<CancelSignal>);
+struct CancelSignal {
+    cause: AtomicU8,
+    sender: std::sync::Mutex<Option<futures::channel::oneshot::Sender<CancelCause>>>,
+    cancelled: futures::future::Shared<futures::future::BoxFuture<'static, CancelCause>>,
+}
+impl Default for CancelToken {
+    fn default() -> Self {
+        use futures::FutureExt;
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        Self(Arc::new(CancelSignal {
+            cause: AtomicU8::new(NOT_CANCELLED),
+            sender: std::sync::Mutex::new(Some(sender)),
+            cancelled: receiver
+                .map(|result| result.unwrap_or(CancelCause::Host))
+                .boxed()
+                .shared(),
+        }))
+    }
+}
+impl std::fmt::Debug for CancelToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CancelToken").field(&self.cause()).finish()
+    }
+}
 
 const NOT_CANCELLED: u8 = 0;
 const BY_USER: u8 = 1;
@@ -248,18 +267,24 @@ impl CancelToken {
             CancelCause::Timeout => BY_TIMEOUT,
             CancelCause::Host => BY_HOST,
         };
-        let _ = self
+        if self
             .0
-            .compare_exchange(NOT_CANCELLED, code, Ordering::SeqCst, Ordering::SeqCst);
+            .cause
+            .compare_exchange(NOT_CANCELLED, code, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            && let Some(sender) = self.0.sender.lock().expect("cancel signal lock").take()
+        {
+            let _ = sender.send(cause);
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst) != NOT_CANCELLED
+        self.0.cause.load(Ordering::SeqCst) != NOT_CANCELLED
     }
 
     /// Why the turn was asked to stop, if it was.
     pub fn cause(&self) -> Option<CancelCause> {
-        match self.0.load(Ordering::SeqCst) {
+        match self.0.cause.load(Ordering::SeqCst) {
             BY_USER => Some(CancelCause::User),
             BY_TIMEOUT => Some(CancelCause::Timeout),
             BY_HOST => Some(CancelCause::Host),
@@ -402,6 +427,7 @@ enum Controlled<T> {
 }
 
 enum ControlRace<T> {
+    Cancelled,
     Work(T),
     Intent(Option<ControlIntent>),
 }
@@ -496,17 +522,24 @@ where
 {
     let mut work = Box::pin(work);
     loop {
-        if control.is_none() {
-            return Controlled::Completed(work.await);
-        }
         let raced = {
             let intent = Box::pin(receive_intent(control));
-            match select(intent, work.as_mut()).await {
-                Either::Left((intent, _)) => ControlRace::Intent(intent),
-                Either::Right((result, _)) => ControlRace::Work(result),
+            let interruption = async {
+                if disposition == InterruptDisposition::AwaitEffect {
+                    return ControlRace::Intent(intent.await);
+                }
+                match select(Box::pin(cancel.0.cancelled.clone()), intent).await {
+                    Either::Left(_) => ControlRace::Cancelled,
+                    Either::Right((intent, _)) => ControlRace::Intent(intent),
+                }
+            };
+            match select(work.as_mut(), Box::pin(interruption)).await {
+                Either::Left((result, _)) => ControlRace::Work(result),
+                Either::Right((race, _)) => race,
             }
         };
         match raced {
+            ControlRace::Cancelled => return Controlled::Interrupted,
             ControlRace::Work(result) => return Controlled::Completed(result),
             ControlRace::Intent(None) => {
                 *control = None;
@@ -911,6 +944,8 @@ pub struct TurnLoop<'session, 'turn> {
     hook_binding: Option<HookBindingState<'session>>,
     hook_runtime: Option<SessionHookRuntime<'session>>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
+    task_usage: Option<Arc<dyn Fn() -> Usage + Send + Sync + 'turn>>,
+    generation_role: GenerationRole,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
 }
@@ -1037,6 +1072,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             hook_runtime: None,
             active_skill_scope: None,
             active_skill_invocations: BTreeMap::new(),
+            task_usage: None,
+            generation_role: GenerationRole::Main,
         })
     }
 
@@ -2534,7 +2571,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             // on an unmetered or subscription row no charge is raised at all.
             // `CLI.md:128` spells it the same way: "exit 5 when hit", not
             // "when it would be hit".
-            if tokens_reached(self.config.token_ceiling, &self.state().usage) {
+            if tokens_reached(
+                self.config.token_ceiling,
+                &self
+                    .task_usage
+                    .as_ref()
+                    .map(|usage| usage())
+                    .unwrap_or_else(|| self.state().usage),
+            ) {
                 return Ok(DriveOutcome::Ended(ExitReason::Budget, None));
             }
 
@@ -2667,7 +2711,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
 
             let mut pending = pending;
+            let task_results = self.run_tasks(turn, &policy_snapshot, &mut pending).await?;
             for index in 0..pending.len() {
+                if task_results.contains(&pending[index].item) {
+                    continue;
+                }
                 // A batch is not one effect, and this is the only place that
                 // says so. A control that arrived while the generation was
                 // streaming reaches the loop with the calls already logged
@@ -3307,14 +3355,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 };
                 let reference = attempt.attempt();
                 next_attempt = reference.retry();
-                self.admit_generation(&profile, reference, GenerationRole::Main)?;
+                self.admit_generation(&profile, reference, self.generation_role)?;
                 let generation = self.journal.append(
                     turn,
                     None,
                     None,
                     EventKind::GenerationStarted {
                         attempt: reference,
-                        role: GenerationRole::Main,
+                        role: self.generation_role,
                     },
                 )?;
                 let stream = profile.generator.generate(request, attempt);
@@ -3484,7 +3532,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     }
 
     fn main_model_request(&self) -> GenerationModelRequest {
-        let request = GenerationModelRequest::new(GenerationRole::Main);
+        let request = GenerationModelRequest::new(self.generation_role);
         let Some(scope) = self.active_skill_scope.as_ref() else {
             return request;
         };
@@ -4373,6 +4421,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Err(refusal) => return Ok(answered(false, refusal)),
         };
         let (tool, mut prepared, mut presentation) = match prepared {
+            PreparedToolCall::Task(_) => {
+                return Ok(answered(
+                    false,
+                    "task must be dispatched by its batch owner".into(),
+                ));
+            }
             PreparedToolCall::Effect {
                 tool,
                 call,
