@@ -13,6 +13,232 @@ use support::{
     Ego, Plan, ReleaseGate, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
 };
 
+// Catches: the shared picker hides sessions from other roots or omits their synopsis/order.
+#[test]
+fn resume_picker_lists_summaries_across_roots_newest_first() {
+    across_root_picker_contract("list");
+}
+
+// Catches: selecting history keeps the previous root's instructions or filesystem authority.
+#[test]
+fn history_picker_resumes_across_roots_with_new_root_instructions_and_tools() {
+    across_root_picker_contract("history");
+}
+
+// Catches: Enter resumes a session whose recorded workspace no longer exists.
+#[test]
+fn sessions_picker_marks_missing_roots_unavailable_and_cannot_resume() {
+    across_root_picker_contract("missing");
+}
+
+fn across_root_picker_contract(case: &str) {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+    use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("target-read", "read", r#"{"path":"notes.md"}"#)),
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub);
+    ego.file("AGENTS.md", "# REGRESSION-MARKER\n");
+    ego.file("notes.md", "REGRESSION-MARKER\n");
+    let current = std::fs::canonicalize(ego.workspace_path()).unwrap();
+    let target = current.join("target");
+    let older = current.join("older");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::write(target.join("AGENTS.md"), "# REGRESSION-MARKER\n").unwrap();
+    std::fs::write(target.join("notes.md"), "REGRESSION-MARKER\n").unwrap();
+    let target = std::fs::canonicalize(target).unwrap();
+    let older = std::fs::canonicalize(older).unwrap();
+    let store = JsonlStore::new(ego.home_path().join("sessions"), current, Box::new(OsIo));
+    let selected = SessionId::new();
+    for (id, root, label, millis) in [
+        (SessionId::new(), &older, "Older record", 1000),
+        (selected, &target, "Orchid cross-root", 2000),
+    ] {
+        store
+            .publish_empty_session(id, root, Timestamp::from_millis(1))
+            .unwrap();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        for (item, kind) in [
+            (
+                None,
+                EventKind::SessionTitleChanged {
+                    title: Some(label.into()),
+                },
+            ),
+            (
+                Some(ItemId::new()),
+                EventKind::UserPrompt {
+                    text: format!("REGRESSION-MARKER {label}"),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            ),
+            (
+                Some(ItemId::new()),
+                EventKind::AssistantMessage {
+                    text: format!("Saved synopsis for {label}"),
+                },
+            ),
+            (
+                None,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            ),
+        ] {
+            store
+                .append(
+                    &id,
+                    &DomainEvent {
+                        env: Envelope {
+                            seq: seq.next(),
+                            id: EventId::new(),
+                            turn,
+                            item,
+                            parent: None,
+                            ts: Timestamp::from_millis(millis),
+                            producer: Producer::Main,
+                        },
+                        kind,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    if case == "missing" {
+        std::fs::remove_dir_all(&target).unwrap();
+    }
+    let ego = if case == "list" {
+        ego.subcommand("resume")
+    } else {
+        ego.conversing()
+    };
+    let ego = ego.env("TZ", "UTC").args([
+        "--model",
+        "ollama/qwen3",
+        "--sandbox",
+        "off",
+        "--allow",
+        "read(**)",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 30,
+            cols: 140,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    let start = if case == "list" {
+        0
+    } else {
+        until(&reader, &mut output, b"Trust project files");
+        let start = output.len();
+        input.write_all(b"yes\r").unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, start);
+        let start = output.len();
+        input
+            .write_all(if case == "history" {
+                b"/history REGRESSION-MARKER\r"
+            } else {
+                b"/sessions\r"
+            })
+            .unwrap();
+        input.flush().unwrap();
+        start
+    };
+    until_normalized(&reader, &mut output, start, "Orchid cross-root");
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        "Saved synopsis for Orchid cross-root",
+    );
+    if case == "list" {
+        until_normalized(&reader, &mut output, start, "Older record");
+        until_normalized(&reader, &mut output, start, "1970-01-01 00:00");
+        drain_until_quiet(&reader, &mut output);
+        let shown = normalized(&output[start..]);
+        assert!(
+            shown.find("Orchid cross-root").unwrap() < shown.find("Older record").unwrap(),
+            "{shown}"
+        );
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+    } else if case == "missing" {
+        until_normalized(&reader, &mut output, start, "unavailable");
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        drain_until_quiet(&reader, &mut output);
+        assert!(!normalized(&output[start..]).contains(&format!("resumed session {selected}")));
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+        assert!(stub.generations().is_empty());
+    } else {
+        let start = output.len();
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "Trust project files");
+        input.write_all(b"yes\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "Saved synopsis for Orchid cross-root",
+        );
+        drain_until_quiet(&reader, &mut output);
+        let start = output.len();
+        input.write_all(b"read notes\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+        let requests = stub.generations();
+        let instructions = requests[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .map(|message| message.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(instructions.contains("REGRESSION-MARKER"), "{instructions}");
+        assert!(!instructions.contains("REGRESSION-MARKER"), "{instructions}");
+        let request = requests.last().unwrap().to_string();
+        assert!(
+            request.contains("REGRESSION-MARKER") && !request.contains("REGRESSION-MARKER"),
+            "{request}"
+        );
+        assert!(request.contains("REGRESSION-MARKER Orchid cross-root"));
+    }
+    if case != "list" {
+        until_prompt_from(&reader, &mut output, start);
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+    }
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "{}", normalized(&output));
+}
+
 // Catches: resume shows an empty transcript, duplicate deltas, or drops compact tool rows.
 #[test]
 fn resume_replays_recent_turns_before_input_without_repeating_deltas() {
@@ -151,6 +377,10 @@ fn resume_replay_contract(turns: usize, unrenderable: bool) {
         start,
         &format!("REPLAY-ANSWER-{:02}", turns - 1),
     );
+    if unrenderable {
+        until_normalized(&reader, &mut output, start, "[transcript item unavailable]");
+    }
+    until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
     let shown = normalized(&output[start..]);
     for n in turns.saturating_sub(10)..turns {
@@ -331,12 +561,7 @@ fn sessions_picker_contract(populated: bool) {
             "selected session history missing"
         );
     } else {
-        until_normalized(
-            &reader,
-            &mut output,
-            start,
-            "No other sessions in this workspace",
-        );
+        until_normalized(&reader, &mut output, start, "No other saved sessions");
         input.write_all(b"\x1b").unwrap();
         input.flush().unwrap();
     }

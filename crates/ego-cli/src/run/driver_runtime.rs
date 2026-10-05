@@ -410,6 +410,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 session: active.id(),
                 state,
                 result,
+                selected_session: None,
                 mcp_errors: mcp_errors.clone(),
             };
             if let Some(artifact_store) = artifact_store.as_ref() {
@@ -464,6 +465,9 @@ pub(super) async fn drive_execution<S: EventSink>(
             }
 
             enum EpochTransition<'store> {
+                Resume {
+                    meta: ego_core::store::session_store::SessionMeta,
+                },
                 Exit,
                 New {
                     target: ActiveSession<'store>,
@@ -491,6 +495,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 session: active.id(),
                 state: state.clone(),
                 result: Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: mcp_errors.clone(),
             };
 
@@ -1256,11 +1261,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         }
                                         continue;
                                     }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Sessions,
-                                    )) => {
+                                    repl::Line::HostCommand(
+                                        command @ (repl::HostCommand::Action(
+                                            repl::actions::ActionId::Sessions,
+                                        )
+                                        | repl::HostCommand::History(_)),
+                                    ) => {
                                         if !seat.has_human() {
-                                            match crate::catalogue::listing(jsonl_store.as_ref(), &root, false) {
+                                            match crate::catalogue::listing(jsonl_store.as_ref(), &root, true) {
                                                 Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
                                                 Err(error) => diagnostics.note(&format!("the session catalogue could not be read: {error}")),
                                             }
@@ -1270,23 +1278,52 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             diagnostics.note("a session cannot be selected while source work is pending");
                                             continue;
                                         }
-                                        let metas = match crate::catalogue::listing(
-                                            jsonl_store.as_ref(),
-                                            &root,
-                                            false,
-                                        ) {
-                                            Ok(metas) => metas
-                                                .into_iter()
-                                                .filter(|meta| meta.id != active.id())
-                                                .collect(),
-                                            Err(error) => {
-                                                diagnostics.note(&format!("the session catalogue could not be read: {error}"));
-                                                continue;
-                                            }
-                                        };
-                                        let Some(target) = seat.pick_session(metas) else {
+                                        let mut metas: Vec<_> =
+                                            match crate::catalogue::saved_sessions(
+                                                jsonl_store.as_ref(),
+                                            ) {
+                                                Ok(metas) => metas
+                                                    .into_iter()
+                                                    .filter(|meta| meta.id != active.id())
+                                                    .collect(),
+                                                Err(error) => {
+                                                    diagnostics.note(&format!("the session catalogue could not be read: {error}"));
+                                                    continue;
+                                                }
+                                            };
+                                        if let repl::HostCommand::History(query) = command {
+                                            let history = jsonl_store.history();
+                                            let hits =
+                                                match tokio::task::spawn_blocking(move || {
+                                                    history.matches(&query)
+                                                })
+                                                .await
+                                                {
+                                                    Ok(Ok(hits)) => hits,
+                                                    result => {
+                                                        diagnostics.note(&format!(
+                                                        "history could not be searched: {result:?}"
+                                                    ));
+                                                        continue;
+                                                    }
+                                                };
+                                            metas.retain(|meta| {
+                                                hits.iter().any(|hit| hit.id == meta.id)
+                                            });
+                                        }
+                                        let Some(target) = seat.pick_session(metas.clone()) else {
                                             continue;
                                         };
+                                        let Some(meta) =
+                                            metas.into_iter().find(|meta| meta.id == target)
+                                        else {
+                                            continue;
+                                        };
+                                        if !meta.workspace_root.is_dir() {
+                                            diagnostics
+                                                .note("the selected session root is unavailable");
+                                            continue;
+                                        }
                                         let opened = match session::open(
                                             jsonl_store.as_ref(),
                                             &target,
@@ -1307,6 +1344,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         {
                                             diagnostics.note(&format!("session {target} has unfinished work; use ego resume {target}"));
                                             continue;
+                                        }
+                                        if meta.workspace_root != root {
+                                            drop(opened);
+                                            break 'epoch EpochTransition::Resume { meta };
                                         }
                                         let target_owner = match ActiveSession::durable(
                                             opened,
@@ -2023,6 +2064,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 session: active.id(),
                                 state: state.clone(),
                                 result,
+                                selected_session: None,
                                 mcp_errors: mcp_errors.clone(),
                             };
 
@@ -2075,6 +2117,17 @@ pub(super) async fn drive_execution<S: EventSink>(
                         last.state = source_state;
                         if let Err(termination) = session_end {
                             last.termination = termination;
+                        }
+                        break 'sessions Ok(last);
+                    }
+                    EpochTransition::Resume { meta } => {
+                        active.replace_state(source_state.clone());
+                        last.state = source_state;
+                        if let Err(termination) = session_end {
+                            last.termination = termination;
+                        } else {
+                            last.selected_session = Some(meta);
+                            seat.restore_control(control);
                         }
                         break 'sessions Ok(last);
                     }

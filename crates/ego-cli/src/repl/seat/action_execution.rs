@@ -182,6 +182,15 @@ pub(super) fn surface_line(
                     }
                     continue;
                 }
+                Dispatch::History(query) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice =
+                            Some("history is unavailable while a turn is running".to_owned());
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::History(query)), failed);
+                }
                 Dispatch::SessionMetadata(operation) => {
                     if let Some(line) =
                         route_session_metadata(status, operation, phase.get() == EditPhase::Busy)
@@ -345,6 +354,12 @@ pub(super) fn surface_line(
                             editor.run_edit_commands(&[EditCommand::Clear]);
                             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
                         }
+                        continue;
+                    }
+                    Dispatch::History(_) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some("history is unavailable while a turn is running".to_owned());
+                        repaint_status(status);
                         continue;
                     }
                     Dispatch::SessionMetadata(operation) => {

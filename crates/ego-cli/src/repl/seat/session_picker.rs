@@ -25,14 +25,17 @@ pub(super) fn run_session_picker(
         cursor = cursor.min(matches.len().saturating_sub(1));
         let (cols, height) = crossterm::terminal::size().unwrap_or((80, 24));
         let width = usize::from(cols).saturating_sub(1);
-        let visible = usize::from(height).saturating_sub(6).max(1);
+        let visible = usize::from(height)
+            .saturating_sub(6)
+            .saturating_div(3)
+            .max(1);
         let (start, end) = window_bounds(matches.len(), visible, Some(cursor));
         let mut rows = vec![truncate_cells(
             &format!("Select session · filter: {filter}"),
             width,
         )];
         if sessions.is_empty() {
-            rows.push("No other sessions in this workspace.".to_owned());
+            rows.push("No other saved sessions.".to_owned());
         } else if matches.is_empty() {
             rows.push("No matching sessions; Backspace edits.".to_owned());
         }
@@ -47,12 +50,25 @@ pub(super) fn run_session_picker(
                         .to_string()
                 })
                 .unwrap_or_else(|| "—".to_owned());
+            let available = meta.workspace_root.is_dir();
             rows.push(truncate_cells(
                 &format!(
                     "{marker} {stamp}  {}  {}",
                     meta.title.as_deref().unwrap_or("Untitled"),
                     meta.model.as_deref().unwrap_or("—")
                 ),
+                width,
+            ));
+            rows.push(truncate_cells(
+                &format!(
+                    "  {}{}",
+                    if available { "" } else { "[unavailable] " },
+                    meta.workspace_root.display()
+                ),
+                width,
+            ));
+            rows.push(truncate_cells(
+                &format!("  {}", meta.summary.as_deref().unwrap_or("No summary")),
                 width,
             ));
         }
@@ -79,7 +95,9 @@ pub(super) fn run_session_picker(
                         .filter(|meta| matches_filter(meta, &filter))
                         .collect();
                     if let Some(meta) = filtered.get(cursor.min(filtered.len().saturating_sub(1))) {
-                        break 'picker Some(meta.id);
+                        if meta.workspace_root.is_dir() {
+                            break 'picker Some(meta.id);
+                        }
                     }
                 }
                 "up" => cursor = cursor.saturating_sub(1),
@@ -117,6 +135,12 @@ fn matches_filter(meta: &SessionMeta, filter: &str) -> bool {
         .contains(&filter)
         || meta
             .model
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains(&filter)
+        || meta
+            .summary
             .as_deref()
             .unwrap_or("")
             .to_lowercase()

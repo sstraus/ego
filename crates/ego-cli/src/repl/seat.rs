@@ -1035,6 +1035,7 @@ impl Seat {
                     .registry
                     .classify(self.registry.submit(text.clone(), InputOrigin::Typed))
                 {
+                    Dispatch::History(query) => Line::HostCommand(HostCommand::History(query)),
                     Dispatch::SessionMetadata(operation) => {
                         Line::HostCommand(HostCommand::SessionMetadata(operation))
                     }
@@ -1586,6 +1587,18 @@ impl crate::run::InteractiveSeat for Seat {
             .expect("interactive coordinator lock")
             .take()
             .expect("the session takes its interactive coordinator once")
+    }
+
+    fn restore_control(&self, control: InteractiveControl) {
+        let mut owner = self
+            .coordinator
+            .lock()
+            .expect("interactive coordinator lock");
+        assert!(
+            owner.is_none(),
+            "only the completed driver restores its coordinator"
+        );
+        *owner = Some(control);
     }
 
     fn refresh_queue(&self, queue: QueueStatus) {

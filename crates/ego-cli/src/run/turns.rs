@@ -142,6 +142,8 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
         let (_ingress, control) = interactive_control();
         control
     }
+    /// Return terminal ingress ownership before re-entering rooted admission.
+    fn restore_control(&self, _control: InteractiveControl) {}
     /// Publish the coordinator's authoritative durable queue projection.
     fn refresh_queue(&self, _queue: QueueStatus) {}
     /// Publish the coordinator-owned compaction guard to the interactive surface.

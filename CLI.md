@@ -29,7 +29,7 @@ proposed.
 ```
 ego [PROMPT]                  interactive session (prompt submitted if given)
 ego run [PROMPT]              headless one-shot; PROMPT from argv, -f FILE, or stdin
-ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspace;
+ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or headless latest;
                               --answer QUESTION_ID=JSON answers pending input;
                               --name and --goal are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
@@ -145,7 +145,7 @@ omitted when empty: two states, identical bytes.
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
 | `ego [PROMPT]` | **yes** | asks once whether to trust project files before ambient reads, then runs the line-oriented session. Permission questions accept `allow`, `deny`, or `amend`; amended raw JSON parameters are prepared and classified again from the beginning |
-| `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
+| `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it a human terminal shows the session picker across roots; headless execution takes the most recently updated session of this workspace. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | **yes** | creates a durable lineage branch at the idle tip or after the completed turn containing `--at ITEM_ID`, without copying source spend or run state |
 | `ego compact` | **yes** | a required request ID derives one idempotent clean target from the existing idle compaction operation and supports later continuation |
@@ -938,7 +938,7 @@ use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /fork [message-id] /compact /clear /usage /statusline /export /doctor /quit /new
+/sessions /history QUERY /fork [message-id] /compact /clear /usage /statusline /export /doctor /quit /new
 /name /goal /tools /expand /skills /hooks /version`. These 25 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
@@ -1658,14 +1658,21 @@ from providers that enumerate themselves.
 
 ### Interactive session picker
 
-On a human terminal, `/sessions` opens the current workspace's saved sessions,
-newest first, excluding the active session. Rows show title, model, and updated
-local time. Type to filter title or model, use Up/Down to select, Enter to resume,
-and Esc to cancel. The next prompt uses the selected session's durable context;
-the current model selection stays in effect. Sessions with unfinished work need
-`ego resume ID`, which owns recovery. Pending source work prevents switching.
-With sequential stdin, `/sessions` keeps the table. `ego ls` and machine output
-keep their existing format.
+On a human terminal, `/sessions` and `ego resume` without an ID open the saved
+sessions across project roots, newest first. `/sessions` excludes the active
+session. Rows show title, model, updated local time, recorded root, and summary.
+Type to filter title, model, or summary, use Up/Down to select, Enter to resume,
+and Esc to cancel. Missing roots remain visible as `[unavailable]` and cannot
+be selected. `/history QUERY` searches the conversational FTS5 index and opens
+the same picker with the matching sessions.
+
+The next prompt uses the selected session's durable context. Switching to another
+root re-enters normal run admission with that root: project instructions, config,
+trust, and tool confinement are rebuilt. Within the current root, the active model
+selection stays in effect. Sessions with unfinished work require `ego resume ID`,
+which owns recovery. Pending source work prevents switching. Sequential stdin keeps
+the `/sessions` table; headless `ego resume` without an ID keeps latest-in-workspace
+selection. `ego ls` and machine output keep their existing format.
 
 On human-terminal resume, the transcript replays the most recent 10 user turns
 before the composer, using canonical final answers and the live compact tool
