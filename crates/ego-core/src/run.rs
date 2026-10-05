@@ -3109,7 +3109,12 @@ where
                 Err(error) => return Err(lifecycle_run_error(error)),
             };
             match folded.snapshot.status {
-                RunStatus::Uncertain => return Err(LifecycleError::EffectUncertain),
+                RunStatus::Uncertain => {
+                    if let Ok(lease) = folded.last_lease() {
+                        self.release_live_attachment(folded.snapshot.run_id, lease);
+                    }
+                    return Err(LifecycleError::EffectUncertain);
+                }
                 // Paused belongs with the terminal statuses and not with
                 // `Cancelling`: a paused run has already stopped at a durable
                 // boundary, so there is no in-flight effect to cancel and

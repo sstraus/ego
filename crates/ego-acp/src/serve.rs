@@ -2227,10 +2227,15 @@ fn lifecycle_error(error: &LifecycleError) -> Error {
         // Transient by construction: another writer has the session, or moved
         // it under this request. Retrying is what these are for, and both
         // methods are idempotent so retrying is safe.
-        LifecycleError::LeaseHeld
-        | LifecycleError::Active
-        | LifecycleError::Conflict
-        | LifecycleError::EffectUncertain => ErrorCode::Other(SESSION_BUSY),
+        LifecycleError::LeaseHeld | LifecycleError::Active | LifecycleError::Conflict => {
+            ErrorCode::Other(SESSION_BUSY)
+        }
+        LifecycleError::EffectUncertain => {
+            return Error::new(
+                ErrorCode::InternalError.into(),
+                "the session's last run has an uncertain effect; close it with `session/close` and start a new chat with `session/new`",
+            );
+        }
         // ego failed. Not the caller's parameters, and not something a retry
         // is promised to fix.
         LifecycleError::Store(_)
@@ -3370,6 +3375,30 @@ where
                     };
                     if let Err(error) = unadmitted.refuse(durable_session) {
                         return responder.respond_with_error(error);
+                    }
+                    // Read the durable run even if a failed load left no local
+                    // attachment. Retrying an uncertain effect cannot recover it.
+                    match controller.status_by_session(durable_session).await {
+                        Ok(snapshot) if snapshot.status() == RunStatus::Uncertain => {
+                            let recovery = format!(
+                                "run {} has an uncertain effect; close this session with `session/close` and start a new chat with `session/new`",
+                                snapshot.run_id(),
+                            );
+                            let message = match snapshot.settlement() {
+                                Some(settlement) => failure_message(&recovery, settlement),
+                                None => recovery,
+                            };
+                            return responder.respond_with_error(Error::new(
+                                ErrorCode::InternalError.into(),
+                                message,
+                            ));
+                        }
+                        Ok(_) | Err(RunError::Store(StoreError::NotFound)) => {}
+                        Err(error) => {
+                            return responder.respond_with_error(
+                                Error::internal_error().data(error.to_string()),
+                            );
+                        }
                     }
                     // Serialized, so a numeric `41` and a string `"41"` stay
                     // two different requests exactly as JSON-RPC says they are.
