@@ -135,7 +135,7 @@ pub(super) async fn drive_headless_turn(
     ));
     let instructions_loaded = config.system.is_some();
     let runtime = GenerationRuntime {
-        source: source.bind(http, cancel.clone(), run_deadline),
+        source: source.bind(Arc::clone(&http), cancel.clone(), run_deadline),
         policy_source: Arc::clone(&policy_source),
         gate: gate.clone(),
         config,
@@ -255,6 +255,7 @@ pub(super) async fn drive_headless_turn(
         Some(elicitor) => loop_.with_elicitor(elicitor),
         None => loop_,
     };
+    let loop_ = super::composition::with_destructive_judge(loop_, http);
     let loop_ = super::composition::with_permission_analysis(loop_, hook_trust);
     let mut loop_ = if judge_available {
         loop_.with_judge(JudgeContext {

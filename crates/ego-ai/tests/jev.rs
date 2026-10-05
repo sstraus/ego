@@ -402,3 +402,6 @@ async fn explicit_api_key_gateway_resolves_the_named_environment_at_call_time() 
         format!("Bearer {expected}").as_bytes()
     );
 }
+
+#[path = "jev/destructive.rs"]
+mod destructive;

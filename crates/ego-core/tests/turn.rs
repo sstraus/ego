@@ -88,6 +88,7 @@ use serde_json::json;
 mod common;
 
 mod turn {
+    mod destructive;
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 

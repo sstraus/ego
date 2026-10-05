@@ -1,8 +1,10 @@
 //! One Decisions client for router, destructive and wake questions.
 pub mod calibration;
 mod configured;
+mod destructive;
 use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method, bearer_header, public_header};
 pub use configured::ConfiguredDecisions;
+pub use destructive::JevDestructiveJudge;
 use ego_core::credentials::SecretMaterial;
 use futures::StreamExt;
 use serde_json::{Value, json};

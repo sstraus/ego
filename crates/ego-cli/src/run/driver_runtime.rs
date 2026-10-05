@@ -201,7 +201,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&$ports)))
                 as Arc<dyn ego_ai::http::Http>;
             let runtime = GenerationRuntime {
-                source: source.bind(http, $cancel.clone(), run_deadline),
+                source: source.bind(Arc::clone(&http), $cancel.clone(), run_deadline),
                 policy_source: Arc::clone(&policy_source),
                 gate: gate.clone(),
                 config: config.clone(),
@@ -275,6 +275,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             } else {
                 loop_
             };
+            let loop_ = super::composition::with_destructive_judge(loop_, http);
             super::composition::with_permission_analysis(loop_, skill_trust)
                 .with_execution_observation($observation, $probe_evidence)
         }};
@@ -1729,7 +1730,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 as Arc<dyn ego_ai::http::Http>;
                                             let runtime = GenerationRuntime {
                                                 source: source.bind(
-                                                    http,
+                                                    Arc::clone(&http),
                                                     compaction_cancel.clone(),
                                                     run_deadline,
                                                 ),
@@ -1813,6 +1814,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                     exec_caps: observation.capabilities(),
                                                 });
                                             }
+                                            let compaction =
+                                                super::composition::with_destructive_judge(
+                                                    compaction, http,
+                                                );
                                             let mut compaction =
                                                 super::composition::with_permission_analysis(
                                                     compaction,

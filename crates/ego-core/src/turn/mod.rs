@@ -936,6 +936,7 @@ pub struct TurnLoop<'session, 'turn> {
     prompt_snapshot: crate::session::PromptSnapshot,
     lineage_root: SessionId,
     judge: Option<JudgeContext>,
+    destructive_judge: Option<Arc<dyn crate::permit::analysis::DestructiveJudge>>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
         crate::config::Trust,
@@ -1080,6 +1081,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             prompt_snapshot,
             lineage_root: session_id,
             judge: None,
+            destructive_judge: None,
             analysis_cache: None,
             analysis_observation: None,
             execution_observation: None,
@@ -1104,6 +1106,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     /// Attach the stable host facts for the optional judge seat.
     pub fn with_judge(mut self, judge: JudgeContext) -> Self {
         self.judge = Some(judge);
+        self
+    }
+
+    /// Attach the calibrated destructive judge for pending Unknown exec calls.
+    pub fn with_destructive_judge(
+        mut self,
+        judge: Arc<dyn crate::permit::analysis::DestructiveJudge>,
+    ) -> Self {
+        self.destructive_judge = Some(judge);
         self
     }
 
@@ -4187,6 +4198,31 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         turn: TurnId,
         pending: &Pending,
     ) -> Result<JudgeRun, StoreError> {
+        if policy.destructive_candidate(pending.call())
+            && let Some(judge) = self.destructive_judge.as_ref()
+        {
+            let opinion = match await_controlled(
+                &self.journal,
+                &self.cancel,
+                &mut self.control,
+                turn,
+                judge.judge(policy_snapshot.workspace().as_path(), pending.call()),
+                InterruptDisposition::Return,
+            )
+            .await
+            {
+                Controlled::Completed(opinion) => opinion,
+                Controlled::Interrupted => {
+                    return Ok(JudgeRun::Ended(ExitReason::Cancelled(
+                        self.cancel.cause().unwrap_or(CancelCause::User),
+                    )));
+                }
+                Controlled::Failed(cause) => return Err(cause),
+            };
+            if opinion != crate::permit::analysis::DestructiveOpinion::CurrentJudge {
+                return Ok(JudgeRun::Destructive(opinion));
+            }
+        }
         if policy.mode() != Mode::Auto {
             return Ok(JudgeRun::Unavailable);
         }
@@ -4880,6 +4916,25 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                     .await?
                                 {
                                     JudgeRun::Unavailable => pending,
+                                    JudgeRun::Destructive(opinion) => {
+                                        match policy.settle_destructive(pending, opinion) {
+                                            Resolution::Settled(Ok(authorized)) => {
+                                                self.decided(
+                                                    turn,
+                                                    call,
+                                                    &hook_selector,
+                                                    true,
+                                                    authorized.by().clone(),
+                                                )
+                                                .await?;
+                                                break authorized;
+                                            }
+                                            Resolution::Ask(pending) => pending,
+                                            _ => unreachable!(
+                                                "destructive scrutiny only allows or asks"
+                                            ),
+                                        }
+                                    }
                                     JudgeRun::Ended(ExitReason::Cancelled(_)) => {
                                         self.decided(
                                             turn,
@@ -5624,6 +5679,7 @@ enum DriveOutcome {
 }
 
 enum JudgeRun {
+    Destructive(crate::permit::analysis::DestructiveOpinion),
     Unavailable,
     Ended(ExitReason),
     Decided {
