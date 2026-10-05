@@ -538,7 +538,7 @@ fn render_mcp_preview(text: &str, path: Option<&std::path::Path>) -> String {
     let separator = if preview.ends_with('\n') { "" } else { "\n" };
     let saved = match path {
         Some(path) => format!(
-            "Full output written to: {}. Use read(path) or grep(query, path) to read it.",
+            "Full output written to: {}. Use read(path) to read it.",
             path.display()
         ),
         None => "Full output could not be saved.".to_owned(),

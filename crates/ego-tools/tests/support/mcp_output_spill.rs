@@ -107,7 +107,8 @@ fn mcp_output_spill_large_result_keeps_full_bytes_readable_and_events_small() {
             .model_text()
             .contains("showing first 20480 bytes of 120019 bytes")
     );
-    assert!(answer.model_text().contains("grep(query, path)"));
+    assert!(answer.model_text().contains("Use read(path) to read it."));
+    assert!(!answer.model_text().contains("grep(query, path)"));
     assert!(!answer.model_text().contains("TAIL ONLY IN FILE"));
     let event = serde_json::to_string(&EventKind::ToolCallCompleted {
         ok: true,
