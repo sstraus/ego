@@ -1933,15 +1933,6 @@ mod turn {
                 },
                 AiEvent::Stop(StopReason::ToolUse),
             ],
-            vec![
-                AiEvent::ToolCall {
-                    call_id: "child-read".into(),
-                    name: "read".into(),
-                    args: json!({"path":"/ws/note.txt"}).to_string(),
-                },
-                AiEvent::Stop(StopReason::ToolUse),
-            ],
-            vec![AiEvent::Stop(StopReason::Stop)],
             vec![AiEvent::Stop(StopReason::Stop)],
         ])
         .with_rules(&["write(*)"], &[]);
@@ -1979,29 +1970,35 @@ mod turn {
             .expect("store accepts the batch");
         assert!(outcome.ok);
         let calls = fx.generator.calls();
-        let child_follow_up = calls
-            .iter()
-            .find(|call| {
-                call.messages.messages().iter().flat_map(|message| &message.content).any(|block| {
-                matches!(block, ContentBlock::ToolResult {call_id, ..} if call_id == "child-read")
-            })
-            })
-            .expect("child receives its read result");
-        let output = child_follow_up
+        assert_eq!(calls.len(), 2, "a refused mixed batch must not run a child");
+        let feedback: Vec<_> = calls[1]
             .messages
             .messages()
             .iter()
             .flat_map(|message| &message.content)
-            .find_map(|block| match block {
+            .filter_map(|block| match block {
                 ContentBlock::ToolResult {
-                    call_id, output, ..
-                } if call_id == "child-read" => Some(output.as_str()),
+                    call_id,
+                    output,
+                    is_error,
+                    ..
+                } => Some((call_id.as_str(), output.as_str(), *is_error)),
                 _ => None,
             })
-            .unwrap();
+            .collect();
+        assert_eq!(feedback.len(), 2, "every mixed-batch call needs feedback");
+        for (call_id, output, is_error) in feedback {
+            assert!(matches!(call_id, "parent-write" | "child-task"));
+            assert!(is_error);
+            assert_eq!(
+                output,
+                "task calls cannot be mixed with other tool calls in one provider response"
+            );
+        }
         assert_eq!(
-            output, "new contents",
-            "child must analyze the updated workspace"
+            fx.fs.read(&CanonPath::new("/ws/note.txt")).unwrap(),
+            b"old contents",
+            "a refused batch must not write"
         );
     }
 

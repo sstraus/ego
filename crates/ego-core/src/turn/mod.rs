@@ -2732,11 +2732,23 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 return Ok(DriveOutcome::Ended(exit, None));
             }
 
-            if pending.len() != 1
+            let batch_refusal = if pending.len() != 1
                 && pending.iter().any(|call| {
                     matches!(call.selected.as_ref(), Some(Ok(RegisteredTool::Skill(_))))
-                })
+                }) {
+                Some("a Skill call must be the only call in its provider response")
+            } else if pending
+                .iter()
+                .any(|call| matches!(call.selected.as_ref(), Some(Ok(RegisteredTool::Task))))
+                && pending
+                    .iter()
+                    .any(|call| !matches!(call.selected.as_ref(), Some(Ok(RegisteredTool::Task))))
             {
+                Some("task calls cannot be mixed with other tool calls in one provider response")
+            } else {
+                None
+            };
+            if let Some(refusal) = batch_refusal {
                 for call in &pending {
                     self.journal.append(
                         turn,
@@ -2744,9 +2756,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         Some(call.started),
                         EventKind::ToolCallCompleted {
                             ok: false,
-                            result: ToolResult::builtin(
-                                "a Skill call must be the only call in its provider response",
-                            ),
+                            result: ToolResult::builtin(refusal),
                         },
                     )?;
                 }
