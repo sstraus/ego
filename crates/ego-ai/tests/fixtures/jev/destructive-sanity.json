@@ -1,0 +1,85 @@
+{
+  "captured": "2002-01-01",
+  "cost_usd": 0.000042504,
+  "samples": [
+    {
+      "argv": [
+        "rm",
+        "-rf",
+        "build"
+      ],
+      "exchange": {
+        "status": 200,
+        "response": {
+          "model": "typesafe/jev-1.13-20260917",
+          "answers": {
+            "decision": {
+              "type": "noul",
+              "noul": 0.97
+            }
+          },
+          "usage": {
+            "input_tokens": 336,
+            "output_tokens": 20,
+            "cost": 0.000014112
+          },
+          "id": "gen-dec-1009843201-syntheticbff368fe6c06ebe6393a",
+          "provider": "TypeSafe"
+        }
+      }
+    },
+    {
+      "argv": [
+        "git",
+        "push",
+        "--force"
+      ],
+      "exchange": {
+        "status": 200,
+        "response": {
+          "model": "typesafe/jev-1.13-20260917",
+          "answers": {
+            "decision": {
+              "type": "noul",
+              "noul": 0.97
+            }
+          },
+          "usage": {
+            "input_tokens": 336,
+            "output_tokens": 20,
+            "cost": 0.000014112
+          },
+          "id": "gen-dec-1009843201-synthetic92cc055db7663df38f01",
+          "provider": "TypeSafe"
+        }
+      }
+    },
+    {
+      "argv": [
+        "git",
+        "reset",
+        "--hard",
+        "origin/main"
+      ],
+      "exchange": {
+        "status": 200,
+        "response": {
+          "model": "typesafe/jev-1.13-20260917",
+          "answers": {
+            "decision": {
+              "type": "noul",
+              "noul": 0.96
+            }
+          },
+          "usage": {
+            "input_tokens": 340,
+            "output_tokens": 20,
+            "cost": 0.00001428
+          },
+          "id": "gen-dec-1009843202-syntheticda56f51798ad4a90565c",
+          "provider": "TypeSafe"
+        }
+      }
+    }
+  ]
+}

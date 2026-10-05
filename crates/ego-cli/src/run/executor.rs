@@ -574,7 +574,7 @@ impl CliCompactionCommand {
         let http =
             Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
         let runtime = GenerationRuntime {
-            source: source.bind(http, cancel.clone(), run_deadline),
+            source: source.bind(Arc::clone(&http), cancel.clone(), run_deadline),
             policy_source,
             gate,
             config,
@@ -602,6 +602,7 @@ impl CliCompactionCommand {
                 exec_caps: observation.capabilities(),
             });
         }
+        loop_ = super::composition::with_destructive_judge(loop_, http);
         loop_ = super::composition::with_permission_analysis(loop_, Trust::Untrusted)
             .with_execution_observation(observation, probe_evidence);
         let target_tools = registry.iter().map(RegisteredTool::descriptor).collect();

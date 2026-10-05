@@ -2,6 +2,27 @@
 
 use super::*;
 
+pub(super) fn with_destructive_judge<'session: 'turn, 'turn>(
+    loop_: TurnLoop<'session, 'turn>,
+    http: Arc<dyn ego_ai::http::Http>,
+) -> TurnLoop<'session, 'turn> {
+    let config = crate::config::jev(crate::config::ego_home().as_deref());
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let client = match (config, home) {
+        (Ok(config), Some(home)) => Ok(ego_ai::jev::ConfiguredDecisions::new(
+            config,
+            home,
+            Duration::from_secs(1),
+        )),
+        _ => Err(ego_ai::jev::DecisionError::InvalidConfiguration),
+    };
+    loop_.with_destructive_judge(Arc::new(ego_ai::jev::JevDestructiveJudge::new(
+        client, http,
+    )))
+}
+
 pub(super) fn with_permission_analysis<'session: 'turn, 'turn>(
     loop_: TurnLoop<'session, 'turn>,
     trust: Trust,

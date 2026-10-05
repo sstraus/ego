@@ -403,6 +403,9 @@ async fn explicit_api_key_gateway_resolves_the_named_environment_at_call_time() 
     );
 }
 
+#[path = "jev/destructive.rs"]
+mod destructive;
+
 // Catches: inverted/inexact calibrated bands, fabricated zero cost, off-root HTTP,
 // or a stalled exchange blocking the fixed-model fallback beyond the hop deadline.
 #[tokio::test]
