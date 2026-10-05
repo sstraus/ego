@@ -944,7 +944,6 @@ impl ConfigLayer {
             return Err(ConfigError::Invalid {
                 source,
                 message: "cache = long requires explicit user config".to_owned(),
-
             });
         }
         if let Some((name, _)) = value.profile.iter().find(|(name, profile)| {
