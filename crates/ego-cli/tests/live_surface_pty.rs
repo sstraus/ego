@@ -96,6 +96,10 @@ fn successor_accepts_next_turn(action: &str) {
                 "forked session"
             },
         );
+        // The receipt can be printed while activation still interrupts the
+        // previous read. Wait for the successor's completed empty frame, not
+        // a quiet interval or the prompt token in an unfinished repaint.
+        until_successor_ready(&reader, &mut output, start, action, &stub);
         drain_until_quiet(&reader, &mut output);
     }
     let requests_before = stub.requests().len();
@@ -1700,6 +1704,35 @@ fn rendered_prompt_count(output: &[u8]) -> usize {
                 || tail.starts_with(b"\n")
         })
         .count()
+}
+
+fn until_successor_ready(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    action: &str,
+    stub: &Stub,
+) {
+    let receipt = format!("{action}ed session");
+    let receipt_end = start
+        + output[start..]
+            .windows(receipt.len())
+            .position(|window| window == receipt.as_bytes())
+            .expect("successor receipt was observed")
+        + receipt.len();
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while support::ready_prompt_count(&output[receipt_end..]) == 0 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "{action} successor composer wait failed: {error}; requests: {:?}; PTY: {:?}",
+                stub.requests(),
+                String::from_utf8_lossy(output),
+            );
+        });
+        output.extend(chunk);
+    }
 }
 
 fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
