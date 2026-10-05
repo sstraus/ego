@@ -11,7 +11,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::negotiate::{SERVED, negotiate};
-use crate::project::{AcpNotice, project_notice_v1, project_replay_v1, stop_reason_v1};
+use crate::project::{
+    AcpNotice, project_goal_plan_v1, project_notice_v1, project_replay_v1, stop_reason_v1,
+};
 use crate::question::{AcpQuestionAdapter, CapabilityCapture};
 use agent_client_protocol::{
     Agent, AgentProtocolRouter, ByteStreams, Client, ConnectTo, ConnectionTo, Error, ErrorCode,
@@ -1647,6 +1649,7 @@ trait LifecycleOperations: Send + Sync {
     ) -> Result<SessionPage, LifecycleError>;
     fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError>;
     fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError>;
+    fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError>;
     fn lineage_info(&self, id: SessionId) -> Result<Option<SessionLineageInfo>, LifecycleError>;
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment>;
     fn resume<'a>(
@@ -1699,6 +1702,10 @@ where
 
     fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
         SessionLifecycle::meta(self, id)
+    }
+
+    fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError> {
+        SessionLifecycle::goal(self, id)
     }
 
     fn lineage_info(&self, id: SessionId) -> Result<Option<SessionLineageInfo>, LifecycleError> {
@@ -2319,7 +2326,16 @@ fn emit_info(
                 .updated_at(meta.updated.to_rfc3339())
                 .meta(session_meta(hold, meta.summary.as_deref(), lineage)),
         ),
-    ))
+    ))?;
+    if let Some(lifecycle) = lifecycle {
+        let goal = lifecycle
+            .goal(meta.id)
+            .map_err(|error| lifecycle_error(&error))?;
+        if let Some(plan) = project_goal_plan_v1(goal.as_ref()) {
+            connection.send_notification(v1::SessionNotification::new(id.clone(), plan))?;
+        }
+    }
+    Ok(())
 }
 
 fn emit_config_options(
@@ -3767,7 +3783,7 @@ where
                 let sessions = sessions.clone();
                 let unadmitted = unadmitted.clone();
                 let confinement = confinement.clone();
-                async move |request: v1::SetSessionConfigOptionRequest, responder, _cx| {
+                async move |request: v1::SetSessionConfigOptionRequest, responder, cx: ConnectionTo<Client>| {
                     // Absent controls are unavailable, not partially emulated:
                     // the same rule that makes an unadvertised lifecycle method
                     // answer `method_not_found` rather than pretend.
@@ -3815,6 +3831,7 @@ where
                     // picker showing a confinement the run does not have, and
                     // a host reading its own selection back would be told the
                     // change landed when nothing downstream had moved.
+                    let mode_changed = matches!(change, SessionControlChange::Mode(_));
                     let staged = if matches!(change, SessionControlChange::Sandbox(_)) {
                         sessions.stage_confinement(
                             &request.session_id, session, controls.as_ref(), change,
@@ -3823,9 +3840,17 @@ where
                         controls.stage(session, change).map_err(|error| control_error(&error))
                     };
                     match staged {
-                        Ok(state) => responder.respond(v1::SetSessionConfigOptionResponse::new(
-                            crate::controls::options(&state),
-                        )),
+                        Ok(state) => {
+                            let options = crate::controls::options(&state);
+                            responder.respond(v1::SetSessionConfigOptionResponse::new(options.clone()))?;
+                            cx.send_notification(v1::SessionNotification::new(request.session_id.clone(),
+                                v1::SessionUpdate::ConfigOptionUpdate(v1::ConfigOptionUpdate::new(options))))?;
+                            if mode_changed && let Some(mode) = state.mode.current {
+                                cx.send_notification(v1::SessionNotification::new(request.session_id,
+                                    v1::SessionUpdate::CurrentModeUpdate(v1::CurrentModeUpdate::new(mode.as_str()))))?;
+                            }
+                            Ok(())
+                        },
                         Err(error) => responder.respond_with_error(error),
                     }
                 }

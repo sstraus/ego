@@ -822,6 +822,11 @@ where
         self.metadata.meta(id)
     }
 
+    /// Read the current durable goal for an attached consumer.
+    pub fn goal(&self, id: SessionId) -> Result<Option<GoalRecord>, LifecycleError> {
+        self.metadata.goal(id)
+    }
+
     /// Derive tree metadata without retaining a second lineage authority.
     pub fn lineage_info(
         &self,

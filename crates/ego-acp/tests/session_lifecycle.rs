@@ -1204,6 +1204,36 @@ async fn compaction_children_project_lineage_in_list_and_load_info() {
     connection.finish().await;
 }
 
+// Catches: a durable goal set outside the current connection never reaching
+// the host's plan card on attachment.
+#[tokio::test]
+async fn loading_a_goal_emits_one_current_plan_entry() {
+    let fixture = support::DurableAcpFixture::new();
+    let (session, _) = fixture.seed_settled_messages(ROOT);
+    fixture.set_current_goal(&session, "Finish the ACP surface");
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (loaded, _) = connection
+        .request(
+            "session/load",
+            serde_json::json!({"sessionId": session, "cwd": ROOT, "mcpServers": []}),
+        )
+        .await;
+    assert!(loaded.get("result").is_some(), "load failed: {loaded}");
+    let announced = connection.announced().await;
+    let plans = updates(&announced)
+        .into_iter()
+        .filter(|params| params["update"]["sessionUpdate"] == "plan")
+        .collect::<Vec<_>>();
+    assert_eq!(plans.len(), 1, "no complete current plan: {announced:?}");
+    let entries = plans[0]["update"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["content"], "Finish the ACP surface");
+    assert_eq!(entries[0]["status"], "in_progress");
+    assert_eq!(entries[0]["_meta"]["ego"]["goalState"], "active");
+    connection.finish().await;
+}
+
 #[tokio::test]
 async fn failed_mcp_admission_leaves_no_fork_child_listed() {
     let fixture = support::DurableAcpFixture::new();

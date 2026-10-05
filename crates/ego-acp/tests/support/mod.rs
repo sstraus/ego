@@ -102,6 +102,22 @@ impl SessionRunLifecycle for InactiveRuns {
 }
 
 impl DurableAcpFixture {
+    pub fn set_current_goal(&self, session: &str, objective: &str) {
+        let session: SessionId = session.parse().unwrap();
+        let lease = self.store.acquire_inactive_lease(session).unwrap();
+        ego_core::session_lifecycle::SessionMetadata::new(
+            Arc::clone(&self.store),
+            Arc::new(TestClock),
+        )
+        .set_goal(
+            lease.as_ref(),
+            self.store.semantic_seq(&session),
+            objective.to_owned(),
+            ego_core::goal::GoalOwner::Operator,
+            ego_core::ceiling::Ceilings::default(),
+        )
+        .unwrap();
+    }
     /// Two successful turns, produced with the same domain journal facts as a run.
     pub fn seed_settled_messages(&self, root: &str) -> (String, [ItemId; 2]) {
         let lifecycle = SessionLifecycle::new(

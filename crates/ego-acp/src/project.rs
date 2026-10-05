@@ -736,13 +736,44 @@ pub fn project_acp_updates_v1(
     caps: &ModelCapabilities,
     root: &std::path::Path,
 ) -> Vec<v1::SessionUpdate> {
-    if needs_state(event) {
+    let mut updates = if needs_state(event) {
         project_acp_v1(event, state_after, caps)
             .into_iter()
             .collect()
     } else {
         project_updates_v1(event, root)
+    };
+    if matches!(
+        event,
+        PublicEvent::TurnStarted { .. } | PublicEvent::TurnCompleted { .. }
+    ) && let Some(plan) = project_goal_plan_v1(state_after.goal.as_ref())
+    {
+        updates.push(plan);
     }
+    updates
+}
+
+/// Present the current goal as one plan entry, without inventing plan steps.
+pub fn project_goal_plan_v1(
+    goal: Option<&ego_core::goal::GoalRecord>,
+) -> Option<v1::SessionUpdate> {
+    use ego_core::goal::GoalState;
+    let goal = goal?;
+    let status = match goal.state {
+        GoalState::Active => v1::PlanEntryStatus::InProgress,
+        GoalState::Achieved => v1::PlanEntryStatus::Completed,
+        GoalState::Blocked => v1::PlanEntryStatus::Pending,
+    };
+    Some(v1::SessionUpdate::Plan(v1::Plan::new(vec![
+        v1::PlanEntry::new(&goal.objective, v1::PlanEntryPriority::Medium, status).meta(
+            serde_json::Map::from_iter([(
+                "ego".to_owned(),
+                serde_json::json!({
+                    "goalId": goal.id, "goalState": goal.state,
+                }),
+            )]),
+        ),
+    ])))
 }
 
 /// Project one `PublicEvent` onto ACP protocol v2's `SessionUpdate`.
