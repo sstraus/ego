@@ -3220,6 +3220,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
     until_prompt_from(&reader, &mut output, cancel_start);
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(40, 100, 0);
@@ -3250,6 +3251,13 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     input.write_all(b"/usage\r").expect("usage command");
     input.flush().expect("usage flush");
     until_normalized(&reader, &mut output, usage_start, "workspace");
+    until_local_action_completed(
+        &reader,
+        &mut output,
+        usage_start,
+        "usage",
+        SLASH_ACTION_DEADLINE,
+    );
     drain_until_quiet(&reader, &mut output);
     let usage = normalized(&output[usage_start..]);
     assert!(usage.contains("0.0000 USD"), "known usage cost: {usage:?}");
@@ -3267,9 +3275,17 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
         "completed token counts survive: {usage:?}"
     );
 
+    let quit_start = output.len();
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
+    until_normalized(&reader, &mut output, quit_start, "unsent drafts");
     bounded_exit(child);
+    drain(&reader, &mut output);
+    assert!(
+        normalized(&output[quit_start..]).contains("unsent drafts"),
+        "/quit must be accepted before the process exits: {:?}",
+        normalized(&output[quit_start..]),
+    );
     drop(input);
     drop(pair);
     reader_join.join().expect("reader thread");
