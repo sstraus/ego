@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -212,6 +213,11 @@ pub trait McpDuplexEffects: Send {
 
 /// Consumer-owned factory for one fresh management/discovery duplex.
 pub trait McpDuplexEffectsFactory: Send + Sync {
+    /// Only ACP session effects retain children; command runtimes remain one-shot.
+    fn session_stdio(&self) -> Option<Arc<crate::McpStdioSession>> {
+        None
+    }
+
     fn create(
         &self,
         server: McpServerName,
