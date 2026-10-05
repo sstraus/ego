@@ -1615,7 +1615,7 @@ reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
                                    # or "unknown" (fails closed) or "any"
 default_reasoning_effort = "medium" # optional; omission means unknown
 cancel = "cooperative"             # "unsupported" | "cooperative" | "immediate"
-cache = "short"                    # "none" | "short" | "long"
+cache = "short"                    # "none" | "short" (5m) | "long" (1h, user config only)
 transport = "sse"
 
 # `image_input` is either a bare string — `"unknown"` (the default, and it

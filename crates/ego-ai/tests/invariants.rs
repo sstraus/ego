@@ -431,6 +431,7 @@ async fn one_turn(
             policy_source: Arc::new(FixedPolicySource),
             gate,
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system: None,
                 identity: None,
                 token_ceiling: None,

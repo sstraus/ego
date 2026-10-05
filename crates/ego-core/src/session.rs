@@ -236,6 +236,7 @@ pub struct PromptSnapshot {
 /// The ancestor-only result of a lineage replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayedContext {
+    lineage_root: SessionId,
     conversation: Conversation,
     prompt_snapshot: Option<PromptSnapshot>,
     session_pins: Vec<SessionId>,
@@ -243,6 +244,9 @@ pub struct ReplayedContext {
 }
 
 impl ReplayedContext {
+    pub fn lineage_root(&self) -> SessionId {
+        self.lineage_root
+    }
     pub fn prompt_snapshot(&self) -> Option<&PromptSnapshot> {
         self.prompt_snapshot.as_ref()
     }
@@ -274,6 +278,7 @@ impl<'a> ReplayContext<'a> {
     pub fn replay(&self, target: &SessionId) -> Result<ReplayedContext, ReplayError> {
         let Some(lineage) = self.source.lineage(target).map_err(map_source)? else {
             return Ok(ReplayedContext {
+                lineage_root: *target,
                 conversation: Conversation::new(Vec::new())
                     .expect("an empty conversation is valid"),
                 prompt_snapshot: None,
@@ -300,6 +305,15 @@ impl<'a> ReplayContext<'a> {
         lineage: SessionLineage,
         visited: &mut HashSet<SessionId>,
     ) -> Result<ReplayedContext, ReplayError> {
+        let lineage_root = walk_lineage(
+            self.source,
+            lineage,
+            &mut visited.clone(),
+            LineageEdges::ForksAndCompactions,
+        )?
+        .last()
+        .expect("a lineage has a source")
+        .source;
         let steps = walk_lineage(self.source, lineage, visited, LineageEdges::Forks)?;
         let session_pins = steps.iter().map(|step| step.source).collect();
         let frames: Vec<_> = steps
@@ -390,6 +404,7 @@ impl<'a> ReplayContext<'a> {
             });
         }
         Ok(ReplayedContext {
+            lineage_root,
             prompt_snapshot: state.prompt_snapshot.clone(),
             conversation,
             session_pins,

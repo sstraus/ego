@@ -136,6 +136,7 @@ fn context_checkpoint_frame(text: &str) -> String {
 #[test]
 fn main_checkpoint_baseline_uses_existing_gaps_and_expressibility_ports_only() {
     let request = GenRequest {
+        cache: None,
         model: "main-model".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, checkpoint())])
             .expect("checkpoint baseline history"),
@@ -502,6 +503,7 @@ fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
         let frame = context_checkpoint_frame(parsed.text());
 
         let request = GenRequest {
+            cache: None,
             model: "main-model".to_string(),
             messages: Conversation::new(vec![Message::text(Role::User, frame)])
                 .expect("size-sweep request history"),
@@ -808,6 +810,7 @@ fn compaction_turn_with_state(
             source,
             gate,
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system: None,
                 identity: None,
                 token_ceiling: None,

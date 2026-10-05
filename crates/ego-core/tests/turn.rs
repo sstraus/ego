@@ -1723,6 +1723,7 @@ mod turn {
             source: Arc::new(source),
             gate: gate.clone(),
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system,
                 identity: None,
                 token_ceiling,
@@ -6530,6 +6531,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -6768,6 +6770,7 @@ mod turn {
                 source,
                 gate: fx.gate.borrow().clone(),
                 config: TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -7059,6 +7062,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7187,6 +7191,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7249,6 +7254,7 @@ mod turn {
                         source: source.clone(),
                         gate: gate.clone(),
                         config: TurnConfig {
+                            cache: ego_core::generator::capabilities::CacheRetention::Short,
                             system: None,
                             identity: None,
                             token_ceiling: None,
@@ -7315,6 +7321,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7405,6 +7412,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7503,6 +7511,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7580,6 +7589,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7650,6 +7660,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7731,6 +7742,7 @@ mod turn {
                         source: source.clone(),
                         gate: gate.clone(),
                         config: TurnConfig {
+                            cache: ego_core::generator::capabilities::CacheRetention::Short,
                             system: None,
                             identity: None,
                             token_ceiling: None,
@@ -7836,6 +7848,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7952,6 +7965,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -8067,6 +8081,7 @@ mod turn {
                 "which model answered",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8141,6 +8156,7 @@ mod turn {
                 "which model?",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: Some(ego_core::turn::AgentIdentity {
                         version: "0.0.0".to_owned(),
@@ -8256,6 +8272,7 @@ mod turn {
                 "retry safely",
                 source.clone(),
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8374,6 +8391,7 @@ mod turn {
                 "permanent then fallback",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8420,6 +8438,7 @@ mod turn {
                 "possibly sent",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8500,6 +8519,7 @@ mod turn {
                 "use the fallback",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8607,6 +8627,7 @@ mod turn {
                 "skip the candidate",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8673,6 +8694,7 @@ mod turn {
                     "account missing usage",
                     source,
                     TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -8750,6 +8772,7 @@ mod turn {
                 "must refuse live replay",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,

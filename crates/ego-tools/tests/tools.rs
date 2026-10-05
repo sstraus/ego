@@ -1867,6 +1867,7 @@ mod end_to_end {
                     }),
                     gate,
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -1964,6 +1965,7 @@ mod end_to_end {
                     }),
                     gate,
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,

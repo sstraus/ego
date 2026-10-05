@@ -158,6 +158,7 @@ pub(super) async fn drive_execution<S: EventSink>(
     let interactive_metadata_ceilings = effective.ceilings.clone();
 
     let mut config = TurnConfig {
+        cache: effective.cache,
         system,
         identity: Some(AgentIdentity {
             version: crate::build_info::VERSION.to_owned(),

@@ -6,8 +6,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::digest::hmac_sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::config::Mode;
 use crate::event::time::{Clock, Timestamp};
@@ -611,30 +611,6 @@ fn validate_key(key: &[u8]) -> Result<(), ContinuationError> {
     } else {
         Ok(())
     }
-}
-
-fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut normalized = [0_u8; BLOCK];
-    if key.len() > BLOCK {
-        normalized[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        normalized[..key.len()].copy_from_slice(key);
-    }
-    let mut inner_pad = [0x36_u8; BLOCK];
-    let mut outer_pad = [0x5c_u8; BLOCK];
-    for index in 0..BLOCK {
-        inner_pad[index] ^= normalized[index];
-        outer_pad[index] ^= normalized[index];
-    }
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
-    inner.update(message);
-    let inner = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner);
-    outer.finalize().into()
 }
 
 fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {

@@ -216,6 +216,7 @@ mod lifecycle {
 
     fn request_for(model: &str) -> GenRequest {
         GenRequest {
+            cache: None,
             model: model.to_string(),
             messages: Conversation::new(vec![Message::text(
                 Role::User,

@@ -17,6 +17,7 @@ use ego_core::generator::types::{
 
 fn request(messages: Vec<Message>) -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gpt-4.1".to_string(),
         messages: Conversation::new(messages).expect("a valid conversation"),
         tools: Vec::new(),

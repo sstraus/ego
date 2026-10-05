@@ -120,6 +120,30 @@ impl WireFormat for OpenAiCompletions {
     }
 }
 
+/// OpenRouter owns routing affinity and routed Claude's explicit cache markers.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OpenRouterCompletions;
+
+impl WireFormat for OpenRouterCompletions {
+    fn build_request(
+        &self,
+        target: &RequestTarget<'_>,
+        req: &GenRequest,
+    ) -> Result<HttpRequest, RequestRefused> {
+        Ok(target.post_json(
+            PATH,
+            openrouter_request_body(req).map_err(RequestRefused::from)?,
+        ))
+    }
+    fn decode(
+        &self,
+        response: Result<HttpResponse, HttpError>,
+        cost: Option<Arc<dyn ProviderCost>>,
+    ) -> BoxStream<'static, AiEvent> {
+        decode(response, cost)
+    }
+}
+
 /// The path a provider row appends to its base URL to reach this format.
 ///
 /// Held here rather than in the provider table because it is a fact about the
@@ -462,6 +486,61 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         max_completion_tokens: req.max_output_tokens,
     };
     Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))
+}
+
+/// Provider-specific fields stay out of the generic compatible mapping.
+pub fn openrouter_request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::cache::routing_key(req, "openrouter").is_none() {
+        return request_body(req);
+    }
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&request_body(req)?).expect("request JSON");
+    if let Some(key) = super::cache::routing_key(req, "openrouter") {
+        body["session_id"] = key.into();
+    }
+    if req.model.starts_with("anthropic/")
+        && let Some(control) = super::cache::control(req)
+    {
+        let boundary = req
+            .cache
+            .as_ref()
+            .expect("cache metadata")
+            .stable_messages
+            .min(req.messages.messages().len());
+        let stable = wire_messages(&req.messages.messages()[..boundary]).len();
+        let messages = body["messages"].as_array_mut().expect("messages array");
+        for message in messages
+            .iter_mut()
+            .take(stable)
+            .rev()
+            .filter(|message| message["role"] != "system")
+        {
+            if let Some(content) = message.get_mut("content")
+                && super::cache::mark_content(content, &control)
+            {
+                break;
+            }
+        }
+        // OpenRouter normalizes all system turns; keep their ordered blocks in one turn.
+        let mut system = Vec::new();
+        messages.retain(|message| {
+            if message["role"] != "system" {
+                return true;
+            }
+            if let Some(text) = message["content"].as_str() {
+                system.push(serde_json::json!({"type":"text", "text":text}));
+            } else if let Some(blocks) = message["content"].as_array() {
+                system.extend(blocks.iter().cloned());
+            }
+            false
+        });
+        if !system.is_empty() {
+            let mut content = serde_json::Value::Array(system);
+            super::cache::mark_content(&mut content, &control);
+            messages.insert(0, serde_json::json!({"role":"system", "content":content}));
+        }
+    }
+    Ok(serde_json::to_vec(&body).expect("a JSON value serialises"))
 }
 
 /// The captured Pi/Hermes client projection for compatible endpoints.

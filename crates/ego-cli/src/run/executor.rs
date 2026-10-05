@@ -543,6 +543,7 @@ impl CliCompactionCommand {
             currency,
         ));
         let config = TurnConfig {
+            cache: effective.cache,
             system: system.clone(),
             identity: None,
             token_ceiling: effective.ceilings.tokens,

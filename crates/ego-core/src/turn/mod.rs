@@ -312,6 +312,7 @@ impl PauseToken {
 /// The generation settings a turn does not derive from its history.
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
+    pub cache: crate::generator::capabilities::CacheRetention,
     /// The system prompt, prepended to every generation's conversation.
     ///
     /// Captured with the stable identity on the first admitted generation of
@@ -689,6 +690,7 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
             ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::DefinitelyUnsent)
         })?;
         let request = GenRequest {
+            cache: None,
             model: profile.request_model.clone(),
             messages,
             tools: Vec::new(),
@@ -894,6 +896,7 @@ pub struct TurnLoop<'session, 'turn> {
     settlement_currency: crate::cost::CurrencyCode,
     config: TurnConfig,
     prompt_snapshot: crate::session::PromptSnapshot,
+    lineage_root: SessionId,
     judge: Option<JudgeContext>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
@@ -1035,6 +1038,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             settlement_currency,
             config: runtime.config,
             prompt_snapshot,
+            lineage_root: session_id,
             judge: None,
             analysis_cache: None,
             analysis_observation: None,
@@ -1207,6 +1211,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
     /// Attach the verified fork history and its cutoff's stable prompt epoch.
     pub fn with_replayed_context(mut self, replayed: &crate::session::ReplayedContext) -> Self {
+        self.lineage_root = replayed.lineage_root();
         if self.state().prompt_snapshot.is_none()
             && let Some(snapshot) = replayed.prompt_snapshot()
         {
@@ -1405,6 +1410,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 error,
             })?;
         let request = GenRequest {
+            cache: None,
             model: profile.request_model.clone(),
             messages: source_messages,
             tools: Vec::new(),
@@ -1573,6 +1579,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             checkpoint_frame(checkpoint.text()),
         ));
         let baseline = GenRequest {
+            cache: None,
             model: main.request_model.clone(),
             messages: Conversation::new(target_messages).map_err(CompactionError::History)?,
             tools: target_tools,
@@ -3188,13 +3195,19 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         &mcp_servers,
                     )
                 });
+                let (messages, stable_messages) = Self::with_host_context(
+                    candidate_conversation.clone(),
+                    self.tools.context_notes(),
+                    identity.as_deref(),
+                );
                 let mut request = GenRequest {
+                    cache: Some(crate::generator::types::PromptCache {
+                        lineage_root: self.lineage_root,
+                        retention: self.config.cache,
+                        stable_messages,
+                    }),
                     model: profile.request_model.clone(),
-                    messages: Self::with_host_context(
-                        candidate_conversation.clone(),
-                        self.tools.context_notes(),
-                        identity.as_deref(),
-                    ),
+                    messages,
                     tools: descriptors.clone(),
                     thinking: profile.thinking,
                     max_output_tokens: profile.output_ceiling(),
@@ -3228,11 +3241,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             },
                         },
                     )?;
-                    request.messages = Self::with_host_context(
+                    let (messages, stable_messages) = Self::with_host_context(
                         candidate_conversation.clone(),
                         self.tools.context_notes(),
                         identity.as_deref(),
                     );
+                    request.messages = messages;
+                    if let Some(cache) = request.cache.as_mut() {
+                        cache.stable_messages = stable_messages;
+                    }
                     gaps = primary_capabilities
                         .as_ref()
                         .unwrap_or(&profile.capabilities)
@@ -3635,10 +3652,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         history: Conversation,
         notes: Vec<String>,
         identity: Option<&str>,
-    ) -> Conversation {
-        if notes.is_empty() && identity.is_none() {
-            return history;
-        }
+    ) -> (Conversation, usize) {
+        let has_context = !notes.is_empty() || identity.is_some();
         let mut messages: Vec<Message> = history.into();
         let mut current_user = messages
             .iter()
@@ -3685,8 +3700,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             rendered.truncate(rendered.floor_char_boundary(MAX_CONTEXT_BYTES));
             rendered.push_str("\n[context truncated]");
         }
-        messages.insert(current_user, Message::text(Role::User, rendered));
-        Conversation::new(messages).expect("context data adds no tool call or answer")
+        if has_context {
+            messages.insert(current_user, Message::text(Role::User, rendered));
+        }
+        (
+            Conversation::new(messages).expect("context data adds no tool call or answer"),
+            current_user,
+        )
     }
 
     fn durable_skill_messages(&self) -> Result<Vec<Message>, StoreError> {

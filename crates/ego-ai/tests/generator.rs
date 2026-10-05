@@ -105,6 +105,7 @@ fn caps() -> ModelCapabilities {
 
 fn request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gpt-5.1".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, "list the files")])
             .expect("one user message is a conversation"),
@@ -119,6 +120,7 @@ fn request() -> GenRequest {
 /// format has nowhere to put, and refuses rather than drops.
 fn request_carrying_reasoning() -> GenRequest {
     GenRequest {
+        cache: None,
         messages: Conversation::new(vec![
             Message::text(Role::User, "list the files"),
             Message {

@@ -380,6 +380,7 @@ fn loop_with_session_state(
         source: Arc::new(TestGenerationSource { generator }),
         gate,
         config: TurnConfig {
+            cache: ego_core::generator::capabilities::CacheRetention::Short,
             system,
             identity,
             token_ceiling: None,
@@ -973,6 +974,11 @@ fn host_updates_preserve_the_prefix_and_leave_current_user_intent_last() {
         (&calls[1], "second intent", "revision two"),
     ] {
         let messages = call.messages.messages();
+        assert_eq!(
+            call.cache.as_ref().unwrap().stable_messages,
+            messages.len() - 2,
+            "the boundary excludes live data and the current intent"
+        );
         let user = messages.last().expect("current prompt");
         assert_eq!(user.role, Role::User);
         assert_eq!(
