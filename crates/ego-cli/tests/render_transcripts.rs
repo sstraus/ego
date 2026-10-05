@@ -17,7 +17,7 @@
 //! **They prove no bytes reach a terminal.** Like `ego-ai`'s wire goldens, this
 //! is a fixture, not an observation: it says what this code produces, not what
 //! iTerm2 draws. What iTerm2 draws is the ADR's matrix
-//! (`docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §4),
+//! (`ARCHITECTURE.md` §4),
 //! which is evidence from those terminals' own sources. These goldens hold the
 //! renderer to the shape that matrix says is safe.
 //!

@@ -1,6 +1,6 @@
 //! The litellm price table: fetched, decoded, and never trusted with a float.
 //!
-//! `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §5 makes this the
+//! `ARCHITECTURE.md` §5 makes this the
 //! *third* and last rate source — behind an operator's own quote and behind the
 //! provider's published prices — "because it is a third party's summary of
 //! someone else's prices". §6 puts the fetching and decoding here, in the crate
@@ -282,7 +282,7 @@ pub struct Table {
 /// What one model costs per token, as the table states it.
 ///
 /// Every category is `Option` and none defaults, because
-/// `docs/decisions/2026-08-21-how-a-model-is-metered.md` §9 requires an absent
+/// `ARCHITECTURE.md` §9 requires an absent
 /// figure to decode as absent. What an absence *means* for a ceiling is not
 /// decided here: this type reports what the document says.
 #[derive(Debug, Clone, PartialEq, Eq)]

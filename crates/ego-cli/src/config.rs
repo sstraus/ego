@@ -1138,7 +1138,7 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     // "the command line" are the same layer. The fix worth making is to give
     // `Source`'s `Display` a form that reads correctly in a sentence, which
     // changes every config diagnostic and belongs with `Source::rank` going
-    // public (`docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`
+    // public (`ARCHITECTURE.md`
     // "Consequences"), not with whichever caller noticed it.
     ConfigLayer::parse(Source::Flags, &toml)
         .map_err(|err| UsageError(format!("the command line: {err}")))

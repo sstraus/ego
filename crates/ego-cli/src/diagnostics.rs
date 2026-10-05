@@ -1,6 +1,6 @@
 //! Where the diagnostics this workspace already emits actually go.
 //!
-//! `docs/decisions/2026-09-07-diagnostics-get-a-destination-before-a-switch.md`.
+//! `ARCHITECTURE.md`.
 //!
 //! Seven crates depend on `tracing` and there are seventy-four call sites. Until
 //! this module existed, every one of those events was constructed and dropped:

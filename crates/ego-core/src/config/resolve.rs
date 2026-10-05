@@ -560,7 +560,7 @@ fn resolve_inner(
     // already present, was skipped, and kept whichever origin the merge loop
     // happened to leave: the *user* copy, the one whose deletion changes
     // nothing. See
-    // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
+    // `ARCHITECTURE.md`.
     for entry in system_deny {
         Ruleset::merge(&mut permissions.deny, entry, Source::System);
     }
@@ -580,8 +580,8 @@ fn resolve_inner(
     // the push was allowed. No better comparison rescues it — those two rules
     // are neither equal nor unrelated, and the only place their relationship
     // is decidable is against an actual call. See
-    // `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6 and
-    // `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §7.
+    // `ARCHITECTURE.md` §6 and
+    // `ARCHITECTURE.md` §7.
     //
     // The system-deny ceiling above is a *different* job and stays: it
     // guarantees a `/etc/ego` entry is present in the list at all, which no

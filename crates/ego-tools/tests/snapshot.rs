@@ -583,7 +583,7 @@ mod snapshot {
     /// A snapshot a *previous build of this binary* wrote, byte for byte, not
     /// a synthetic one with its version field poked. `ItemState` gained four
     /// required fields in
-    /// `docs/decisions/2026-08-21-tool-use-history.md`, so a v2 snapshot no
+    /// `ARCHITECTURE.md`, so a v2 snapshot no
     /// longer even parses — and the point of this test is that it does not
     /// have to. Whichever rejection fires, resume produces the same state a
     /// full replay does, which is what makes "a snapshot is a cache" true

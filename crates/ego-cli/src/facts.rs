@@ -1,6 +1,6 @@
 //! `models.toml`: where a hosted model's price and ceilings are *supplied*.
 //!
-//! `docs/decisions/2026-08-21-what-a-model-resolves-to.md` §1 forbids this
+//! `ARCHITECTURE.md` §1 forbids this
 //! repository from writing down a hosted price — "a price written from memory
 //! is not a cheaper version of a price, it is a number the budget gate will
 //! trust and that nothing can check" — and says the hosted path "works as soon
@@ -42,7 +42,7 @@
 //!
 //! ## Why a run with no money ceiling ignores the prices in it
 //!
-//! `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §5 gates every rate
+//! `ARCHITECTURE.md` §5 gates every rate
 //! source on a ceiling existing: "none of them is consulted at all unless a
 //! ceiling is configured". This file is the first of the three, so the gate
 //! starts here.
@@ -139,7 +139,7 @@ struct Retired {
 #[serde(deny_unknown_fields)]
 struct Supplied {
     capabilities: ModelCapabilities,
-    /// Optional, per `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3.
+    /// Optional, per `ARCHITECTURE.md` §3.
     /// A run that configures no ceiling needs no prices, so a `[model."x"]`
     /// entry with capabilities alone is a complete entry and resolves.
     /// Capabilities are not optional beside it, and the asymmetry is the

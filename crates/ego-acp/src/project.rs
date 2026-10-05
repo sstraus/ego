@@ -387,7 +387,7 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         // cancelled turn is over and a paused one is waiting, and a host that
         // read them as the same word would either offer no way to resume or
         // offer one that cannot work. See
-        // `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-session.md`.
+        // `ARCHITECTURE.md`.
         ExitReason::Paused => v2::StopReason::Other("_paused".to_string()),
         ExitReason::Provider => v2::StopReason::Other("_provider".to_string()),
         ExitReason::ContextOverflow => v2::StopReason::Other("_context_overflow".to_string()),

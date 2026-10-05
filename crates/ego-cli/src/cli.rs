@@ -14,7 +14,7 @@
 //!    "flags are never removed silently"). Both run before `clap` sees the
 //!    vector, so the answer is a sentence about *that flag* rather than
 //!    clap's "unexpected argument".
-//! 3. **`clap`, over what is left.** `docs/04-crates.md` names clap for
+//! 3. **`clap`, over what is left.** `ARCHITECTURE.md` names clap for
 //!    argv, and generating the reference and the completions from the same
 //!    definition (§4.5's last clause) is only possible while there is exactly
 //!    one definition.
@@ -378,7 +378,7 @@ pub enum SessionChoice {
     /// mistyped id succeed by silently starting an empty session, so the
     /// caller who asked to continue something would get a new thing wearing
     /// its name. See
-    /// `docs/decisions/2026-08-21-the-two-commands-the-header-unblocked.md` §3.
+    /// `ARCHITECTURE.md` §3.
     Resume(Option<String>),
 }
 
@@ -523,7 +523,7 @@ pub struct DoctorArgs {
 ///
 /// `sandbox` is a ceiling and not a default. A connected host picks its own
 /// confinement per session and can only pick something at least this strong
-/// (`docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`).
+/// (`ARCHITECTURE.md`).
 /// `None` means the operator named none, and the resolved configuration
 /// stands.
 #[derive(Debug, Clone, PartialEq, Eq)]

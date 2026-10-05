@@ -92,7 +92,7 @@ yaml-rust2.workspace = true
 # nobody selects is a keymap that can still shadow one we chose. Notably
 # `system_clipboard` is *not* a default either, so plain `Ctrl+V` arrives
 # unbound and there is no binding to displace — see
-# `docs/decisions/2026-08-22-the-seat-reads-before-the-screen-writes.md` §3.
+# `ARCHITECTURE.md` §3.
 reedline = { path = "../../vendor/reedline", version = "0.51.0", default-features = false, features = ["external_printer"] }
 unicode-width = "0.2.2"
 unicode-segmentation = "1.13.3"

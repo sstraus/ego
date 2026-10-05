@@ -2,7 +2,7 @@
 //!
 //! # Why this is a second mapping and not a fourth profile
 //!
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §4
+//! `ARCHITECTURE.md` §4
 //! allows a provider to differ in exactly three places, and Anthropic differs
 //! in the request's *shape* and the stream's *event model* — neither of which
 //! is one of the three. The three structural reasons, each asserted below
@@ -228,7 +228,7 @@ fn a_failed_tool_result_carries_the_flag_that_says_so() {
 /// `max_tokens` is required by the Messages API and
 /// `GenRequest::max_output_tokens` is an `Option`. A default invented here
 /// would be a silent choice about someone's bill, which is exactly what
-/// `docs/08-codex-critique.md` I5 forbids doing quietly.
+/// `ARCHITECTURE.md` I5 forbids doing quietly.
 #[test]
 fn a_request_with_no_ceiling_is_refused_rather_than_given_one() {
     let req = GenRequest {

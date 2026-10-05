@@ -5,7 +5,7 @@
 //! `$EGO_HOME` belong to the binary; what an inventory *is*, when two of them
 //! are the same, and whether a stored answer still applies are decisions, and
 //! decisions live in core. See
-//! `docs/decisions/2026-09-05-a-trust-answer-is-remembered-per-root.md`.
+//! `ARCHITECTURE.md`.
 
 use ego_core::config::{
     ExecutableDeclaration, ExecutableSurface, ProgramEvidence, Trust, TrustInventory, TrustLedger,

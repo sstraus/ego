@@ -1,6 +1,6 @@
 //! The profiles the conformance suite is parameterised over.
 //!
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §9:
+//! `ARCHITECTURE.md` §9:
 //! the suite runs **per provider**, not per code path, and every profile gets
 //! its own fixtures even where several select the same adapter. That is what
 //! makes the fixtures non-redundant rather than copies of one test — a fixture

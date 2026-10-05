@@ -26,7 +26,7 @@
 //! establishes who connected, and `ego_core::endpoint` decides which endpoint
 //! kinds exist and which authentication each compels. A2A serves `hyper` over
 //! the stream it is handed and ACP serves `ByteStreams` over the same one; see
-//! `docs/decisions/2026-09-07-one-inbound-endpoint-serves-every-host-protocol.md`.
+//! `ARCHITECTURE.md`.
 
 pub mod auth;
 pub mod card;

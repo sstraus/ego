@@ -2,7 +2,7 @@
 //!
 //! It looks like [`openai_completions`](super::openai_completions) and it is
 //! not that format.
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §8
+//! `ARCHITECTURE.md` §8
 //! settles the question from a measurement rather than from the resemblance:
 //! a live daemon honours `max_tokens` and discards `max_completion_tokens`, so
 //! Ollama fails the family's first conformance check and is not a member of

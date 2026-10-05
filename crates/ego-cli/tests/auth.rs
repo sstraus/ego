@@ -142,7 +142,7 @@ fn header_overlay_is_case_insensitive_and_empty_deletes() {
     );
 }
 
-/// The recipes `docs/16-subscription-login.md` §7.8 hands an operator work.
+/// The recipes `ARCHITECTURE.md` §7.8 hands an operator work.
 ///
 /// ego ships no vendor client identity
 /// (`crates/ego-ai/tests/vendor_client_identity.rs`), so the documented

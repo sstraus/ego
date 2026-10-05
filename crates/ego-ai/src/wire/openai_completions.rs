@@ -156,7 +156,7 @@ pub const PATH: &str = "chat/completions";
 /// A `GenRequest` this format cannot express without lying about it.
 ///
 /// Every variant is a case where the alternative would be to drop something
-/// the caller asked for and send the request anyway. `docs/08-codex-critique.md`
+/// the caller asked for and send the request anyway. `ARCHITECTURE.md`
 /// I5 is about exactly that: a shared HTTP shape is not equivalent semantics,
 /// and a silent mistranslation is worse than a refusal because nothing
 /// downstream can tell it happened.
@@ -201,7 +201,7 @@ impl From<Inexpressible> for RequestRefused {
 ///
 /// Split out because exactly one member's body differs, in exactly one field:
 /// Ollama reads `max_tokens` and discards `max_completion_tokens`
-/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §8).
+/// (`ARCHITECTURE.md` §8).
 /// §4 place 3 makes that an adapter difference and offers no third option, so
 /// the difference is carried by *which mapping serialises this*, and never by
 /// a flag one shared mapping reads. `pub(crate)` for that reason and no other:
@@ -261,7 +261,7 @@ struct StreamOptions {
     /// OpenRouter retired a **precondition, not a spelling** — nothing
     /// succeeded it — so there is no second spelling to be carrying, which is
     /// the shape `AGENTS.md` forbids. Audited in
-    /// `docs/15-provider-contract-audit.md` §3 and guarded by
+    /// `ARCHITECTURE.md` §3 and guarded by
     /// `tests/deprecated_spellings.rs`.
     include_usage: bool,
 }

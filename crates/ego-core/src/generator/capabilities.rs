@@ -1,5 +1,5 @@
 //! `ModelCapabilities`: the versioned record ARCH §3.1 and I5
-//! (`docs/08-codex-critique.md`) require before treating a shared HTTP shape
+//! (`ARCHITECTURE.md`) require before treating a shared HTTP shape
 //! as equivalent conversation semantics.
 //!
 //! A provider row is configuration, not proof two models behave the same in
@@ -281,7 +281,7 @@ pub enum CancelSemantics {
     Immediate,
 }
 
-/// Prompt/response cache retention, pi's `CacheRetention` (`docs/02-pi.md`
+/// Prompt/response cache retention, pi's `CacheRetention` (`ARCHITECTURE.md`
 /// §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -294,7 +294,7 @@ pub enum CacheRetention {
 /// Which [`ThinkingLevel`]s a model accepts on the wire.
 ///
 /// Three states rather than an `Option`, decided in
-/// `docs/decisions/2026-08-21-grok-as-a-provider.md` §4 after Codex refused
+/// `ARCHITECTURE.md` §4 after Codex refused
 /// the `Option` this repository first proposed. `None` would have had to mean
 /// "nothing stated, so send anything", and an absent field read as a
 /// permissive fact is the mistake
@@ -334,7 +334,7 @@ pub enum ReasoningEffortSupport {
 /// socket, so there is no seam a second transport could be reached through,
 /// no decoder that frames one, and nothing that would select between them.
 ///
-/// enum (`docs/02-pi.md:64`) rather than anything measured here, and neither
+/// enum (`ARCHITECTURE.md`) rather than anything measured here, and neither
 /// was ever constructed. `Auto` was the worse of the two on its own terms: it
 /// is a selection *policy*, and this record states what a generation did — a
 /// manifest saying `auto` names no transport at all.

@@ -28,7 +28,7 @@ use crate::event::id::{Seq, SessionId};
 use crate::event::time::Timestamp;
 
 /// The codec version written into every session's header line, and — since
-/// `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md` §3 —
+/// `ARCHITECTURE.md` §3 —
 /// actually compared when one is read.
 ///
 /// v12 binds hook plans, starts, and settlements to explicit descriptor and

@@ -1766,7 +1766,7 @@ where
 /// The generation controls this session offers, or nothing.
 ///
 /// Absent controls stay absent rather than becoming an empty picker, which is
-/// the same fallback rule `docs/06-acp.md` §3 applies to usage and cost. A
+/// the same fallback rule `ARCHITECTURE.md` §3 applies to usage and cost. A
 /// seat that cannot be read is a warning and an omission, not a refusal to
 /// open the session: creating a session has never depended on the picker.
 fn config_options(
