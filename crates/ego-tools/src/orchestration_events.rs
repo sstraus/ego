@@ -202,10 +202,11 @@ impl ObservationPump {
                 Some("working" | "awaiting_input" | "completed") => {
                     self.cursor.settle_spawn(&receipt.session_id);
                 }
-                Some("idle") if now_ms.saturating_sub(receipt.spawned_at_ms) >= 60_000 => {
-                    if self.cursor.settle_spawn(&receipt.session_id) {
-                        actions.push(receipt.clone());
-                    }
+                Some("idle")
+                    if now_ms.saturating_sub(receipt.spawned_at_ms) >= 60_000
+                        && self.cursor.settle_spawn(&receipt.session_id) =>
+                {
+                    actions.push(receipt.clone());
                 }
                 _ => {}
             }
@@ -405,27 +406,6 @@ pub fn millis(time: SystemTime) -> u64 {
         })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::ffi::OsStr;
-
-    // Catches: the observer consumes its launching Claude coordinator's inbox.
-    #[test]
-    fn observer_command_replaces_caller_identity_and_removes_parent_identity() {
-        let home = tempfile::tempdir().unwrap();
-        let pump = ObservationPump::open(home.path(), home.path()).unwrap();
-        let command = pump.command("agent", json!({"action":"inbox", "since":0}));
-        let env: std::collections::BTreeMap<_, _> = command.as_std().get_envs().collect();
-        assert_eq!(
-            env[OsStr::new("TUIC_SESSION")],
-            Some(OsStr::new(pump.observer()))
-        );
-        assert_eq!(env[OsStr::new("TUIC_PARENT")], None);
-        assert_eq!(command.as_std().get_args().next(), Some(OsStr::new("mcp")));
-    }
-}
-
 /// Only native active-tool completions can introduce supervised children.
 pub fn spawn_receipts(
     entries: &[ego_core::store::session_store::SessionEntry],
@@ -467,4 +447,25 @@ pub fn spawn_receipts(
         }
     }
     Ok(receipts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    // Catches: the observer consumes its launching Claude coordinator's inbox.
+    #[test]
+    fn observer_command_replaces_caller_identity_and_removes_parent_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let pump = ObservationPump::open(home.path(), home.path()).unwrap();
+        let command = pump.command("agent", json!({"action":"inbox", "since":0}));
+        let env: std::collections::BTreeMap<_, _> = command.as_std().get_envs().collect();
+        assert_eq!(
+            env[OsStr::new("TUIC_SESSION")],
+            Some(OsStr::new(pump.observer()))
+        );
+        assert_eq!(env[OsStr::new("TUIC_PARENT")], None);
+        assert_eq!(command.as_std().get_args().next(), Some(OsStr::new("mcp")));
+    }
 }
