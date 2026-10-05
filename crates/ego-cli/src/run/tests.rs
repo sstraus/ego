@@ -2123,3 +2123,34 @@ fn system_root_ceiling_is_checked_before_run_effects() {
             .contains("system roots ceiling")
     );
 }
+
+// Catches: /yolo bypasses the system maximum when staging the next generation.
+#[test]
+fn repl_mode_selection_cannot_raise_system_maximum() {
+    use ego_core::config::{ConfigLayer, Source, resolve};
+
+    let layers = vec![ConfigLayer::parse(Source::System, "max_mode = 'default'").unwrap()];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+    let selection = GenerationPolicySelection::new(
+        effective.mode.unwrap_or(Mode::Default),
+        effective.permissions,
+    );
+    let owner = PolicyApplicationOwner::new(
+        selection.clone(),
+        Arc::new(UnusedStore),
+        Arc::new(CliAutoPreflight::new(CapturedAutoPreflight::Valid)),
+        Arc::new(FrozenRuleResolver::new(
+            layers,
+            Trust::Trusted,
+            None,
+            selection.clone(),
+        )),
+    );
+
+    let result = owner.apply(PolicyControlRequest::SetMode(Mode::Yolo));
+    assert!(
+        result.is_err(),
+        "REPL accepted yolo above system max_mode=default"
+    );
+    assert_eq!(selection.capture().unwrap().mode, Mode::Default);
+}
