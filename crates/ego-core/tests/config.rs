@@ -1654,7 +1654,16 @@ fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
     ];
     let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
 
-    assert_eq!(effective.permissions.deny.len(), 1, "one rule, one entry");
+    assert_eq!(
+        effective
+            .permissions
+            .deny
+            .iter()
+            .filter(|entry| entry.origins() != ego_core::config::OriginSet::just(Source::Default))
+            .count(),
+        1,
+        "one explicit rule, one entry"
+    );
     let entry = &effective.permissions.deny[0];
     assert_eq!(entry.rule(), &rule("read(/etc/**)"));
 

@@ -526,6 +526,10 @@ impl fmt::Display for PolicyDenied {
                 // and least expects — every other layer is theirs to edit, so
                 // the default assumption is that this one is too.
                 match from {
+                    Source::Default => write!(
+                        f,
+                        "credential defaults; an explicit user read rule can lift this preset"
+                    )?,
                     Source::System => write!(
                         f,
                         "system config, which no --allow and no higher layer can lift"
@@ -1085,6 +1089,7 @@ impl PolicyEngine {
     /// A policy that decides `mode`'s way, under `permissions`, inside
     /// `workspace`.
     pub fn new(workspace: CanonPath, mode: Mode, permissions: Ruleset) -> Self {
+        let permissions = permissions.with_credential_defaults();
         Self {
             approver: Box::new(ModeApprover::new(mode, workspace.clone())),
             workspace,
@@ -1598,7 +1603,7 @@ impl PolicyEngine {
     fn matching<'r>(&self, rules: &'r [SourcedRule], op: &Op) -> Option<&'r SourcedRule> {
         rules
             .iter()
-            .find(|entry| entry.rule().matches(op, self.workspace.as_path()))
+            .find(|entry| entry.denies(op, self.workspace.as_path(), &self.allow))
     }
 
     /// Mint a permit for an explicit scope.

@@ -91,7 +91,7 @@ fn settle_without_question(host: &mut AcpHost, prompt_id: u64) -> serde_json::Va
     }
 }
 
-fn listed_rules(places: &Places, profile: Option<&str>) -> serde_json::Value {
+fn listed_user_rules(places: &Places, profile: Option<&str>) -> serde_json::Value {
     let ego = Ego::at(places.home_path(), places.workspace_path(), None).subcommand("rules");
     let ego = match profile {
         Some(name) => ego.args(["ls", "--profile", name, "--json"]),
@@ -99,7 +99,13 @@ fn listed_rules(places: &Places, profile: Option<&str>) -> serde_json::Value {
     };
     let result = ego.run();
     assert_eq!(result.code, Some(0), "{}", result.stderr);
-    serde_json::from_str(&result.stdout).expect("rules ls JSON")
+    let mut value: serde_json::Value = serde_json::from_str(&result.stdout).expect("rules ls JSON");
+    // Session persistence assertions concern user-written rules, not built-in defaults.
+    value["rules"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|row| row["from"] == "user");
+    value
 }
 
 #[test]
@@ -145,7 +151,7 @@ fn session_allow_answers_five_later_calls_without_a_prompt_then_expires() {
     assert!(returned["params"]["options"].is_array());
     host.finish();
     assert!(
-        listed_rules(&places, Some(PROFILE))["rules"]
+        listed_user_rules(&places, Some(PROFILE))["rules"]
             .as_array()
             .expect("profile rules")
             .is_empty()
@@ -354,7 +360,7 @@ fn allow_always_on_an_opaque_mcp_call_stores_a_tool_rule_that_covers_the_next_se
     assert!(finished["result"].is_object(), "{finished}");
     first.finish();
 
-    let rules = listed_rules(&places, Some(PROFILE));
+    let rules = listed_user_rules(&places, Some(PROFILE));
     assert!(
         rules["rules"]
             .as_array()
@@ -396,13 +402,13 @@ fn allow_always_writes_one_profile_rule_and_revoke_restores_the_question() {
     assert!(first_result["result"].is_object(), "{first_result}");
     first.finish();
 
-    let profile = listed_rules(&places, Some(PROFILE));
+    let profile = listed_user_rules(&places, Some(PROFILE));
     let rows = profile["rules"].as_array().expect("profile rules");
     assert_eq!(rows.len(), 1, "{profile}");
     assert_eq!(rows[0]["effect"], "allow");
     assert_eq!(rows[0]["rule"], "exec(ls)");
     assert!(
-        listed_rules(&places, None)["rules"]
+        listed_user_rules(&places, None)["rules"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -421,7 +427,7 @@ fn allow_always_writes_one_profile_rule_and_revoke_restores_the_question() {
         .run();
     assert_eq!(revoked.code, Some(0), "{}", revoked.stderr);
     assert!(
-        listed_rules(&places, Some(PROFILE))["rules"]
+        listed_user_rules(&places, Some(PROFILE))["rules"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -450,7 +456,7 @@ fn reject_always_stores_profile_deny_that_beats_a_later_base_allow() {
     );
     first.finish();
 
-    let profile = listed_rules(&places, Some(PROFILE));
+    let profile = listed_user_rules(&places, Some(PROFILE));
     let rows = profile["rules"].as_array().expect("profile rules");
     assert_eq!(rows.len(), 1, "{profile}");
     assert_eq!(rows[0]["effect"], "deny");
@@ -513,7 +519,7 @@ fn concurrent_opposite_rule_makes_allow_always_fail_closed() {
         !places.workspace_path().join("attack-marker").exists(),
         "a conflicting selected allow executed the denied command"
     );
-    let profile = listed_rules(&places, Some(PROFILE));
+    let profile = listed_user_rules(&places, Some(PROFILE));
     let rows = profile["rules"].as_array().expect("profile rules");
     assert_eq!(rows.len(), 1, "{profile}");
     assert_eq!(rows[0]["effect"], "deny");

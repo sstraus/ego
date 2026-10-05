@@ -39,6 +39,15 @@ fn stdout(output: &Output) -> &str {
     std::str::from_utf8(&output.stdout).expect("UTF-8 stdout")
 }
 
+fn user_rows(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["from"] == "user")
+        .collect()
+}
+
 fn stderr(output: &Output) -> &str {
     std::str::from_utf8(&output.stderr).expect("UTF-8 stderr")
 }
@@ -84,7 +93,10 @@ fn ls_text_and_json_have_deterministic_effect_id_rule_from_also_rows() {
     );
     let text = fixture.run(&["rules", "ls"]);
     assert_eq!(text.status.code(), Some(0));
-    let text_rows: Vec<_> = stdout(&text).lines().collect();
+    let text_rows: Vec<_> = stdout(&text)
+        .lines()
+        .filter(|row| row.split('\t').nth(3) == Some("user"))
+        .collect();
     assert_eq!(text_rows.len(), 2);
     for row in &text_rows {
         assert_eq!(row.split('\t').count(), 5);
@@ -104,7 +116,7 @@ fn ls_text_and_json_have_deterministic_effect_id_rule_from_also_rows() {
     assert_eq!(value["v"], 1);
     assert_eq!(value["scope"], "effective");
     assert!(value["profile"].is_null());
-    let rows = value["rules"].as_array().unwrap();
+    let rows = user_rows(&value);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["effect"], "deny");
     assert_eq!(rows[0]["rule"], "exec(cargo *)");
@@ -138,11 +150,11 @@ fn management_ignores_ego_profile_and_explicit_profile_isolated_and_persistent()
     assert_eq!(profile.status.code(), Some(0));
     let profile_value: serde_json::Value = serde_json::from_str(stdout(&profile)).unwrap();
     assert_eq!(profile_value["profile"], "ci");
-    assert!(profile_value["rules"].as_array().unwrap().is_empty());
+    assert!(user_rows(&profile_value).is_empty());
     let base_value: serde_json::Value =
         serde_json::from_str(stdout(&fixture.run(&["rules", "ls", "--json"]))).unwrap();
     assert_eq!(base_value["profile"], serde_json::Value::Null);
-    assert_eq!(base_value["rules"].as_array().unwrap().len(), 1);
+    assert_eq!(user_rows(&base_value).len(), 1);
     let profile_set = fixture.run(&["rules", "allow", "--profile", "ci", "write(src/**)"]);
     assert_eq!(profile_set.status.code(), Some(0));
     assert!(stdout(&fixture.run(&["rules", "ls", "--profile", "ci"])).contains("write(src/**)"));
@@ -181,17 +193,19 @@ fn revoke_existing_and_missing_are_persistent_noop_or_change_and_prune_permissio
         Some(0)
     );
     let listed = fixture.run(&["rules", "ls", "--json"]);
-    let id = serde_json::from_str::<serde_json::Value>(stdout(&listed)).unwrap()["rules"][0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let value: serde_json::Value = serde_json::from_str(stdout(&listed)).unwrap();
+    let id = user_rows(&value)[0]["id"].as_str().unwrap().to_owned();
     let revoked = fixture.run(&["rules", "revoke", &id]);
     assert_eq!(revoked.status.code(), Some(0));
     assert!(stdout(&revoked).starts_with("stored_changed\t"));
     let missing = fixture.run(&["rules", "revoke", &id]);
     assert_eq!(missing.status.code(), Some(0));
     assert!(stdout(&missing).starts_with("stored_unchanged\t"));
-    assert!(stdout(&fixture.run(&["rules", "ls"])).is_empty());
+    assert!(
+        !stdout(&fixture.run(&["rules", "ls"]))
+            .lines()
+            .any(|row| row.split('\t').nth(3) == Some("user"))
+    );
     let future = fixture.run(&["rules", "revoke", "r2:000000000000"]);
     assert_eq!(future.status.code(), Some(2));
     assert!(stdout(&future).is_empty());
@@ -220,7 +234,11 @@ fn remember_preview_is_nonpublishing_and_yes_persists_canonical_rule() {
         stdout(&preview)
             .contains("RESULT\tstored_unchanged\teffective_unchanged\tuser\tnot_published\n")
     );
-    assert!(stdout(&fixture.run(&["rules", "ls"])).is_empty());
+    assert!(
+        !stdout(&fixture.run(&["rules", "ls"]))
+            .lines()
+            .any(|row| row.split('\t').nth(3) == Some("user"))
+    );
     let accepted = fixture.run(&[
         "rules",
         "remember",
@@ -350,4 +368,28 @@ fn rules_usage_and_secret_failures_are_exit_two_without_stdout_or_raw_values() {
         assert!(output.stdout.is_empty());
         assert!(!stderr(&output).contains("NO-LEAK"));
     }
+}
+
+// Catches persisted user re-allow not reaching classification, or revoke leaving it enabled.
+#[test]
+fn credential_defaults_persisted_user_allow_and_revoke_change_read_explanation() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.workspace.path().join(".env"), "EXAMPLE=public\n").unwrap();
+    let explain = || {
+        let result = fixture.run(&["rules", "explain", "read", r#"{"path":".env"}"#, "--json"]);
+        assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+        serde_json::from_str::<serde_json::Value>(stdout(&result)).unwrap()
+    };
+    let denied = explain();
+    assert_eq!(denied["outcome"], "denied");
+    assert_eq!(denied["authorities"][0]["from"], "default");
+    let allowed = fixture.run(&["rules", "allow", "read(.env)"]);
+    assert_eq!(allowed.status.code(), Some(0), "{}", stderr(&allowed));
+    let id = stdout(&allowed).split('\t').nth(3).unwrap().to_owned();
+    let granted = explain();
+    assert_eq!(granted["outcome"], "allowed");
+    assert_eq!(granted["authorities"][0]["from"], "user");
+    let revoked = fixture.run(&["rules", "revoke", &id]);
+    assert_eq!(revoked.status.code(), Some(0), "{}", stderr(&revoked));
+    assert_eq!(explain()["outcome"], "denied");
 }
