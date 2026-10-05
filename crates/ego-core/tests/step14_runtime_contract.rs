@@ -649,6 +649,7 @@ mod turn_execution_observation {
                     }),
                     gate: self.gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,

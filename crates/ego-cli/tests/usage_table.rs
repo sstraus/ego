@@ -53,7 +53,16 @@ fn usage_text_is_a_table_with_the_six_asked_for_columns_plus_role() {
     let columns: Vec<&str> = header.split_whitespace().collect();
     assert_eq!(
         columns,
-        ["session", "model", "role", "in", "out", "cached", "cost"],
+        [
+            "session",
+            "model",
+            "role",
+            "in",
+            "out",
+            "cached",
+            "cache_hit",
+            "cost"
+        ],
         "the table names exactly the columns the report shows"
     );
     assert!(

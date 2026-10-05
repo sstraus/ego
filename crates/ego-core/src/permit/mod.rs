@@ -36,7 +36,8 @@ pub use foreign::{
     Resolver, Subject, TransportError, TransportFailure,
 };
 pub use fs::{
-    Fs, FsError, GuardedEffects, GuardedIo, IoDenied, McpAcpClaim, McpHttpClaim, PathResolver,
+    Fs, FsError, GuardedEffects, GuardedIo, IoDenied, McpAcpClaim, McpHttpClaim, McpStdioClaim,
+    PathResolver,
 };
 pub(crate) use grant::PermissionPresentationInput;
 pub use grant::{

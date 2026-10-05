@@ -665,6 +665,7 @@ fn with_foreign_turn<R>(
             source,
             gate,
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system: None,
                 identity: None,
                 token_ceiling: None,
@@ -791,6 +792,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
             source,
             gate,
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system: None,
                 identity: None,
                 token_ceiling: None,
@@ -1080,6 +1082,7 @@ fn reconstructed_resume_without_captured_policy_fails_closed_before_settlement()
                 }),
                 gate,
                 config: TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,

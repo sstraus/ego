@@ -99,6 +99,7 @@ fn credential(row: &ProviderRow) -> ResolvedCredential {
 
 fn request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "test-model".to_owned(),
         messages: Conversation::new(vec![Message::text(Role::User, "hello")])
             .expect("valid conversation"),

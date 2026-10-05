@@ -35,11 +35,22 @@ impl Seat {
             SessionControlChange::Mode(mode) => Some(*mode),
             _ => None,
         });
+        let model = staged.iter().rev().find_map(|(_, change)| match change {
+            SessionControlChange::Model(model) => Some(model.clone()),
+            _ => None,
+        });
         SessionControlState {
             model: ControlSelect {
-                current: Some(ModelRef("ollama/gemma4:e4b-mlx".to_owned())),
-                chosen: None,
-                available: vec![ModelRef("ollama/gemma4:e4b-mlx".to_owned())],
+                current: Some(
+                    model
+                        .clone()
+                        .unwrap_or(ModelRef("ollama/gemma4:e4b-mlx".to_owned())),
+                ),
+                chosen: model,
+                available: vec![
+                    ModelRef("ollama/gemma4:e4b-mlx".to_owned()),
+                    ModelRef("ollama/qwen3".to_owned()),
+                ],
             },
             effort: ControlSelect {
                 current: Some(ThinkingLevel::Off),
@@ -191,6 +202,7 @@ async fn setting_a_config_option_without_a_seat_is_method_not_found() {
 
 /// The response is the whole replacement set, so a host that changes one
 /// control learns what that did to the others in the same round trip.
+/// Catches: a successful mode change leaving the host's mode and config views stale.
 #[tokio::test]
 async fn a_staged_change_answers_with_the_whole_replacement_set() {
     let seat = Arc::new(Seat::default());
@@ -216,6 +228,65 @@ async fn a_staged_change_answers_with_the_whole_replacement_set() {
     assert_eq!(staged.len(), 1);
     assert_eq!(staged[0].0.to_string(), id);
     assert_eq!(staged[0].1, SessionControlChange::Mode(Mode::Plan));
+    let notifications = connection.announced(ROOT).await;
+    assert_eq!(
+        notifications.len(),
+        2,
+        "missing accepted-change updates: {notifications:?}"
+    );
+    assert_eq!(notifications[0]["params"]["sessionId"], id);
+    assert_eq!(
+        notifications[0]["params"]["update"]["sessionUpdate"],
+        "config_option_update"
+    );
+    assert_eq!(
+        notifications[0]["params"]["update"]["configOptions"],
+        answer["result"]["configOptions"]
+    );
+    assert_eq!(notifications[1]["params"]["sessionId"], id);
+    assert_eq!(
+        notifications[1]["params"]["update"]["sessionUpdate"],
+        "current_mode_update"
+    );
+    assert_eq!(
+        notifications[1]["params"]["update"]["currentModeId"],
+        "plan"
+    );
+    connection.abort().await;
+}
+
+// Catches: a changed model appearing in the response but never refreshing the host picker.
+#[tokio::test]
+async fn an_accepted_model_change_publishes_the_replacement_config_options() {
+    let seat = Arc::new(Seat::default());
+    let mut connection = support::Connected::new(router(Some(seat)));
+    connection.initialize().await;
+    let session = connection.new_session(ROOT).await;
+    let id = session["result"]["sessionId"].as_str().unwrap();
+    let (answer, _) = connection
+        .request(
+            "session/set_config_option",
+            serde_json::json!({
+                "sessionId": id, "configId": "model", "value": "ollama/qwen3"
+            }),
+        )
+        .await;
+    assert_eq!(option(&answer, "model")["currentValue"], "ollama/qwen3");
+    let notifications = connection.announced(ROOT).await;
+    assert_eq!(
+        notifications.len(),
+        1,
+        "model update missing or duplicated: {notifications:?}"
+    );
+    assert_eq!(notifications[0]["params"]["sessionId"], id);
+    assert_eq!(
+        notifications[0]["params"]["update"]["sessionUpdate"],
+        "config_option_update"
+    );
+    assert_eq!(
+        notifications[0]["params"]["update"]["configOptions"],
+        answer["result"]["configOptions"]
+    );
     connection.abort().await;
 }
 
@@ -243,6 +314,10 @@ async fn an_unoffered_value_is_refused_before_the_seat_is_asked() {
         seat.staged.lock().expect("seat lock").is_empty(),
         "a refused value must never reach the seat"
     );
+    assert!(
+        connection.announced(ROOT).await.is_empty(),
+        "refused changes must not publish a successful update"
+    );
     connection.abort().await;
 }
 
@@ -268,5 +343,9 @@ async fn an_opaque_unselected_answer_is_a_wire_noop_without_staging() {
         .await;
     assert!(answer["result"]["configOptions"].is_array(), "{answer}");
     assert_eq!(*seat.staged.lock().expect("stage counter lock"), 0);
+    assert!(
+        connection.announced(ROOT).await.is_empty(),
+        "an unselected noop must not publish a change"
+    );
     connection.abort().await;
 }

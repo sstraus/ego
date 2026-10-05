@@ -109,6 +109,7 @@ mod budget {
 
     fn request(max_output_tokens: Option<u64>) -> GenRequest {
         GenRequest {
+            cache: None,
             model: "claude-opus-5".to_string(),
             messages: Conversation::new(vec![Message::text(
                 Role::User,
@@ -787,6 +788,7 @@ mod budget {
     /// The standard fixture request against a named model.
     fn request_for(model: &str, max_output_tokens: Option<u64>) -> GenRequest {
         GenRequest {
+            cache: None,
             model: model.to_string(),
             ..request(max_output_tokens)
         }
@@ -1656,6 +1658,7 @@ mod budget {
         );
 
         let elsewhere = GenRequest {
+            cache: None,
             model: "claude-haiku-5".to_string(),
             ..request(Some(1_024))
         };

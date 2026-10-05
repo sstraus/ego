@@ -99,6 +99,8 @@ impl From<Inexpressible> for RequestRefused {
 
 #[derive(Debug, Serialize)]
 struct WireRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
     model: &'a str,
     stream: bool,
     store: bool,
@@ -272,6 +274,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         })
         .collect();
     let wire = WireRequest {
+        prompt_cache_key: super::cache::routing_key(req, "xai"),
         model: &req.model,
         stream: true,
         store: false,

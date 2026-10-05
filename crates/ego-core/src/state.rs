@@ -1062,6 +1062,8 @@ impl QueuedPrompt {
 /// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_snapshot: Option<crate::session::PromptSnapshot>,
     /// The `seq` carried by the most recently applied event. `apply` trusts
     /// the caller's replay order and never reorders, clamps or rejects on
     /// this value — see `Seq`'s and `Timestamp`'s doc comments.
@@ -1215,6 +1217,7 @@ impl Default for SessionState {
             usage: Usage::IDENTITY,
             last_seq: Seq::default(),
             lineage: None,
+            prompt_snapshot: None,
             title: None,
             summary: None,
             summary_failures: 0,
@@ -1984,7 +1987,18 @@ impl SessionState {
                     });
                 }
             }
-            EventKind::GenerationStarted { attempt, role } => self.start(ev, attempt, *role),
+            EventKind::GenerationStarted {
+                attempt,
+                role,
+                snapshot,
+            } => {
+                self.start(ev, attempt, *role);
+                if self.generations.contains_key(&ev.env.id)
+                    && let Some(snapshot) = snapshot
+                {
+                    self.prompt_snapshot = Some(snapshot.clone());
+                }
+            }
             EventKind::FallbackDecision { .. } => {}
             EventKind::ExecutionObserved { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
@@ -2033,6 +2047,7 @@ impl SessionState {
                 prompt_revision,
                 checkpoint,
             } => {
+                self.prompt_snapshot = None;
                 self.lineage = Some(SessionLineage::Compaction {
                     source: *source,
                     source_seq: *source_seq,
@@ -2046,10 +2061,16 @@ impl SessionState {
                 self.summary = Some(synopsis_excerpt(checkpoint, 300));
             }
             EventKind::Compacted { summary } => {
+                self.prompt_snapshot = None;
                 self.summary = Some(synopsis_excerpt(summary, 300));
                 self.compactions.push(summary.clone());
             }
-            EventKind::Forked { source, at_seq } => {
+            EventKind::Forked {
+                source,
+                at_seq,
+                snapshot,
+            } => {
+                self.prompt_snapshot = snapshot.clone();
                 self.lineage = Some(SessionLineage::Fork {
                     source: *source,
                     at_seq: *at_seq,

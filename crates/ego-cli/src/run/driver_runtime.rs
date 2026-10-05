@@ -158,6 +158,7 @@ pub(super) async fn drive_execution<S: EventSink>(
     let interactive_metadata_ceilings = effective.ceilings.clone();
 
     let mut config = TurnConfig {
+        cache: effective.cache,
         system,
         identity: Some(AgentIdentity {
             version: crate::build_info::VERSION.to_owned(),
@@ -169,6 +170,8 @@ pub(super) async fn drive_execution<S: EventSink>(
         retry: args.retry,
         fallbacks: args.fallbacks.clone(),
     };
+
+    let mut refresh_prompt = false;
 
     let turns = Turns {
         schema: compiled.as_ref(),
@@ -252,7 +255,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             let skill_owner: Arc<dyn SkillInvocationPort + '_> = ($skill_owner).clone();
             let loop_ = loop_.with_skill_invocation_port(skill_owner);
             let loop_ = match $active.replayed() {
-                Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
+                Some(replayed) => loop_.with_replayed_context(replayed),
                 None => loop_,
             };
             let loop_ = match elicitor.as_ref() {
@@ -1300,6 +1303,31 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
+                                        repl::actions::ActionId::Refresh,
+                                    )) => {
+                                        if pending_work {
+                                            diagnostics.note("instructions cannot be refreshed while source work is pending");
+                                            continue;
+                                        }
+                                        match instructions(
+                                            &effective,
+                                            &args,
+                                            &root,
+                                            &cwd,
+                                            diagnostics,
+                                        ) {
+                                            Ok(system) => {
+                                                config.system = system;
+                                                refresh_prompt = true;
+                                                diagnostics.note("instructions refreshed; the next generation opens a new prompt epoch");
+                                            }
+                                            Err(error) => diagnostics.note(&format!(
+                                                "instructions were not refreshed: {error}"
+                                            )),
+                                        }
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::New,
                                     )) => {
                                         if pending_work {
@@ -1593,9 +1621,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 CompactionError::Internal(error.to_string())
                                             })?;
                                             if let Some(replayed) = active.replayed() {
-                                                compaction = compaction.with_ancestor_conversation(
-                                                    replayed.conversation().clone(),
-                                                );
+                                                compaction =
+                                                    compaction.with_replayed_context(replayed);
                                             }
                                             if let Some(elicitor) = elicitor.as_ref() {
                                                 compaction =
@@ -1820,6 +1847,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     .map_err(|message| RunTermination::Failed { message })?,
                                 Some(RuntimeResume::Model(_)) | None => loop_,
                             };
+                            let previous_epoch = state
+                                .prompt_snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.epoch);
+                            let loop_ = if refresh_prompt {
+                                loop_.with_prompt_refresh()
+                            } else {
+                                loop_
+                            };
                             let mut loop_ = loop_.with_interactive_control(&mut control);
                             let driven = match resumed_turn {
                                 Some(RuntimeResume::Model(turn)) => {
@@ -1909,6 +1945,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                             };
                             drop(loop_);
                             state = session_hooks.state.state();
+                            if state
+                                .prompt_snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.epoch)
+                                != previous_epoch
+                            {
+                                refresh_prompt = false;
+                            }
                             if let Some(status) = status.as_ref()
                                 && status.human
                             {

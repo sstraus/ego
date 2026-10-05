@@ -225,15 +225,32 @@ pub(crate) fn read_verified_blob<B: SessionBlobSource + ?Sized>(
     Ok(bytes)
 }
 
+/// Exact stable system bytes and instruction provenance for one durable epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSnapshot {
+    pub epoch: EventId,
+    pub identity: Option<String>,
+    pub system: Option<crate::config::SystemPrompt>,
+}
+
 /// The ancestor-only result of a lineage replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayedContext {
+    lineage_root: SessionId,
     conversation: Conversation,
+    prompt_snapshot: Option<PromptSnapshot>,
     session_pins: Vec<SessionId>,
     blob_pins: Vec<BlobRef>,
 }
 
 impl ReplayedContext {
+    pub fn lineage_root(&self) -> SessionId {
+        self.lineage_root
+    }
+    pub fn prompt_snapshot(&self) -> Option<&PromptSnapshot> {
+        self.prompt_snapshot.as_ref()
+    }
+
     pub fn conversation(&self) -> &Conversation {
         &self.conversation
     }
@@ -261,8 +278,10 @@ impl<'a> ReplayContext<'a> {
     pub fn replay(&self, target: &SessionId) -> Result<ReplayedContext, ReplayError> {
         let Some(lineage) = self.source.lineage(target).map_err(map_source)? else {
             return Ok(ReplayedContext {
+                lineage_root: *target,
                 conversation: Conversation::new(Vec::new())
                     .expect("an empty conversation is valid"),
+                prompt_snapshot: None,
                 session_pins: Vec::new(),
                 blob_pins: Vec::new(),
             });
@@ -286,6 +305,15 @@ impl<'a> ReplayContext<'a> {
         lineage: SessionLineage,
         visited: &mut HashSet<SessionId>,
     ) -> Result<ReplayedContext, ReplayError> {
+        let lineage_root = walk_lineage(
+            self.source,
+            lineage,
+            &mut visited.clone(),
+            LineageEdges::ForksAndCompactions,
+        )?
+        .last()
+        .expect("a lineage has a source")
+        .source;
         let steps = walk_lineage(self.source, lineage, visited, LineageEdges::Forks)?;
         let session_pins = steps.iter().map(|step| step.source).collect();
         let frames: Vec<_> = steps
@@ -376,6 +404,8 @@ impl<'a> ReplayContext<'a> {
             });
         }
         Ok(ReplayedContext {
+            lineage_root,
+            prompt_snapshot: state.prompt_snapshot.clone(),
             conversation,
             session_pins,
             blob_pins,
@@ -406,7 +436,11 @@ impl TargetSeed {
                     ts: at,
                     producer: Producer::Main,
                 },
-                kind: EventKind::Forked { source, at_seq },
+                kind: EventKind::Forked {
+                    source,
+                    at_seq,
+                    snapshot: None,
+                },
             },
             trailing_events: Vec::new(),
             lineage: SessionLineage::Fork { source, at_seq },
@@ -451,6 +485,17 @@ impl TargetSeed {
                 prompt_revision,
             },
         }
+    }
+
+    fn with_prompt_snapshot(mut self, snapshot: Option<PromptSnapshot>) -> Self {
+        if let EventKind::Forked {
+            snapshot: inherited,
+            ..
+        } = &mut self.event.kind
+        {
+            *inherited = snapshot;
+        }
+        self
     }
 
     pub fn event(&self) -> &DomainEvent {
@@ -600,6 +645,7 @@ impl PreparedFork {
         }
         Ok(Self {
             seed: TargetSeed::fork(source, state.last_seq, at)
+                .with_prompt_snapshot(state.prompt_snapshot.clone())
                 .with_title(state.title.clone())
                 .with_goal(state.goal.as_ref()),
         })
@@ -636,6 +682,7 @@ impl PreparedFork {
         let prefix = SessionState::replay(events[..=boundary].iter().cloned());
         Ok(Self {
             seed: TargetSeed::fork(source, prefix.last_seq, at)
+                .with_prompt_snapshot(prefix.prompt_snapshot.clone())
                 .with_title(prefix.title.clone())
                 .with_goal(prefix.goal.as_ref()),
         })

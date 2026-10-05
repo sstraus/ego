@@ -195,6 +195,7 @@ fn caps() -> ModelCapabilities {
 
 fn request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "grok-5".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, "list the files")])
             .expect("one user message is a conversation"),

@@ -56,6 +56,10 @@ pub(crate) struct RunProcessContext {
 }
 
 impl RunProcessContext {
+    pub(crate) fn confinement(&self) -> ego_core::permit::Confinement {
+        self.confinement.level()
+    }
+
     pub(crate) fn new(
         backend: Arc<dyn Backend>,
         evidence: SessionEvidenceStore,

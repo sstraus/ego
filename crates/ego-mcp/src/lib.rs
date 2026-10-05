@@ -74,3 +74,6 @@ pub use state::{
     McpInputState, McpManualOutcome, McpMappedInput, McpRefreshRequest, McpResultMetadata,
     McpRetryRequest, McpSubscription, McpSubscriptionEvent, McpToolResult,
 };
+
+mod session_stdio;
+pub use session_stdio::McpStdioSession;

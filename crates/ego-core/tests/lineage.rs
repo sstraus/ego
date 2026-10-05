@@ -248,6 +248,11 @@ fn nested_forks_follow_edges_iteratively_compaction_is_terminal_and_cycles_fail_
         .insert((root, reference.clone()), PNG_1X1.to_vec());
     let replay = ReplayContext::new(&source, &blobs).replay(&target).unwrap();
     assert_eq!(replay.session_pins(), [child, root]);
+    assert_eq!(
+        replay.lineage_root(),
+        root,
+        "nested forks keep one routing identity"
+    );
     let image = Image::new(PNG_1X1.to_vec(), ImageMediaType::Png).unwrap();
     assert_eq!(
         replay.conversation().messages(),
@@ -266,15 +271,22 @@ fn nested_forks_follow_edges_iteratively_compaction_is_terminal_and_cycles_fail_
     );
     assert_eq!(replay.blob_pins(), [reference]);
 
+    let before_compaction = SessionId::new();
     source.lineages.insert(
         root,
         Ok(Some(SessionLineage::Compaction {
-            source: root,
+            source: before_compaction,
             source_seq: seq(1),
             prompt_revision: 3,
         })),
     );
-    assert!(ReplayContext::new(&source, &blobs).replay(&target).is_ok());
+    let compacted = ReplayContext::new(&source, &blobs).replay(&target).unwrap();
+    assert_eq!(compacted.lineage_root(), before_compaction);
+    assert_eq!(
+        compacted.conversation(),
+        replay.conversation(),
+        "compaction ancestors do not add history"
+    );
 
     source.lineages.insert(
         root,
