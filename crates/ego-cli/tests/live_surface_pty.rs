@@ -6667,6 +6667,8 @@ fn e_edits_the_call_and_the_amended_call_is_asked_again() {
     session.press(b"\r");
     session.wait("timeout_ms: ");
     session.press(b"\r");
+    session.wait("background: ");
+    session.press(b"false\r");
     session.wait("[d] details");
     let amended = session.screen().join("\n");
     assert!(amended.contains("Allow run seq 1 4?"), "{amended}");
