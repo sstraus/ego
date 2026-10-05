@@ -390,6 +390,63 @@ fn two_process_sessions_reuse_one_paid_analysis_and_mint_fresh_audit_authority()
     );
 }
 
+// Catches: session-owned read pins invalidating a persisted denial and paying twice.
+#[cfg(unix)]
+#[test]
+fn rotating_session_read_pins_reuses_a_cached_denial_without_another_paid_judge() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            exec_request(),
+            judge_response("deny", "same observed image remains refused"),
+            exec_request(),
+        ],
+        ..Plan::default()
+    });
+    let build = || {
+        Ego::at(home.path(), workspace.path(), Some(&stub))
+            .env("ANTHROPIC_API_KEY", "sk-test")
+            .args([
+                "--model",
+                HOSTED_MODEL,
+                "--thinking",
+                "off",
+                "--mode",
+                "auto",
+                "--sandbox",
+                "off",
+                "--output",
+                "json",
+                "Ask",
+            ])
+    };
+    let first = build();
+    first.home_file(
+        "config.toml",
+        "[permissions]\njudge = \"anthropic/claude-test-5\"\n",
+    );
+    first.home_file("models.toml", ANTHROPIC_FACTS);
+    let finished = first.run();
+    assert_eq!(finished.code, Some(3), "{}", finished.stderr);
+    let cache_path = home.path().join("permission-analysis/v1.json");
+    assert_eq!(finished.report()["denied_by"]["by"], "judge");
+    let before = std::fs::read(&cache_path).expect("complete image analysis was persisted");
+    let finished = build().run();
+    assert_eq!(finished.code, Some(3), "{}", finished.stderr);
+    assert_eq!(finished.report()["denied_by"]["by"], "cached_judge");
+    assert_eq!(
+        stub.generations().len(),
+        3,
+        "rotating only the session MCP read pin must not pay for another refusal"
+    );
+    assert_eq!(
+        std::fs::read(cache_path).unwrap(),
+        before,
+        "a hit must not rewrite the cache"
+    );
+}
+
 #[test]
 fn auto_uses_a_separately_resolved_judge_model_without_inheriting_main_tools() {
     let stub = Stub::start(plan(judge_response("deny", "judge model"), None));
