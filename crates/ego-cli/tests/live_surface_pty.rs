@@ -52,7 +52,14 @@ fn repeated_cross_root_resume_preserves_relative_session_store() {
             .ego(&stub)
             .without_fixture_thinking()
             .subcommand("resume")
-            .args([id, "--session-dir", store.to_str().unwrap(), "--name"])
+            .args([
+                id,
+                "--session-dir",
+                store.to_str().unwrap(),
+                "-C",
+                root.to_str().unwrap(),
+                "--name",
+            ])
             .arg(&format!("set={title}"))
             .run();
         assert_eq!(named.code, Some(0), "{}", named.stderr);
