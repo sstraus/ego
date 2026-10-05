@@ -365,6 +365,16 @@ pub enum ToolResultProvenance {
 }
 
 impl ToolResult {
+    /// Mask disclosure text without changing tool identity or evidence references.
+    pub fn mask_secrets(&mut self, values: &crate::secrets::SecretValues) {
+        for block in &mut self.content {
+            block.text = values.mask(&block.text);
+        }
+        if let ToolResultProvenance::Foreign { result } = &mut self.provenance {
+            result.mask_secrets(values);
+        }
+    }
+
     pub fn builtin(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolContentBlock::builtin(text)],
@@ -386,6 +396,20 @@ impl ToolResult {
             provenance: ToolResultProvenance::Foreign {
                 result: Box::new(result),
             },
+        }
+    }
+
+    /// Publish oversized MCP text before exposing or journaling the result.
+    /// An unavailable store or failed write keeps a preview and a failure notice.
+    pub fn spill_mcp_output(
+        &mut self,
+        store: Option<&dyn crate::store::evidence::EvidenceStore>,
+        run: crate::evidence::RunInvocationId,
+        call: crate::event::id::ItemId,
+    ) {
+        if let ToolResultProvenance::Foreign { result } = &mut self.provenance {
+            result.spill_output(store, run, call);
+            self.content = vec![ToolContentBlock::builtin(result.visible_text().to_owned())];
         }
     }
 
@@ -533,7 +557,7 @@ fn base64(bytes: &[u8]) -> String {
 /// willingness to act: `io.read(p)` succeeds exactly when the permit covers
 /// `p`. Handing the permit over as well gave a tool a second, unchecked
 /// handle on its own grant, and gave a caller two values to pair — which is
-/// what `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §3 exists to
+/// what `ARCHITECTURE.md` §3 exists to
 /// prevent. The permit now lives inside the `GuardedFs` and dies with it.
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;

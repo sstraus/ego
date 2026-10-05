@@ -58,13 +58,17 @@ async fn report_workspace(args: &UsageArgs) -> Result<UsageReport, RunTerminatio
 
 /// The columns of the text table, in order.
 ///
-/// Seven facts and no more: the six the story asked for, plus `role`, without
-/// which the hideable rows this table is built around could not be told apart.
-/// The report is the complete record and `--json` hands it over whole. The text
-/// view exists for a person deciding whether a session cost anything, and every
-/// column it does not have is one that was pushing the answer off the
-/// right-hand edge.
-const COLUMNS: [&str; 7] = ["session", "model", "role", "in", "out", "cached", "cost"];
+/// Cache hit counts reads only; writes remain visible in the cached-token total.
+const COLUMNS: [&str; 8] = [
+    "session",
+    "model",
+    "role",
+    "in",
+    "out",
+    "cached",
+    "cache_hit",
+    "cost",
+];
 
 /// Render an already-reconciled report without performing accounting.
 ///
@@ -193,6 +197,10 @@ fn row(session: &str, model: &str, role: &str, line: &UsageLine) -> Vec<String> 
         usage.uncached_input_tokens.to_string(),
         usage.output_tokens.to_string(),
         cached.to_string(),
+        line.cache_hit().map_or_else(
+            || "unknown".to_owned(),
+            |hit| format!("{:.1}%", hit * 100.0),
+        ),
         cost_text(&line.cost),
     ]
 }

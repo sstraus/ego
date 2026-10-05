@@ -360,6 +360,12 @@ impl SpawnSpec {
         self.cwd.as_ref()
     }
 
+    /// Remove the process lifetime bound for a session-owned, request-bounded child.
+    pub fn session_lifetime(mut self) -> Self {
+        self.timeout = None;
+        self
+    }
+
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
@@ -482,7 +488,7 @@ impl Confinement {
     /// Whether this confines at least as much as `ceiling` does.
     ///
     /// The only question a ceiling is ever asked
-    /// (`docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`).
+    /// (`ARCHITECTURE.md`).
     /// `ro` is within every ceiling; `off` is within `off` alone.
     pub const fn within(self, ceiling: Self) -> bool {
         self.strength() >= ceiling.strength()
@@ -888,6 +894,7 @@ pub struct RunConfinement {
     offline: bool,
     workspace: CanonPath,
     exec_paths: Vec<CanonPath>,
+    roots: Vec<super::ProfileRoot>,
     requirements: ExecRequirements,
 }
 
@@ -911,6 +918,7 @@ impl RunConfinement {
             offline,
             workspace,
             exec_paths: Vec::new(),
+            roots: Vec::new(),
             requirements: ExecRequirements::new(required),
         })
     }
@@ -924,6 +932,17 @@ impl RunConfinement {
     pub fn with_exec_paths(mut self, exec_paths: Vec<CanonPath>) -> Self {
         self.exec_paths = exec_paths;
         self
+    }
+
+    /// Canonical perimeter roots admitted before any process effect.
+    #[must_use]
+    pub fn with_roots(mut self, roots: Vec<super::ProfileRoot>) -> Self {
+        self.roots = roots;
+        self
+    }
+
+    pub fn roots(&self) -> &[super::ProfileRoot] {
+        &self.roots
     }
 
     pub fn exec_paths(&self) -> &[CanonPath] {
@@ -975,6 +994,11 @@ impl std::error::Error for RunConfinementError {}
 
 /// Host process execution behind the permit-checking facade.
 pub trait ProcessExecutor: Send + Sync {
+    /// Effective confinement of this effect scope; unknown refuses channel reuse.
+    fn confinement(&self) -> Option<Confinement> {
+        None
+    }
+
     /// An adapter that cannot observe identity leaves it incomplete, never
     /// inventing facts that could support reusable approval.
     fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {

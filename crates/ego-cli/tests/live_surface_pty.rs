@@ -1,18 +1,5 @@
 mod support;
 
-use ego_cli::repl::actions::ActionRegistry;
-use portable_pty::{ExitStatus, NativePtySystem, PtySize, PtySystem};
-use std::{
-    io::{self, Read, Write},
-    path::Path,
-    sync::{Arc, mpsc},
-    thread,
-    time::{Duration, Instant},
-};
-use support::{
-    Ego, Plan, ReleaseGate, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
-};
-
 // Catches: dropping turn-local effects kills a detached command before the next REPL turn.
 #[test]
 fn regression_detached_exec_survives_the_launching_repl_turn() {
@@ -118,6 +105,726 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
         history.contains("exited code 0") && history.contains("DETACHED-DONE"),
         "next turn lost detached settlement: {history}"
     );
+}
+
+// Catches: a second cross-root selection rebases a relative store under the selected project.
+#[test]
+fn repeated_cross_root_resume_preserves_relative_session_store() {
+    let stub = support::Stub::start(support::Plan {
+        completions: vec![
+            support::Reply::Sse(support::text("CRITIC-SEED-A")),
+            support::Reply::Sse(support::text("CRITIC-SEED-B")),
+            support::Reply::Sse(support::text("CRITIC-RETURNED-A")),
+        ],
+        ..support::Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# critic root A\n");
+    places.file("other/AGENTS.md", "# critic root B\n");
+    let root_b = places.workspace_path().join("other");
+    let store = places.workspace_path().join("critic-sessions");
+    let id_b = "0192a600-0000-7000-8000-000000000174";
+    for (root, id, prompt, title) in [
+        (
+            places.workspace_path(),
+            support::FIXTURE_SESSION_ID,
+            "critic original conversation",
+            "CriticAlpha",
+        ),
+        (
+            root_b.as_path(),
+            id_b,
+            "critic other conversation",
+            "CriticBeta",
+        ),
+    ] {
+        let seeded = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--session-id",
+                id,
+                "--session-dir",
+                store.to_str().unwrap(),
+                "-C",
+                root.to_str().unwrap(),
+            ])
+            .arg(prompt)
+            .run();
+        assert_eq!(seeded.code, Some(0), "{}", seeded.stderr);
+        let named = places
+            .ego(&stub)
+            .without_fixture_thinking()
+            .subcommand("resume")
+            .args([
+                id,
+                "--session-dir",
+                store.to_str().unwrap(),
+                "-C",
+                root.to_str().unwrap(),
+                "--name",
+            ])
+            .arg(&format!("set={title}"))
+            .run();
+        assert_eq!(named.code, Some(0), "{}", named.stderr);
+    }
+    let ego = places.ego(&stub).subcommand("resume").args([
+        support::FIXTURE_SESSION_ID,
+        "--model",
+        "ollama/qwen3",
+        "--sandbox",
+        "off",
+        "--session-dir",
+        "critic-sessions",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    for (title, id, needs_trust) in [
+        ("CriticBeta", id_b, true),
+        ("CriticAlpha", support::FIXTURE_SESSION_ID, false),
+    ] {
+        drain_until_quiet(&reader, &mut output);
+        let start = output.len();
+        input.write_all(b"/sessions\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, title);
+        input.write_all(format!("{title}\r").as_bytes()).unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            &format!("resumed session {id}"),
+        );
+        if needs_trust {
+            until_normalized(&reader, &mut output, start, "Trust project files");
+            input.write_all(b"yes\r").unwrap();
+            input.flush().unwrap();
+        }
+        drain_until_quiet(&reader, &mut output);
+    }
+    let start = output.len();
+    input
+        .write_all(b"continue original conversation\r")
+        .unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "CRITIC-RETURNED-A");
+    let generations = stub.generations();
+    let request = generations.last().unwrap().to_string();
+    assert!(
+        request.contains("critic original conversation"),
+        "{request}"
+    );
+    assert!(!request.contains("critic other conversation"), "{request}");
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "{}", normalized(&output));
+    assert!(
+        !root_b.join("critic-sessions").exists(),
+        "store was rebased into root B"
+    );
+}
+
+use ego_cli::repl::actions::ActionRegistry;
+use portable_pty::{ExitStatus, NativePtySystem, PtySize, PtySystem};
+use std::{
+    io::{self, Read, Write},
+    path::Path,
+    sync::{Arc, mpsc},
+    thread,
+    time::{Duration, Instant},
+};
+use support::{
+    Ego, Plan, ReleaseGate, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
+};
+
+// Catches: the shared picker hides sessions from other roots or omits their synopsis/order.
+#[test]
+fn resume_picker_lists_summaries_across_roots_newest_first() {
+    across_root_picker_contract("list");
+}
+
+// Catches: selecting history keeps the previous root's instructions or filesystem authority.
+#[test]
+fn history_picker_resumes_across_roots_with_new_root_instructions_and_tools() {
+    across_root_picker_contract("history");
+}
+
+// Catches: Enter resumes a session whose recorded workspace no longer exists.
+#[test]
+fn sessions_picker_marks_missing_roots_unavailable_and_cannot_resume() {
+    across_root_picker_contract("missing");
+}
+
+fn across_root_picker_contract(case: &str) {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+    use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("target-read", "read", r#"{"path":"notes.md"}"#)),
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub);
+    ego.file("AGENTS.md", "# REGRESSION-MARKER\n");
+    ego.file("notes.md", "REGRESSION-MARKER\n");
+    let current = std::fs::canonicalize(ego.workspace_path()).unwrap();
+    let target = current.join("target");
+    let older = current.join("older");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::write(target.join("AGENTS.md"), "# REGRESSION-MARKER\n").unwrap();
+    std::fs::write(target.join("notes.md"), "REGRESSION-MARKER\n").unwrap();
+    let target = std::fs::canonicalize(target).unwrap();
+    let older = std::fs::canonicalize(older).unwrap();
+    let store = JsonlStore::new(ego.home_path().join("sessions"), current, Box::new(OsIo));
+    let selected = SessionId::new();
+    for (id, root, label, millis) in [
+        (SessionId::new(), &older, "Older record", 1000),
+        (selected, &target, "Orchid cross-root", 2000),
+    ] {
+        store
+            .publish_empty_session(id, root, Timestamp::from_millis(1))
+            .unwrap();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        for (item, kind) in [
+            (
+                None,
+                EventKind::SessionTitleChanged {
+                    title: Some(label.into()),
+                },
+            ),
+            (
+                Some(ItemId::new()),
+                EventKind::UserPrompt {
+                    text: format!("REGRESSION-MARKER {label}"),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            ),
+            (
+                Some(ItemId::new()),
+                EventKind::AssistantMessage {
+                    text: format!("Saved synopsis for {label}"),
+                },
+            ),
+            (
+                None,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            ),
+        ] {
+            store
+                .append(
+                    &id,
+                    &DomainEvent {
+                        env: Envelope {
+                            seq: seq.next(),
+                            id: EventId::new(),
+                            turn,
+                            item,
+                            parent: None,
+                            ts: Timestamp::from_millis(millis),
+                            producer: Producer::Main,
+                        },
+                        kind,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    if case == "missing" {
+        std::fs::remove_dir_all(&target).unwrap();
+    }
+    let ego = if case == "list" {
+        ego.subcommand("resume")
+    } else {
+        ego.conversing()
+    };
+    let ego = ego.env("TZ", "UTC").args([
+        "--model",
+        "ollama/qwen3",
+        "--sandbox",
+        "off",
+        "--allow",
+        "read(**)",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 30,
+            cols: 140,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    let start = if case == "list" {
+        0
+    } else {
+        until(&reader, &mut output, b"Trust project files");
+        let start = output.len();
+        input.write_all(b"yes\r").unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, start);
+        let start = output.len();
+        input
+            .write_all(if case == "history" {
+                b"/history REGRESSION-MARKER\r"
+            } else {
+                b"/sessions\r"
+            })
+            .unwrap();
+        input.flush().unwrap();
+        start
+    };
+    until_normalized(&reader, &mut output, start, "Orchid cross-root");
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        "Saved synopsis for Orchid cross-root",
+    );
+    if case == "list" {
+        until_normalized(&reader, &mut output, start, "Older record");
+        until_normalized(&reader, &mut output, start, "1970-01-01 00:00");
+        drain_until_quiet(&reader, &mut output);
+        let shown = normalized(&output[start..]);
+        assert!(
+            shown.find("Orchid cross-root").unwrap() < shown.find("Older record").unwrap(),
+            "{shown}"
+        );
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+    } else if case == "missing" {
+        until_normalized(&reader, &mut output, start, "unavailable");
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        drain_until_quiet(&reader, &mut output);
+        assert!(!normalized(&output[start..]).contains(&format!("resumed session {selected}")));
+        let canceled = output.len();
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, canceled);
+        assert!(stub.generations().is_empty());
+    } else {
+        let start = output.len();
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "Trust project files");
+        input.write_all(b"yes\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "Saved synopsis for Orchid cross-root",
+        );
+        drain_until_quiet(&reader, &mut output);
+        let start = output.len();
+        input.write_all(b"read notes\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+        let requests = stub.generations();
+        let instructions = requests[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .map(|message| message.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(instructions.contains("REGRESSION-MARKER"), "{instructions}");
+        assert!(!instructions.contains("REGRESSION-MARKER"), "{instructions}");
+        let request = requests.last().unwrap().to_string();
+        assert!(
+            request.contains("REGRESSION-MARKER") && !request.contains("REGRESSION-MARKER"),
+            "{request}"
+        );
+        assert!(request.contains("REGRESSION-MARKER Orchid cross-root"));
+    }
+    if case != "list" {
+        until_prompt_from(&reader, &mut output, start);
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+    }
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "{}", normalized(&output));
+}
+
+// Catches: resume shows an empty transcript, duplicate deltas, or drops compact tool rows.
+#[test]
+fn resume_replays_recent_turns_before_input_without_repeating_deltas() {
+    resume_replay_contract(3, false);
+}
+
+// Catches: replay is unbounded or one known unrenderable message prevents the composer.
+#[test]
+fn resume_replay_bounds_turns_and_survives_a_known_unrenderable_message() {
+    resume_replay_contract(12, true);
+}
+
+fn resume_replay_contract(turns: usize, unrenderable: bool) {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+    use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::permit::ToolResult;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.file("AGENTS.md", "# transcript replay fixture\n");
+    let root = std::fs::canonicalize(ego.workspace_path()).unwrap();
+    let store = JsonlStore::new(
+        ego.home_path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    );
+    let id: SessionId = support::FIXTURE_SESSION_ID.parse().unwrap();
+    store
+        .publish_empty_session(id, &root, Timestamp::from_millis(1))
+        .unwrap();
+    let mut seq = Seq::ZERO;
+    let mut millis = 1;
+    for n in 0..turns {
+        let turn = TurnId::new();
+        let user = ItemId::new();
+        let call = ItemId::new();
+        let assistant = ItemId::new();
+        let mut append = |item, kind| {
+            let at = seq.next();
+            millis += 10;
+            store
+                .append(
+                    &id,
+                    &DomainEvent {
+                        env: Envelope {
+                            seq: at,
+                            id: EventId::new(),
+                            turn,
+                            item,
+                            parent: None,
+                            ts: Timestamp::from_millis(millis),
+                            producer: Producer::Main,
+                        },
+                        kind,
+                    },
+                )
+                .unwrap();
+        };
+        append(
+            Some(user),
+            EventKind::UserPrompt {
+                text: format!("REPLAY-USER-{n:02}"),
+                images: Vec::new(),
+                queued_prompt: None,
+            },
+        );
+        append(
+            Some(call),
+            EventKind::ToolCallStarted {
+                name: "read".to_owned(),
+                args: format!("{{\"path\":\"replay-{n:02}.txt\"}}"),
+                call_id: Some(format!("read-{n}")),
+            },
+        );
+        append(
+            Some(call),
+            EventKind::ToolCallCompleted {
+                ok: true,
+                result: ToolResult::builtin("saved content"),
+            },
+        );
+        append(
+            Some(assistant),
+            EventKind::AssistantDelta {
+                text: format!("REPLAY-ANSWER-{n:02}"),
+            },
+        );
+        append(
+            Some(assistant),
+            EventKind::AssistantMessage {
+                text: format!("REPLAY-ANSWER-{n:02}"),
+            },
+        );
+        if unrenderable && n + 1 == turns {
+            append(
+                None,
+                EventKind::AssistantMessage {
+                    text: "NOT-RENDERABLE".to_owned(),
+                },
+            );
+        }
+        append(
+            None,
+            EventKind::TurnCompleted {
+                ok: true,
+                exit_reason: ExitReason::Completed,
+            },
+        );
+    }
+    let ego = ego
+        .subcommand("resume")
+        .arg(support::FIXTURE_SESSION_ID)
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        &format!("REPLAY-ANSWER-{:02}", turns - 1),
+    );
+    if unrenderable {
+        until_normalized(&reader, &mut output, start, "[transcript item unavailable]");
+    }
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let shown = normalized(&output[start..]);
+    for n in turns.saturating_sub(10)..turns {
+        assert!(shown.contains(&format!("REPLAY-USER-{n:02}")), "{shown}");
+        assert_eq!(
+            shown.matches(&format!("REPLAY-ANSWER-{n:02}")).count(),
+            1,
+            "{shown}"
+        );
+        assert!(shown.contains(&format!("replay-{n:02}.txt")), "{shown}");
+    }
+    if turns > 10 {
+        assert!(shown.contains("2 earlier turns omitted"), "{shown}");
+        assert!(!shown.contains("REPLAY-USER-00"), "{shown}");
+    }
+    if unrenderable {
+        assert_eq!(
+            shown.matches("[transcript item unavailable]").count(),
+            1,
+            "{shown}"
+        );
+    }
+    assert!(
+        rendered_prompt_count(&output[start..]) > 0,
+        "composer missing: {shown}"
+    );
+    assert!(
+        stub.generations().is_empty(),
+        "display replay generated a response"
+    );
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "{shown}");
+}
+
+// Catches: /sessions remains a UTC table, loses search bursts, or activates the wrong writer.
+#[test]
+fn sessions_picker_filters_titles_and_resumes_selected_context_in_local_time() {
+    sessions_picker_contract(true);
+}
+
+// Catches: a workspace with no other sessions opens a blank or uncloseable picker.
+#[test]
+fn sessions_picker_empty_workspace_has_an_explicit_cancelable_state() {
+    sessions_picker_contract(false);
+}
+
+fn sessions_picker_contract(populated: bool) {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# session picker fixture\n");
+    let mut expected_stamp = String::new();
+    if populated {
+        let seeded = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+            ])
+            .arg("remember selected context 239")
+            .run();
+        assert_eq!(seeded.code, Some(0), "{}", seeded.stderr);
+        let named = places
+            .ego(&stub)
+            .without_fixture_thinking()
+            .subcommand("resume")
+            .args([support::FIXTURE_SESSION_ID, "--name", "set=Orchid project"])
+            .run();
+        assert_eq!(named.code, Some(0), "{}", named.stderr);
+        let other_id = "0192a600-0000-7000-8000-000000000239";
+        let other = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                other_id,
+                "--sandbox",
+                "off",
+            ])
+            .arg("unrelated context 239")
+            .run();
+        assert_eq!(other.code, Some(0), "{}", other.stderr);
+        let other = places
+            .ego(&stub)
+            .without_fixture_thinking()
+            .subcommand("resume")
+            .args([other_id, "--name", "set=Zebra project"])
+            .run();
+        assert_eq!(other.code, Some(0), "{}", other.stderr);
+        let listing = places
+            .ego(&stub)
+            .subcommand("ls")
+            .args(["--output", "json"])
+            .run()
+            .report();
+        let millis = listing["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == support::FIXTURE_SESSION_ID)
+            .unwrap()["updated"]
+            .as_u64()
+            .unwrap();
+        let utc = chrono::DateTime::from_timestamp_millis(i64::try_from(millis).unwrap()).unwrap();
+        expected_stamp = (utc - chrono::Duration::hours(10))
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+    }
+    let ego = places
+        .ego(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TZ", "Pacific/Honolulu");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    let start = output.len();
+    input.write_all(b"/sessions\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Select session");
+    if populated {
+        until_normalized(&reader, &mut output, start, &expected_stamp);
+        until_normalized(&reader, &mut output, start, "Orchid project");
+        let filtered = output.len();
+        input.write_all(b"orchid").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, filtered, "filter: orchid");
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            filtered,
+            &format!("resumed session {}", support::FIXTURE_SESSION_ID),
+        );
+        drain_until_quiet(&reader, &mut output);
+        let answer = output.len();
+        input.write_all(b"recall selected context\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, answer, "REGRESSION-MARKER");
+        assert!(
+            stub.generations()
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("remember selected context 239"),
+            "selected session history missing"
+        );
+    } else {
+        until_normalized(&reader, &mut output, start, "No other saved sessions");
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+    }
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "{}", normalized(&output));
 }
 
 // Catches: the replacement session has no evidence authority for its next turn.
@@ -299,10 +1006,11 @@ fn successor_accepts_next_turn(action: &str) {
             )
         });
     assert_eq!(target["model"], "ollama/qwen3");
-    let resumed = places
-        .ego(&stub)
-        .subcommand("resume")
-        .args(["--sandbox", "off"]);
+    let resumed = places.ego(&stub).subcommand("resume").args([
+        target["id"].as_str().unwrap(),
+        "--sandbox",
+        "off",
+    ]);
     let pair = NativePtySystem::default()
         .openpty(PtySize {
             rows: 24,
@@ -4954,7 +5662,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 26] = [
+    const COMMANDS: [&str; 27] = [
         "help",
         "model",
         "thinking",
@@ -4973,6 +5681,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "config",
         "doctor",
         "quit",
+        "refresh",
         "new",
         "name",
         "goal",
@@ -5028,6 +5737,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
 
     for (command, prompt) in [
         ("model", "Select model"),
+        ("sessions", "Select session"),
         ("thinking", "Select reasoning for"),
         ("mode", "Choose execution mode"),
         ("permissions", "Choose permission operation"),
@@ -5051,7 +5761,6 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
 
     for (command, expected) in [
         ("mcp", Some("mcp:")),
-        ("sessions", Some("UPDATED")),
         ("fork", None),
         // The inherited model permits a checkpoint request; its empty reply must fail.
         ("compact", Some("compaction failed")),
@@ -6041,10 +6750,25 @@ fn tool_turn(
         })
         .collect();
     completions.push(Reply::Sse(text(TOOL_TURN_DONE)));
-    let stub = Stub::start(Plan {
+    tool_turn_with_completions(cols, files, completions, expand, None)
+}
+
+fn tool_turn_with_completions(
+    cols: u16,
+    files: &[(&str, &str)],
+    completions: Vec<Reply>,
+    expand: bool,
+    children_gate: Option<(Arc<ReleaseGate>, bool)>,
+) -> ToolTurnScreens {
+    let plan = Plan {
         completions,
         ..Plan::default()
-    });
+    };
+    let stub = if children_gate.is_some() {
+        Stub::start_concurrent(plan)
+    } else {
+        Stub::start(plan)
+    };
     let ego = Ego::against(&stub)
         .conversing()
         .args([
@@ -6055,7 +6779,11 @@ fn tool_turn(
             "--mode",
             "yolo",
             "--sandbox",
-            "off",
+            if children_gate.is_some() {
+                "workspace"
+            } else {
+                "off"
+            },
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# tool row fixture\n");
@@ -6088,7 +6816,62 @@ fn tool_turn(
     let start = output.len();
     input.write_all(b"use the tools\r").expect("turn");
     input.flush().expect("turn flush");
-    until_normalized(&reader, &mut output, start, TOOL_TURN_DONE);
+    let cancel_children = children_gate.as_ref().is_some_and(|(_, cancel)| *cancel);
+    if let Some((gate, cancel)) = children_gate {
+        let deadline = Instant::now() + PROGRESS_DEADLINE;
+        loop {
+            let requests = stub.requests();
+            if requests
+                .iter()
+                .filter(|request| request.path.ends_with("/chat/completions"))
+                .count()
+                >= 3
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                gate.release();
+                panic!("both task children must reach the provider concurrently: {requests:?}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if cancel {
+            input.write_all(b"\x1b").expect("cancel task children");
+            input.flush().expect("cancel task children flush");
+            until_normalized(&reader, &mut output, start, "Interrupted by user");
+        }
+        gate.release();
+        let generations = stub.generations();
+        let live_context = |generation: &serde_json::Value| {
+            generation["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|message| message["content"].as_str())
+                .find(|content| content.contains("- Posture:"))
+                .expect("the real CLI supplies authoritative live posture")
+                .to_owned()
+        };
+        let parent_system = live_context(&generations[0]);
+        assert!(
+            parent_system.contains("sandbox: workspace; network: online"),
+            "{parent_system}"
+        );
+        for child in &generations[1..3] {
+            let child_system = live_context(child);
+            for fact in parent_system.lines().filter(|line| {
+                line.starts_with("- Posture:") || line.starts_with("- Workspace root:")
+            }) {
+                assert!(
+                    child_system.contains(fact),
+                    "child widened parent posture: {child_system}"
+                );
+            }
+        }
+    }
+    if !cancel_children {
+        until_normalized(&reader, &mut output, start, TOOL_TURN_DONE);
+    }
     let screen_lines = |output: &[u8]| {
         let mut screen = vt100::Parser::new(rows, cols, 0);
         screen.process(output);
@@ -6124,7 +6907,16 @@ fn tool_turn(
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
+    let status = bounded_exit(child);
+    if cancel_children {
+        assert_eq!(
+            status.exit_code(),
+            130,
+            "the cancelled turn owns the final exit"
+        );
+    } else {
+        assert!(status.success());
+    }
     drop(input);
     drop(pair);
     reader_join.join().expect("reader thread");
@@ -6972,8 +7764,6 @@ fn e_edits_the_call_and_the_amended_call_is_asked_again() {
     session.press(b"\r");
     session.wait("timeout_ms: ");
     session.press(b"\r");
-    session.wait("background: ");
-    session.press(b"false\r");
     session.wait("[d] details");
     let amended = session.screen().join("\n");
     assert!(amended.contains("Allow run seq 1 4?"), "{amended}");
@@ -7721,4 +8511,132 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
         receipt,
         target["id"].as_str().expect("successor id").to_owned(),
     )
+}
+
+fn two_task_calls() -> String {
+    let first = tool_call("one", "task", r#"{"name":"one","prompt":"read calc.py"}"#);
+    let second = tool_call("two", "task", r#"{"name":"two","prompt":"read calc.py"}"#);
+    let (head, tail) = first.split_once("\n\n").unwrap();
+    let mut frame: serde_json::Value =
+        serde_json::from_str(head.strip_prefix("data: ").unwrap()).unwrap();
+    let other: serde_json::Value = serde_json::from_str(
+        second
+            .split_once("\n\n")
+            .unwrap()
+            .0
+            .strip_prefix("data: ")
+            .unwrap(),
+    )
+    .unwrap();
+    let mut second_call = other["choices"][0]["delta"]["tool_calls"][0].clone();
+    second_call["index"] = serde_json::json!(1);
+    frame["choices"][0]["delta"]["tool_calls"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_call);
+    format!("data: {frame}\n\n{tail}")
+}
+
+// Catches: concurrent task rows interleaving their labels or overwriting the composer.
+#[test]
+fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
+    let tasks = two_task_calls();
+    let gate = ReleaseGate::new();
+    let child = || Reply::GatedPaced {
+        head: String::new(),
+        tail: tool_call("read1", "read", r#"{"path":"calc.py"}"#),
+        gate: gate.clone(),
+    };
+    let screens = tool_turn_with_completions(
+        120,
+        &[("calc.py", "hello\n")],
+        vec![
+            Reply::Sse(tasks),
+            child(),
+            child(),
+            Reply::Sse(text("child final")),
+            Reply::Sse(text("child final")),
+            Reply::Sse(text(TOOL_TURN_DONE)),
+        ],
+        false,
+        Some((gate.clone(), false)),
+    );
+    let lines = &screens.after_turn;
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("↳ one ›") && line.contains("read calc.py"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("↳ two ›") && line.contains("read calc.py"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("task one"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("task two"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert!(
+        lines.last().is_some_and(|line| line.starts_with('>')),
+        "{lines:?}"
+    );
+}
+
+// Catches: Esc returning to the composer while a child still owns a live attempt.
+#[test]
+fn esc_cancels_both_task_children_and_restores_one_idle_composer() {
+    let gate = ReleaseGate::new();
+    let held = || Reply::GatedPaced {
+        head: String::new(),
+        tail: text("must not finish"),
+        gate: gate.clone(),
+    };
+    let screens = tool_turn_with_completions(
+        120,
+        &[],
+        vec![Reply::Sse(two_task_calls()), held(), held()],
+        false,
+        Some((gate.clone(), true)),
+    );
+    let visible = screens.after_turn.join("\n");
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "{visible}"
+    );
+    assert_eq!(
+        screens
+            .after_turn
+            .iter()
+            .filter(|line| line.contains("✗ task") && line.contains("Cancelled"))
+            .count(),
+        2,
+        "{visible}"
+    );
+    assert!(
+        screens
+            .after_turn
+            .last()
+            .is_some_and(|line| line.starts_with('>')),
+        "{visible}"
+    );
+    assert!(!visible.contains("must not finish"), "{visible}");
 }

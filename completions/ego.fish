@@ -40,6 +40,7 @@ complete -c ego -n "__fish_ego_needs_command" -f -a "a2a" -d 'Serve the Agent2Ag
 complete -c ego -n "__fish_ego_needs_command" -f -a "auth" -d 'Manage subscription credentials.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "mcp" -d 'Manage configured MCP servers.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "config" -d 'Manage stored user configuration.'
+complete -c ego -n "__fish_ego_needs_command" -f -a "roots"
 complete -c ego -n "__fish_ego_needs_command" -f -a "rules" -d 'Inspect and manage persistent permission rules.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "mcp-server" -d 'Serve scoped ego runs over MCP on stdio.'
 complete -c ego -n "__fish_ego_using_subcommand run" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
@@ -235,6 +236,18 @@ complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcomma
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -l effective -d 'Show the effective run perimeter instead of stored values'
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from edit" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand roots; and not __fish_seen_subcommand_from add rm ls" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand roots; and not __fish_seen_subcommand_from add rm ls" -f -a "add" -d 'Add or update one user perimeter root'
+complete -c ego -n "__fish_ego_using_subcommand roots; and not __fish_seen_subcommand_from add rm ls" -f -a "rm" -d 'Remove a root by its stored spelling'
+complete -c ego -n "__fish_ego_using_subcommand roots; and not __fish_seen_subcommand_from add rm ls" -f -a "ls" -d 'List roots stored in the selected user target'
+complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from add" -l profile -r
+complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from add" -l access -r
+complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from rm" -l profile -r
+complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from rm" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from ls" -l profile -r
+complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from ls" -l json
+complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand rules; and not __fish_seen_subcommand_from ls allow deny revoke remember explain" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand rules; and not __fish_seen_subcommand_from ls allow deny revoke remember explain" -f -a "ls" -d 'List the effective system and selected user rules'
 complete -c ego -n "__fish_ego_using_subcommand rules; and not __fish_seen_subcommand_from ls allow deny revoke remember explain" -f -a "allow" -d 'Persist one allow predicate'

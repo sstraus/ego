@@ -35,6 +35,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand auth 'Manage subscription credentials.'
             cand mcp 'Manage configured MCP servers.'
             cand config 'Manage stored user configuration.'
+            cand roots 'roots'
             cand rules 'Inspect and manage persistent permission rules.'
             cand mcp-server 'Serve scoped ego runs over MCP on stdio.'
         }
@@ -310,6 +311,30 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --help 'Print help'
         }
         &'ego;config;edit'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;roots'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+            cand add 'Add or update one user perimeter root'
+            cand rm 'Remove a root by its stored spelling'
+            cand ls 'List roots stored in the selected user target'
+        }
+        &'ego;roots;add'= {
+            cand --profile 'profile'
+            cand --access 'access'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;roots;rm'= {
+            cand --profile 'profile'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;roots;ls'= {
+            cand --profile 'profile'
+            cand --json 'json'
             cand -h 'Print help'
             cand --help 'Print help'
         }

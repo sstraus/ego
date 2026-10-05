@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// The wall-clock wait between two attempts of one generation plan.
+pub(super) struct TokioRetryPause;
+
+impl ego_core::turn::RetryPause for TokioRetryPause {
+    fn pause(&self, delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(delay))
+    }
+}
+
 pub(super) async fn effect_scope(
     confinement: &RunConfinement,
     evidence: &SessionEvidenceStore,
@@ -555,8 +564,10 @@ impl ChildHost for CliChildHost {
                 .resolve(&args)
                 .map_err(|error| error.to_string())
                 .and_then(|effective| {
-                    self.executor
-                        .admit_child_authority(&effective, args.offline)
+                    self.executor.admit_child_authority(
+                        &effective,
+                        args.offline || effective.network == ego_core::config::Network::Off,
+                    )
                 }),
             None => rooted_settings(
                 &args,

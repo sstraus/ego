@@ -119,7 +119,7 @@ fn checkpoint() -> String {
         "# Ordered next steps",
         "Run the focused gate.",
         "# Critical references",
-        "docs/decisions/2026-08-24-compaction-seeds-a-clean-session.md",
+        "ARCHITECTURE.md",
     ]
     .join("\n")
 }
@@ -136,6 +136,7 @@ fn context_checkpoint_frame(text: &str) -> String {
 #[test]
 fn main_checkpoint_baseline_uses_existing_gaps_and_expressibility_ports_only() {
     let request = GenRequest {
+        cache: None,
         model: "main-model".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, checkpoint())])
             .expect("checkpoint baseline history"),
@@ -312,7 +313,7 @@ fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
 
 #[test]
 fn public_projection_distinguishes_checkpoint_from_human_prompt_and_keeps_authority_low() {
-    assert_eq!(PUBLIC_EVENT_VERSION, 10);
+    assert_eq!(PUBLIC_EVENT_VERSION, 11);
     let source: SessionId =
         serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
     let seeded = seeded_event(EventKind::CompactionSeeded {
@@ -418,6 +419,7 @@ fn compaction_attempts_settle_in_the_source_ledger_for_every_terminal_boundary()
         state.apply(&event(EventKind::GenerationStarted {
             attempt,
             role: GenerationRole::Compaction,
+            snapshot: None,
         }));
         state.apply(&event(EventKind::UsageUpdated {
             usage,
@@ -501,6 +503,7 @@ fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
         let frame = context_checkpoint_frame(parsed.text());
 
         let request = GenRequest {
+            cache: None,
             model: "main-model".to_string(),
             messages: Conversation::new(vec![Message::text(Role::User, frame)])
                 .expect("size-sweep request history"),
@@ -528,6 +531,7 @@ fn compaction_output_stays_private_from_the_source_conversation() {
         event(EventKind::GenerationStarted {
             attempt: AttemptRef::first(GenerationId::new()),
             role: GenerationRole::Compaction,
+            snapshot: None,
         }),
         event(EventKind::AssistantMessage { text: checkpoint() }),
         event(EventKind::CompactionSeeded {
@@ -806,6 +810,7 @@ fn compaction_turn_with_state(
             source,
             gate,
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system: None,
                 identity: None,
                 token_ceiling: None,
@@ -814,6 +819,7 @@ fn compaction_turn_with_state(
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
+            retry_pause: Arc::new(NoRetryPause),
         },
         tools,
     )
@@ -874,6 +880,7 @@ fn busy_state(busy: &CompactionBusy) -> SessionState {
             EventKind::GenerationStarted {
                 attempt: AttemptRef::first(GenerationId::new()),
                 role: GenerationRole::Main,
+                snapshot: None,
             },
         ),
     };
@@ -1326,4 +1333,13 @@ fn compaction_busy_states_and_cancellation_are_not_silently_admitted() {
         store.events().is_empty(),
         "cancelled before provider must not reserve"
     );
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
+    }
 }

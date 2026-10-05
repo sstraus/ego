@@ -1001,7 +1001,7 @@ mod edit {
 
     #[test]
     fn edit_prepares_a_read_and_a_write_of_the_file_it_names() {
-        // `docs/13-effect-tools.md` Step C, first invariant. The operation
+        // `ARCHITECTURE.md` Step C, first invariant. The operation
         // carries the substitution rather than the resulting bytes, because
         // the resulting bytes are not knowable here — and because "replace
         // this text with that text in this file" is the reviewable sentence
@@ -1769,6 +1769,11 @@ mod rogue {
 mod end_to_end {
     use super::*;
 
+    mod mcp_output_spill {
+        use super::*;
+        include!("support/mcp_output_spill.rs");
+    }
+
     struct FixedPolicySource {
         policy: Arc<PolicyEngine>,
         snapshot: Arc<GenerationPolicySnapshot>,
@@ -1877,6 +1882,7 @@ mod end_to_end {
                     }),
                     gate,
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -1885,6 +1891,7 @@ mod end_to_end {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 Tools::new(
                     &ws.registry,
@@ -1974,6 +1981,7 @@ mod end_to_end {
                     }),
                     gate,
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -1982,6 +1990,7 @@ mod end_to_end {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 Tools::new(
                     &ws.registry,
@@ -2130,5 +2139,14 @@ mod end_to_end {
             image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
             default_reasoning_effort: None,
         }
+    }
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
     }
 }

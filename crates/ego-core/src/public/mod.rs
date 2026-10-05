@@ -33,7 +33,8 @@ use crate::state::Usage;
 /// Version 7 adds the public question item and its structured report. The
 /// durable codec stays at 7 because new event variants are additive.
 /// Version 9 adds the closed question target to the public report. Version 10
-/// adds the sanitized fallback decision event.
+/// adds the sanitized fallback decision event. Version 11 adds the live
+/// provider retry status.
 ///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
@@ -41,7 +42,7 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 10;
+pub const PUBLIC_EVENT_VERSION: u32 = 11;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
@@ -87,7 +88,7 @@ pub enum InstructionSource {
 
 /// One instruction file a run loaded, described but **never quoted**.
 ///
-/// `docs/08-codex-critique.md` I2 asks for each path, digest and scope to be
+/// `ARCHITECTURE.md` I2 asks for each path, digest and scope to be
 /// recorded in the public start event, and asks for the *text* to stay out of
 /// it. Those are one requirement, not two: the stream this rides is what a CI
 /// job archives, and an `AGENTS.md` is one symlink away from being something
@@ -103,7 +104,7 @@ pub struct InstructionDescriptor {
     /// It describes the file, not the prompt: the assembler frames what it
     /// sends, so a digest over the framed text would change with the framing
     /// and prove nothing about the repository. See
-    /// `docs/decisions/2026-08-21-a-binary-that-produces-the-exit-code.md` §4.
+    /// `ARCHITECTURE.md` §4.
     pub sha256: String,
     /// How many bytes that digest covers.
     pub bytes: u64,
@@ -260,6 +261,27 @@ pub enum PublicEvent {
         ceiling: CeilingEffect,
         /// What the ceiling rests on, when it rests on anything.
         rates: RateSource,
+    },
+    /// A transient provider failure will be retried after `delay_ms`.
+    ///
+    /// Live status, not a durable fact: the failed attempt is already in the
+    /// log with its own error and settlement, and the wait in between is a
+    /// harness decision a host shows while it lasts. So, like
+    /// [`MeteringSelected`](Self::MeteringSelected), the harness publishes it
+    /// directly and no `DomainEvent` records it; a replay never shows a wait
+    /// that ended long ago.
+    ///
+    /// `attempt` counts retries from 1 to `limit`, the candidate's retry
+    /// allowance. `cause` is host-safe by construction (see
+    /// [`AiEvent::ProviderFailure`](crate::generator::port::AiEvent::ProviderFailure)).
+    /// The status ends when a later item, or the turn's completion, arrives.
+    ProviderRetry {
+        turn: TurnId,
+        attempt: u32,
+        limit: u32,
+        delay_ms: u64,
+        kind: ErrorKind,
+        cause: String,
     },
     /// A fallback was sanitized or skipped before any network effect.
     FallbackDecision {
@@ -632,7 +654,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         }),
         // `window` is deliberately not projected. It reaches consumers through
         // the reduction a sink is handed beside the event
-        // (`docs/decisions/2026-08-21-what-a-sink-is-handed.md`), which is
+        // (`ARCHITECTURE.md`), which is
         // where the only reader of it — the ACP `UsageUpdate` denominator —
         // already looks. Carrying it here as well would put the same fact on
         // two versioned surfaces that could then disagree, and would cost a

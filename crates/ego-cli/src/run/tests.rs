@@ -1047,7 +1047,14 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
         crate::skill::SkillCatalogue::discover(discovery, &["help", "skills", "hooks", "quit"])
             .expect("skill catalogue");
     let before = catalogue.capture().expect("initial capture");
-    let before_registry = tools(None, Some(before.core())).expect("initial tool registry");
+    let before_registry = tools(
+        None,
+        Some(before.core()),
+        None,
+        None,
+        ego_core::permit::EnvPolicy::Inherited,
+    )
+    .expect("initial tool registry");
     std::fs::create_dir_all(user.join("new-valid")).expect("new skill directory");
     std::fs::write(
         user.join("new-valid/SKILL.md"),
@@ -1062,8 +1069,14 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
             .iter()
             .any(|spec| spec.name() == "new-valid")
     );
-    let prospective_registry = tools(None, Some(prospective.core()))
-        .expect("prospective capture supplies model tool preflight");
+    let prospective_registry = tools(
+        None,
+        Some(prospective.core()),
+        None,
+        None,
+        ego_core::permit::EnvPolicy::Inherited,
+    )
+    .expect("prospective capture supplies model tool preflight");
     assert!(
         prospective_registry
             .iter()
@@ -1071,11 +1084,27 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
     );
 
     let selected = vec!["not-a-tool".to_owned()];
-    assert!(tools(Some(&selected), Some(prospective.core())).is_err());
+    assert!(
+        tools(
+            Some(&selected),
+            Some(prospective.core()),
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited
+        )
+        .is_err()
+    );
     let after = catalogue.capture().expect("capture after failed preflight");
     assert!(std::sync::Arc::ptr_eq(&before.core(), &after.core()));
     assert_eq!(before.snapshot_digest(), after.snapshot_digest());
-    let after_registry = tools(None, Some(after.core())).expect("unchanged registry");
+    let after_registry = tools(
+        None,
+        Some(after.core()),
+        None,
+        None,
+        ego_core::permit::EnvPolicy::Inherited,
+    )
+    .expect("unchanged registry");
     assert_eq!(
         before_registry
             .iter()
@@ -1247,7 +1276,16 @@ fn frozen_rule_resolver_reuses_startup_layers_and_replaces_only_base_user_permis
         result.next.ruleset.allow[0].origins(),
         ego_core::config::OriginSet::just(ego_core::config::Source::Project)
     );
-    assert_eq!(result.next.ruleset.deny.len(), 1);
+    assert_eq!(
+        result
+            .next
+            .ruleset
+            .deny
+            .iter()
+            .filter(|entry| entry.authority() != ego_core::config::Source::Default)
+            .count(),
+        1
+    );
     assert_eq!(
         result.next.ruleset.deny[0].rule(),
         &ego_core::permit::rule::Rule::load("read(src/**)").unwrap()
@@ -1791,7 +1829,14 @@ fn a_tool_less_protocol_session_offers_no_tool_to_ask_a_seat_for() {
             ..crate::cli::SessionShape::default()
         },
     );
-    let offered = composition::tools(tool_less.tools.as_ref(), None).expect("an empty selection");
+    let offered = composition::tools(
+        tool_less.tools.as_ref(),
+        None,
+        None,
+        None,
+        ego_core::permit::EnvPolicy::Inherited,
+    )
+    .expect("an empty selection");
     assert!(
         offered.is_empty(),
         "a tool-less session offered {} tools",
@@ -1800,9 +1845,15 @@ fn a_tool_less_protocol_session_offers_no_tool_to_ask_a_seat_for() {
 
     let ordinary = protocol_args(None, crate::cli::SessionShape::default());
     assert!(
-        !composition::tools(ordinary.tools.as_ref(), None)
-            .expect("no selection at all")
-            .is_empty(),
+        !composition::tools(
+            ordinary.tools.as_ref(),
+            None,
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited
+        )
+        .expect("no selection at all")
+        .is_empty(),
         "an unshaped session must still offer the builtins"
     );
 }
@@ -2061,4 +2112,83 @@ fn a_plain_host_is_told_nothing_per_event() {
     ] {
         assert_eq!(plain.signal(&event, &state), "");
     }
+}
+
+// Catches: the process composition admits exec_paths outside a system root
+// ceiling even though profile roots are checked.
+#[tokio::test]
+async fn system_root_ceiling_is_checked_before_run_effects() {
+    let tree = tempdir().unwrap();
+    let workspace = tree.path().canonicalize().unwrap();
+    let extra = workspace.parent().unwrap();
+    let session_root = workspace.join("sessions");
+    let layers = vec![
+        ConfigLayer::parse(Source::System, "roots=[]").unwrap(),
+        ConfigLayer::parse(Source::User, &format!("exec_paths=['{}']", extra.display())).unwrap(),
+    ];
+    let store = Arc::new(JsonlStore::new(
+        session_root.clone(),
+        workspace.clone(),
+        Box::new(OsIo),
+    ));
+    let mut executor = CliRunExecutor::for_acp(
+        None,
+        SessionShape::default(),
+        store,
+        Arc::new(EvidenceAdmissionService::new()),
+    );
+    executor.frozen = Some(Arc::new(config::FrozenRunConfig::from_layers(
+        layers,
+        &executor.args,
+        Trust::Untrusted,
+    )));
+    let invocation = RunInvocationId::new();
+    let request = RunPreparation {
+        run_id: RunId::new(SessionId::new(), invocation.uuid()),
+        invocation,
+        root: ego_core::run::RunRoot::new(workspace).unwrap(),
+        selections: ego_core::run::RunSelections::new(None, None, None, None, None),
+        continuation: false,
+        origin: RunOrigin::TopLevel,
+    };
+    let error = match executor.prepare(&request).await {
+        Err(error) => error,
+        Ok(_) => panic!("exec_paths outside system roots must be refused"),
+    };
+    assert!(error.to_string().contains("system roots ceiling"));
+    assert!(
+        !session_root.exists(),
+        "refusal must precede session creation"
+    );
+}
+
+// Catches: /yolo bypasses the system maximum when staging the next generation.
+#[test]
+fn repl_mode_selection_cannot_raise_system_maximum() {
+    use ego_core::config::{ConfigLayer, Source, resolve};
+
+    let layers = vec![ConfigLayer::parse(Source::System, "max_mode = 'default'").unwrap()];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+    let selection = GenerationPolicySelection::new(
+        effective.mode.unwrap_or(Mode::Default),
+        effective.permissions,
+    );
+    let owner = PolicyApplicationOwner::new(
+        selection.clone(),
+        Arc::new(UnusedStore),
+        Arc::new(CliAutoPreflight::new(CapturedAutoPreflight::Valid)),
+        Arc::new(FrozenRuleResolver::new(
+            layers,
+            Trust::Trusted,
+            None,
+            selection.clone(),
+        )),
+    );
+
+    let result = owner.apply(PolicyControlRequest::SetMode(Mode::Yolo));
+    assert!(
+        result.is_err(),
+        "REPL accepted yolo above system max_mode=default"
+    );
+    assert_eq!(selection.capture().unwrap().mode, Mode::Default);
 }

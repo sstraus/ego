@@ -491,6 +491,10 @@ pub enum SessionTrustStatus {
 }
 
 pub trait SessionTrustAdmission: Send + Sync {
+    /// The adapter decides whether the process has a host-selected profile.
+    /// Default ports never accept client self-attestation.
+    fn attest_trusted(&self, _root: &RunRoot) {}
+
     fn status(&self, root: &RunRoot) -> SessionTrustStatus;
     /// False means executable authority changed while the question was open.
     fn record_answer(&self, root: &RunRoot, fingerprint: &str, decision: Trust) -> bool;
@@ -1762,7 +1766,7 @@ where
 /// The generation controls this session offers, or nothing.
 ///
 /// Absent controls stay absent rather than becoming an empty picker, which is
-/// the same fallback rule `docs/06-acp.md` §3 applies to usage and cost. A
+/// the same fallback rule `ARCHITECTURE.md` §3 applies to usage and cost. A
 /// seat that cannot be read is a warning and an omission, not a refusal to
 /// open the session: creating a session has never depended on the picker.
 fn config_options(
@@ -2223,10 +2227,15 @@ fn lifecycle_error(error: &LifecycleError) -> Error {
         // Transient by construction: another writer has the session, or moved
         // it under this request. Retrying is what these are for, and both
         // methods are idempotent so retrying is safe.
-        LifecycleError::LeaseHeld
-        | LifecycleError::Active
-        | LifecycleError::Conflict
-        | LifecycleError::EffectUncertain => ErrorCode::Other(SESSION_BUSY),
+        LifecycleError::LeaseHeld | LifecycleError::Active | LifecycleError::Conflict => {
+            ErrorCode::Other(SESSION_BUSY)
+        }
+        LifecycleError::EffectUncertain => {
+            return Error::new(
+                ErrorCode::InternalError.into(),
+                "the session's last run has an uncertain effect; close it with `session/close` and start a new chat with `session/new`",
+            );
+        }
         // ego failed. Not the caller's parameters, and not something a retry
         // is promised to fix.
         LifecycleError::Store(_)
@@ -2585,6 +2594,7 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
+                let trust = trust.clone();
                 async move |McpChecked(request): McpChecked<v1::NewSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let sessions = sessions.clone();
                     let unadmitted = unadmitted.clone();
@@ -2595,6 +2605,7 @@ where
                     let controls = controls.clone();
                     let confinement = confinement.clone();
                     let notices = notices.clone();
+                    let trust = trust.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
@@ -2688,6 +2699,14 @@ where
                     } else {
                         None
                     };
+                    if request.meta.as_ref()
+                        .and_then(|meta| meta.get("ego"))
+                        .and_then(|ego| ego.get("trust"))
+                        .and_then(serde_json::Value::as_str) == Some(TRUST_GRANT)
+                        && let Some(admission) = &trust
+                    {
+                        admission.attest_trusted(&attachment_root);
+                    }
                     drop(hidden);
                     // The response first, the announcement after it. A
                     // `session_info_update` names a session by an id the client
@@ -3356,6 +3375,30 @@ where
                     };
                     if let Err(error) = unadmitted.refuse(durable_session) {
                         return responder.respond_with_error(error);
+                    }
+                    // Read the durable run even if a failed load left no local
+                    // attachment. Retrying an uncertain effect cannot recover it.
+                    match controller.status_by_session(durable_session).await {
+                        Ok(snapshot) if snapshot.status() == RunStatus::Uncertain => {
+                            let recovery = format!(
+                                "run {} has an uncertain effect; close this session with `session/close` and start a new chat with `session/new`",
+                                snapshot.run_id(),
+                            );
+                            let message = match snapshot.settlement() {
+                                Some(settlement) => failure_message(&recovery, settlement),
+                                None => recovery,
+                            };
+                            return responder.respond_with_error(Error::new(
+                                ErrorCode::InternalError.into(),
+                                message,
+                            ));
+                        }
+                        Ok(_) | Err(RunError::Store(StoreError::NotFound)) => {}
+                        Err(error) => {
+                            return responder.respond_with_error(
+                                Error::internal_error().data(error.to_string()),
+                            );
+                        }
                     }
                     // Serialized, so a numeric `41` and a string `"41"` stay
                     // two different requests exactly as JSON-RPC says they are.

@@ -185,7 +185,14 @@ impl CliPrepared {
             compiled,
             text: _,
             slug,
-        } = prepared_materials(&settings, &args, String::new(), &Stderr).map_err(usage)?;
+        } = prepared_materials(
+            &settings,
+            &args,
+            String::new(),
+            Arc::new(store.history()),
+            &Stderr,
+        )
+        .map_err(usage)?;
         let system = if child { None } else { system };
         let compiled = if child { None } else { compiled };
         let Settings {
@@ -343,6 +350,8 @@ impl CliPrepared {
                     diagnostic: Some(format!("configuration error: {message}")),
                 });
             }
+            // Nothing was generated yet, so the failure's effect is known.
+            Err(termination @ RunTermination::Provider { .. }) => return settlement(termination),
             Err(error) => return Err(run_executor_error(error)),
         };
         drop(proof_directory);
@@ -381,16 +390,19 @@ impl CliPrepared {
         // an escalation becomes a question the operator can answer instead of
         // an internal error the host can only render as a failure.
         let profile_roots =
-            super::profile_roots::admit(&self.effective).map_err(RunExecutorError::new)?;
+            super::profile_roots::admit(&self.effective, self.confinement.workspace())
+                .map_err(RunExecutorError::new)?;
         let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
             CliGenerationPolicySource::new(
                 policy_selection,
                 CanonPath::new(&self.root),
                 bindings.human(),
             )
-            .with_profile_roots(profile_roots),
+            .with_profile_roots(profile_roots)
+            .with_coordinator_profile(self.effective.active_profile.as_ref()),
         );
         let config = TurnConfig {
+            cache: self.effective.cache,
             system: self.system,
             identity: Some(AgentIdentity {
                 version: crate::build_info::VERSION.to_owned(),
@@ -730,6 +742,7 @@ pub(super) async fn execution_preflight(
         &settings,
         args,
         matches!(driver, Driver::Interactive { .. }),
+        Arc::new(chosen.store.history()),
         diagnostics,
     )
     .map_err(usage)?;

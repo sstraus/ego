@@ -1,6 +1,6 @@
 //! The one check no fixture can make: the provider accepted the body.
 //!
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §9
+//! `ARCHITECTURE.md` §9
 //! splits "the same contract" into five checks. Four are offline and live in
 //! `crates/ego-ai/tests/conformance.rs`, which replays committed transcripts. The fifth
 //! cannot be made offline **at all**, and that asymmetry is the honest core of
@@ -326,7 +326,7 @@ async fn send(
 ///
 /// SSE reserves a line beginning `:` for comments and every decoder skips
 /// them, so provenance travels *inside* the evidence rather than in a README
-/// beside it — which is the gap `docs/12-cline-provider-survey.md:749-760`
+/// beside it — which is the gap `ARCHITECTURE.md`
 /// found in the harness it studied.
 fn transcript_fixture(profile: &Profile, model: &str, when: &str, transcript: &str) -> String {
     format!(
@@ -439,6 +439,7 @@ async fn smoke(profile: &Profile, when: &str) {
     // every provider owes an answer to and the cheapest to ask for: it is
     // rejected before any generation happens, so it costs nothing.
     let absent = GenRequest {
+        cache: None,
         model: "this-model-does-not-exist".to_string(),
         ..canonical(profile)
     };

@@ -109,10 +109,21 @@ fn an_acp_host_is_handed_the_status_of_a_refused_catalogue_and_none_of_its_body(
             "prompt": [{ "type": "text", "text": "Ask" }],
         }),
     );
-    let data = answered["error"]["data"]
-        .as_str()
-        .unwrap_or_else(|| panic!("a refused catalogue did not fail the prompt: {answered}"))
-        .to_owned();
+    // The message and `data` together: a refused catalogue is a known
+    // failure since regression case, so its cause is in the message and there
+    // is no executor diagnostic to repeat in `data`.
+    let error = answered
+        .get("error")
+        .unwrap_or_else(|| panic!("a refused catalogue did not fail the prompt: {answered}"));
+    let data = format!(
+        "{} {}",
+        error["message"].as_str().unwrap_or_default(),
+        error["data"].as_str().unwrap_or_default()
+    );
+    assert!(
+        !data.contains("uncertain"),
+        "a refused catalogue left the run uncertain: {answered}"
+    );
 
     assert!(
         data.contains("api/tags"),

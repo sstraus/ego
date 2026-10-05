@@ -1,7 +1,7 @@
 //! Who decided, recorded so an audit can answer "what did this run do
 //! without asking me".
 //!
-//! `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §7. The arms are
+//! `ARCHITECTURE.md` §7. The arms are
 //! the ones with producers in this build, including the judge and human seats
 //! at §6 steps 6 and 7.
 
@@ -15,7 +15,7 @@ use crate::generator::attempt::AttemptRef;
 /// One rule that contributed to a decision, and where it came from.
 ///
 /// The same `{ id, from, also }` shape
-/// `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md` gave
+/// `ARCHITECTURE.md` gave
 /// `PolicyDenied::Denied`, deliberately: "who said so" is one vocabulary, and
 /// two that must agree about the same fact is the duplication the reuse rule
 /// exists to prevent.

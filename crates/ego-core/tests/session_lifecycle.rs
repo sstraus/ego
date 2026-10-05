@@ -689,8 +689,9 @@ fn lease_active_and_uncertain_controls_refuse_their_operations() {
         Err(LifecycleError::Active)
     ));
     runs.mark_uncertain(id);
+    // Uncertain evidence remains protected from deletion; close may abandon it.
     assert!(matches!(
-        futures::executor::block_on(service.close(id)),
+        futures::executor::block_on(service.delete(id)),
         Err(LifecycleError::EffectUncertain)
     ));
 }

@@ -36,7 +36,7 @@ use crate::suspension::{ContinuationError, GuardedMcpResume};
 /// The distinction is the point: a tool that was refused and a tool that
 /// looked and found nothing are telling the model two different things, and a
 /// single "it didn't work" collapses them. See
-/// `docs/decisions/2026-08-21-reading-without-reading-everything.md` §6.
+/// `ARCHITECTURE.md` §6.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsError {
     NotFound {
@@ -158,7 +158,7 @@ pub trait GuardedIo<'s>: Send + Sync {
     /// The seam reads the files; the caller supplies only the judgement and
     /// receives only the verdicts. That is what lets `grep` work without ever
     /// holding read authority over the subtree
-    /// (`docs/decisions/2026-08-21-reading-without-reading-everything.md` §2).
+    /// (`ARCHITECTURE.md` §2).
     fn search(&self, req: &ScanRequest, matcher: &dyn LineMatcher) -> Result<Found, IoDenied>;
 
     /// Execute the exact process specification admitted by this permit.
@@ -208,6 +208,11 @@ pub trait GuardedIo<'s>: Send + Sync {
         Err(authority_mismatch())
     }
 
+    /// Consume the exact selected stdio request authority without spawning.
+    fn claim_mcp_stdio(&self, _call: PreparedCall) -> Result<McpStdioClaim, TransportError> {
+        Err(authority_mismatch())
+    }
+
     fn is_cancelled(&self) -> bool {
         false
     }
@@ -238,6 +243,29 @@ pub struct McpHttpClaim {
 }
 
 /// A spent, non-clone authority for one selected call over an existing ACP channel.
+/// Fresh semantic request authority, independent of a session child lifetime.
+pub struct McpStdioClaim {
+    envelope: super::prepared_call::McpPreparedEnvelope,
+    spec: SpawnSpec,
+    confinement: super::Confinement,
+}
+
+impl McpStdioClaim {
+    pub fn envelope(&self) -> &super::prepared_call::McpPreparedEnvelope {
+        &self.envelope
+    }
+    pub fn spec(&self) -> &SpawnSpec {
+        &self.spec
+    }
+    pub fn confinement(&self) -> super::Confinement {
+        self.confinement
+    }
+    /// Consume spawn authority only when a fresh child is required.
+    pub fn into_spawn_spec(self) -> SpawnSpec {
+        self.spec.session_lifetime()
+    }
+}
+
 pub struct McpAcpClaim {
     envelope: super::prepared_call::McpPreparedEnvelope,
 }
@@ -570,6 +598,24 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         Ok(McpAcpClaim { envelope })
     }
 
+    pub fn claim_mcp_stdio(&self, call: PreparedCall) -> Result<McpStdioClaim, TransportError> {
+        let envelope = call
+            .mcp_envelope()
+            .cloned()
+            .ok_or_else(authority_mismatch)?;
+        let claim = self.claim_foreign(&call, ForeignKind::Duplex, None)?;
+        let spec = claim.spawn.ok_or_else(authority_mismatch)?;
+        self.process
+            .revalidate(&spec)
+            .map_err(|_| authority_mismatch())?;
+        let confinement = self.process.confinement().ok_or_else(authority_mismatch)?;
+        Ok(McpStdioClaim {
+            envelope,
+            spec,
+            confinement,
+        })
+    }
+
     pub fn guarded_duplex(
         &self,
         call: PreparedCall,
@@ -801,6 +847,10 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
 
     fn claim_mcp_acp(&self, call: PreparedCall) -> Result<McpAcpClaim, TransportError> {
         GuardedEffects::claim_mcp_acp(self, call)
+    }
+
+    fn claim_mcp_stdio(&self, call: PreparedCall) -> Result<McpStdioClaim, TransportError> {
+        GuardedEffects::claim_mcp_stdio(self, call)
     }
 
     fn is_cancelled(&self) -> bool {

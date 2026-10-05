@@ -457,7 +457,7 @@ mod walking {
 
     #[test]
     fn scan_rooted_at_a_file_reports_not_a_directory() {
-        // The variant `docs/decisions/2026-08-21-reading-without-reading-everything.md`
+        // The variant `ARCHITECTURE.md`
         // §6 removed for having no caller. This is the caller it said it
         // would arrive with.
         let tree = Tree::new();
@@ -847,7 +847,7 @@ fn set_mode(at: &Path, mode: u32) {
 
 /// The two behaviours the grammar ADR reasoned about and did not measure.
 ///
-/// `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §5
+/// `ARCHITECTURE.md` §5
 /// decides against case folding and against Unicode normalisation, and names
 /// both residuals as *unverified on this machine* — believed to fail closed,
 /// with one experiment each. These are those experiments. They belong here

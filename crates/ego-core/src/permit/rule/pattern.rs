@@ -1,6 +1,6 @@
 //! Path patterns: canonicalisation and matching.
 //!
-//! `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §5.
+//! `ARCHITECTURE.md` §5.
 //! Two constructs and one meaning each — `*` within a segment, `**` across
 //! whole segments — defined here rather than inherited from a glob crate,
 //! because the two things that differ between glob libraries are exactly

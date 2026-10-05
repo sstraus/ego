@@ -98,6 +98,10 @@ impl TailBytes {
 }
 
 impl RunProcessContext {
+    pub(crate) fn confinement(&self) -> ego_core::permit::Confinement {
+        self.confinement.level()
+    }
+
     pub(crate) fn new(
         backend: Arc<dyn Backend>,
         evidence: SessionEvidenceStore,
@@ -1229,10 +1233,13 @@ fn write_stream(
     preview_bytes: usize,
     live_output: Option<Arc<Mutex<LiveOutput>>>,
 ) -> Result<PendingStream, DrainFailure> {
+    let secrets = crate::secrets::from_env();
+    let mut masking = secrets.stream();
     let mut preview = BoundedPreview::new(preview_bytes);
     while let Some(message) = receiver.blocking_recv() {
         match message {
             WriterMessage::Chunk(chunk) => {
+                let chunk = masking.push(&chunk, false);
                 if let Err(error) = writer.append(&chunk) {
                     let process = evidence_error(stream, error);
                     let _ = writer.abort();
@@ -1252,6 +1259,13 @@ fn write_stream(
                 }
             }
             WriterMessage::Finish => {
+                let tail = masking.push(&[], true);
+                if let Err(error) = writer.append(&tail) {
+                    let process = evidence_error(stream, error);
+                    let _ = writer.abort();
+                    return Err(DrainFailure::Process(process));
+                }
+                preview.append(&tail);
                 return Ok(PendingStream {
                     stream,
                     writer,

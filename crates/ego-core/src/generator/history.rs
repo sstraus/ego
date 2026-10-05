@@ -1,6 +1,6 @@
 //! Rebuilding a sendable [`Conversation`] from a reduced session log.
 //!
-//! See `docs/decisions/2026-08-21-tool-use-history.md` §4. This lives beside
+//! See `ARCHITECTURE.md` §4. This lives beside
 //! [`Conversation`] rather than inside the turn loop because it is defined
 //! entirely in terms of the invariants that type owns; the loop is one caller
 //! of it, and putting it here means it is testable before the loop exists and

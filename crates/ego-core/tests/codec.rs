@@ -537,7 +537,7 @@ mod codec {
                     // `UsageUpdated` written before attempts were attributed
                     // still decodes, which is the whole reason the field is
                     // optional rather than required
-                    // (`docs/decisions/2026-08-21-attempt-accounting-ledger.md`).
+                    // (`ARCHITECTURE.md`).
                     attempt: None,
                 },
             },
@@ -548,6 +548,7 @@ mod codec {
                 kind: EventKind::GenerationStarted {
                     attempt: golden_attempt(),
                     role: GenerationRole::Main,
+                    snapshot: None,
                 },
             },
             // The attributed twin of the record above: same money shape, now
@@ -670,7 +671,7 @@ mod codec {
     /// This used to be called "written by a past build", and that name
     /// overclaimed: the fixture is regenerated whenever the durable format
     /// moves, so it has only ever proved that *this* build reads *this*
-    /// fixture. `docs/decisions/2026-08-21-two-levels-of-ending.md` §3 makes
+    /// fixture. `ARCHITECTURE.md` §3 makes
     /// the gap explicit rather than leaving it in a test name — v1 logs are
     /// not readable by a v2 build, deliberately, because none exist outside
     /// this repository. If that ever stops being true, this is the test that
@@ -703,7 +704,7 @@ mod codec {
     }
 
     /// `Usage` gained two fields in
-    /// `docs/decisions/2026-08-21-a-vocabulary-settled-before-the-second-mapping.md`
+    /// `ARCHITECTURE.md`
     /// — one for cache writes at an extended retention, one for the share of
     /// the output the provider attributed to reasoning — and that ADR's
     /// argument for leaving `CODEC_VERSION` alone is that both decode when
@@ -840,7 +841,7 @@ mod codec {
     }
 
     /// `ToolCallStarted` gained `call_id` in
-    /// `docs/decisions/2026-08-21-tool-use-history.md`, as an `Option` with a
+    /// `ARCHITECTURE.md`, as an `Option` with a
     /// serde default rather than a required field plus a `CODEC_VERSION`
     /// bump. This is the claim that decision rests on: a payload written
     /// before the field existed still decodes, and decodes to the only honest

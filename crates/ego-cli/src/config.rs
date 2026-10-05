@@ -123,12 +123,7 @@ async fn execute_inner(
     let editor = matches!(&args.action, ConfigAction::Edit)
         .then(editor_argv)
         .transpose()?;
-    let path = ego_home()
-        .ok_or_else(|| RunTermination::Failed {
-            message: "config management needs EGO_HOME or HOME for user configuration".to_owned(),
-        })?
-        .join("config.toml");
-    let store = OsUserConfigStore::new(Arc::new(OsIo), path);
+    let store = user_store()?;
     match &args.action {
         ConfigAction::Effective { .. } => {
             unreachable!("effective listing returns before stored-value management")
@@ -139,6 +134,10 @@ async fn execute_inner(
                 .values
                 .into_iter()
                 .find_map(|(candidate, value)| (candidate == *key).then_some(value).flatten())
+                .or_else(|| {
+                    (*key == ego_core::config::ManagedConfigKey::Roots)
+                        .then(|| ManagedConfigValue::Roots(Vec::new()))
+                })
                 .ok_or_else(|| RunTermination::Failed {
                     message: format!("config key `{key}` is absent from the selected user target"),
                 })?;
@@ -175,14 +174,22 @@ async fn execute_inner(
                 }
             }
         }
-        ConfigAction::Set { target, key, value } => {
+        ConfigAction::Root {
+            target,
+            path,
+            access,
+        } => {
             let result = store
-                .mutate(UserConfigMutation::ManagedSet {
+                .mutate(UserConfigMutation::Root {
                     target: target.clone(),
-                    key: *key,
-                    value: value.clone(),
+                    path: path.clone(),
+                    access: *access,
                 })
                 .map_err(store_failure)?;
+            render_receipt(result, out)?;
+        }
+        ConfigAction::Set { target, key, value } => {
+            let result = set_managed(&store, target.clone(), *key, value.clone())?;
             render_receipt(result, out)?;
         }
         ConfigAction::Unset { target, key } => {
@@ -459,7 +466,30 @@ fn render_json(
 }
 
 fn render_receipt(result: UserConfigMutationResult, out: &Stdout) -> Result<(), RunTermination> {
+    let (receipt, warning) = receipt_text(result)?;
+    out.line(&receipt);
+    if let Some(warning) = warning {
+        output::note(&warning);
+    }
+    Ok(())
+}
+
+fn receipt_text(
+    result: UserConfigMutationResult,
+) -> Result<(String, Option<String>), RunTermination> {
     let (key, value) = match result.facts {
+        UserConfigMutationFacts::Root { path, access } => (
+            ego_core::config::ManagedConfigKey::Roots,
+            format!(
+                "{} {}",
+                match access {
+                    Some(ego_core::permit::RootAccess::Read) => "read",
+                    Some(ego_core::permit::RootAccess::ReadWrite) => "read-write",
+                    None => "removed",
+                },
+                path.display()
+            ),
+        ),
         UserConfigMutationFacts::Set { key, value } => (key, value.to_toml()),
         UserConfigMutationFacts::Unset { key } => (key, "<absent>".to_owned()),
         _ => {
@@ -476,7 +506,7 @@ fn render_receipt(result: UserConfigMutationResult, out: &Stdout) -> Result<(), 
             ("published_durability_uncertain", Some(diagnostic))
         }
     };
-    out.line(&format!(
+    let receipt = format!(
         "{}\t{}\t{}\t{}\t{}",
         if result.changed {
             "changed"
@@ -487,13 +517,10 @@ fn render_receipt(result: UserConfigMutationResult, out: &Stdout) -> Result<(), 
         key.as_str(),
         escape_field(&value),
         publication
-    ));
-    if let Some(warning) = warning {
-        output::note(&format!(
-            "config was published but durability is uncertain: {warning}"
-        ));
-    }
-    Ok(())
+    );
+    let warning = warning
+        .map(|warning| format!("config was published but durability is uncertain: {warning}"));
+    Ok((receipt, warning))
 }
 
 pub(crate) fn escape_field(value: &str) -> String {
@@ -780,11 +807,24 @@ pub(crate) fn metadata_ceilings(
 
 impl FrozenRunConfig {
     pub(crate) fn capture(workspace: &Path, args: &Args, trust: Trust) -> Result<Self, UsageError> {
-        Ok(Self {
-            layers: base_layers(workspace, trust)?,
+        Ok(Self::from_layers(
+            base_layers(workspace, trust)?,
+            args,
+            trust,
+        ))
+    }
+
+    /// Pin an already captured layer authority for host-facing preparation.
+    pub(crate) fn from_layers(
+        layers: Vec<Sourced<ConfigLayer>>,
+        args: &Args,
+        trust: Trust,
+    ) -> Self {
+        Self {
+            layers,
             profile: profile(args),
             trust,
-        })
+        }
     }
 
     /// The posture this capture pinned.
@@ -1098,7 +1138,7 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     // "the command line" are the same layer. The fix worth making is to give
     // `Source`'s `Display` a form that reads correctly in a sentence, which
     // changes every config diagnostic and belongs with `Source::rank` going
-    // public (`docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`
+    // public (`ARCHITECTURE.md`
     // "Consequences"), not with whichever caller noticed it.
     ConfigLayer::parse(Source::Flags, &toml)
         .map_err(|err| UsageError(format!("the command line: {err}")))
@@ -1147,6 +1187,71 @@ fn quote(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
+
+fn user_store() -> Result<OsUserConfigStore<Arc<OsIo>>, RunTermination> {
+    let path = ego_home()
+        .ok_or_else(|| RunTermination::Failed {
+            message: "config management needs EGO_HOME or HOME for user configuration".to_owned(),
+        })?
+        .join("config.toml");
+    Ok(OsUserConfigStore::new(Arc::new(OsIo), path))
+}
+
+fn set_managed(
+    store: &impl UserConfigStore,
+    target: UserConfigTarget,
+    key: ego_core::config::ManagedConfigKey,
+    value: ManagedConfigValue,
+) -> Result<UserConfigMutationResult, RunTermination> {
+    store
+        .mutate(UserConfigMutation::ManagedSet { target, key, value })
+        .map_err(store_failure)
+}
+
+/// Parse the REPL assignment through the standalone configuration command.
+pub(crate) fn repl_set_args(arguments: &str) -> Result<ConfigArgs, UsageError> {
+    let assignment = arguments
+        .strip_prefix("set ")
+        .ok_or_else(|| UsageError("usage: /config set KEY TOML_VALUE".into()))?
+        .trim();
+    let (key, value) = assignment
+        .split_once(char::is_whitespace)
+        .ok_or_else(|| UsageError("usage: /config set KEY TOML_VALUE".into()))?;
+    match crate::cli::parse(vec![
+        "ego".into(),
+        "config".into(),
+        "set".into(),
+        format!("{key}={}", value.trim()),
+    ])? {
+        crate::cli::Invocation::Config(args) => Ok(*args),
+        _ => unreachable!("the config parser returns a config invocation"),
+    }
+}
+
+/// Publish defaults through the same transaction and receipt as `ego config set`.
+pub(crate) fn repl_set(args: &ConfigArgs) -> Result<String, RunTermination> {
+    repl_set_on(&user_store()?, args)
+}
+
+pub(crate) fn repl_set_on(
+    store: &impl UserConfigStore,
+    args: &ConfigArgs,
+) -> Result<String, RunTermination> {
+    let ConfigAction::Set { target, key, value } = &args.action else {
+        return Err(RunTermination::Failed {
+            message: "expected a config set action".into(),
+        });
+    };
+    let (mut receipt, warning) =
+        receipt_text(set_managed(store, target.clone(), *key, value.clone())?)?;
+    if let Some(warning) = warning {
+        receipt.push_str(&format!("\n{warning}"));
+    }
+    Ok(receipt)
+}
+
+mod repl_view;
+pub(crate) use repl_view::{repl_text, saved_override};
 
 #[cfg(test)]
 mod tests {
@@ -1201,5 +1306,45 @@ model = "request/model"
         assert_eq!(active.selected_by, Source::Flags);
         assert!(!active.definitions.is_empty());
         assert!(active.definitions.contains(Source::Project));
+    }
+}
+
+#[cfg(test)]
+mod config_repl_tests {
+    use super::*;
+
+    // Catches: slash assignment splitting strips TOML quotes, bypasses strict validation, or creates a second persistence path.
+    #[test]
+    fn config_repl_set_preserves_toml_and_uses_atomic_transaction() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("config.toml");
+        std::fs::write(&path, "# keep this comment\nmode = 'plan'\n").unwrap();
+        let store = OsUserConfigStore::new(Arc::new(OsIo), path.clone());
+        let args = repl_set_args("set exec.env_allowlist [\"PATH\", \"HOME\"]").unwrap();
+        let receipt = repl_set_on(&store, &args).unwrap();
+        assert!(receipt.contains("published_durably"));
+        let ConfigAction::Set { target, key, value } = args.action else {
+            panic!("set action")
+        };
+        let disk = std::fs::read_to_string(&path).unwrap();
+        assert!(disk.contains("# keep this comment"));
+        assert!(disk.contains("mode = 'plan'"));
+        assert!(
+            store
+                .snapshot(target)
+                .unwrap()
+                .values
+                .contains(&(key, Some(value)))
+        );
+        for invalid in [
+            "set mode yolo",
+            "set unknown 'value'",
+            "set mode 'invalid'",
+            "set mode",
+            "set budget 'unbounded'",
+        ] {
+            assert!(repl_set_args(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), disk);
     }
 }

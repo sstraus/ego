@@ -42,13 +42,13 @@ use serde::{Deserialize, Serialize};
 /// is always correct.
 ///
 /// v2: `SessionState` gained the attempt ledger and lifecycle
-/// (`docs/decisions/2026-08-21-attempt-accounting-ledger.md`). A v1 snapshot
+/// (`ARCHITECTURE.md`). A v1 snapshot
 /// has no fields for them, so it is discarded and the log is replayed — a
 /// cache miss, not data loss, which is precisely what this constant buys.
 ///
 /// v3: `ItemState` gained `seq`, `kind`, `call_id` and `args`, so that a
 /// tool-use history can be rebuilt from the reduced state at all
-/// (`docs/decisions/2026-08-21-tool-use-history.md`). They are required
+/// (`ARCHITECTURE.md`). They are required
 /// fields — an item with no author or no position is not a fact anything can
 /// default — so a v2 snapshot cannot be read, and does not need to be.
 ///
@@ -78,7 +78,7 @@ use serde::{Deserialize, Serialize};
 /// v12 retains the exact `ToolCallStarted` event for every tool item so
 /// continuation parent checks remain exact after bounded replay. A v11 cache
 /// is discarded and rebuilt from the authoritative v11 event log.
-pub const SNAPSHOT_VERSION: u32 = 14;
+pub const SNAPSHOT_VERSION: u32 = 15;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

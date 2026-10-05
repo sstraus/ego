@@ -1,0 +1,243 @@
+//! Display-only replay from the existing durable session, through live renderers.
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use ego_core::event::domain::{DomainEvent, EventKind};
+use ego_core::event::id::{ItemId, SessionId};
+use ego_core::session::ReplaySource;
+use ego_core::store::session_store::SessionEntry;
+
+use super::{Answer, Capabilities, tool_row};
+use crate::output::TextOutput;
+
+/// Ten recent user turns keep startup output bounded without a new setting.
+const RECENT_TURNS: usize = 10;
+const UNAVAILABLE: &str = "[transcript item unavailable]";
+
+pub(crate) fn replay(
+    source: &dyn ReplaySource,
+    session: SessionId,
+    output: &dyn TextOutput,
+    capabilities: Capabilities,
+) -> Result<(), String> {
+    let entries = source
+        .entries(&session)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("session {session} is missing"))?;
+    let events: Vec<_> = entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            SessionEntry::Event(event) => Some(event),
+            SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
+        })
+        .collect();
+    render(&events, output, capabilities);
+    output.finish();
+    Ok(())
+}
+
+fn message(output: &dyn TextOutput, text: &str, capabilities: Capabilities) {
+    let mut answer = Answer::new(capabilities);
+    let mut rendered = answer.push(text);
+    rendered.push_str(&answer.finish());
+    output.write(&rendered);
+    if !rendered.ends_with('\n') {
+        output.line("");
+    }
+}
+
+fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabilities) {
+    let mut seen = HashSet::new();
+    let turns: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            (matches!(event.kind, EventKind::UserPrompt { .. }) && seen.insert(event.env.turn))
+                .then_some(index)
+        })
+        .collect();
+    let omitted = turns.len().saturating_sub(RECENT_TURNS);
+    if omitted > 0 {
+        output.line(&format!("{omitted} earlier turns omitted"));
+    }
+    let events = &events[turns.get(omitted).copied().unwrap_or(0)..];
+    let finals: HashMap<_, _> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event.kind {
+            EventKind::AssistantMessage { .. } => event.env.item.map(|item| (item, index)),
+            _ => None,
+        })
+        .collect();
+    let mut last_delta = HashMap::new();
+    for (index, event) in events.iter().enumerate() {
+        if matches!(event.kind, EventKind::AssistantDelta { .. })
+            && let Some(item) = event.env.item
+        {
+            last_delta.insert(item, index);
+        }
+    }
+    let mut partials: HashMap<ItemId, String> = HashMap::new();
+    let mut calls: HashMap<ItemId, (&str, &str, u64)> = HashMap::new();
+    for (index, event) in events.iter().enumerate() {
+        let transcript = matches!(
+            event.kind,
+            EventKind::UserPrompt { .. }
+                | EventKind::AssistantMessage { .. }
+                | EventKind::AssistantDelta { .. }
+                | EventKind::ToolCallStarted { .. }
+                | EventKind::ToolCallCompleted { .. }
+        );
+        if transcript && event.env.item.is_none() {
+            output.line(UNAVAILABLE);
+            continue;
+        }
+        match &event.kind {
+            EventKind::UserPrompt { text, .. } => {
+                output.line(&format!("> {text}"));
+            }
+            EventKind::AssistantMessage { text } => {
+                if event.env.item.and_then(|item| finals.get(&item)) == Some(&index) {
+                    message(output, text, capabilities);
+                }
+            }
+            EventKind::CompactionSeeded { checkpoint, .. } => {
+                message(output, checkpoint, capabilities)
+            }
+            EventKind::AssistantDelta { text } => {
+                let item = event.env.item.expect("transcript item checked above");
+                if !finals.contains_key(&item) {
+                    let partial = partials.entry(item).or_default();
+                    partial.push_str(text);
+                    if last_delta.get(&item) == Some(&index) {
+                        message(output, partial, capabilities);
+                    }
+                }
+            }
+            EventKind::ToolCallStarted { name, args, .. } => {
+                calls.insert(
+                    event.env.item.expect("transcript item checked above"),
+                    (name, args, event.env.ts.as_millis()),
+                );
+            }
+            EventKind::ToolCallCompleted { ok, result } => {
+                let item = event.env.item.expect("transcript item checked above");
+                if let Some((name, args, started)) = calls.remove(&item) {
+                    if name == ego_core::question::ASK_QUESTION_TOOL {
+                        continue;
+                    }
+                    let result = result.model_text();
+                    let record = tool_row::record(
+                        &tool_row::Finished {
+                            name,
+                            args,
+                            ok: *ok,
+                            result: &result,
+                            elapsed: Duration::from_millis(
+                                event.env.ts.as_millis().saturating_sub(started),
+                            ),
+                        },
+                        capabilities,
+                    );
+                    output.tool_row(&record.rows, record.detail);
+                } else {
+                    output.line(UNAVAILABLE);
+                }
+            }
+            _ => {}
+        }
+    }
+    for _ in calls {
+        output.line(UNAVAILABLE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::Diagnostics;
+    use ego_core::event::domain::Envelope;
+    use ego_core::event::id::{EventId, Producer, Seq, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Recorded(Mutex<String>);
+    impl Diagnostics for Recorded {
+        fn note(&self, text: &str) {
+            self.0.lock().unwrap().push_str(text);
+        }
+    }
+    impl TextOutput for Recorded {
+        fn write(&self, text: &str) {
+            self.0.lock().unwrap().push_str(text);
+        }
+        fn line(&self, text: &str) {
+            self.write(&format!("{text}\n"));
+        }
+    }
+
+    // Catches: displaying a durable transcript rewrites the log or adds usage.
+    #[test]
+    fn replay_preserves_durable_bytes_and_usage_without_a_generation() {
+        let home = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(home.path()).unwrap();
+        let store = JsonlStore::new(home.path().join("sessions"), root.clone(), Box::new(OsIo));
+        let id = SessionId::new();
+        store
+            .publish_empty_session(id, &root, Timestamp::from_millis(1))
+            .unwrap();
+        let mut seq = Seq::ZERO;
+        store
+            .append(
+                &id,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: seq.next(),
+                        id: EventId::new(),
+                        turn: TurnId::new(),
+                        item: Some(ItemId::new()),
+                        parent: None,
+                        ts: Timestamp::from_millis(2),
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::AssistantMessage {
+                        text: "REGRESSION-MARKER".to_owned(),
+                    },
+                },
+            )
+            .unwrap();
+        let log = home
+            .path()
+            .join("sessions")
+            .join(id.to_string())
+            .join("events.jsonl");
+        let before = std::fs::read(&log).unwrap();
+        let entries = source_entries(&store, id);
+        let state = ego_core::state::SessionState::replay(entries.clone());
+        let output = Recorded::default();
+        replay(&store, id, &output, Capabilities::plain()).unwrap();
+        assert_eq!(*output.0.lock().unwrap(), "REGRESSION-MARKER\n");
+        assert_eq!(std::fs::read(log).unwrap(), before);
+        assert_eq!(
+            ego_core::state::SessionState::replay(source_entries(&store, id)),
+            state
+        );
+    }
+
+    fn source_entries(store: &JsonlStore, id: SessionId) -> Vec<DomainEvent> {
+        store
+            .entries(&id)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                SessionEntry::Event(event) => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+}

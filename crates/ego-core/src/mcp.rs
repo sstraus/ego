@@ -15,15 +15,11 @@ use crate::generator::attempt::DeliveryCertainty;
 use crate::permit::{InvocationDigest, ToolResult};
 use crate::store::evidence::EvidenceRef;
 
-/// Maximum UTF-8 bytes exposed to a model from one foreign result.
-///
-/// Also the bound on one server's `instructions` ([`McpServerInstructions`]).
-/// The same number rather than a fourth one: every instruction-shaped text
-/// this build admits is already bounded at 64 KiB — an instruction file
-/// (`config::discovery`), a skill body (`skill::MAX_ADMISSION_BYTES`), and a
-/// foreign result. A different limit for this one would need a reason, and
-/// there is not one.
+/// Maximum UTF-8 bytes admitted from one server's instructions.
+/// Kept at the same 64 KiB bound as instruction files and skill bodies.
 pub const FOREIGN_VISIBLE_BYTES: usize = 64 * 1024;
+/// MCP tool text previews use 20 KiB; complete text lives in the session store.
+pub const MCP_RESULT_VISIBLE_BYTES: usize = 20 * 1024;
 /// Maximum bytes retained inline for one unsupported content block.
 pub const FOREIGN_UNSUPPORTED_BYTES: usize = 32 * 1024;
 
@@ -371,6 +367,11 @@ pub struct ForeignResult {
     cache_scope: Option<CacheScope>,
     visible_text: String,
     visible_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_path: Option<std::path::PathBuf>,
+    // Owned only until publication. Never put the complete payload in events.
+    #[serde(skip)]
+    pending_output: Option<String>,
     unsupported: Vec<UnsupportedContent>,
     evidence: EvidenceRef,
     delivery: DeliveryCertainty,
@@ -404,11 +405,13 @@ impl ForeignResult {
 
         let mut visible_text = String::new();
         let mut unsupported = Vec::new();
-        let mut visible_truncated = false;
         for block in content {
             match block {
                 ForeignContent::Text { text } => {
-                    append_bounded_text(&mut visible_text, &text, &mut visible_truncated);
+                    if !visible_text.is_empty() {
+                        visible_text.push('\n');
+                    }
+                    visible_text.push_str(&text);
                 }
                 ForeignContent::Unsupported {
                     content_type,
@@ -423,6 +426,12 @@ impl ForeignResult {
                 }),
             }
         }
+        let pending_output = (visible_text.len() > MCP_RESULT_VISIBLE_BYTES)
+            .then(|| std::mem::take(&mut visible_text));
+        let visible_truncated = pending_output.is_some();
+        if let Some(text) = &pending_output {
+            visible_text = render_mcp_preview(text, None);
+        }
         Ok(Self {
             server,
             tool,
@@ -433,6 +442,8 @@ impl ForeignResult {
             cache_scope,
             visible_text,
             visible_truncated,
+            output_path: None,
+            pending_output,
             unsupported,
             evidence,
             delivery,
@@ -464,11 +475,39 @@ impl ForeignResult {
     pub fn cache_scope(&self) -> Option<CacheScope> {
         self.cache_scope
     }
+    pub(crate) fn mask_secrets(&mut self, values: &crate::secrets::SecretValues) {
+        if let Some(text) = &mut self.pending_output {
+            *text = values.mask(text);
+            self.visible_text = render_mcp_preview(text, None);
+        } else {
+            self.visible_text = values.mask(&self.visible_text);
+        }
+    }
+
     pub fn visible_text(&self) -> &str {
         &self.visible_text
     }
     pub const fn visible_limit(&self) -> usize {
-        FOREIGN_VISIBLE_BYTES
+        MCP_RESULT_VISIBLE_BYTES
+    }
+
+    /// The complete output file, when its session publication succeeded.
+    pub fn output_path(&self) -> Option<&std::path::Path> {
+        self.output_path.as_deref()
+    }
+
+    pub(crate) fn spill_output(
+        &mut self,
+        store: Option<&dyn crate::store::evidence::EvidenceStore>,
+        run: crate::evidence::RunInvocationId,
+        call: crate::event::id::ItemId,
+    ) {
+        let Some(text) = self.pending_output.take() else {
+            return;
+        };
+        self.output_path =
+            store.and_then(|store| store.spill_mcp_output(run, call, text.as_bytes()).ok());
+        self.visible_text = render_mcp_preview(&text, self.output_path.as_deref());
     }
     pub fn visible_truncated(&self) -> bool {
         self.visible_truncated
@@ -485,6 +524,29 @@ impl ForeignResult {
     pub fn cancellation(&self) -> CancellationClassification {
         self.cancellation
     }
+}
+
+fn render_mcp_preview(text: &str, path: Option<&std::path::Path>) -> String {
+    let mut boundary = text.len().min(MCP_RESULT_VISIBLE_BYTES);
+    while !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    if let Some(newline) = text[..boundary].rfind('\n') {
+        boundary = newline + 1;
+    }
+    let preview = &text[..boundary];
+    let separator = if preview.ends_with('\n') { "" } else { "\n" };
+    let saved = match path {
+        Some(path) => format!(
+            "Full output written to: {}. Use read(path) to read it.",
+            path.display()
+        ),
+        None => "Full output could not be saved.".to_owned(),
+    };
+    format!(
+        "{preview}{separator}[MCP output truncated: showing first {boundary} bytes of {} bytes. {saved}]",
+        text.len()
+    )
 }
 
 fn append_bounded_text(target: &mut String, text: &str, truncated: &mut bool) {

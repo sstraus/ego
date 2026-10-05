@@ -2,7 +2,7 @@
 //! filesystem a policy grant is exercised against.
 //!
 //! Kept as three stages rather than one `run(name, args)` future, for the
-//! reason `docs/decisions/2026-08-21-the-turn-loop.md` gives for rejecting a
+//! reason `ARCHITECTURE.md` gives for rejecting a
 //! `ToolRunner` port: M1 has to append a permission request *between*
 //! authorising and executing, and a single future has no such between.
 
@@ -25,6 +25,19 @@ use super::catalogue::{
     AdmittedToolSource, CapturedToolCatalogue, ToolCaptureAuthority, ToolCatalogueError,
     validate_distinct,
 };
+
+struct TaskToolSource {
+    capture: CapturedToolCatalogue,
+    notes: Vec<String>,
+}
+impl AdmittedToolSource for TaskToolSource {
+    fn capture(&self) -> Result<CapturedToolCatalogue, ToolCatalogueError> {
+        Ok(self.capture.clone())
+    }
+    fn context_notes(&self) -> Vec<String> {
+        self.notes.clone()
+    }
+}
 
 struct EmptyAdmittedToolSource;
 
@@ -76,12 +89,17 @@ impl GenerationToolCatalogue {
 /// A model call after the mixed registry has selected its typed boundary.
 /// Human input never acquires an effect tool or enters permission policy.
 pub(crate) enum PreparedToolCall {
+    Task(super::task::TaskRequest),
     Effect {
         tool: std::sync::Arc<dyn Tool>,
         call: PreparedCall,
         presentation: PermissionPresentationInput,
     },
     HumanInput(crate::question::QuestionRequest),
+    History {
+        source: std::sync::Arc<dyn crate::history::SessionHistory>,
+        request: crate::history::HistoryRequest,
+    },
     Skill {
         operation: crate::skill::SkillOperation,
         catalogue: std::sync::Arc<crate::skill::SkillCatalogue>,
@@ -105,6 +123,7 @@ pub struct ToolEffectPorts<'a> {
     one_hop: std::sync::Arc<dyn OneHop>,
     duplex: std::sync::Arc<dyn DuplexSpawner>,
     cancel: Option<super::CancelToken>,
+    secrets: crate::secrets::SecretValues,
 }
 
 impl<'a> ToolEffectPorts<'a> {
@@ -130,7 +149,14 @@ impl<'a> ToolEffectPorts<'a> {
             one_hop,
             duplex,
             cancel: None,
+            secrets: crate::secrets::SecretValues::default(),
         }
+    }
+
+    /// Bind the adapter's known environment values to result publication.
+    pub fn with_secret_values(mut self, values: crate::secrets::SecretValues) -> Self {
+        self.secrets = values;
+        self
     }
 
     pub fn with_cancel(mut self, cancel: super::CancelToken) -> Self {
@@ -203,8 +229,10 @@ pub struct Tools<'a> {
     /// authorised call; there is no permit to swap into a shared one.
     effects: ToolEffectPorts<'a>,
     cwd: CanonPath,
+    mcp_output_root: Option<CanonPath>,
     skill_resource_roots: Option<crate::skill::SkillResourceRoots>,
     resume: Option<std::sync::Arc<ResumeSealer>>,
+    task_context: Option<(String, std::sync::Arc<futures::lock::Mutex<()>>)>,
 }
 
 impl<'a> Tools<'a> {
@@ -224,10 +252,12 @@ impl<'a> Tools<'a> {
                 .map(RegisteredTool::Effect)
                 .collect(),
             source: std::sync::Arc::new(EmptyAdmittedToolSource),
+            mcp_output_root: effects.evidence.mcp_output_root().ok().flatten(),
             effects,
             cwd,
             skill_resource_roots: None,
             resume: None,
+            task_context: None,
         }
     }
 
@@ -241,10 +271,12 @@ impl<'a> Tools<'a> {
         Self {
             registry: registry.to_vec(),
             source: std::sync::Arc::new(EmptyAdmittedToolSource),
+            mcp_output_root: effects.evidence.mcp_output_root().ok().flatten(),
             effects,
             cwd,
             skill_resource_roots: None,
             resume: None,
+            task_context: None,
         }
     }
 
@@ -259,10 +291,12 @@ impl<'a> Tools<'a> {
         Ok(Self {
             registry: registry.to_vec(),
             source,
+            mcp_output_root: effects.evidence.mcp_output_root().ok().flatten(),
             effects,
             cwd,
             skill_resource_roots: None,
             resume: None,
+            task_context: None,
         })
     }
 
@@ -274,6 +308,62 @@ impl<'a> Tools<'a> {
     pub fn with_skill_resource_roots(mut self, roots: crate::skill::SkillResourceRoots) -> Self {
         self.skill_resource_roots = Some(roots);
         self
+    }
+
+    pub(crate) fn mcp_output_root(&self) -> Option<&CanonPath> {
+        self.mcp_output_root.as_ref()
+    }
+
+    pub(crate) fn finish_result(
+        &self,
+        result: &mut crate::permit::ToolResult,
+        run: crate::evidence::RunInvocationId,
+        call: ItemId,
+    ) {
+        self.mask_result(result);
+        result.spill_mcp_output(
+            self.mcp_output_root.as_ref().map(|_| self.effects.evidence),
+            run,
+            call,
+        );
+    }
+
+    pub(crate) fn mask_result(&self, result: &mut crate::permit::ToolResult) {
+        result.mask_secrets(&self.effects.secrets);
+    }
+
+    pub(crate) fn masked_result(
+        &self,
+        mut result: crate::permit::ToolResult,
+    ) -> crate::permit::ToolResult {
+        self.mask_result(&mut result);
+        result
+    }
+
+    pub(crate) fn task_child(
+        &self,
+        name: String,
+        serial: std::sync::Arc<futures::lock::Mutex<()>>,
+        cancel: super::CancelToken,
+    ) -> Result<Self, ToolCatalogueError> {
+        Ok(Self {
+            registry: self
+                .registry
+                .iter()
+                .filter(|entry| !matches!(entry, RegisteredTool::Task))
+                .cloned()
+                .collect(),
+            source: std::sync::Arc::new(TaskToolSource {
+                capture: self.source.capture()?,
+                notes: self.source.context_notes(),
+            }),
+            effects: self.effects.clone().with_cancel(cancel),
+            cwd: self.cwd.clone(),
+            mcp_output_root: self.mcp_output_root.clone(),
+            skill_resource_roots: self.skill_resource_roots.clone(),
+            resume: self.resume.clone(),
+            task_context: Some((name, serial)),
+        })
     }
 
     pub(crate) fn blob_store(&self) -> &dyn BlobStore {
@@ -293,7 +383,10 @@ impl<'a> Tools<'a> {
             .iter()
             .find_map(|registered| match registered {
                 RegisteredTool::Skill(catalogue) => Some(std::sync::Arc::clone(catalogue)),
-                RegisteredTool::Effect(_) | RegisteredTool::HumanInput(_) => None,
+                RegisteredTool::Effect(_)
+                | RegisteredTool::HumanInput(_)
+                | RegisteredTool::Task
+                | RegisteredTool::History { .. } => None,
             })
     }
 
@@ -302,6 +395,9 @@ impl<'a> Tools<'a> {
         let mut registry = Vec::with_capacity(self.registry.len() + dynamic.tools().len());
         registry.extend(self.registry.iter().cloned());
         registry.extend(dynamic.tools().iter().cloned());
+        if self.task_context.is_some() {
+            registry.retain(|tool| !matches!(tool, RegisteredTool::Task));
+        }
         validate_distinct(&registry)?;
         let descriptors = registry.iter().map(RegisteredTool::descriptor).collect();
         Ok(GenerationToolCatalogue {
@@ -476,6 +572,11 @@ impl<'a> Tools<'a> {
                 call: self.prepare_params(tool.as_ref(), params.clone())?,
                 presentation: PermissionPresentationInput::new(params, descriptor.parameters),
             }),
+            RegisteredTool::Task => super::task::parse(params).map(PreparedToolCall::Task),
+            RegisteredTool::History { source, tool } => Ok(PreparedToolCall::History {
+                source: std::sync::Arc::clone(source),
+                request: tool.parse(params)?,
+            }),
             RegisteredTool::HumanInput(tool) => {
                 tool.parse(params).map(PreparedToolCall::HumanInput)
             }
@@ -578,7 +679,7 @@ impl<'a> Tools<'a> {
     /// layer down: the value already names what it refused, and discarding the
     /// type at the seam left the loop unable to tell "policy said no" from
     /// "the tool broke". Those are different outcomes now — see `CLI.md` §4.4
-    /// and `docs/decisions/2026-08-21-two-levels-of-ending.md`.
+    /// and `ARCHITECTURE.md`.
     ///
     /// Three outcomes rather than two, and the third is the one the loop must
     /// not collapse: a call nobody in this run can answer is not a call that
@@ -631,7 +732,20 @@ impl<'a> Tools<'a> {
         item: ItemId,
         pending: Pending,
     ) -> Resolution {
-        policy.decide(item, pending).await
+        if let Some((name, serial)) = &self.task_context {
+            let _guard = serial.lock().await;
+            if self
+                .effects
+                .cancel
+                .as_ref()
+                .is_some_and(super::CancelToken::is_cancelled)
+            {
+                return Resolution::Ask(pending);
+            }
+            policy.decide_named(item, pending, Some(name)).await
+        } else {
+            policy.decide(item, pending).await
+        }
     }
 
     /// Stage three: run it, under the grant policy issued and through the

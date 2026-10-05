@@ -32,7 +32,7 @@
 //!
 //! ## A ceiling is optional; the lifecycle is not
 //!
-//! `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §1: nobody has to
+//! `ARCHITECTURE.md` §1: nobody has to
 //! configure a ceiling, and a run without one needs no prices at all. So the
 //! gate holds a [`Ledger`], which is [`Unlimited`](Ledger::Unlimited) when no
 //! ceiling was configured and [`Limited`](Ledger::Limited) when one was, and
@@ -287,7 +287,7 @@ pub struct ResolvedRates {
 /// which is why the reservation reads the rates and the settlement reads
 /// this.
 ///
-/// See `docs/decisions/2026-08-21-how-a-model-is-metered.md` §1 and §2, as
+/// See `ARCHITECTURE.md` §1 and §2, as
 /// narrowed by `2026-08-21-a-run-with-no-ceiling.md` §3.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -321,7 +321,7 @@ impl fmt::Display for SettlementSource {
 /// table for it — the provider will charge — and folding "we have rates" into
 /// this vocabulary would force a fourth variant meaning *ignorance*, inside a
 /// type whose other three variants are claims about the world. See
-/// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3.
+/// `ARCHITECTURE.md` §3.
 ///
 /// The `Currency` variant keeps `settlement` for the same reason it lost the
 /// quote: whether a provider states its own charge is a property of that
@@ -593,7 +593,7 @@ impl BudgetBinding {
     /// discard the best figure it will ever receive in favour of a
     /// pessimistic bound. A provider's own invoice figure is not a table
     /// change — the reason for the check does not reach it. See
-    /// `docs/decisions/2026-08-21-how-a-model-is-metered.md` §5.
+    /// `ARCHITECTURE.md` §5.
     ///
     /// A **policy** figure must name the policy that was authorised, for the
     /// same reason as a table.

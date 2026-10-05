@@ -180,6 +180,11 @@
 //!   the `session/prompt` call, a different message shape (a response's error
 //!   field, not a notification). Rendering it as an `AgentMessageChunk` would
 //!   misrepresent an RPC-level fact as conversational content.
+//! - **`ProviderRetry`** — a live status, not transcript, and stateful: it
+//!   must be cleared when the next attempt shows output or the turn ends.
+//!   [`AcpSink`](crate::sink::AcpSink) owns that state and sends
+//!   [`provider_retry_v1`] / [`provider_retry_cleared_v1`]; replay never
+//!   shows a wait that ended long ago.
 //! - **`TurnCompleted`, v1 only** — v1 turn completion rides the
 //!   `session/prompt` response's `stop_reason`, never a `session/update`.
 //!   (v2 *does* have a mapping — see [`project_v2`]'s arm.)
@@ -223,6 +228,54 @@ pub fn project_notice_v1(notice: &AcpNotice) -> v1::SessionUpdate {
                 }),
             )])),
     )
+}
+
+/// The live retry status, as a `session_info_update` patch.
+///
+/// `session_info_update` because the status is a replaceable property of the
+/// session while the wait lasts, not conversational content: a chunk would
+/// put it in the transcript and could never be taken back. Only
+/// `_meta.ego.providerRetry` is set, so a client that merges the update as a
+/// patch keeps the title and every other `_meta.ego` key it already holds.
+/// `None` is not produced for a non-retry event; the caller decides.
+pub fn provider_retry_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
+    let PublicEvent::ProviderRetry {
+        attempt,
+        limit,
+        delay_ms,
+        kind,
+        cause,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    let seconds = delay_ms.div_ceil(1_000);
+    Some(provider_retry_meta(serde_json::json!({
+        "state": "waiting",
+        "attempt": attempt,
+        "limit": limit,
+        "delayMs": delay_ms,
+        "kind": kind,
+        "cause": cause,
+        "text": format!(
+            "{cause} — connection problem, retrying in {seconds}s (attempt {attempt}/{limit})"
+        ),
+    })))
+}
+
+/// The update that ends a retry status: `_meta.ego.providerRetry` is `null`.
+pub fn provider_retry_cleared_v1() -> v1::SessionUpdate {
+    provider_retry_meta(serde_json::Value::Null)
+}
+
+fn provider_retry_meta(status: serde_json::Value) -> v1::SessionUpdate {
+    v1::SessionUpdate::SessionInfoUpdate(v1::SessionInfoUpdate::new().meta(
+        serde_json::Map::from_iter([(
+            "ego".to_owned(),
+            serde_json::json!({ "providerRetry": status }),
+        )]),
+    ))
 }
 
 fn activity_meta() -> v1::Meta {
@@ -334,7 +387,7 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         // cancelled turn is over and a paused one is waiting, and a host that
         // read them as the same word would either offer no way to resume or
         // offer one that cannot work. See
-        // `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-session.md`.
+        // `ARCHITECTURE.md`.
         ExitReason::Paused => v2::StopReason::Other("_paused".to_string()),
         ExitReason::Provider => v2::StopReason::Other("_provider".to_string()),
         ExitReason::ContextOverflow => v2::StopReason::Other("_context_overflow".to_string()),
@@ -409,6 +462,7 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         RunTermination::TaskFailed => Err("the turn ran and the task did not succeed".to_string()),
         RunTermination::UsageError { message }
         | RunTermination::Provider { message }
+        | RunTermination::ProviderUncertain { message }
         | RunTermination::ContextOverflow { message }
         | RunTermination::Failed { message } => Err(message.clone()),
     }
@@ -698,6 +752,7 @@ fn project_v1_with_root(
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
+        | PublicEvent::ProviderRetry { .. }
         | PublicEvent::TurnCompleted { .. }
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
@@ -877,6 +932,7 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
+        | PublicEvent::ProviderRetry { .. }
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
         | PublicEvent::Error { .. } => None,

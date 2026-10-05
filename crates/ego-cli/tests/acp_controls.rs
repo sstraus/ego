@@ -549,7 +549,7 @@ fn a_new_model_with_unknown_default_does_not_reuse_the_base_resolved_effort() {
 /// The seat is the connection's, and a new connection builds a new one. That
 /// is the decision and not an omission: a durable per-session model would make
 /// resume order-dependent, which
-/// `docs/decisions/2026-08-30-skill-invocation-preserves-one-authority-epoch.md`
+/// `ARCHITECTURE.md`
 /// rejects, and the terminal seat is bound by the same rule — a session-only
 /// pick lives in memory for that session only. What survives a disconnect is
 /// the hold, which is a fact about the session, not a preference about the
@@ -821,4 +821,25 @@ fn confinement_measurements_are_seeded_once_without_duplicate_rows_or_reseed() {
         .is_err(),
         "a session must not be reseeded after admission"
     );
+}
+
+// Catches: a live ACP selection bypasses system max_mode after startup resolution.
+#[test]
+fn acp_mode_selection_cannot_raise_system_maximum() {
+    use ego_core::config::{ConfigLayer, Source, Trust, resolve};
+
+    let system = ConfigLayer::parse(Source::System, "max_mode = 'default'").unwrap();
+    let effective = resolve(&[system], Trust::Untrusted, None).unwrap();
+    let seat = AcpSessionControls::new(&effective, Confinement::Workspace, None);
+    let session = SessionId::new();
+    admit_all(&seat, session);
+
+    let result = seat.stage(session, SessionControlChange::Mode(Mode::Yolo));
+    assert!(
+        result.is_err(),
+        "ACP accepted yolo above system max_mode=default"
+    );
+    let state = seat.state(session).unwrap();
+    assert_eq!(state.mode.current, Some(Mode::Default));
+    assert_eq!(state.mode.chosen, None);
 }

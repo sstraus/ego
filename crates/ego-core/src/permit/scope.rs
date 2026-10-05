@@ -25,14 +25,14 @@ use crate::store::evidence::EvidenceRead;
 /// directory is not thereby allowed to read what it finds there. Knowing that
 /// `.env` exists and knowing what is in it are different authorities, and
 /// collapsing them would mean a glob that can exfiltrate a workspace
-/// (`docs/decisions/2026-08-21-reading-without-reading-everything.md` §1).
+/// (`ARCHITECTURE.md` §1).
 /// **The fields are `pub(super)`, not `pub`.** `Scope` is public because a
 /// `rules explain` and the audit event both have to render one, and it is
 /// readable through the accessors below. What no longer exists is the ability
 /// to *compose* one from outside `crate::permit`: a `Scope` literal is a
 /// statement about what some permit may do, and until this was closed any
 /// holder of a `&PolicyEngine` could write that statement itself and mint it
-/// (`docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §2).
+/// (`ARCHITECTURE.md` §2).
 ///
 /// Rust has no per-file visibility, so `pub(super)` is the tightest bound
 /// available and it admits the whole `permit` module rather than `grant.rs`
@@ -54,7 +54,7 @@ pub struct Scope {
     pub(super) secret_egress: Option<SecretEgressAuthority>,
     pub(super) foreign_invocations: Vec<(ForeignToolId, InvocationDigest)>,
     pub(super) foreign_transport: Option<ForeignTransportTarget>,
-    pub(super) spawn: Option<SpawnSpec>,
+    pub(super) spawns: Vec<SpawnSpec>,
     pub(super) evidence: Option<EvidenceRead>,
     pub(super) session_process: Option<(DetachedExecId, SessionProcessAction)>,
 }
@@ -100,9 +100,9 @@ impl Scope {
         self.foreign_transport.as_ref()
     }
 
-    /// The exact process specification this scope may spawn.
-    pub fn spawn(&self) -> Option<&SpawnSpec> {
-        self.spawn.as_ref()
+    /// The exact process specifications this scope may spawn.
+    pub fn spawns(&self) -> &[SpawnSpec] {
+        &self.spawns
     }
 
     /// The exact session evidence object this scope may read.

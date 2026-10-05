@@ -1,7 +1,7 @@
 //! A provider row: where to send a request, and what to authenticate it with.
 //!
 //! See `ARCHITECTURE.md` §3.1 and
-//! `docs/decisions/2026-08-21-a-generator-that-actually-reaches-a-provider.md`.
+//! `ARCHITECTURE.md`.
 //!
 //! A row is configuration. The credential inside it is not, and the
 //! difference is enforced by [`Secret`] rather than by field privacy: a row
@@ -30,7 +30,7 @@ use crate::wire::github_copilot_completions::GithubCopilotCompletions;
 use crate::wire::minimax_anthropic::MiniMaxAnthropic;
 use crate::wire::nous_portal::NousPortal;
 use crate::wire::openai_codex_responses::OpenAiCodexResponses;
-use crate::wire::openai_completions::OpenAiCompletions;
+use crate::wire::openai_completions::OpenRouterCompletions;
 use crate::wire::openai_responses::OpenAiResponses;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
 use crate::wire::xai_responses::XaiResponses;
@@ -45,7 +45,7 @@ pub type Secret = ProviderSecret;
 /// How a provider presents a credential, and where the credential is read
 /// from — the *strategy*, never the value.
 ///
-/// `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §3. A row used
+/// `ARCHITECTURE.md` §3. A row used
 /// to carry a resolved [`Secret`], which was not readable outside this module
 /// but was one `derive` away from being — and which made a row *impossible to
 /// build* without a credential, so a missing key made a provider vanish and
@@ -88,7 +88,7 @@ impl CredentialStrategy {
     /// header that carries it.
     ///
     /// **Once**, and that is the whole of
-    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// `ARCHITECTURE.md`
     /// §6. The Step 13.5 ADR weighed resolving *in the row* against resolving
     /// *per request* and rejected the second, correctly: it makes every
     /// generation fallible for a condition decided at startup, and it would
@@ -319,7 +319,7 @@ pub enum CostExpectation {
 /// One provider profile: who it is, where it lives, how it authenticates,
 /// which shape its bytes take, and whether it states a charge.
 ///
-/// `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §2. Everything
+/// `ARCHITECTURE.md` §2. Everything
 /// here is configuration that varies per deployment, per key or per account;
 /// the code that varies per API shape is behind [`wire`](Self::wire) and
 /// nowhere else.
@@ -335,7 +335,7 @@ pub struct ProviderRow {
     /// [`RequestTarget::url`](crate::wire::RequestTarget::url). A row carrying
     /// the whole endpoint would be a row that could disagree with its own
     /// mapping about where the mapping lives
-    /// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// (`ARCHITECTURE.md`
     /// §2).
     ///
     /// **Always ends in `/`**, and the constructors guarantee it rather than
@@ -389,7 +389,7 @@ pub struct ProviderRow {
     ///
     /// Stated by every constructor rather than defaulted, because a new row
     /// that silently inherited "selectable" is precisely what
-    /// `docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`
+    /// `ARCHITECTURE.md`
     /// was written to stop.
     pub promotion: Promotion,
 }
@@ -476,7 +476,7 @@ static OPENAI_SUPPLIED: Supplied = Supplied::new(&OpenAiResponses);
 /// row*, not about the mapping. Sharing one static would have made moving
 /// OpenAI to Responses silently retarget every compatible gateway at an
 /// endpoint it does not serve.
-static OPENAI_COMPATIBLE_SUPPLIED: Supplied = Supplied::new(&OpenAiCompletions);
+static OPENROUTER_SUPPLIED: Supplied = Supplied::new(&OpenRouterCompletions);
 static ANTHROPIC_SUPPLIED: Supplied = Supplied::new(&AnthropicMessages);
 static GEMINI_SUPPLIED: Supplied = Supplied::new(&GeminiInteractions);
 static OPENAI_CODEX_SUBSCRIPTION: SubscriptionSupplied = SubscriptionSupplied::new(
@@ -578,11 +578,11 @@ impl ProviderRow {
                 var: OPENAI_KEY_VAR.to_string(),
             },
             // OpenAI reports token usage and no monetary total
-            // (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §6), so
+            // (`ARCHITECTURE.md` §6), so
             // this row is priced from a supplied table or not at all.
             cost: None,
             // Selectable on a published contract, which
-            // `docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`
+            // `ARCHITECTURE.md`
             // amends the 2026-09-03 ADR to allow. Nothing here has been sent to
             // OpenAI and the deterministic fixtures still only establish checks
             // one to four — what changed is where the missing fifth check is
@@ -622,7 +622,7 @@ impl ProviderRow {
     /// measurement discipline found the one place the daemon's answers differ
     /// from the family's — it reads `max_tokens` and discards
     /// `max_completion_tokens` — and
-    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// `ARCHITECTURE.md`
     /// §8 spends that fact rather than excusing it: a member that fails a
     /// conformance check is not a member. So this row names its own mapping,
     /// which shares the family's request projection and its whole decoder and
@@ -693,7 +693,7 @@ impl ProviderRow {
             // not that extension. An operator who accepts GitHub's terms puts
             // those four back with `[auth.github-copilot.headers]`, where the
             // overlay replaces this row's `user-agent` by name
-            // (`docs/16-subscription-login.md` §7.8).
+            // (`ARCHITECTURE.md` §7.8).
             extra_headers: vec![(
                 "user-agent".to_string(),
                 crate::oauth::EGO_USER_AGENT.to_string(),
@@ -805,7 +805,7 @@ impl ProviderRow {
     /// "deprecated and have no effect", with full usage returned automatically
     /// in every response. So the projection is compatible, and the inert flag
     /// stays — it is current on the contract the mapping is derived from
-    /// (`docs/15-provider-contract-audit.md` §3).
+    /// (`ARCHITECTURE.md` §3).
     ///
     /// [`Supplied`] and not a discovering resolver: OpenRouter's models
     /// endpoint publishes a *public* table rather than what this key is
@@ -820,7 +820,7 @@ impl ProviderRow {
             http_profile,
             extra_headers: Vec::new(),
             cost_expectation: CostExpectation::Positive,
-            resolver: &OPENAI_COMPATIBLE_SUPPLIED,
+            resolver: &OPENROUTER_SUPPLIED,
             credential: CredentialStrategy::OAuthOrEnv {
                 provider: "openrouter".to_string(),
                 var: OPENROUTER_KEY_VAR.to_string(),

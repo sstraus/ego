@@ -1,7 +1,7 @@
 //! The `anthropic-messages` wire format: `POST /messages`, streamed.
 //!
 //! Anthropic's own shape, and no one else's.
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §4
+//! `ARCHITECTURE.md` §4
 //! allows a provider to differ from a family in exactly three places — a model
 //! fact, a transport fact, or another mapping — and this differs in the
 //! request's *shape* and the stream's *event model*, which is neither of the
@@ -9,7 +9,7 @@
 //!
 //! Every field name and enum spelling below was read from the published
 //! Messages API reference on 2026-08-22, not recalled. What that is worth is
-//! `[D]+[S]` in `docs/14-six-wire-protocols.md` §0's evidence classes: no
+//! `[D]+[S]` in `ARCHITECTURE.md` §0's evidence classes: no
 //! `ANTHROPIC_API_KEY` exists in this repository, so nothing here has been
 //! observed against a live server, and the row this mapping serves is a
 //! **candidate** — built, tested offline, and absent from the table
@@ -135,7 +135,7 @@ pub const DIALECT: &str = "anthropic-messages";
 ///
 /// Every variant is a case where the alternative would be to drop something
 /// the caller asked for, or invent something they did not, and send the
-/// request anyway. `docs/08-codex-critique.md` I5 is about exactly that: a
+/// request anyway. `ARCHITECTURE.md` I5 is about exactly that: a
 /// silent mistranslation is worse than a refusal because nothing downstream
 /// can tell it happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,7 +505,35 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         },
         output_config: effort.map(|effort| OutputConfig { effort }),
     };
-    Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))
+    if super::cache::control(req).is_none() {
+        return Ok(serde_json::to_vec(&wire).expect("WireRequest serialises JSON"));
+    }
+    let mut body = serde_json::to_value(&wire).expect("WireRequest serialises JSON");
+    if let Some(control) = super::cache::control(req) {
+        if let Some(system) = body.get_mut("system") {
+            super::cache::mark_content(system, &control);
+        }
+        let stable = req
+            .messages
+            .messages()
+            .iter()
+            .take(
+                req.cache
+                    .as_ref()
+                    .expect("cache control has metadata")
+                    .stable_messages,
+            )
+            .filter(|message| message.role != Role::System && !message.content.is_empty())
+            .count();
+        if let Some(messages) = body["messages"].as_array_mut() {
+            for message in messages.iter_mut().take(stable).rev() {
+                if super::cache::mark_content(&mut message["content"], &control) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(serde_json::to_vec(&body).expect("a JSON value serialises"))
 }
 
 /// A complete HTTP request for `req` against `target`.
@@ -1094,7 +1122,7 @@ fn classify_error(kind: &str) -> ErrorKind {
 ///
 /// `cost` is accepted and unused, and that is the row's claim rather than an
 /// omission here: Anthropic reports tokens and never a monetary figure
-/// (`docs/12-cline-provider-survey.md` §2.2, from a recorded fixture), so its
+/// (`ARCHITECTURE.md` §2.2, from a recorded fixture), so its
 /// row carries `cost: None` and conformance check 5 fails if that ever stops
 /// matching what its transcripts hold.
 pub fn decode(

@@ -22,7 +22,7 @@
 //! true` in favour of `max_completion_tokens`; Ollama's compatibility surface
 //! reads `max_tokens` and discards `max_completion_tokens`, which is the whole
 //! reason [`ego_ai::wire::ollama`] exists as a second mapping
-//! (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+//! (`ARCHITECTURE.md`
 //! §8). One key, retired by one vendor and current for another. So the table
 //! below is keyed on **(spelling, mapping)** and never on spelling alone: a
 //! mapping is derived from exactly one published contract, and that contract's
@@ -48,7 +48,7 @@
 //!
 //! Dropping the field to please the one member that ignores it would cost the
 //! other three their usage figures and would buy a fifth mapping differing in
-//! an inert field. `docs/15-provider-contract-audit.md` §3 is where that
+//! an inert field. `ARCHITECTURE.md` §3 is where that
 //! argument lives in full.
 
 use ego_ai::provider::{GEMINI_BASE, XAI_BASE};
@@ -210,6 +210,7 @@ fn conversation(messages: Vec<Message>) -> Conversation {
 /// that has none.
 fn widest_request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gpt-5.1".to_string(),
         messages: conversation(vec![
             Message::text(Role::System, "You are terse."),

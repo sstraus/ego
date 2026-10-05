@@ -1,6 +1,6 @@
 //! Why an *invocation* ended, as opposed to why a turn did.
 //!
-//! See `docs/decisions/2026-08-21-two-levels-of-ending.md` and `CLI.md` §4.3.
+//! See `ARCHITECTURE.md` and `CLI.md` §4.3.
 //!
 //! Two levels rather than one enum, because a turn and a run are not the same
 //! thing. `max_turns` fires *between* two completed turns: recording it as
@@ -83,7 +83,7 @@ impl SessionId {
 /// `Option` is "absent or unknown", and this is neither: it is a stated fact
 /// about a run in which §6's order was exhausted. Same size, nothing to
 /// re-derive. See
-/// `docs/decisions/2026-08-21-an-exit-code-that-names-who-refused.md` §2.
+/// `ARCHITECTURE.md` §2.
 ///
 /// There is deliberately no `Authority::Nobody` arm. That type is persisted
 /// through `EventKind::PermissionDecided`, and a *decision* event whose
@@ -146,8 +146,15 @@ pub enum RunTermination {
     PermissionRequired { action: String, by: DeniedBy },
     /// A durable question awaits an answer from the invoking human.
     QuestionRequired { question: Box<QuestionReport> },
-    /// The provider or the network failed.
+    /// The provider or the network failed, and the turn's effect is known:
+    /// the failed attempt showed nothing, or the provider itself reported the
+    /// failure. The run is settled and the session takes the next prompt.
+    /// `message` names the cause once, in words a host may show.
     Provider { message: String },
+    /// The exchange was lost after the turn had already shown output, so
+    /// nobody can say what the provider did with the rest. The only provider
+    /// failure that leaves the run uncertain.
+    ProviderUncertain { message: String },
     /// The provider explicitly reported that the model context window was
     /// exhausted. The run is settled; a host may offer explicit compaction.
     ContextOverflow { message: String },
@@ -198,7 +205,7 @@ impl RunTermination {
             RunTermination::UsageError { .. } => 2,
             RunTermination::PermissionRequired { .. } => 3,
             RunTermination::QuestionRequired { .. } => 3,
-            RunTermination::Provider { .. } => 4,
+            RunTermination::Provider { .. } | RunTermination::ProviderUncertain { .. } => 4,
             RunTermination::ContextOverflow { .. } => 4,
             RunTermination::BudgetExceeded => 5,
             RunTermination::MaxTurns => 5,
@@ -235,6 +242,7 @@ impl RunTermination {
             RunTermination::TaskFailed
             | RunTermination::UsageError { .. }
             | RunTermination::Provider { .. }
+            | RunTermination::ProviderUncertain { .. }
             | RunTermination::ContextOverflow { .. }
             | RunTermination::Failed { .. }
             | RunTermination::Signalled(_) => "error",
@@ -268,7 +276,7 @@ impl RunTermination {
     /// class of it: the invocation and the *resolved* model disagree — a
     /// `--thinking` level the model does not accept — and nothing above the
     /// turn holds the resolved [`ModelCapabilities`] to compare against. See
-    /// `docs/decisions/2026-08-21-a-request-the-model-will-not-take.md`.
+    /// `ARCHITECTURE.md`.
     ///
     /// [`ModelCapabilities`]: crate::generator::capabilities::ModelCapabilities
     ///
@@ -280,6 +288,25 @@ impl RunTermination {
     /// inventing a placeholder would hide the bug that produced it. The
     /// missing thing is the whole [`Denial`], so an action can no longer
     /// arrive without an authority beside it.
+    /// [`after_turn`](Self::after_turn) for a whole turn outcome.
+    ///
+    /// A provider failure carries what the turn learned about it: the cause a
+    /// host may be shown, and whether the turn's effect is known. Everything
+    /// else is decided by the exit reason alone.
+    pub fn after_outcome(outcome: &crate::turn::TurnOutcome) -> Option<Self> {
+        match (&outcome.exit_reason, &outcome.provider_failure) {
+            (ExitReason::Provider, Some(failure)) if failure.effect_known => {
+                Some(RunTermination::Provider {
+                    message: failure.cause.clone(),
+                })
+            }
+            (ExitReason::Provider, Some(failure)) => Some(RunTermination::ProviderUncertain {
+                message: failure.cause.clone(),
+            }),
+            _ => Self::after_turn(outcome.exit_reason, outcome.denied.clone()),
+        }
+    }
+
     pub fn after_turn(reason: ExitReason, denied: Option<Denial>) -> Option<Self> {
         match reason {
             ExitReason::Completed => None,
@@ -1446,7 +1473,7 @@ pub trait RunExecutor: Send + Sync {
     /// Returning `Ok` says the request was delivered, not that the boundary
     /// has been reached — only the log says that, and only once the turn has
     /// got there. See
-    /// `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-session.md`.
+    /// `ARCHITECTURE.md`.
     fn pause<'a>(
         &'a self,
         handle: &'a RunHandle,
@@ -3082,7 +3109,12 @@ where
                 Err(error) => return Err(lifecycle_run_error(error)),
             };
             match folded.snapshot.status {
-                RunStatus::Uncertain => return Err(LifecycleError::EffectUncertain),
+                RunStatus::Uncertain => {
+                    if let Ok(lease) = folded.last_lease() {
+                        self.release_live_attachment(folded.snapshot.run_id, lease);
+                    }
+                    return Err(LifecycleError::EffectUncertain);
+                }
                 // Paused belongs with the terminal statuses and not with
                 // `Cancelling`: a paused run has already stopped at a durable
                 // boundary, so there is no in-flight effect to cancel and

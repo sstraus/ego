@@ -1,7 +1,7 @@
 //! How an invocation ends: the exit codes of `CLI.md` §4.3 and the
 //! `exit_reason` words of §4.1, and how a turn's ending becomes a run's.
 //!
-//! See `docs/decisions/2026-08-21-two-levels-of-ending.md` and
+//! See `ARCHITECTURE.md` and
 //! `plans/m0b-vertical-slice.md` Step 13.6.
 //!
 //! These are contract tests, not implementation tests: every assertion here

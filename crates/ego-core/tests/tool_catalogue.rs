@@ -337,6 +337,26 @@ fn loop_with_policy(
     system: Option<SystemPrompt>,
     identity: Option<AgentIdentity>,
 ) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
+    loop_with_session_state(
+        generator,
+        static_tools,
+        source,
+        policy_source,
+        system,
+        identity,
+        SessionState::default(),
+    )
+}
+
+fn loop_with_session_state(
+    generator: Arc<dyn ego_core::generator::port::Generator>,
+    static_tools: &[RegisteredTool],
+    source: Arc<dyn AdmittedToolSource>,
+    policy_source: Arc<dyn ego_core::turn::GenerationPolicySource>,
+    system: Option<SystemPrompt>,
+    identity: Option<AgentIdentity>,
+    state: SessionState,
+) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
     let store: &'static MemoryStore = Box::leak(Box::new(MemoryStore::default()));
     let clock = Box::leak(Box::new(FixedClock));
     let sink = Box::leak(Box::new(CollectingSink::new()));
@@ -360,6 +380,7 @@ fn loop_with_policy(
         source: Arc::new(TestGenerationSource { generator }),
         gate,
         config: TurnConfig {
+            cache: ego_core::generator::capabilities::CacheRetention::Short,
             system,
             identity,
             token_ceiling: None,
@@ -368,10 +389,11 @@ fn loop_with_policy(
         },
         admission: Arc::new(EvidenceAdmissionService::new()),
         invocation: RunInvocationId::new(),
+        retry_pause: Arc::new(NoRetryPause),
     };
     let session = Session {
         id: SessionId::new(),
-        state: SessionState::default(),
+        state,
         store,
         evidence,
         clock,
@@ -767,9 +789,20 @@ fn the_runtime_identity_names_the_model_workspace_posture_tools_and_every_mcp_se
     futures::executor::block_on(turn.run("which model?")).expect("first turn");
 
     let systems = system_texts(&generator.calls()[0]);
-    let identity = &systems[0];
+    assert_eq!(systems[0], "You are ego 9.9.9, a coding agent.");
+    let calls = generator.calls();
+    let identity = calls[0]
+        .messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } if text.contains("Current runtime facts") => Some(text),
+            _ => None,
+        })
+        .next()
+        .expect("live identity");
     for line in [
-        "You are ego 9.9.9",
         "- Model: catalogue-test (reasoning effort: off)",
         "- Workspace root: /workspace",
         "- Posture: permission mode: plan; sandbox: ro; network: offline",
@@ -901,4 +934,165 @@ fn system_texts(request: &GenRequest) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+struct HostNotes(Arc<Mutex<String>>);
+
+impl AdmittedToolSource for HostNotes {
+    fn capture(&self) -> Result<CapturedToolCatalogue, ToolCatalogueError> {
+        CapturedToolCatalogue::new("stable", Vec::new())
+    }
+    fn context_notes(&self) -> Vec<String> {
+        vec![self.0.lock().expect("host notes").clone()]
+    }
+}
+
+// Catches: volatile host snapshots becoming System text or preceding the cached history.
+#[test]
+fn host_updates_preserve_the_prefix_and_leave_current_user_intent_last() {
+    let notes = Arc::new(Mutex::new("host workspace revision one".to_owned()));
+    let generator = Arc::new(FakeGenerator::new([
+        vec![AiEvent::Stop(StopReason::Stop)],
+        vec![AiEvent::Stop(StopReason::Stop)],
+    ]));
+    let (mut turn, store) = loop_with_policy(
+        generator.clone(),
+        &[],
+        Arc::new(HostNotes(notes.clone())),
+        common::default_policy_source(),
+        Some(SystemPrompt::verbatim("stable instructions")),
+        None,
+    )
+    .expect("catalogue");
+    futures::executor::block_on(turn.run("first intent")).expect("first turn");
+    *notes.lock().expect("notes") = "host workspace revision two".to_owned();
+    futures::executor::block_on(turn.run("second intent")).expect("second turn");
+    let calls = generator.calls();
+    assert_eq!(system_texts(&calls[0]), vec!["stable instructions"]);
+    assert_eq!(system_texts(&calls[0]), system_texts(&calls[1]));
+    for (call, intent, note) in [
+        (&calls[0], "first intent", "revision one"),
+        (&calls[1], "second intent", "revision two"),
+    ] {
+        let messages = call.messages.messages();
+        assert_eq!(
+            call.cache.as_ref().unwrap().stable_messages,
+            messages.len() - 2,
+            "the boundary excludes live data and the current intent"
+        );
+        let user = messages.last().expect("current prompt");
+        assert_eq!(user.role, Role::User);
+        assert_eq!(
+            user.content,
+            vec![ContentBlock::Text {
+                text: intent.to_owned()
+            }]
+        );
+        let data = &messages[messages.len() - 2];
+        assert_eq!(data.role, Role::User);
+        assert!(format!("{:?}", data.content).contains(note));
+    }
+    let durable = store.events.lock().expect("events");
+    assert!(
+        !serde_json::to_string(&*durable)
+            .expect("journal")
+            .contains("host workspace revision")
+    );
+}
+
+// Catches: fork/resume re-rendering edited instructions instead of inheriting the source epoch.
+#[test]
+fn fork_and_resume_reuse_the_snapshot_until_explicit_refresh() {
+    let generator = Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+    let (mut source, _) = loop_with_policy(
+        generator,
+        &[],
+        Arc::new(HostNotes(Arc::new(Mutex::new("source host".into())))),
+        common::default_policy_source(),
+        Some(SystemPrompt::verbatim("source instructions")),
+        None,
+    )
+    .expect("source");
+    futures::executor::block_on(source.run("source prompt")).expect("source turn");
+    let source_state = source.state();
+    let inherited =
+        ego_core::session::PreparedFork::new(SessionId::new(), &source_state, Timestamp::EPOCH)
+            .expect("idle source");
+    let child_state = SessionState::replay(inherited.seed().events().cloned());
+    assert_eq!(child_state.prompt_snapshot, source_state.prompt_snapshot);
+    let resumed_generator = Arc::new(FakeGenerator::new([
+        vec![AiEvent::Stop(StopReason::Stop)],
+        vec![AiEvent::Stop(StopReason::Stop)],
+    ]));
+    let (mut child, child_store) = loop_with_session_state(
+        resumed_generator.clone(),
+        &[],
+        Arc::new(HostNotes(Arc::new(Mutex::new("child host".into())))),
+        common::default_policy_source(),
+        Some(SystemPrompt::verbatim("edited instructions")),
+        None,
+        child_state,
+    )
+    .expect("child");
+    futures::executor::block_on(child.run("child prompt")).expect("child turn");
+    assert_eq!(
+        system_texts(&resumed_generator.calls()[0]),
+        vec!["source instructions"]
+    );
+    let inherited_epoch = child.state().prompt_snapshot.expect("epoch").epoch;
+    child = child.with_prompt_refresh();
+    futures::executor::block_on(child.run("refresh prompt")).expect("refreshed turn");
+    assert_eq!(
+        system_texts(&resumed_generator.calls()[1]),
+        vec!["edited instructions"]
+    );
+    assert_ne!(
+        child.state().prompt_snapshot.expect("new epoch").epoch,
+        inherited_epoch
+    );
+    let replayed = SessionState::replay(child_store.events.lock().expect("journal").clone());
+    assert_eq!(replayed.prompt_snapshot, child.state().prompt_snapshot);
+    assert!(
+        !serde_json::to_string(&*child_store.events.lock().expect("journal"))
+            .expect("json")
+            .contains("child host")
+    );
+}
+
+// Catches: oversized Unicode host data panicking at a byte boundary or replacing user intent.
+#[test]
+fn oversized_host_context_is_bounded_without_splitting_unicode_or_user_text() {
+    let generator = Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+    let (mut turn, _) = loop_with_policy(
+        generator.clone(),
+        &[],
+        Arc::new(HostNotes(Arc::new(Mutex::new("漢".repeat(30_000))))),
+        common::default_policy_source(),
+        None,
+        None,
+    )
+    .expect("source");
+    futures::executor::block_on(turn.run("the user decides")).expect("turn");
+    let calls = generator.calls();
+    let messages = calls[0].messages.messages();
+    let ContentBlock::Text { text } = &messages[messages.len() - 2].content[0] else {
+        panic!("data text");
+    };
+    assert!(text.len() <= 65_536 + "\n[context truncated]".len());
+    assert!(text.ends_with("[context truncated]"));
+    assert_eq!(
+        messages.last().expect("user").content,
+        vec![ContentBlock::Text {
+            text: "the user decides".into()
+        }]
+    );
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
+    }
 }

@@ -39,7 +39,7 @@
 //! provider's extension into the format every provider uses, and that it would
 //! still miss xAI's spelling. The second is a reason to read **both** names,
 //! not neither. The first is answered by
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §4,
+//! `ARCHITECTURE.md` §4,
 //! which rules that an extension field is decoded opportunistically and
 //! uniformly for every member of the family, and §8, which applies it here by
 //! name: the deciding question is whether there is any member for which

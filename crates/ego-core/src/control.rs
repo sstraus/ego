@@ -52,7 +52,7 @@ pub struct SessionControlState {
     /// unlike them in one way that the type cannot express: its `available`
     /// list is a ceiling the seat may narrow and never widen.
     ///
-    /// `docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`
+    /// `ARCHITECTURE.md`
     pub sandbox: ControlSelect<Confinement>,
 }
 

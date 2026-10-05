@@ -17,6 +17,7 @@ use url::Url;
 
 fn request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gpt-5.6-sol".to_string(),
         messages: Conversation::new(vec![
             Message::text(Role::System, "be brief"),
@@ -149,7 +150,7 @@ async fn a_function_call_stream_ends_in_tool_use() {
 }
 
 #[tokio::test]
-async fn a_non_200_is_three_terminal_events() {
+async fn a_non_200_ends_in_the_shared_terminal_events() {
     let events: Vec<AiEvent> = OpenAiCodexResponses
         .decode(
             Ok(HttpResponse {
@@ -163,8 +164,10 @@ async fn a_non_200_is_three_terminal_events() {
         )
         .collect()
         .await;
-    assert_eq!(events.len(), 3);
-    assert!(matches!(events[2], AiEvent::Stop(StopReason::Error)));
+    // The three terminal events plus the host-safe cause (regression case).
+    assert_eq!(events.len(), 4);
+    assert!(matches!(events[2], AiEvent::ProviderFailure { .. }));
+    assert!(matches!(events[3], AiEvent::Stop(StopReason::Error)));
 }
 
 /// The Codex Responses body has no field for an opaque reasoning signature.

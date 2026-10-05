@@ -209,3 +209,81 @@ fn missing_lineage_or_evidence_fails_closed_without_emitting_raw_bytes() {
     assert!(finished.stdout.is_empty(), "failure emitted bundle bytes");
     assert!(!finished.stderr.contains("SECRET"), "raw bytes leaked");
 }
+
+// Catches an exact value surviving JSON escapes or the markdown renderer.
+#[test]
+fn exports_mask_known_env_values_in_every_format() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    for format in ["json", "jsonl", "md"] {
+        let finished = fixture
+            .command()
+            .subcommand("export")
+            .args([support::FIXTURE_SESSION_ID, "--format", format])
+            .env("EGO_TEST_SECRET", "VISIBLE-RESULT")
+            .run();
+        assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+        assert!(
+            !finished.stdout.contains("VISIBLE-RESULT"),
+            "format {format}"
+        );
+        assert!(finished.stdout.contains("[REDACTED]"), "format {format}");
+    }
+}
+
+// Catches a child token reaching the next provider request or the event journal.
+#[test]
+#[cfg(unix)]
+fn child_secret_is_masked_in_model_context_event_log_and_export() {
+    const TOKEN: &str = "ego-child-token-274-unique";
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::tool_call(
+                "secret-child",
+                "exec",
+                r#"{"argv":["/bin/sh","-c","printf '%s' \"$EGO_TEST_TOKEN\"; printf '%s' \"$EGO_TEST_TOKEN\" >&2"],"timeout_ms":5000}"#,
+            )),
+            Reply::Sse(support::text("done")),
+        ],
+        ..Plan::default()
+    });
+    let finished = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--thinking",
+            "off",
+            "--sandbox",
+            "off",
+            "--allow",
+            "exec(/bin/sh *)",
+            "Print the inherited token",
+        ])
+        .env("EGO_TEST_TOKEN", TOKEN)
+        .run();
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    let requests = stub.generations();
+    let context = requests.last().unwrap().to_string();
+    assert!(context.contains("[REDACTED]"));
+    assert!(!context.contains(TOKEN));
+    let log = std::fs::read_to_string(
+        home.path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(log.contains("[REDACTED]"));
+    assert!(!log.contains(TOKEN));
+    let exported = Ego::at(home.path(), workspace.path(), None)
+        .subcommand("export")
+        .args([support::FIXTURE_SESSION_ID, "--format", "json"])
+        .run();
+    assert_eq!(exported.code, Some(0), "{}", exported.stderr);
+    assert!(exported.stdout.contains("[REDACTED]"));
+    assert!(!exported.stdout.contains(TOKEN));
+}

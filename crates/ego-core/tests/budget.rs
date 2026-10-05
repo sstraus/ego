@@ -109,6 +109,7 @@ mod budget {
 
     fn request(max_output_tokens: Option<u64>) -> GenRequest {
         GenRequest {
+            cache: None,
             model: "claude-opus-5".to_string(),
             messages: Conversation::new(vec![Message::text(
                 Role::User,
@@ -787,6 +788,7 @@ mod budget {
     /// The standard fixture request against a named model.
     fn request_for(model: &str, max_output_tokens: Option<u64>) -> GenRequest {
         GenRequest {
+            cache: None,
             model: model.to_string(),
             ..request(max_output_tokens)
         }
@@ -1170,7 +1172,7 @@ mod budget {
 
     // --- the other three meterings -----------------------------------------
     //
-    // `docs/decisions/2026-08-21-how-a-model-is-metered.md` §2. Everything
+    // `ARCHITECTURE.md` §2. Everything
     // above this line is the currency-table arrangement the gate was born
     // with. These are the three the sum-product added, and each is here
     // because it makes the gate *behave* differently — not because a variant
@@ -1488,7 +1490,7 @@ mod budget {
 
     // --- a run with no ceiling -------------------------------------------
     //
-    // `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §§1-2. Nobody has
+    // `ARCHITECTURE.md` §§1-2. Nobody has
     // to configure a ceiling, and a run without one still reserves, settles
     // and reconciles — it simply has nothing to enforce. The four cases of
     // §2's table are exercised below, plus what the shape it mints costs the
@@ -1656,6 +1658,7 @@ mod budget {
         );
 
         let elsewhere = GenRequest {
+            cache: None,
             model: "claude-haiku-5".to_string(),
             ..request(Some(1_024))
         };
@@ -1835,7 +1838,7 @@ mod budget {
 
     /// Whether it is worth going and *finding* rates at all.
     ///
-    /// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §5 says the three
+    /// `ARCHITECTURE.md` §5 says the three
     /// sources are consulted "only when a ceiling is configured", and §10
     /// says a monetary ceiling on a row with no per-token charge binds
     /// nothing. Those are not two rules: they are the single question "will

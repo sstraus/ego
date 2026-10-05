@@ -549,7 +549,7 @@ mod snapshot {
 
     #[test]
     fn version_seven_snapshot_is_a_cache_miss_after_the_codec_bump() {
-        assert_eq!(SNAPSHOT_VERSION, 14);
+        assert_eq!(SNAPSHOT_VERSION, 15);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         let mut legacy = Snapshot::new(fx.id, source_seq, prefix_state);
@@ -564,7 +564,7 @@ mod snapshot {
 
     #[test]
     fn current_snapshot_replays_the_same_state_as_the_full_log() {
-        assert_eq!(SNAPSHOT_VERSION, 14);
+        assert_eq!(SNAPSHOT_VERSION, 15);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         fx.store
@@ -572,7 +572,7 @@ mod snapshot {
             .unwrap();
         let written: Snapshot =
             serde_json::from_slice(&std::fs::read(fx.snapshot_path()).unwrap()).unwrap();
-        assert_eq!(written.v, 14, "current snapshots are written as v14");
+        assert_eq!(written.v, 15, "current snapshots are written as v15");
 
         let (resumed, rejection) = fx.store.resume(&fx.id).unwrap();
 
@@ -583,7 +583,7 @@ mod snapshot {
     /// A snapshot a *previous build of this binary* wrote, byte for byte, not
     /// a synthetic one with its version field poked. `ItemState` gained four
     /// required fields in
-    /// `docs/decisions/2026-08-21-tool-use-history.md`, so a v2 snapshot no
+    /// `ARCHITECTURE.md`, so a v2 snapshot no
     /// longer even parses — and the point of this test is that it does not
     /// have to. Whichever rejection fires, resume produces the same state a
     /// full replay does, which is what makes "a snapshot is a cache" true

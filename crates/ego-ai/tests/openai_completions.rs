@@ -53,6 +53,7 @@ fn conversation(messages: Vec<Message>) -> Conversation {
 /// once, so a field that silently stops being sent has nowhere to hide.
 fn golden_request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gpt-5.1".to_string(),
         messages: conversation(vec![
             Message::text(Role::System, "You are terse."),
@@ -153,7 +154,7 @@ fn fields_that_have_nothing_to_say_are_omitted() {
 /// two tools, and the results answering them. OpenAI wants the calls attached
 /// to the assistant message and each result in its own `tool` message naming
 /// the id — a shape `Message` could not express at all before
-/// `docs/decisions/2026-08-21-tool-use-history.md`.
+/// `ARCHITECTURE.md`.
 #[test]
 fn a_tool_round_trip_reaches_the_wire_in_the_shape_the_schema_asks_for() {
     let mut req = golden_request();
@@ -259,6 +260,7 @@ fn an_assistant_turn_of_pure_tool_calls_sends_no_content_key() {
 #[test]
 fn reasoning_state_is_refused_rather_than_dropped() {
     let req = GenRequest {
+        cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "What is in ./src?"),
             Message {
@@ -895,6 +897,10 @@ async fn an_error_status_is_reported_with_what_the_provider_said() {
                     .to_string(),
                 kind: ErrorKind::Transient,
             },
+            AiEvent::ProviderFailure {
+                cause: "the provider returned HTTP 429: Rate limit reached for gpt-5.1".to_string(),
+                retry_after: None,
+            },
             AiEvent::Stop(StopReason::Error),
         ]
     );
@@ -953,6 +959,12 @@ async fn an_unmapped_status_is_unclassified_rather_than_assumed_retryable() {
             AiEvent::Error {
                 message: "the provider returned HTTP 418: not json at all".to_string(),
                 kind: ErrorKind::Unclassified,
+            },
+            // A body that is no envelope stays in the operator's message and
+            // out of the host-safe cause.
+            AiEvent::ProviderFailure {
+                cause: "the provider returned HTTP 418".to_string(),
+                retry_after: None,
             },
             AiEvent::Stop(StopReason::Error),
         ]

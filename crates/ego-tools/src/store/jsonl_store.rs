@@ -207,7 +207,7 @@ impl Repair {
 /// line at index 0 has established a valid prefix of zero bytes, and a
 /// caller that then truncates to that length deletes the entire session —
 /// which is what this store did, reporting it as an ordinary `Repair`. See
-/// `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md` §1.
+/// `ARCHITECTURE.md` §1.
 ///
 /// So the header is answered here, before anything is allowed to remove a
 /// byte. `read` and `recover` both come through this function so the two
@@ -431,7 +431,7 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                             prompt_revision,
                         })
                     }
-                    EventKind::Forked { source, at_seq } => {
+                    EventKind::Forked { source, at_seq, .. } => {
                         lineage = Some(SessionLineage::Fork { source, at_seq })
                     }
                     EventKind::ExecutionObserved { observation, .. } => {
@@ -515,11 +515,16 @@ impl JsonlStore {
         }
     }
 
+    /// Conversational search is a derived cache beside the authoritative logs.
+    pub fn history(self: &Arc<Self>) -> super::HistoryIndex {
+        super::HistoryIndex::new(self.root.join("history.sqlite"), Arc::clone(self))
+    }
+
     pub(super) fn session_dir(&self, id: &SessionId) -> PathBuf {
         self.root.join(session_dir_name(id))
     }
 
-    fn log_path(&self, id: &SessionId) -> PathBuf {
+    pub(super) fn log_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("events.jsonl")
     }
 
@@ -629,7 +634,7 @@ impl JsonlStore {
         first.next();
         let valid_kind = match (&event.kind, seed.lineage()) {
             (
-                EventKind::Forked { source, at_seq },
+                EventKind::Forked { source, at_seq, .. },
                 SessionLineage::Fork {
                     source: lineage_source,
                     at_seq: lineage_seq,
@@ -1038,7 +1043,7 @@ impl JsonlStore {
             // only, which makes the header the *least* protected line in the
             // file. The conclusion survives on the write-once clause alone;
             // the deleted clause was never checked. ADR §2 of
-            // `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md`.
+            // `ARCHITECTURE.md`.
             created: projected_meta.created,
             updated: projected_meta.updated,
             title: projected_meta.title,
@@ -1184,7 +1189,7 @@ impl JsonlStore {
                     source_seq: *source_seq,
                     prompt_revision: *prompt_revision,
                 }),
-                EventKind::Forked { source, at_seq } => Some(SessionLineage::Fork {
+                EventKind::Forked { source, at_seq, .. } => Some(SessionLineage::Fork {
                     source: *source,
                     at_seq: *at_seq,
                 }),
@@ -1988,7 +1993,7 @@ impl JsonlStore {
                             break;
                         }
                         match event.kind {
-                            EventKind::Forked { source, at_seq } => {
+                            EventKind::Forked { source, at_seq, .. } => {
                                 lineage = Some(SessionLineage::Fork { source, at_seq });
                             }
                             EventKind::CompactionSeeded {
@@ -2253,7 +2258,9 @@ impl ReplaySource for JsonlStore {
                 source_seq,
                 prompt_revision,
             }),
-            EventKind::Forked { source, at_seq } => Some(SessionLineage::Fork { source, at_seq }),
+            EventKind::Forked { source, at_seq, .. } => {
+                Some(SessionLineage::Fork { source, at_seq })
+            }
             _ => None,
         };
         if lineage.is_some() && first_event.env.seq != first {

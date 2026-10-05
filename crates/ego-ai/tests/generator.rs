@@ -1,7 +1,7 @@
 //! The binding: a `Generator` that actually reaches a provider.
 //!
 //! See `plans/m0b-vertical-slice.md` Step 13.5 and
-//! `docs/decisions/2026-08-21-a-generator-that-actually-reaches-a-provider.md`.
+//! `ARCHITECTURE.md`.
 //!
 //! Steps 8, 9 and 10 shipped the `Http` seam, the openai-completions wire
 //! format and the turn loop, each green in isolation and none of them joined
@@ -105,6 +105,7 @@ fn caps() -> ModelCapabilities {
 
 fn request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "gpt-5.1".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, "list the files")])
             .expect("one user message is a conversation"),
@@ -119,6 +120,7 @@ fn request() -> GenRequest {
 /// format has nowhere to put, and refuses rather than drops.
 fn request_carrying_reasoning() -> GenRequest {
     GenRequest {
+        cache: None,
         messages: Conversation::new(vec![
             Message::text(Role::User, "list the files"),
             Message {
@@ -157,7 +159,7 @@ fn generator(http: Arc<dyn Http>) -> WireGenerator {
 /// The fixture row's credential, resolved.
 ///
 /// A generator cannot be built without one, which is the type-level half of
-/// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §6:
+/// `ARCHITECTURE.md` §6:
 /// there is no longer a state in which a generation exists and its credential
 /// does not.
 fn credential(creds: &dyn ego_ai::provider::Credentials) -> ResolvedCredential {
@@ -554,7 +556,7 @@ async fn a_streamed_response_decodes_to_what_the_wire_format_decodes() {
 /// The row is asked for its headers *first*, and inspected after. That
 /// ordering is the test. It used to be true only that a held [`Secret`]
 /// declined to print itself — a redaction one `derive` away from being wrong
-/// (`docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §3). Resolving
+/// (`ARCHITECTURE.md` §3). Resolving
 /// a credential now leaves the row exactly as it was, so there is nothing for
 /// a future `Serialize` to leak.
 #[test]

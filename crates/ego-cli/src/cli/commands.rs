@@ -306,7 +306,7 @@ pub(super) struct Shape {
 /// process that serves runs and not to the protocol it happens to speak:
 /// `ego a2a` is the same question and flattens the same two lines.
 ///
-/// `docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`
+/// `ARCHITECTURE.md`
 #[derive(Debug, ClapArgs)]
 pub(super) struct Ceiling {
     /// The weakest confinement a session may select: ro|workspace|off.
@@ -764,4 +764,35 @@ pub(super) struct Flags {
     /// Never emit ANSI colour, whatever the terminal claims to support.
     #[arg(long)]
     pub(super) no_color: bool,
+}
+
+#[derive(Debug, Parser)]
+pub(super) struct RootsCommand {
+    #[command(subcommand)]
+    pub(super) action: RootsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum RootsSubcommand {
+    /// Add or update one user perimeter root.
+    Add {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, default_value = "read")]
+        access: String,
+        path: PathBuf,
+    },
+    /// Remove a root by its stored spelling.
+    Rm {
+        #[arg(long)]
+        profile: Option<String>,
+        path: PathBuf,
+    },
+    /// List roots stored in the selected user target.
+    Ls {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }

@@ -1,6 +1,6 @@
 //! The two invariants of the provider seam, proved from outside it.
 //!
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §5
+//! `ARCHITECTURE.md` §5
 //! states three, and each has a *necessary* condition and a *sufficient* one.
 //! The necessary one — that the near side names no provider and no protocol —
 //! is a grep, and it lives in `crates/ego-core/tests/near_side.rs` because the
@@ -431,6 +431,7 @@ async fn one_turn(
             policy_source: Arc::new(FixedPolicySource),
             gate,
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system: None,
                 identity: None,
                 token_ceiling: None,
@@ -439,6 +440,7 @@ async fn one_turn(
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
+            retry_pause: Arc::new(NoRetryPause),
         },
         Tools::new(
             &registry,
@@ -830,4 +832,13 @@ async fn a_cut_stream_settles_against_the_last_report_the_mapping_held() {
             total: usd("0.005370")
         }
     );
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
+    }
 }

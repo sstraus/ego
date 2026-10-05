@@ -142,6 +142,8 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
         let (_ingress, control) = interactive_control();
         control
     }
+    /// Return terminal ingress ownership before re-entering rooted admission.
+    fn restore_control(&self, _control: InteractiveControl) {}
     /// Publish the coordinator's authoritative durable queue projection.
     fn refresh_queue(&self, _queue: QueueStatus) {}
     /// Publish the coordinator-owned compaction guard to the interactive surface.
@@ -149,6 +151,13 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     /// Confirm a source-owned clean-session transition.
     fn confirm_compaction(&self, _source: SessionId) -> bool {
         false
+    }
+    /// Select an existing session through the terminal owner.
+    fn pick_session(
+        &self,
+        _sessions: Vec<ego_core::store::session_store::SessionMeta>,
+    ) -> Option<SessionId> {
+        None
     }
     /// Switch the terminal and its draft namespace after publication.
     fn activate_session(&self, _target: SessionId) -> bool {
@@ -332,9 +341,7 @@ impl Turns<'_> {
                 };
             }
 
-            if let Some(termination) =
-                RunTermination::after_turn(outcome.exit_reason, outcome.denied)
-            {
+            if let Some(termination) = RunTermination::after_outcome(&outcome) {
                 return (termination, self.answer(&loop_.state()));
             }
 

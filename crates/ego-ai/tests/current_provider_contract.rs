@@ -80,6 +80,7 @@ fn supplied_capabilities() -> ego_core::generator::capabilities::ModelCapabiliti
 
 fn request(model: &str, tools: Vec<ToolDescriptor>) -> GenRequest {
     GenRequest {
+        cache: None,
         model: model.to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, "say ok")])
             .expect("valid history"),
@@ -353,7 +354,7 @@ fn every_current_fixed_profile_also_installs_its_wire_on_resolved_model() {
             ProviderRow::openrouter_default(),
             "openrouter",
             "z-ai/glm-4.7",
-            "OpenAiCompletions",
+            "OpenRouterCompletions",
         ),
     ] {
         let slug = format!("{provider}/{model}");

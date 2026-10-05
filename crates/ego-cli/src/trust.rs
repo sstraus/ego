@@ -2,7 +2,7 @@
 //! themselves. Executable authority invalidates a decision; instructions do
 //! not.
 //!
-//! See `docs/decisions/2026-09-28-one-workspace-trust-answer-across-seats.md`.
+//! See `ARCHITECTURE.md`.
 //! `ego-core` owns what each fact means and whether a stored answer still
 //! applies. This module owns trust inventory reads and the separate locked
 //! documents under `$EGO_HOME`. Records live outside the workspace on purpose:

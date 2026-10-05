@@ -184,6 +184,7 @@ pub(crate) struct CliGenerationPolicySource {
     selection: GenerationPolicySelection,
     workspace: CanonPath,
     roots: Vec<ProfileRoot>,
+    coordinator: bool,
     human: Option<Arc<dyn HumanApprover>>,
 }
 
@@ -197,6 +198,7 @@ impl CliGenerationPolicySource {
             selection,
             workspace,
             roots: Vec::new(),
+            coordinator: false,
             human,
         }
     }
@@ -204,6 +206,14 @@ impl CliGenerationPolicySource {
     /// The same source, reaching the profile's admitted roots too.
     pub(crate) fn with_profile_roots(mut self, roots: Vec<ProfileRoot>) -> Self {
         self.roots = roots;
+        self
+    }
+
+    pub(crate) fn with_coordinator_profile(
+        mut self,
+        profile: Option<&ego_core::config::ActiveProfileProvenance>,
+    ) -> Self {
+        self.coordinator = profile.is_some_and(|profile| profile.name == "coordinator");
         self
     }
 
@@ -218,7 +228,8 @@ impl CliGenerationPolicySource {
                 ),
                 None => PolicyEngine::new(self.workspace.clone(), snapshot.mode, snapshot.ruleset),
             }
-            .with_profile_roots(self.roots.clone()),
+            .with_profile_roots(self.roots.clone())
+            .with_coordinator_profile(self.coordinator),
         )
     }
 }
@@ -236,7 +247,12 @@ impl GenerationPolicySource for CliGenerationPolicySource {
             .selection
             .capture()
             .map_err(|error| error.to_string())?;
-        GenerationPolicyCapture::with_profile_roots(
+        let capture = if self.coordinator {
+            GenerationPolicyCapture::with_coordinator_profile
+        } else {
+            GenerationPolicyCapture::with_profile_roots
+        };
+        capture(
             self.workspace.clone(),
             self.roots.clone(),
             snapshot.mode,
@@ -276,6 +292,9 @@ pub trait PreflightPort: Send + Sync {
 
 /// Re-resolve policy from the frozen source set admitted for this session.
 pub trait FrozenPolicyResolver: Send + Sync {
+    /// The maximum mode admitted by this session's frozen authority.
+    fn max_mode(&self) -> Result<Option<Mode>, PolicyControlError>;
+
     fn resolve_rule_transaction(
         &self,
         before: &RuleSnapshot,
@@ -345,6 +364,7 @@ impl std::error::Error for PolicyControlError {}
 
 /// Application owner for policy preflight, persistence, resolution, and staging.
 pub struct PolicyApplicationOwner {
+    max_mode: Result<Option<Mode>, PolicyControlError>,
     selection: GenerationPolicySelection,
     rules: RuleApplication,
     preflight: Arc<dyn PreflightPort>,
@@ -360,6 +380,7 @@ impl PolicyApplicationOwner {
     ) -> Self {
         Self {
             selection,
+            max_mode: resolver.max_mode(),
             rules: RuleApplication::new(store, UserConfigTarget::Base),
             preflight,
             resolver,
@@ -407,6 +428,13 @@ impl PolicyApplicationOwner {
     }
 
     fn apply_mode(&self, mode: Mode) -> Result<PolicyControlOutcome, PolicyControlError> {
+        if let Some(maximum) = self.max_mode.as_ref().map_err(Clone::clone)?
+            && !mode.within(*maximum)
+        {
+            return Err(PolicyControlError::Resolution {
+                diagnostic: format!("mode {mode} exceeds system max_mode {maximum}"),
+            });
+        }
         if mode == Mode::Auto {
             self.preflight.validate_auto()?;
         }

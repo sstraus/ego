@@ -86,6 +86,81 @@ impl SessionBlobStore {
         })
     }
 
+    pub(super) fn mcp_output_root(&self) -> io::Result<ego_core::permit::CanonPath> {
+        let directory = self
+            .directory
+            .parent()
+            .expect("session evidence has a parent")
+            .join("mcp-output");
+        std::fs::create_dir_all(&directory)?;
+        if std::fs::symlink_metadata(&directory)?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(io::Error::other(
+                "session output directory must not be a symlink",
+            ));
+        }
+        crate::privacy::harden_private_path(
+            &directory,
+            crate::privacy::PrivatePathKind::Directory,
+        )?;
+        Ok(ego_core::permit::CanonPath::new(std::fs::canonicalize(
+            directory,
+        )?))
+    }
+
+    pub(super) fn spill_mcp_output(
+        &self,
+        run: ego_core::evidence::RunInvocationId,
+        call: ego_core::event::id::ItemId,
+        bytes: &[u8],
+    ) -> io::Result<PathBuf> {
+        let _publication = self
+            .publishes
+            .lock()
+            .map_err(|_| io::Error::other("session publication lock poisoned"))?;
+        let root = self.mcp_output_root()?;
+        let target = root.as_path().join(format!("{run}-{call}.txt"));
+        let existing_matches = |existing: Vec<u8>| {
+            if existing == bytes {
+                Ok(target.clone())
+            } else {
+                Err(io::Error::other(
+                    "session output identity already has different bytes",
+                ))
+            }
+        };
+        if let Some(existing) = self.io.read(&target)? {
+            return existing_matches(existing);
+        }
+        let nonce = NEXT_STAGING.fetch_add(1, Ordering::Relaxed);
+        let staging = root.as_path().join(format!(
+            ".{run}-{call}-{}-{nonce}.staging",
+            std::process::id()
+        ));
+        self.io.create_new(&staging)?;
+        let published = (|| {
+            crate::privacy::harden_private_path(&staging, crate::privacy::PrivatePathKind::File)?;
+            self.io.append_bytes(&staging, bytes)?;
+            self.io.fsync(&staging)?;
+            if self.io.publish_new(&staging, &target)? {
+                Ok(target.clone())
+            } else {
+                existing_matches(
+                    self.io
+                        .read(&target)?
+                        .ok_or_else(|| io::Error::other("published output disappeared"))?,
+                )
+            }
+        })();
+        // A successful publish consumes staging. Failed writes must not retain payloads.
+        if self.io.exists(&staging).unwrap_or(false) {
+            let _ = self.io.remove_file(&staging);
+        }
+        published
+    }
+
     fn recover_staging(&self) -> Result<(), BlobError> {
         for path in self.io.list_files(&self.directory)? {
             if path

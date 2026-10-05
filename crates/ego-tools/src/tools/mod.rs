@@ -1,8 +1,8 @@
 //! The builtins: `read`, `glob`, `grep`, `write`, `edit`, `exec`, and
 //! `read_tool_result`.
 //!
-//! See `docs/decisions/2026-08-21-reading-without-reading-everything.md` and
-//! `docs/decisions/2026-08-21-three-tools-on-a-real-filesystem.md`. Each
+//! See `ARCHITECTURE.md` and
+//! `ARCHITECTURE.md`. Each
 //! prepares a *different* operation, because listing, searching and reading
 //! are three different authorities: a `glob` that prepared `Op::Read` over its
 //! root would be handed the right to read every byte under it, having asked
@@ -12,7 +12,7 @@
 //! one that produces a *mutating* op, and until it existed `ModeApprover`
 //! approved every call this workspace could make in every mode — so the five
 //! modes, the `plan` floor and every rule with a `write(...)` head were
-//! machinery with no reachable input (`docs/13-effect-tools.md` §0).
+//! machinery with no reachable input (`ARCHITECTURE.md` §0).
 //!
 //! `edit` is the fifth and it is also not one more of the same. It is the only
 //! one that prepares *two* operations for one call — a `Read` and a `Write` of
@@ -32,6 +32,7 @@ mod exec_cancel;
 mod exec_status;
 mod glob;
 mod grep;
+mod memory;
 mod read;
 mod read_tool_result;
 mod write;
@@ -42,6 +43,7 @@ pub use exec_cancel::{ExecCancelParams, ExecCancelTool};
 pub use exec_status::{ExecStatusParams, ExecStatusTool};
 pub use glob::{GlobParams, GlobTool};
 pub use grep::{GrepParams, GrepTool};
+pub use memory::{MemoryEntryType, MemoryLookup, MemoryLookupParams};
 pub use read::{ReadParams, ReadTool};
 pub use read_tool_result::{ReadToolResult, ReadToolResultParams};
 pub use write::{WriteParams, WriteTool};
@@ -62,13 +64,18 @@ pub const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 
 /// The seven, ready to hand to `Tools::new`.
 pub fn builtins() -> Vec<Arc<dyn Tool>> {
+    builtins_with_environment(ego_core::permit::EnvPolicy::Inherited)
+}
+
+/// The builtins with the run-selected environment applied to exec.
+pub fn builtins_with_environment(environment: ego_core::permit::EnvPolicy) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(Typed(ReadTool)),
         Arc::new(Typed(GlobTool)),
         Arc::new(Typed(GrepTool)),
         Arc::new(Typed(WriteTool)),
         Arc::new(Typed(EditTool)),
-        Arc::new(Typed(ExecTool)),
+        Arc::new(Typed(ExecTool::with_environment(environment))),
         Arc::new(Typed(ExecCancelTool)),
         Arc::new(Typed(ExecStatusTool)),
         Arc::new(Typed(ReadToolResult)),
@@ -106,7 +113,7 @@ fn resolve(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPath, ToolError> {
 /// *reach*. A single helper would have to belong to one of those two moments,
 /// and the seam re-deriving the target independently of what a tool claimed
 /// is the whole reason the seam is there.
-fn resolve_target(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPath, ToolError> {
+pub(crate) fn resolve_target(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPath, ToolError> {
     let named = Path::new(path);
     let joined: PathBuf = if named.is_absolute() {
         named.to_path_buf()

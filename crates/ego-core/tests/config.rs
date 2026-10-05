@@ -507,7 +507,7 @@ fn config_no_layer_writing_a_budget_leaves_no_ceiling_at_all() {
 /// and that name is now a claim it does not check. "Cannot be relaxed" was
 /// true of `resolve` while `resolve` ended with
 /// `allow.retain(|e| !deny.contains(e))`, and that line is gone
-/// (`docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6): whether a
+/// (`ARCHITECTURE.md` §6): whether a
 /// deny beats an allow is now decided per call, by the engine, against a
 /// canonical `PreparedCall`.
 ///
@@ -563,7 +563,7 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
     // for a reason that does not generalise — the two strings happened to be
     // equal. Change the allow to `list(src/**)` and the retain kept it,
     // while the deny it violates sat right beside it in the same `Effective`.
-    // See `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6.
+    // See `ARCHITECTURE.md` §6.
     assert!(carries(&effective.permissions.allow, "list(**)"));
 }
 
@@ -815,7 +815,7 @@ fn config_bare_flag_forces_bare_even_when_trusted() {
 //
 // The pure half: which files, in what order, and — the part that matters —
 // that an untrusted workspace's files are never *touched*. See
-// `docs/decisions/2026-08-21-instructions-a-workspace-may-hand-a-model.md`.
+// `ARCHITECTURE.md`.
 
 mod instructions {
     use std::cell::RefCell;
@@ -1630,7 +1630,7 @@ fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
     // denial. The old skip kept whichever origin arrived first, which is the
     // user's: the one line an operator can delete without effect.
     //
-    // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
+    // `ARCHITECTURE.md`.
     let overlapping = || PermCfg {
         judge: None,
         allow: vec![],
@@ -1654,7 +1654,16 @@ fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
     ];
     let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
 
-    assert_eq!(effective.permissions.deny.len(), 1, "one rule, one entry");
+    assert_eq!(
+        effective
+            .permissions
+            .deny
+            .iter()
+            .filter(|entry| entry.origins() != ego_core::config::OriginSet::just(Source::Default))
+            .count(),
+        1,
+        "one explicit rule, one entry"
+    );
     let entry = &effective.permissions.deny[0];
     assert_eq!(entry.rule(), &rule("read(/etc/**)"));
 
@@ -1768,4 +1777,26 @@ fn exec_paths_catches_project_widening_and_relative_root_acceptance() {
         assert!(ConfigLayer::parse(source, "[profile.custom]\nexec_paths = ['/tools']").is_err());
     }
     assert!(ConfigLayer::parse(Source::User, "exec_paths = ['relative']").is_err());
+}
+
+// Catches: selecting a profile loses lower-layer allowlist names, or invalid
+// environment names pass strict config validation.
+#[test]
+fn child_controls_merge_per_field_and_validate_inactive_profiles() {
+    use ego_core::config::{ExecEnvironment, Network};
+    let user = ConfigLayer::parse(Source::User,
+        "network='off'\n[exec]\nenv='allowlist'\nenv_allowlist=['PATH']\n[profile.dev.exec]\nenv='core'"
+    ).unwrap();
+    let flags = ConfigLayer::parse(Source::Flags, "network='on'").unwrap();
+    let effective = resolve(&[user, flags], Trust::Untrusted, Some("dev")).unwrap();
+    assert_eq!(effective.network, Network::On);
+    assert_eq!(effective.exec.env, Some(ExecEnvironment::Core));
+    assert_eq!(effective.exec.env_allowlist, Some(vec!["PATH".into()]));
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            "[profile.inactive.exec]\nenv_allowlist=['BAD=NAME']"
+        )
+        .is_err()
+    );
 }

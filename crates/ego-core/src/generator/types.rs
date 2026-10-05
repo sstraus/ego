@@ -2,8 +2,8 @@
 //! `Message`, `ContentBlock`, `ToolDescriptor`, `StopReason`, `ErrorKind`,
 //! `ThinkingLevel`, `ReasoningState`.
 //!
-//! See `ARCHITECTURE.md` §3.1 and `docs/02-pi.md` §2 (the pi taxonomy this
-//! borrows from), and `docs/decisions/2026-08-21-tool-use-history.md` for why
+//! See `ARCHITECTURE.md` §3.1 and `ARCHITECTURE.md` §2 (the pi taxonomy this
+//! borrows from), and `ARCHITECTURE.md` for why
 //! a message is a list of blocks rather than a string plus an optional id.
 
 use std::collections::BTreeMap;
@@ -445,7 +445,7 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// Reasoning effort, pi's scale (`docs/02-pi.md` §2) plus `Off`: pi actually
+/// Reasoning effort, pi's scale (`ARCHITECTURE.md` §2) plus `Off`: pi actually
 /// carries two related types (`ThinkingLevel` without `off`, and
 /// `ModelThinkingLevel` adding it for per-model defaults). A `GenRequest`
 /// needs to be able to say "no thinking" as well as an effort level, and the
@@ -481,10 +481,10 @@ impl ThinkingLevel {
     }
 }
 
-/// Why a generation stopped, pi's scale (`docs/02-pi.md` §2) minus `Pending`.
+/// Why a generation stopped, pi's scale (`ARCHITECTURE.md` §2) minus `Pending`.
 ///
 /// The one deliberate deviation from pi, decided in
-/// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`: pi's `Pending`
+/// `ARCHITECTURE.md`: pi's `Pending`
 /// means "no terminal state yet", which is the *absence* of the answer this
 /// type exists to give. Every variant here is terminal, so an
 /// [`Outcome`](super::attempt::Outcome) cannot be built around a value that
@@ -507,7 +507,7 @@ pub enum StopReason {
     /// The generation was cancelled.
     Aborted,
     /// The provider deferred delivery of the result (fetched later, not
-    /// streamed) — `docs/02-pi.md` §2's `DeferredHandle`.
+    /// streamed) — `ARCHITECTURE.md` §2's `DeferredHandle`.
     Deferred,
 }
 
@@ -523,7 +523,7 @@ pub enum StopReason {
 /// rejected for the reason that a string only helps if something matches on
 /// it, and the only thing that would is `turn/` — matching on a provider's
 /// spelling in `turn/` being exactly what
-/// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §5's
+/// `ARCHITECTURE.md` §5's
 /// name-absence test exists to forbid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -869,6 +869,9 @@ pub struct ReasoningState {
 /// A request to generate the next assistant turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenRequest {
+    /// Transient provider-cache policy and prefix boundary; never journaled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<PromptCache>,
     /// The model to generate with, as a provider-catalogue id (e.g.
     /// `"claude-opus-5"`). `ego-core` treats this as an opaque string; the
     /// catalogue and provider table live in `ego-ai` (ARCH §3.1).
@@ -886,4 +889,12 @@ pub struct GenRequest {
     pub thinking: ThinkingLevel,
     pub max_output_tokens: Option<u64>,
     pub parallel_tool_calls: bool,
+}
+
+/// Stable messages precede the volatile context/current user request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCache {
+    pub lineage_root: crate::event::id::SessionId,
+    pub retention: super::capabilities::CacheRetention,
+    pub stable_messages: usize,
 }

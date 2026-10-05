@@ -24,8 +24,11 @@ pub mod generation_model_source;
 pub mod generator;
 pub mod goal;
 pub mod health;
+pub mod history;
 pub mod hook;
 pub mod mcp;
+pub mod orchestration_events;
+pub mod orchestrator;
 pub mod permit;
 pub mod public;
 pub mod question;
@@ -40,3 +43,5 @@ pub mod subagent;
 pub mod suspension;
 pub mod turn;
 pub mod usage;
+
+pub mod secrets;

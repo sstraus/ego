@@ -339,7 +339,8 @@ mod reducer {
             None,
             EventKind::Forked {
                 source: source_session,
-                at_seq: Seq::default()
+                at_seq: Seq::default(),
+                snapshot: None
             }
         );
         push!(
@@ -669,6 +670,7 @@ mod reducer {
                 EventKind::Forked {
                     source: SessionId::new(),
                     at_seq: Seq::default(),
+                    snapshot: None,
                 },
             ),
             (
@@ -757,6 +759,7 @@ mod reducer {
                 EventKind::GenerationStarted {
                     attempt: AttemptRef::first(GenerationId::new()),
                     role: GenerationRole::Main,
+                    snapshot: None,
                 },
             ),
             (
@@ -1368,6 +1371,7 @@ mod reducer {
             EventKind::Forked {
                 source,
                 at_seq: Seq::default(),
+                snapshot: None,
             },
         ));
         state.apply(&ev(
@@ -1412,7 +1416,7 @@ mod reducer {
 
     // --- the attempt ledger ------------------------------------------------
     //
-    // See `docs/decisions/2026-08-21-attempt-accounting-ledger.md`. The
+    // See `ARCHITECTURE.md`. The
     // reducer is total, so "refused" means the variant's effect is not
     // applied and a typed `Refusal` is recorded — the envelope bookkeeping
     // still happens either way.
@@ -1445,6 +1449,7 @@ mod reducer {
             self.apply(EventKind::GenerationStarted {
                 attempt,
                 role: GenerationRole::Main,
+                snapshot: None,
             });
         }
 
@@ -1908,6 +1913,7 @@ mod reducer {
             EventKind::GenerationStarted {
                 attempt,
                 role: GenerationRole::Main,
+                snapshot: None,
             },
             EventKind::UsageUpdated {
                 usage: tokens(10, 1),
@@ -1925,6 +1931,7 @@ mod reducer {
             EventKind::GenerationStarted {
                 attempt: other,
                 role: GenerationRole::Main,
+                snapshot: None,
             },
             EventKind::UsageUpdated {
                 usage: tokens(20, 2),

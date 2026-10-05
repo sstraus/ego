@@ -100,7 +100,6 @@ use ego_tools::exec::{ProcessError, RunEffectPorts};
 use ego_tools::fs::OsFs;
 use ego_tools::instructions::OsInstructionIo;
 use ego_tools::store::{JsonlStore, OsIo, SessionEvidenceStore};
-use ego_tools::tools::builtins;
 use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -194,6 +193,7 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
         RunTermination::TaskFailed => "the answer never satisfied the schema".to_string(),
         RunTermination::UsageError { message }
         | RunTermination::Provider { message }
+        | RunTermination::ProviderUncertain { message }
         | RunTermination::ContextOverflow { message } => message.clone(),
         RunTermination::Failed { message } => message.clone(),
         RunTermination::QuestionRequired { question } => format!(

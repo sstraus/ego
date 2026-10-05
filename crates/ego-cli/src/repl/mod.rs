@@ -47,6 +47,7 @@ pub(super) const CLIPBOARD_PASTE_COMMAND: &str = "ego:clipboard-paste";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCommand {
     Action(ActionId),
+    History(String),
     Fork(ego_core::event::id::ItemId),
     SessionMetadata(crate::cli::SessionMetadataOperation),
     Policy(PolicyControlRequest),
@@ -58,6 +59,7 @@ pub enum HostCommand {
     /// handler by sending [`ExportSelection::default`].
     Export(ExportSelection),
     Hooks,
+    Config(String),
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
     BusySubmit,

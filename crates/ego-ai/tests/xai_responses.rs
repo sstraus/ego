@@ -22,6 +22,7 @@ use url::Url;
 
 fn request() -> GenRequest {
     GenRequest {
+        cache: None,
         model: "grok-4.6".to_string(),
         messages: Conversation::new(vec![
             Message::text(Role::System, "be brief"),
@@ -296,7 +297,7 @@ async fn response_failed_and_in_band_error_are_terminal_errors() {
 }
 
 #[tokio::test]
-async fn non_2xx_uses_the_shared_three_event_failure_contract() {
+async fn non_2xx_uses_the_shared_failure_contract() {
     let events: Vec<AiEvent> = XaiResponses
         .decode(
             Ok(HttpResponse {
@@ -310,8 +311,10 @@ async fn non_2xx_uses_the_shared_three_event_failure_contract() {
         )
         .collect()
         .await;
-    assert_eq!(events.len(), 3);
-    assert!(matches!(events[2], AiEvent::Stop(StopReason::Error)));
+    // The three terminal events plus the host-safe cause (regression case).
+    assert_eq!(events.len(), 4);
+    assert!(matches!(events[2], AiEvent::ProviderFailure { .. }));
+    assert!(matches!(events[3], AiEvent::Stop(StopReason::Error)));
 }
 
 #[test]

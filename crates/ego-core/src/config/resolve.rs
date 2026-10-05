@@ -79,10 +79,18 @@ impl ResolvedMcpConfig {
 /// and the trust gate have been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
+    pub cache: crate::generator::capabilities::CacheRetention,
     pub model: Option<ModelRef>,
     pub thinking: Option<ThinkingLevel>,
     pub mode: Option<Mode>,
+    /// The system maximum remains available to implicit interactive defaults.
+    pub max_mode: Option<Mode>,
+    /// Each system declaration must contain every admitted extra root.
+    pub root_ceilings: Vec<Vec<crate::permit::RootCfg>>,
     pub sandbox: Option<Confinement>,
+    pub exec: super::ExecLayer,
+    pub network: super::Network,
+    pub orchestration: crate::orchestrator::Mode,
     /// Winning layer for the selected sandbox, absent for the default.
     pub sandbox_source: Option<Source>,
     /// Winning layer for the active profile roots.
@@ -160,10 +168,16 @@ impl std::fmt::Display for Discarded {
 /// eligibility, so it is never discarded and saying it was would be false.
 fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     let ConfigLayer {
+        cache,
         model,
         thinking,
         mode,
+        max_mode,
+        roots,
         sandbox,
+        exec,
+        network,
+        orchestration,
         exec_paths,
         permissions,
         budget,
@@ -176,10 +190,16 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     } = layer;
     let mut settings = Vec::new();
     for (present, name) in [
+        (cache.is_some(), "cache"),
         (model.is_some(), "model"),
         (thinking.is_some(), "thinking"),
         (mode.is_some(), "mode"),
+        (max_mode.is_some(), "max_mode"),
+        (roots.is_some(), "roots"),
         (sandbox.is_some(), "sandbox"),
+        (exec.is_some(), "exec"),
+        (network.is_some(), "network"),
+        (orchestration.is_some(), "orchestration"),
         (exec_paths.is_some(), "exec_paths"),
         (permissions.is_some(), "permissions"),
         (budget.is_some(), "budget"),
@@ -326,10 +346,14 @@ fn resolve_inner(
     } else {
         None
     };
+    let mut cache = crate::generator::capabilities::CacheRetention::Short;
     let mut model = None;
     let mut thinking = None;
     let mut mode = None;
     let mut sandbox = None;
+    let mut exec = super::ExecLayer::default();
+    let mut network = super::Network::default();
+    let mut orchestration = crate::orchestrator::Mode::Observe;
     let mut sandbox_source = None;
     let mut roots_source = None;
     let mut exec_paths = Vec::new();
@@ -342,6 +366,7 @@ fn resolve_inner(
     let mut session_dir = None;
     let mut artifact_dir = None;
     let mut roots = Vec::new();
+    let mut root_restrictions = Vec::new();
 
     for sourced in &eligible {
         let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
@@ -364,6 +389,12 @@ fn resolve_inner(
             );
         }
 
+        if let Some(value) = sourced.value.cache
+            && (value != crate::generator::capabilities::CacheRetention::Long
+                || sourced.source == Source::User)
+        {
+            cache = value;
+        }
         if let Some(m) = profile
             .and_then(|p| p.model.clone())
             .or_else(|| sourced.value.model.clone())
@@ -385,6 +416,31 @@ fn resolve_inner(
         {
             sandbox = Some(value);
             sandbox_source = Some(sourced.source);
+        }
+        for controls in sourced
+            .value
+            .exec
+            .iter()
+            .chain(profile.and_then(|profile| profile.exec.as_ref()))
+        {
+            if controls.env.is_some() {
+                exec.env = controls.env;
+            }
+            if controls.env_allowlist.is_some() {
+                exec.env_allowlist = controls.env_allowlist.clone();
+            }
+        }
+        if let Some(value) = profile
+            .and_then(|profile| profile.network)
+            .or(sourced.value.network)
+        {
+            network = value;
+        }
+        if let Some(config) = profile
+            .and_then(|p| p.orchestration)
+            .or(sourced.value.orchestration)
+        {
+            orchestration = config.mode;
         }
         if let Some(paths) = profile
             .and_then(|profile| profile.exec_paths.as_ref())
@@ -422,8 +478,21 @@ fn resolve_inner(
                 value: path,
             });
         }
-        if let Some(profile) = profile.filter(|profile| !profile.roots.is_empty()) {
-            roots = profile.roots.clone();
+        if let Some(selected) = profile
+            .and_then(|p| p.roots.as_ref())
+            .or(sourced.value.roots.as_ref())
+        {
+            if matches!(sourced.source, Source::Project | Source::Local) {
+                root_restrictions.push(if roots_source.is_none() {
+                    vec![crate::permit::RootCfg {
+                        path: "~/Gits".into(),
+                        access: crate::permit::RootAccess::ReadWrite,
+                    }]
+                } else {
+                    roots.clone()
+                });
+            }
+            roots = selected.clone();
             roots_source = Some(sourced.source);
         }
         if let Some(path) = profile.and_then(|profile| profile.artifact_dir.clone()) {
@@ -491,7 +560,7 @@ fn resolve_inner(
     // already present, was skipped, and kept whichever origin the merge loop
     // happened to leave: the *user* copy, the one whose deletion changes
     // nothing. See
-    // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
+    // `ARCHITECTURE.md`.
     for entry in system_deny {
         Ruleset::merge(&mut permissions.deny, entry, Source::System);
     }
@@ -511,8 +580,8 @@ fn resolve_inner(
     // the push was allowed. No better comparison rescues it — those two rules
     // are neither equal nor unrelated, and the only place their relationship
     // is decidable is against an actual call. See
-    // `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6 and
-    // `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §7.
+    // `ARCHITECTURE.md` §6 and
+    // `ARCHITECTURE.md` §7.
     //
     // The system-deny ceiling above is a *different* job and stays: it
     // guarantees a `/etc/ego` entry is present in the list at all, which no
@@ -564,15 +633,66 @@ fn resolve_inner(
     }
     let clamped = ceilings.clamp(&system_ceiling);
 
+    let mut max_mode: Option<Mode> = None;
+    let mut root_ceilings = root_restrictions;
+    for sourced in eligible
+        .iter()
+        .filter(|layer| layer.source == Source::System)
+    {
+        if let Some(maximum) = sourced.value.max_mode
+            && max_mode.is_none_or(|current| maximum.within(current))
+        {
+            max_mode = Some(maximum);
+        }
+        let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
+        for maximum in sourced
+            .value
+            .sandbox
+            .iter()
+            .chain(profile.and_then(|profile| profile.sandbox.as_ref()))
+        {
+            if !sandbox.unwrap_or_default().within(*maximum) {
+                return Err(ConfigError::Invalid {
+                    source: Source::System,
+                    message: format!(
+                        "sandbox {} exceeds the system ceiling {maximum}",
+                        sandbox.unwrap_or_default()
+                    ),
+                });
+            }
+        }
+        if let Some(bounds) = &sourced.value.roots {
+            root_ceilings.push(bounds.clone());
+        }
+        if let Some(bounds) = profile.and_then(|p| p.roots.as_ref()) {
+            root_ceilings.push(bounds.clone());
+        }
+    }
+    if let Some(maximum) = max_mode {
+        let selected = mode.unwrap_or(Mode::Default);
+        if !selected.within(maximum) {
+            return Err(ConfigError::Invalid {
+                source: Source::System,
+                message: format!("mode {selected} exceeds system max_mode {maximum}"),
+            });
+        }
+    }
+
     Ok(Effective {
+        cache,
         model,
         thinking,
         mode,
+        max_mode,
+        root_ceilings,
         sandbox,
+        exec,
+        network,
         sandbox_source,
         roots_source,
+        orchestration,
         exec_paths,
-        permissions,
+        permissions: permissions.with_credential_defaults(),
         judge,
         posture,
         active_profile: resolved_active_profile,

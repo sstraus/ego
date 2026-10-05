@@ -1,7 +1,7 @@
 //! The turn loop: what a turn writes down, and what it does when something
 //! goes wrong.
 //!
-//! See `docs/decisions/2026-08-21-the-turn-loop.md` and
+//! See `ARCHITECTURE.md` and
 //! `plans/m0b-vertical-slice.md` Step 10.
 
 use std::cell::RefCell;
@@ -23,7 +23,9 @@ use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
     ProviderCostRevision, RateSource, UnknownCost,
 };
-use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, ExitReason};
+use ego_core::event::domain::{
+    CancelCause, DomainEvent, Envelope, EventKind, ExitReason, GenerationRole,
+};
 use ego_core::event::hook::{HookDecision, HookLifecycle, HookOutcome};
 use ego_core::event::id::{
     EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId, TurnId,
@@ -1874,6 +1876,7 @@ mod turn {
             source: Arc::new(source),
             gate: gate.clone(),
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system,
                 identity: None,
                 token_ceiling,
@@ -1882,6 +1885,7 @@ mod turn {
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
+            retry_pause: Arc::new(NoRetryPause),
         }
     }
 
@@ -1952,6 +1956,114 @@ mod turn {
             outcome.ok,
             turn.into_state().expect("unique turn journal state"),
         )
+    }
+
+    #[test]
+    fn failed_tool_diagnostic_does_not_leak_known_secret_to_model_or_log() {
+        // Catches: execution or preparation error-to-result conversion bypasses disclosure masking.
+        const SECRET: &str = "example-regression-token";
+        struct DiagnosticTool {
+            fail_prepare: bool,
+        }
+
+        impl TypedTool for DiagnosticTool {
+            type Params = ReadParams;
+
+            fn name(&self) -> &str {
+                "read"
+            }
+
+            fn description(&self) -> &str {
+                "reports a failed read diagnostic"
+            }
+
+            fn prepare_typed(
+                &self,
+                params: ReadParams,
+                ctx: &PrepareCtx<'_>,
+            ) -> Result<PreparedCall, ToolError> {
+                if self.fail_prepare {
+                    return Err(ToolError::InvalidParams(format!(
+                        "credential rejected: {SECRET}"
+                    )));
+                }
+                FakeReadTool.prepare_typed(params, ctx)
+            }
+
+            fn execute<'a, 'io>(
+                &'a self,
+                _call: PreparedCall,
+                _io: &'a dyn GuardedIo<'io>,
+            ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+            where
+                'io: 'a,
+            {
+                Box::pin(futures::future::ready(Err(ToolError::InvalidParams(
+                    format!("credential rejected: {SECRET}"),
+                ))))
+            }
+        }
+
+        for fail_prepare in [false, true] {
+            let mut fx = Fixture::new(vec![
+                vec![
+                    AiEvent::ToolCall {
+                        call_id: "diagnostic".to_owned(),
+                        name: "read".to_owned(),
+                        args: r#"{"path":"/ws/input"}"#.to_owned(),
+                    },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]);
+            fx.registry = vec![Arc::new(Typed(DiagnosticTool { fail_prepare }))];
+            fx.fs.file("/ws/input", "input");
+            let mut budget = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                )
+                .with_secret_values(ego_core::secrets::SecretValues::new([SECRET
+                    .as_bytes()
+                    .to_vec()])),
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                model_for(&fx, &fx.generator, &mut budget),
+                tools,
+            );
+            let outcome = block_on(turn.run("read the input")).expect("turn completes");
+            assert_eq!(outcome.exit_reason, ExitReason::Completed);
+            let events = fx.store.events();
+            let diagnostic = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    EventKind::ToolCallCompleted { ok: false, result } => Some(result.model_text()),
+                    _ => None,
+                })
+                .expect("failed tool result is durable");
+            let calls = fx.generator.calls();
+            assert_eq!(calls.len(), 2, "the error is fed back to the model");
+            let request = serde_json::to_string(&calls[1]).expect("serialize model request");
+            assert!(
+                !diagnostic.contains(SECRET) && !request.contains(SECRET),
+                "failed diagnostic leaked known secret (prepare={fail_prepare}): log={diagnostic}; model={request}"
+            );
+            assert!(diagnostic.contains("[REDACTED]"));
+        }
     }
 
     /// Every `seq` in the log, in the order it was written.
@@ -2061,6 +2173,93 @@ mod turn {
                 "an envelope read a clock this test did not inject"
             );
         }
+    }
+
+    // Catches: task batching moves a child read ahead of an earlier parent write,
+    // making the child analyze stale workspace contents.
+    #[test]
+    fn task_child_reads_the_write_that_precedes_it_in_the_parent_batch() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "parent-write".into(),
+                    name: "fake_write".into(),
+                    args: json!({"path":"/ws/note.txt", "contents":"new contents"}).to_string(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "child-task".into(),
+                    name: "task".into(),
+                    args: json!({"name":"reviewer", "prompt":"Read note.txt"}).to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_rules(&["write(*)"], &[]);
+        fx.fs.file("/ws/note.txt", "old contents");
+        let registry = vec![
+            RegisteredTool::Effect(Arc::new(Typed(FakeWriteTool))),
+            RegisteredTool::Effect(Arc::new(Typed(FakeReadTool))),
+            RegisteredTool::Task,
+        ];
+        let tools = Tools::from_registry(
+            &registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        );
+        let outcome = block_on(turn.run("Update note.txt, then ask the reviewer to read it"))
+            .expect("store accepts the batch");
+        assert!(outcome.ok);
+        let calls = fx.generator.calls();
+        assert_eq!(calls.len(), 2, "a refused mixed batch must not run a child");
+        let feedback: Vec<_> = calls[1]
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                    ..
+                } => Some((call_id.as_str(), output.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(feedback.len(), 2, "every mixed-batch call needs feedback");
+        for (call_id, output, is_error) in feedback {
+            assert!(matches!(call_id, "parent-write" | "child-task"));
+            assert!(is_error);
+            assert_eq!(
+                output,
+                "task calls cannot be mixed with other tool calls in one provider response"
+            );
+        }
+        assert_eq!(
+            fx.fs.read(&CanonPath::new("/ws/note.txt")).unwrap(),
+            b"old contents",
+            "a refused batch must not write"
+        );
     }
 
     #[test]
@@ -3732,7 +3931,7 @@ mod turn {
     /// the log. Writing it there would make a resumed session rebuild it as a
     /// message someone sent, and then send it twice.
     #[test]
-    fn a_system_prompt_leads_every_generation_and_is_never_logged() {
+    fn a_system_prompt_leads_every_generation_and_is_logged_only_as_an_epoch_snapshot() {
         const HOUSE_STYLE: &str = "the house style: no semicolons";
 
         let fx = Fixture::new(vec![
@@ -3776,16 +3975,26 @@ mod turn {
             );
         }
 
-        // Debug over the whole event rather than a field: the claim is that
-        // *no* kind carries it, and naming the kinds that must not would go
-        // stale the moment `EventKind` grows one.
-        for event in fx.store.events() {
-            assert!(
-                !format!("{:?}", event.kind).contains(HOUSE_STYLE),
-                "the system prompt was written to the log as {:?}",
-                event.kind
-            );
-        }
+        let snapshots: Vec<_> = fx
+            .store
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::GenerationStarted {
+                    snapshot: Some(snapshot),
+                    ..
+                } => Some(snapshot),
+                _ => {
+                    assert!(
+                        !format!("{:?}", event.kind).contains(HOUSE_STYLE),
+                        "system text leaked outside the epoch snapshot"
+                    );
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(snapshots.len(), 1, "one durable snapshot per epoch");
+        assert_eq!(snapshots[0].system.as_ref().unwrap().text, HOUSE_STYLE);
     }
 
     /// No system prompt means no system message — not an empty one. A
@@ -5789,7 +5998,7 @@ mod turn {
 
     // --- how this generation is metered, said out loud ---
     //
-    // `docs/decisions/2026-08-21-how-a-model-is-metered.md` §6. Three of the
+    // `ARCHITECTURE.md` §6. Three of the
     // four arrangements make a monetary `--budget` inert, and an operator who
     // set one has to be told that before the run rather than inferring it
     // from a limit that never fired.
@@ -6574,6 +6783,7 @@ mod turn {
                     config,
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             );
@@ -6671,6 +6881,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -6679,6 +6890,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             );
@@ -6909,6 +7121,7 @@ mod turn {
                 source,
                 gate: fx.gate.borrow().clone(),
                 config: TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -6917,6 +7130,7 @@ mod turn {
                 },
                 admission: Arc::new(EvidenceAdmissionService::new()),
                 invocation: RunInvocationId::new(),
+                retry_pause: Arc::new(NoRetryPause),
             };
             let observation = ego_core::permit::ExecObservation::new(
                 ego_core::permit::BackendIdentity::new("test", "1"),
@@ -7200,6 +7414,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7208,6 +7423,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -7262,6 +7478,7 @@ mod turn {
                     EventKind::GenerationStarted {
                         attempt,
                         role: GenerationRole::Judge,
+                        snapshot: None,
                     } => Some(*attempt),
                     _ => None,
                 })
@@ -7327,6 +7544,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7335,6 +7553,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -7389,6 +7608,7 @@ mod turn {
                         source: source.clone(),
                         gate: gate.clone(),
                         config: TurnConfig {
+                            cache: ego_core::generator::capabilities::CacheRetention::Short,
                             system: None,
                             identity: None,
                             token_ceiling: None,
@@ -7397,6 +7617,7 @@ mod turn {
                         },
                         admission: Arc::new(EvidenceAdmissionService::new()),
                         invocation: RunInvocationId::new(),
+                        retry_pause: Arc::new(NoRetryPause),
                     },
                     tools,
                 );
@@ -7455,6 +7676,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7463,6 +7685,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             );
@@ -7545,6 +7768,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7553,6 +7777,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -7643,6 +7868,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7651,6 +7877,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -7720,6 +7947,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7728,6 +7956,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             );
@@ -7790,6 +8019,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7798,6 +8028,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -7871,6 +8102,7 @@ mod turn {
                         source: source.clone(),
                         gate: gate.clone(),
                         config: TurnConfig {
+                            cache: ego_core::generator::capabilities::CacheRetention::Short,
                             system: None,
                             identity: None,
                             token_ceiling: None,
@@ -7879,6 +8111,7 @@ mod turn {
                         },
                         admission: Arc::new(EvidenceAdmissionService::new()),
                         invocation: RunInvocationId::new(),
+                        retry_pause: Arc::new(NoRetryPause),
                     },
                     tools,
                 )
@@ -7976,6 +8209,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -7984,6 +8218,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -8092,6 +8327,7 @@ mod turn {
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -8100,6 +8336,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -8207,6 +8444,7 @@ mod turn {
                 "which model answered",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8281,6 +8519,7 @@ mod turn {
                 "which model?",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: Some(ego_core::turn::AgentIdentity {
                         version: "0.0.0".to_owned(),
@@ -8300,9 +8539,22 @@ mod turn {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|request| match &request.messages.messages()[0].content[0] {
-                    ContentBlock::Text { text } => text.clone(),
-                    other => panic!("the first message is not the identity: {other:?}"),
+                .map(|request| {
+                    request
+                        .messages
+                        .messages()
+                        .iter()
+                        .filter(|message| message.role == Role::User)
+                        .flat_map(|message| &message.content)
+                        .find_map(|block| match block {
+                            ContentBlock::Text { text }
+                                if text.starts_with("Current context data.") =>
+                            {
+                                Some(text.clone())
+                            }
+                            _ => None,
+                        })
+                        .expect("live identity data")
                 })
                 .collect();
             assert_eq!(identities.len(), 2);
@@ -8383,6 +8635,7 @@ mod turn {
                 "retry safely",
                 source.clone(),
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8501,6 +8754,7 @@ mod turn {
                 "permanent then fallback",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8520,14 +8774,19 @@ mod turn {
                 ["primary-model", "fallback-model"]
             );
 
-            // A possibly-sent transient failure is terminal for automatic
-            // delivery, even though its error class would otherwise retry.
+            // A possibly-sent transient failure that already showed output
+            // is terminal for automatic delivery, even though its error class
+            // would otherwise retry (maintainer decision 2026-10-05 retries only
+            // the possibly-sent attempts that showed nothing).
             let trace = GenerationTrace::default();
             let source = Arc::new(
                 ScriptedGenerationSource::new([Ok(profile(
                     primary,
                     false,
                     vec![
+                        AiEvent::TextDelta {
+                            text: "partial".to_owned(),
+                        },
                         AiEvent::Error {
                             message: "connection lost after write".to_owned(),
                             kind: ErrorKind::Transient,
@@ -8547,6 +8806,7 @@ mod turn {
                 "possibly sent",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8559,6 +8819,349 @@ mod turn {
             assert_eq!(
                 trace.steps.lock().unwrap().as_slice(),
                 ["resolve:Main", "generate:primary-model"]
+            );
+        }
+
+        /// The wait a retried attempt asked for, and optionally a host that
+        /// cancels the turn while it waits.
+        #[derive(Default)]
+        struct RecordedPause {
+            delays: Mutex<Vec<std::time::Duration>>,
+            cancel_on_wait: Option<CancelToken>,
+        }
+
+        impl ego_core::turn::RetryPause for RecordedPause {
+            fn pause(&self, delay: std::time::Duration) -> BoxFuture<'static, ()> {
+                self.delays.lock().unwrap().push(delay);
+                match &self.cancel_on_wait {
+                    Some(cancel) => {
+                        cancel.cancel(ego_core::event::domain::CancelCause::Host);
+                        Box::pin(futures::future::pending())
+                    }
+                    None => Box::pin(futures::future::ready(())),
+                }
+            }
+        }
+
+        fn run_retrying(
+            fx: &Fixture,
+            source: Arc<ScriptedGenerationSource>,
+            retry: u32,
+            pause: Arc<RecordedPause>,
+            cancel: CancelToken,
+        ) -> ego_core::turn::TurnOutcome {
+            let gate = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    cancel,
+                ),
+                GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
+                    source,
+                    gate: gate.clone(),
+                    config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
+                        system: None,
+                        identity: None,
+                        token_ceiling: None,
+                        retry,
+                        fallbacks: Vec::new(),
+                    },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
+                    retry_pause: pause,
+                },
+                tools,
+            );
+            block_on(turn.run("are you there?")).expect("the store accepted every append")
+        }
+
+        const OVERLOADED: &str = "Our servers are currently overloaded. Please try again later.";
+
+        /// The live failure's shape: an answered stream whose only content is
+        /// a provider error event.
+        fn overloaded(retry_after: Option<std::time::Duration>) -> Vec<AiEvent> {
+            vec![
+                AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
+                AiEvent::Error {
+                    message: OVERLOADED.to_owned(),
+                    kind: ErrorKind::Transient,
+                },
+                AiEvent::ProviderFailure {
+                    cause: OVERLOADED.to_owned(),
+                    retry_after,
+                },
+                AiEvent::Stop(StopReason::Error),
+            ]
+        }
+
+        fn retries(fx: &Fixture) -> Vec<(u32, u32, u64, String)> {
+            fx.sink
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    PublicEvent::ProviderRetry {
+                        attempt,
+                        limit,
+                        delay_ms,
+                        cause,
+                        ..
+                    } => Some((attempt, limit, delay_ms, cause)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// regression case — catches: a possibly-sent transient failure that
+        /// showed nothing is never retried, and six immediate retries all
+        /// land on a provider that is still overloaded.
+        #[test]
+        fn a_transient_failure_that_showed_nothing_retries_six_times_with_backoff_then_settles_known()
+         {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new((0..7).map(|_| {
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        overloaded(None),
+                        &trace,
+                        Some(1_024),
+                    ))
+                }))
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let pause = Arc::new(RecordedPause::default());
+            let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+
+            assert_eq!(
+                trace.requests.lock().unwrap().len(),
+                7,
+                "one attempt plus six retries"
+            );
+            assert_eq!(
+                *pause.delays.lock().unwrap(),
+                [1, 2, 4, 8, 16, 32].map(std::time::Duration::from_secs),
+                "exponential backoff between attempts"
+            );
+            assert_eq!(
+                retries(&fx),
+                (1..=6)
+                    .map(|n| (n, 6, 1_000 << (n - 1), OVERLOADED.to_owned()))
+                    .collect::<Vec<_>>(),
+                "every retry is announced with its counter, wait and cause"
+            );
+            assert_eq!(outcome.exit_reason, ExitReason::Provider);
+            assert_eq!(
+                outcome.provider_failure,
+                Some(ego_core::turn::ProviderFailure {
+                    cause: OVERLOADED.to_owned(),
+                    effect_known: true,
+                })
+            );
+            assert_eq!(
+                RunTermination::after_outcome(&outcome),
+                Some(RunTermination::Provider {
+                    message: OVERLOADED.to_owned()
+                }),
+                "an exhausted plan is a known failure, named once"
+            );
+        }
+
+        /// regression case — catches: a provider-stated `Retry-After` ignored
+        /// in favour of the local backoff, or obeyed past the ceiling.
+        #[test]
+        fn a_retry_waits_for_the_providers_retry_after_and_a_long_one_stops_the_plan() {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        overloaded(Some(std::time::Duration::from_secs(3))),
+                        &trace,
+                        Some(1_024),
+                    )),
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        vec![
+                            AiEvent::TextDelta {
+                                text: "back".to_owned(),
+                            },
+                            AiEvent::Stop(StopReason::Stop),
+                        ],
+                        &trace,
+                        Some(1_024),
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let pause = Arc::new(RecordedPause::default());
+            let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+            assert!(outcome.ok, "the retried attempt answered");
+            assert_eq!(
+                *pause.delays.lock().unwrap(),
+                [std::time::Duration::from_secs(3)]
+            );
+            assert_eq!(outcome.provider_failure, None);
+
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([Ok(profile(
+                    "ollama/primary-model",
+                    false,
+                    overloaded(Some(std::time::Duration::from_secs(120))),
+                    &trace,
+                    Some(1_024),
+                ))])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let pause = Arc::new(RecordedPause::default());
+            let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+            assert_eq!(trace.requests.lock().unwrap().len(), 1);
+            assert!(pause.delays.lock().unwrap().is_empty());
+            assert!(retries(&fx).is_empty());
+            assert_eq!(outcome.exit_reason, ExitReason::Provider);
+        }
+
+        /// regression case — catches: a retry that shows the user the same
+        /// text or runs the same tool call twice.
+        #[test]
+        fn an_attempt_that_showed_output_before_failing_is_not_retried() {
+            let lost = |head: AiEvent, reported: bool| {
+                let mut script = vec![
+                    head,
+                    AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
+                    AiEvent::Error {
+                        message: "the response stream failed".to_owned(),
+                        kind: ErrorKind::Transient,
+                    },
+                ];
+                if reported {
+                    script.push(AiEvent::ProviderFailure {
+                        cause: OVERLOADED.to_owned(),
+                        retry_after: None,
+                    });
+                }
+                script.push(AiEvent::Stop(StopReason::Error));
+                script
+            };
+            for (head, reported, effect_known) in [
+                (
+                    AiEvent::TextDelta {
+                        text: "half an answer".to_owned(),
+                    },
+                    false,
+                    false,
+                ),
+                (
+                    AiEvent::ReasoningDelta {
+                        text: "thinking".to_owned(),
+                    },
+                    false,
+                    false,
+                ),
+                (
+                    AiEvent::ToolCall {
+                        call_id: "call-288".to_owned(),
+                        name: "read".to_owned(),
+                        args: r#"{"path":"/ws/a"}"#.to_owned(),
+                    },
+                    true,
+                    true,
+                ),
+            ] {
+                let trace = GenerationTrace::default();
+                let source = Arc::new(
+                    ScriptedGenerationSource::new((0..2).map(|_| {
+                        Ok(profile(
+                            "ollama/primary-model",
+                            false,
+                            lost(head.clone(), reported),
+                            &trace,
+                            Some(1_024),
+                        ))
+                    }))
+                    .with_trace(trace.clone()),
+                );
+                let fx = Fixture::new(vec![]);
+                let pause = Arc::new(RecordedPause::default());
+                let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+                assert_eq!(trace.requests.lock().unwrap().len(), 1, "{head:?}");
+                assert!(pause.delays.lock().unwrap().is_empty(), "{head:?}");
+                assert!(retries(&fx).is_empty(), "{head:?}");
+                assert_eq!(outcome.exit_reason, ExitReason::Provider, "{head:?}");
+                let failure = outcome
+                    .provider_failure
+                    .clone()
+                    .expect("a provider failure");
+                assert_eq!(
+                    failure.effect_known, effect_known,
+                    "only a lost exchange after output is uncertain: {head:?}"
+                );
+                assert_eq!(
+                    matches!(
+                        RunTermination::after_outcome(&outcome),
+                        Some(RunTermination::ProviderUncertain { .. })
+                    ),
+                    !effect_known,
+                    "{head:?}"
+                );
+            }
+        }
+
+        /// regression case — catches: a backoff wait the host cannot stop.
+        #[test]
+        fn a_retry_wait_is_cancellable_by_the_host() {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new((0..2).map(|_| {
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        overloaded(None),
+                        &trace,
+                        Some(1_024),
+                    ))
+                }))
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let cancel = CancelToken::new();
+            let pause = Arc::new(RecordedPause {
+                delays: Mutex::default(),
+                cancel_on_wait: Some(cancel.clone()),
+            });
+            let outcome = run_retrying(&fx, source, 6, pause.clone(), cancel);
+            assert_eq!(
+                outcome.exit_reason,
+                ExitReason::Cancelled(ego_core::event::domain::CancelCause::Host)
+            );
+            assert_eq!(pause.delays.lock().unwrap().len(), 1, "the wait began");
+            assert_eq!(
+                trace.requests.lock().unwrap().len(),
+                1,
+                "no attempt follows a cancelled wait"
             );
         }
 
@@ -8627,6 +9230,7 @@ mod turn {
                 "use the fallback",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8734,6 +9338,7 @@ mod turn {
                 "skip the candidate",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -8800,6 +9405,7 @@ mod turn {
                     "account missing usage",
                     source,
                     TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
                         system: None,
                         identity: None,
                         token_ceiling: None,
@@ -8852,6 +9458,7 @@ mod turn {
                 kind: EventKind::GenerationStarted {
                     attempt,
                     role: ego_core::generation_model_source::GenerationRole::Main,
+                    snapshot: None,
                 },
             };
             let mut state = SessionState::default();
@@ -8876,6 +9483,7 @@ mod turn {
                 "must refuse live replay",
                 source,
                 TurnConfig {
+                    cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
                     identity: None,
                     token_ceiling: None,
@@ -10069,5 +10677,432 @@ mod turn {
                 .iter()
                 .all(|kind| kind != "tool_call_started")
         );
+    }
+    mod task_tool {
+        use super::*;
+
+        const TASK_SECRET: &str = "regression_case-unique";
+
+        fn call(id: &str, name: &str, args: serde_json::Value) -> AiEvent {
+            AiEvent::ToolCall {
+                call_id: id.into(),
+                name: name.into(),
+                args: args.to_string(),
+            }
+        }
+
+        fn run_tasks<G: Generator + 'static>(
+            fx: &Fixture,
+            generator: &Arc<G>,
+            cancel: CancelToken,
+            ceiling: Option<u64>,
+        ) -> (ExitReason, SessionState) {
+            let mut registry: Vec<_> = fx
+                .registry
+                .iter()
+                .cloned()
+                .map(RegisteredTool::Effect)
+                .collect();
+            registry.push(RegisteredTool::Task);
+            let tools = Tools::from_registry(
+                &registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                )
+                .with_cancel(cancel.clone())
+                .with_secret_values(ego_core::secrets::SecretValues::new([TASK_SECRET
+                    .as_bytes()
+                    .to_vec()])),
+                CanonPath::new("/ws"),
+            );
+            let mut settings = config();
+            settings.parallel_tool_calls = true;
+            let mut runtime = model_with(
+                generator,
+                &mut fx.gate.borrow_mut(),
+                metering(),
+                Some(rates()),
+                ceiling,
+                settings,
+            );
+            runtime.policy_source = fx.policy_source.clone();
+            runtime.config.identity = Some(ego_core::turn::AgentIdentity {
+                version: "test".into(),
+                sandbox: Confinement::Workspace,
+                offline: true,
+                host: None,
+            });
+            let mut loop_ = CoreTurnLoop::new(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    cancel,
+                ),
+                runtime,
+                tools,
+            )
+            .unwrap();
+            let outcome = block_on(loop_.run("parent")).unwrap();
+            (outcome.exit_reason, loop_.into_state().unwrap())
+        }
+
+        #[test]
+        fn task_child_cannot_escape_workspace_mode_or_recursively_delegate() {
+            // Catches: a child widening the parent workspace/mode or retaining task.
+            let fx = Fixture::new(vec![]).with_write_tool();
+            fx.fs.file("/outside/stolen", "original");
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call("task1", "task", json!({"name":"review", "prompt":"child"})),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "escape",
+                        "fake_write",
+                        json!({"path":"/outside/stolen", "contents":"bad"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (exit, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            assert_eq!(exit, ExitReason::Completed);
+            assert!(generator.calls()[1].tools.iter().all(|t| t.name != "task"));
+            let task = state
+                .items
+                .values()
+                .find(|i| i.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert_eq!(task.ok, Some(false));
+            assert!(
+                state
+                    .items
+                    .values()
+                    .all(|i| i.tool_name.as_deref() != Some("fake_write")),
+                "child transcript leaked into parent"
+            );
+        }
+
+        struct NetworkAttempt;
+        impl TypedTool for NetworkAttempt {
+            type Params = ReadParams;
+            fn name(&self) -> &str {
+                "network_attempt"
+            }
+            fn description(&self) -> &str {
+                "attempt a network effect"
+            }
+            fn prepare_typed(
+                &self,
+                params: ReadParams,
+                _: &PrepareCtx<'_>,
+            ) -> Result<PreparedCall, ToolError> {
+                Ok(PreparedCall::new(
+                    self.name(),
+                    Op::ProtocolConnect {
+                        target: ego_core::permit::NetworkTarget::parse(&params.path)
+                            .map_err(|error| ToolError::InvalidParams(error.to_string()))?,
+                    },
+                ))
+            }
+            fn execute<'a, 'io>(
+                &'a self,
+                _: PreparedCall,
+                _: &'a dyn GuardedIo<'io>,
+            ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+            where
+                'io: 'a,
+            {
+                panic!("offline parent's denied network effect reached execution")
+            }
+        }
+
+        #[test]
+        fn task_child_keeps_offline_posture_and_cannot_drop_parent_network_denial() {
+            // Catches: offline child advertising online posture or losing the parent network ceiling.
+            let mut fx = Fixture::new(vec![]).with_rules(&[], &["net(*)"]);
+            fx.registry.push(Arc::new(Typed(NetworkAttempt)));
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"offline", "prompt":"try network"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "net1",
+                        "network_attempt",
+                        json!({"path":"api.example.test:443"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            let requests = generator.calls();
+            for request in &requests[..2] {
+                assert!(request.messages.messages().iter().flat_map(|message| &message.content).any(|block| {
+                    matches!(block, ContentBlock::Text { text } if text.contains("sandbox: workspace; network: offline"))
+                }), "parent and child must both receive the authoritative offline context");
+            }
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .find(|item| item.tool_name.as_deref() == Some("task"))
+                    .unwrap()
+                    .ok,
+                Some(false)
+            );
+        }
+
+        #[derive(Debug, Default)]
+        struct NamedHuman(Mutex<Vec<PermissionRequest>>);
+        impl HumanApprover for NamedHuman {
+            fn decide<'a>(
+                &'a self,
+                _: ItemId,
+                request: &'a PermissionRequest,
+            ) -> BoxFuture<'a, PermissionDecision> {
+                self.0.lock().unwrap().push(request.clone());
+                Box::pin(futures::future::ready(PermissionDecision::Deny))
+            }
+        }
+
+        #[test]
+        fn task_child_permission_reaches_parent_human_with_name_without_autoapproval() {
+            // Catches: a dropped, unnamed or automatically approved child permission.
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let human = Arc::new(NamedHuman::default());
+            fx.policy_source = Arc::new(FixedPolicySource {
+                mode: Mode::Default,
+                permissions: Ruleset::default(),
+                human: Some(human.clone()),
+            });
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call("task1", "task", json!({"name":"review", "prompt":"child"})),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "write1",
+                        "fake_write",
+                        json!({"path":"/ws/note.txt", "contents":"bad"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            let requests = human.0.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].child_name(), Some("review"));
+            assert_eq!(requests[0].tool(), "fake_write");
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .find(|i| i.tool_name.as_deref() == Some("task"))
+                    .unwrap()
+                    .ok,
+                Some(false)
+            );
+        }
+
+        #[test]
+        fn task_books_child_usage_once_and_returns_only_masked_bounded_final_text() {
+            // Catches: unmetered/double-booked spend, child transcript leakage, and unmasked task results.
+            let fx = Fixture::new(vec![]);
+            let child_text = format!("{TASK_SECRET}{}", "é".repeat(40_000));
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call("task1", "task", json!({"name":"review", "prompt":"child"})),
+                    AiEvent::Usage(tokens(1, 0, 0, 1)),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    AiEvent::TextDelta { text: child_text },
+                    AiEvent::Usage(tokens(3, 0, 0, 2)),
+                    AiEvent::Stop(StopReason::Stop),
+                ],
+                vec![
+                    AiEvent::Usage(tokens(0, 0, 0, 0)),
+                    AiEvent::Stop(StopReason::Stop),
+                ],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            assert_eq!(state.usage.uncached_input_tokens, 4);
+            assert_eq!(state.usage.output_tokens, 3);
+            assert_eq!(state.cost.known(), Some(&usd("0.000057")));
+            let task = state
+                .items
+                .values()
+                .find(|i| i.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            let result = task.tool_result.as_ref().unwrap().model_text();
+            assert!(!result.contains(TASK_SECRET));
+            assert!(result.contains("[REDACTED]"));
+            let parent_request = serde_json::to_string(generator.calls().last().unwrap()).unwrap();
+            assert!(!parent_request.contains(TASK_SECRET));
+            assert!(parent_request.contains("[REDACTED]"));
+            assert!(result.len() <= 65_536);
+            assert!(
+                task.tool_result
+                    .as_ref()
+                    .unwrap()
+                    .model_text()
+                    .contains("truncated")
+            );
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .filter(|i| i.kind == ItemKind::Assistant)
+                    .count(),
+                0
+            );
+            assert_eq!(
+                fx.store
+                    .events()
+                    .iter()
+                    .filter(|ev| matches!(
+                        ev.kind,
+                        EventKind::GenerationStarted {
+                            role: GenerationRole::Subagent,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+            assert!(state.refusals.is_empty());
+        }
+
+        #[test]
+        fn task_cumulative_token_ceiling_includes_parent_spend() {
+            // Catches: a child resetting the cumulative token allowance.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call("task1", "task", json!({"name":"review", "prompt":"child"})),
+                    AiEvent::Usage(tokens(10, 0, 0, 0)),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (exit, state) = run_tasks(&fx, &generator, CancelToken::new(), Some(10));
+            assert_eq!(exit, ExitReason::Budget);
+            assert_eq!(
+                generator.calls().len(),
+                1,
+                "child spent beyond the parent token ceiling"
+            );
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .find(|i| i.tool_name.as_deref() == Some("task"))
+                    .unwrap()
+                    .ok,
+                Some(false)
+            );
+        }
+        struct ConcurrentCancelGenerator {
+            calls: AtomicUsize,
+            cancel: CancelToken,
+        }
+        impl Generator for ConcurrentCancelGenerator {
+            fn ensure_expressible(
+                &self,
+                _: &GenRequest,
+            ) -> Result<(), ego_core::generator::port::RequestExpressibilityError> {
+                Ok(())
+            }
+            fn generate(&self, _: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return AttemptStream::new(
+                        attempt,
+                        Box::pin(futures::stream::iter(vec![
+                            call("one", "task", json!({"name":"one","prompt":"first"})),
+                            call("two", "task", json!({"name":"two","prompt":"second"})),
+                            AiEvent::Stop(StopReason::ToolUse),
+                        ])),
+                    );
+                }
+                if n == 2 {
+                    self.cancel.cancel(CancelCause::User);
+                }
+                AttemptStream::new(attempt, Box::pin(futures::stream::pending()))
+            }
+        }
+
+        #[test]
+        fn task_batch_starts_both_children_and_cancellation_settles_every_attempt() {
+            // Catches: sequential children deadlocking, orphan streams or unpaid cancellation.
+            let fx = Fixture::new(vec![]);
+            let cancel = CancelToken::new();
+            let generator = Arc::new(ConcurrentCancelGenerator {
+                calls: AtomicUsize::new(0),
+                cancel: cancel.clone(),
+            });
+            let watchdog_cancel = cancel.clone();
+            let (stop, watchdog_rx) = std::sync::mpsc::channel();
+            let watchdog = std::thread::spawn(move || {
+                if watchdog_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .is_err()
+                {
+                    watchdog_cancel.cancel(CancelCause::User);
+                }
+            });
+            let (exit, state) = run_tasks(&fx, &generator, cancel, None);
+            let _ = stop.send(());
+            watchdog.join().unwrap();
+            assert_eq!(
+                generator.calls.load(Ordering::SeqCst),
+                3,
+                "both children must reach generation before cancellation"
+            );
+            assert_eq!(exit, ExitReason::Cancelled(CancelCause::User));
+            assert!(state.live_attempts.is_empty());
+            let tasks: Vec<_> = state
+                .items
+                .values()
+                .filter(|i| i.tool_name.as_deref() == Some("task"))
+                .collect();
+            assert_eq!(tasks.len(), 2);
+            assert!(tasks.iter().all(|task| {
+                task.ok == Some(false)
+                    && task
+                        .tool_result
+                        .as_ref()
+                        .unwrap()
+                        .model_text()
+                        .contains("Cancelled")
+            }));
+            assert!(state.refusals.is_empty());
+        }
+    }
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
     }
 }

@@ -63,11 +63,13 @@ struct SessionMcpScope {
     confinement: Confinement,
     cancel: CancelToken,
     _effects: CommandHttpScope,
+    stdio: Arc<ego_mcp::McpStdioSession>,
 }
 
 impl SessionMcpScope {
     async fn open(
         root: &RunRoot,
+        session: ego_core::event::id::SessionId,
         confinement: Confinement,
         observation: Option<&ExecObservation>,
     ) -> Result<Self, McpSessionAdmissionError> {
@@ -83,17 +85,24 @@ impl SessionMcpScope {
                         "the confined MCP effect scope could not be created: {error}"
                     ))
                 })?;
+        let stdio = ego_mcp::McpStdioSession::new(
+            session,
+            Arc::new(RunMcpDuplexEffectsFactory::new(
+                effects.ports().duplex_handle(),
+            )),
+            effects.ports().process_handle(),
+            confinement,
+        );
         Ok(Self {
             confinement,
             cancel,
+            stdio,
             _effects: effects,
         })
     }
 
     fn stdio_management(&self) -> Arc<dyn McpDuplexEffectsFactory> {
-        Arc::new(RunMcpDuplexEffectsFactory::new(
-            self._effects.ports().duplex_handle(),
-        ))
+        self.stdio.clone()
     }
 }
 
@@ -201,6 +210,7 @@ impl SessionMcpAdmission for AcpSessionMcpAdmission {
             }
             if let Some(scope) = &self.scope {
                 scope.cancel.cancel(CancelCause::Host);
+                scope.stdio.close().await;
             }
         })
     }
@@ -716,6 +726,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                     Some(
                         SessionMcpScope::open(
                             &context.root,
+                            context.session,
                             pick.map_or(Confinement::Off, |pick| pick.level),
                             pick.and_then(|pick| pick.observation.as_ref()),
                         )
@@ -1008,7 +1019,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     // scope this server already opened rather than a second egress: an `ego
     // acp` invocation is online by construction, so this adds no reach it did
     // not already have.
-    let (controls, ceiling, rule_target) =
+    let (controls, ceiling, rule_target, coordinator, orchestration_mode) =
         match run::protocol_effective(root.as_path(), args.session_dir.clone(), args.shape.clone())
         {
             Ok(effective) => {
@@ -1058,6 +1069,11 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                     Arc::new(AcpSessionControls::new(&effective, ceiling, catalogue)),
                     ceiling,
                     rule_target,
+                    effective
+                        .active_profile
+                        .as_ref()
+                        .is_some_and(|profile| profile.name == "coordinator"),
+                    effective.orchestration,
                 )
             }
             Err(error) => {
@@ -1123,12 +1139,33 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     // One lister for the whole connection: it holds no session state, and
     // the answer it helps ask is carried by the run selection rather than by
     // anything this adapter remembers.
-    let trust_port: Arc<dyn SessionTrustAdmission> =
-        Arc::new(CliSessionTrustAdmission::new(crate::config::ego_home()));
+    let trust = CliSessionTrustAdmission::new(crate::config::ego_home());
+    let trust = if args.shape.profile.is_some()
+        && args.shape.profile_source == Some(ego_core::config::Source::Flags)
+    {
+        trust.with_host_profile()
+    } else {
+        trust
+    };
+    let trust_port: Arc<dyn SessionTrustAdmission> = Arc::new(trust);
 
+    let notices = ego_acp::serve::AcpNotices::default();
+    let _observer = match crate::orchestration_observer::start(
+        coordinator,
+        orchestration_mode,
+        &root,
+        notices.clone(),
+        Arc::clone(&store),
+    ) {
+        Ok(observer) => observer,
+        Err(error) => {
+            return failed(format!(
+                "the orchestration observer could not start: {error}"
+            ));
+        }
+    };
     let roots = Arc::new(CanonicalRoots { base: root });
     let spawner = Arc::new(TokioExecutionSpawner);
-    let notices = ego_acp::serve::AcpNotices::default();
     let factory = move || {
         ego_acp::serve::durable_agent_with_compaction(
             Arc::clone(&controller),

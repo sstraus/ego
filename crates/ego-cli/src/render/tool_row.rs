@@ -55,6 +55,31 @@ pub struct Finished<'a> {
 }
 
 pub fn record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
+    if let Some((child, name)) = call.name.split_once(" › ") {
+        let label = Line::plain(printable(child))
+            .truncate_to(capabilities.width.saturating_sub(30))
+            .text();
+        let prefix = format!("  ↳ {label} › ");
+        let mut nested_caps = capabilities;
+        nested_caps.width = capabilities
+            .width
+            .saturating_sub(unicode_width::UnicodeWidthStr::width(prefix.as_str()))
+            .max(1);
+        let mut nested = record(&Finished { name, ..*call }, nested_caps);
+        nested.rows = nested
+            .rows
+            .lines()
+            .map(|line| format!("{prefix}{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        nested.detail = cap(nested
+            .detail
+            .lines()
+            .map(|line| format!("{prefix}{line}"))
+            .collect::<Vec<_>>()
+            .join("\n"));
+        return nested;
+    }
     let width = capabilities.width;
     let depth = capabilities.depth;
     let args: Value = serde_json::from_str(call.args).unwrap_or(Value::Null);
@@ -165,6 +190,10 @@ fn parts(call: &Finished<'_>, args: &Value, width: usize) -> Parts {
             string_arg(args, "path").unwrap_or("?").to_owned(),
         ),
         "exec" => ("$".to_owned(), command_line(args)),
+        "task" => (
+            "task".to_owned(),
+            string_arg(args, "name").unwrap_or("?").to_owned(),
+        ),
         _ => (
             String::new(),
             format!("{} {}", call.name, compact(call.args)),
@@ -412,6 +441,29 @@ mod tests {
 
     fn header_of(record: &ToolRecord) -> &str {
         record.rows.lines().next().expect("a header row")
+    }
+
+    #[test]
+    fn nested_task_rows_keep_the_child_label_and_do_not_wrap_into_the_composer() {
+        // Catches: a long child name causing nested rows to overwrite the composer.
+        for width in [40, 80, 120] {
+            let result = record(
+                &call(
+                    "a very long child name that exceeds a narrow screen › read",
+                    r#"{"path":"calc.py"}"#,
+                    true,
+                    "hello\n",
+                ),
+                at(width),
+            );
+            assert!(header_of(&result).starts_with("  ↳ a very lon"));
+            assert!(header_of(&result).contains("› ✓ read"));
+            assert!(
+                result.rows.lines().all(|line| cells(line) <= width),
+                "{width}: {}",
+                result.rows
+            );
+        }
     }
 
     #[test]

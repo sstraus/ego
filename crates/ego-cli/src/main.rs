@@ -18,7 +18,7 @@ use ego_core::turn::CancelToken;
 fn main() -> std::process::ExitCode {
     // Behavioural network probes are hidden child modes, not CLI commands.
     // Dispatch them before clap or any provider/configuration work.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(delivered) = ego_tools::exec::dispatch_network_probe(std::env::args_os()) {
         return if delivered {
             std::process::ExitCode::SUCCESS
@@ -101,6 +101,7 @@ async fn ordinary_main() -> std::process::ExitCode {
             session: ego_core::event::id::SessionId::new(),
             state: ego_core::state::SessionState::default(),
             result: serde_json::Value::String(String::new()),
+            selected_session: None,
             mcp_errors: Vec::new(),
         }
     } else {
@@ -121,6 +122,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                     session: ego_core::event::id::SessionId::new(),
                     state: ego_core::state::SessionState::default(),
                     result: serde_json::Value::String(String::new()),
+                    selected_session: None,
                     mcp_errors: Vec::new(),
                 }
             }
@@ -129,6 +131,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             Ok(Invocation::Auth(args)) => {
@@ -161,6 +164,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                     session: ego_core::event::id::SessionId::new(),
                     state: ego_core::state::SessionState::default(),
                     result: serde_json::Value::String(String::new()),
+                    selected_session: None,
                     mcp_errors: Vec::new(),
                 }
             }
@@ -180,6 +184,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             // `ls` starts no session and takes no turn, so it has no `Ended` to
@@ -190,6 +195,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             Ok(Invocation::SessionMetadata(args)) => Ended {
@@ -197,6 +203,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: args.session,
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             Ok(Invocation::Usage(args)) => Ended {
@@ -204,6 +211,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             Ok(Invocation::Fork(args)) => run::fork(&args, &out).await,
@@ -215,6 +223,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: args.source,
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             Ok(Invocation::Models(args)) => {
@@ -230,6 +239,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                     session: ego_core::event::id::SessionId::new(),
                     state: ego_core::state::SessionState::default(),
                     result: serde_json::Value::String(String::new()),
+                    selected_session: None,
                     mcp_errors: Vec::new(),
                 }
             }
@@ -238,6 +248,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             Ok(Invocation::Hooks(args)) => Ended {
@@ -245,6 +256,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             // `acp` serves many sessions over one connection, so there is no single
@@ -255,6 +267,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             // `mcp-server` owns stdout as its JSON-RPC transport and serves many
@@ -267,6 +280,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             Ok(Invocation::McpServer(args)) => Ended {
@@ -275,6 +289,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
             // `--help` and `--version`. On **stdout** and exit 0, because the
@@ -289,6 +304,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                     session: ego_core::event::id::SessionId::new(),
                     state: ego_core::state::SessionState::default(),
                     result: serde_json::Value::String(String::new()),
+                    selected_session: None,
                     mcp_errors: Vec::new(),
                 }
             }
@@ -309,6 +325,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                         session: ego_core::event::id::SessionId::new(),
                         state: ego_core::state::SessionState::default(),
                         result: serde_json::Value::String(String::new()),
+                        selected_session: None,
                         mcp_errors: Vec::new(),
                     },
                     Some(Ok(preflight)) => {
@@ -349,6 +366,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: Vec::new(),
             },
         }

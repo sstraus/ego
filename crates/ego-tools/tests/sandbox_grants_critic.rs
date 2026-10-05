@@ -154,6 +154,39 @@ fn open(level: Confinement, seat: Arc<Seat>) -> Option<Fixture> {
     }
 }
 
+/// Gate widening cases on the selected backend's actual behavior, not its
+/// platform/name or a failed filesystem measurement. The production denial
+/// note comes from Backend::can_widen; a launch/parser failure cannot skip.
+fn open_widening(level: Confinement, seat: Arc<Seat>) -> Option<Fixture> {
+    let fixture = open(level, seat)?;
+    let prior_grants = fixture.seat.granted();
+    let path = write_file(&fixture.outside.join("widening-control"), "control");
+    let outcome = fixture.sh(FORGE_PATH_FROM_ARG, &[&path]);
+    assert!(
+        matches!(outcome, Err(ProcessError::Exit { code: Some(1), .. })),
+        "the capability control did not reach its target: {outcome:?}"
+    );
+    if note_of(&outcome).contains("this platform's sandbox cannot open") {
+        assert!(
+            fixture.seat.asked().is_empty(),
+            "a non-widening backend asked anyway"
+        );
+        eprintln!("not-verifiable: selected backend reports can_widen=false");
+        return None;
+    }
+    assert_eq!(
+        fixture.seat.asked_paths(),
+        vec![path.clone()],
+        "a widening backend did not ask for the control path: {outcome:?}"
+    );
+    // Reset only the scripted seat's preflight effects. Preserve any stored
+    // grants supplied by the case; its real command has not run yet.
+    *fixture.seat.granted.lock().unwrap() = prior_grants;
+    fixture.seat.asked.lock().unwrap().clear();
+    fixture.seat.commands.lock().unwrap().clear();
+    Some(fixture)
+}
+
 impl Fixture {
     fn run(&self, argv: Vec<OsString>) -> Result<ToolResult, ProcessError> {
         let spec = SpawnSpec::new(
@@ -322,7 +355,7 @@ fn a_refusal_line_from_a_command_that_exited_zero_is_not_a_question() {
 /// about by its resolved location, never by the spelling the child printed.
 #[test]
 fn the_question_names_the_resolved_location_not_the_printed_spelling() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let target = write_file(&fixture.outside.join("real/f"), "x");
@@ -345,7 +378,7 @@ fn the_question_names_the_resolved_location_not_the_printed_spelling() {
 /// failure for a path they could have allowed.
 #[test]
 fn a_later_refusal_is_still_a_question_when_the_first_cannot_be_asked() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let inside = write_file(&fixture.workspace.as_path().join("f"), "x");
@@ -507,7 +540,7 @@ mod seatbelt {
 /// genuine refusal of `--out=/outside/f` is never put to the person.
 #[test]
 fn a_flag_value_path_on_the_command_line_is_a_question_for_that_path() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let target = write_file(&fixture.outside.join("f"), "x");
@@ -527,7 +560,7 @@ fn a_flag_value_path_on_the_command_line_is_a_question_for_that_path() {
 /// recognised as named by the command line.
 #[test]
 fn a_symlinked_command_line_path_anchors_the_files_below_its_target() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let real = fixture.outside.join("real");
@@ -546,7 +579,7 @@ fn a_symlinked_command_line_path_anchors_the_files_below_its_target() {
 /// anchor `real/f`.
 #[test]
 fn dotdot_and_trailing_slash_spellings_anchor_the_same_directory() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let target = write_file(&fixture.outside.join("real/f"), "x");
@@ -658,7 +691,7 @@ fn is_bare_word(command: &str, token: &str) -> bool {
 /// although the exec runs one program with those literal arguments.
 #[test]
 fn arguments_a_shell_would_reinterpret_are_quoted_in_the_question() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let target = write_file(&fixture.outside.join("f"), "x");
@@ -721,7 +754,7 @@ fn a_question_never_hides_the_end_of_the_command_it_re_runs() {
 /// a fake "allowed" line, text reordered).
 #[test]
 fn control_and_bidi_characters_in_arguments_never_reach_the_question_raw() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let target = write_file(&fixture.outside.join("f"), "x");
@@ -821,7 +854,7 @@ fn a_valid_stored_grant_still_applies_beside_unrenderable_ones() {
     use std::os::unix::ffi::OsStringExt;
 
     let seat = Seat::new(no);
-    let Some(fixture) = open(Confinement::Workspace, Arc::clone(&seat)) else {
+    let Some(fixture) = open_widening(Confinement::Workspace, Arc::clone(&seat)) else {
         return;
     };
     let target = write_file(&fixture.outside.join("f"), "stored");

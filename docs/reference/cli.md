@@ -241,6 +241,14 @@ Manage stored user configuration.
 
 - `-h, --help` — Print help
 
+## `ego roots`
+
+- `roots add` — Add or update one user perimeter root
+- `roots rm` — Remove a root by its stored spelling
+- `roots ls` — List roots stored in the selected user target
+
+- `-h, --help` — Print help
+
 ## `ego rules`
 
 Inspect and manage persistent permission rules.

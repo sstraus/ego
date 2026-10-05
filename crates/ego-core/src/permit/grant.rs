@@ -227,7 +227,7 @@ impl Permit {
 
     /// Checks the whole process specification against the one policy admitted.
     pub fn allows_spawn(&self, spec: &SpawnSpec) -> Result<(), PermitDenied> {
-        if self.scope.spawn.as_ref() == Some(spec) {
+        if self.scope.spawns.contains(spec) {
             Ok(())
         } else {
             Err(PermitDenied::Spawn { spec: spec.clone() })
@@ -415,7 +415,7 @@ pub enum PolicyDenied {
     /// construction — its own doc says the origin "is metadata that `rules ls`
     /// shows" — and a run that ends at exit 3 has no second invocation in
     /// which to show it. See
-    /// `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
+    /// `ARCHITECTURE.md`.
     Denied {
         tool: String,
         op: OpName,
@@ -562,6 +562,10 @@ impl fmt::Display for PolicyDenied {
                 // and least expects — every other layer is theirs to edit, so
                 // the default assumption is that this one is too.
                 match from {
+                    Source::Default => write!(
+                        f,
+                        "credential defaults; an explicit user read rule can lift this preset"
+                    )?,
                     Source::System => write!(
                         f,
                         "system config, which no --allow and no higher layer can lift"
@@ -759,6 +763,7 @@ pub struct PermissionRequest {
     ops: Vec<Op>,
     why: Escalation,
     presentation: Option<Box<PermissionPresentation>>,
+    child_name: Option<String>,
 }
 
 /// Display-only facts retained for a human permission decision.
@@ -829,7 +834,13 @@ impl PermissionRequest {
             ops,
             why,
             presentation: None,
+            child_name: None,
         }
+    }
+
+    /// The child requesting this permission, when the call is delegated.
+    pub fn child_name(&self) -> Option<&str> {
+        self.child_name.as_deref()
     }
 
     pub fn tool(&self) -> &str {
@@ -855,6 +866,9 @@ impl PermissionRequest {
 impl fmt::Display for PermissionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let why = self.why.to_string();
+        if let Some(name) = &self.child_name {
+            write!(f, "Child {}: ", TerminalSafe(name))?;
+        }
         write!(
             f,
             "{} needs permission: {}",
@@ -1031,7 +1045,10 @@ pub enum Classification {
 /// `Ask` means the current party escalated. The turn records that question
 /// before it asks the human seat, if one exists. `Reclassify` carries raw
 /// params and never a scope or prepared call.
+/// Like `Classification`, this short-lived decision keeps the prepared call
+/// inline; adding human display context does not warrant boxing authorizations.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Resolution {
     /// Decided. The party allowed it, or refused it.
     Settled(Result<Authorized, PolicyDenied>),
@@ -1080,6 +1097,7 @@ pub struct PolicyEngine {
     /// Extra roots a profile opened, beyond the workspace. Empty for a run
     /// with no profile roots, which keeps the single-boundary behaviour.
     roots: Vec<ProfileRoot>,
+    coordinator: bool,
     mode: Mode,
     /// Both lists intact, matched per call. `resolve` no longer subtracts one
     /// from the other — that comparison was string equality between two lists
@@ -1111,10 +1129,12 @@ impl PolicyEngine {
     /// A policy that decides `mode`'s way, under `permissions`, inside
     /// `workspace`.
     pub fn new(workspace: CanonPath, mode: Mode, permissions: Ruleset) -> Self {
+        let permissions = permissions.with_credential_defaults();
         Self {
             approver: Box::new(ModeApprover::new(mode, workspace.clone())),
             workspace,
             roots: Vec::new(),
+            coordinator: false,
             mode,
             allow: permissions.allow,
             deny: permissions.deny,
@@ -1130,6 +1150,26 @@ impl PolicyEngine {
     /// read-write.
     pub fn with_profile_roots(self, roots: Vec<ProfileRoot>) -> Self {
         Self { roots, ..self }
+    }
+
+    /// Apply the operator-selected coordinator profile's deterministic risk policy.
+    pub fn with_coordinator_profile(self, coordinator: bool) -> Self {
+        Self {
+            coordinator,
+            ..self
+        }
+    }
+
+    pub(crate) fn risk(&self, call: &PreparedCall) -> super::analysis::RiskAssessment {
+        if self.coordinator {
+            super::orchestration::assess(call)
+        } else {
+            super::analysis::assess(call)
+        }
+    }
+
+    fn coordinator_high(&self, call: &PreparedCall) -> bool {
+        self.coordinator && self.risk(call).class == super::analysis::RiskClass::High
     }
 
     /// What this engine lets a run do at `path`: the most specific containing
@@ -1182,7 +1222,7 @@ impl PolicyEngine {
                 pending.ask.presentation = Some(Box::new(PermissionPresentation {
                     parameters: input.parameters,
                     schema: input.schema,
-                    risk: super::analysis::assess(&pending.call),
+                    risk: self.risk(&pending.call),
                     remember,
                     suggested,
                 }));
@@ -1245,7 +1285,7 @@ impl PolicyEngine {
     }
 
     /// Decide what a prepared call may do, and hand back the grant that says
-    /// so (`docs/decisions/2026-08-21-the-turn-loop.md` §1).
+    /// so (`ARCHITECTURE.md` §1).
     ///
     /// This is the method that makes this an engine rather than a stamp. The
     /// scope is derived *from the call*, so a permit can never allow more
@@ -1260,7 +1300,7 @@ impl PolicyEngine {
     /// else's problem: nothing here awaits, opens anything or reads a clock.
     ///
     /// The order is fixed
-    /// (`docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6), first
+    /// (`ARCHITECTURE.md` §6), first
     /// match wins, and it is evaluated **per operation**. The sole exception
     /// is a structurally supporting foreign transport after every opaque
     /// identity is allowed; its authority is the same delegation, not a
@@ -1332,6 +1372,16 @@ impl PolicyEngine {
             if let Err(denied) = self.judge(&call, op) {
                 return Classification::Settled(Err(*denied));
             }
+        }
+        // High belongs to the human, even with an allow rule or yolo mode.
+        if self.coordinator_high(&call) {
+            let op = &call.ops()[0];
+            let why = Escalation::ModeAsksSubject {
+                mode: self.mode,
+                op: op.name(),
+                subject: op.subject(&self.workspace),
+            };
+            return Classification::Ask(self.pending(call, why));
         }
         // Every rule that covered an independent op, not the first one to
         // match. A foreign transport structurally supporting wholly allowed
@@ -1415,6 +1465,21 @@ impl PolicyEngine {
     /// the two parties means a crash while the human is thinking cannot erase
     /// the fact that the request was raised.
     pub async fn settle(&self, pending: Pending) -> Resolution {
+        if self.coordinator_high(pending.call()) {
+            return Resolution::Ask(pending);
+        }
+        if self.coordinator
+            && self.mode != Mode::Plan
+            && self.risk(pending.call()).class <= super::analysis::RiskClass::Bounded
+        {
+            let call = pending.call;
+            let permit = self.mint(scope_of(&call));
+            return Resolution::Settled(Ok(Authorized {
+                call,
+                permit,
+                by: Authority::Mode { mode: self.mode },
+            }));
+        }
         match self.approver.approve(&pending).await {
             Verdict::Allow { by } => {
                 let call = pending.call;
@@ -1428,8 +1493,7 @@ impl PolicyEngine {
             ))),
             Verdict::Escalate { why } => {
                 if self.mode == Mode::Auto
-                    && super::analysis::assess(pending.call()).class
-                        <= super::analysis::RiskClass::Bounded
+                    && self.risk(pending.call()).class <= super::analysis::RiskClass::Bounded
                 {
                     let call = pending.call;
                     let permit = self.mint(scope_of(&call));
@@ -1454,7 +1518,7 @@ impl PolicyEngine {
         by: Authority,
     ) -> Resolution {
         if self.mode != Mode::Auto
-            || super::analysis::assess(pending.call()).class == super::analysis::RiskClass::High
+            || self.risk(pending.call()).class == super::analysis::RiskClass::High
         {
             return Resolution::Ask(pending);
         }
@@ -1478,10 +1542,20 @@ impl PolicyEngine {
     /// Crate-private because only the turn loop owns the durable ordering
     /// boundary. A headless engine preserves the pending question unchanged.
     pub(crate) async fn decide(&self, item: ItemId, pending: Pending) -> Resolution {
+        self.decide_named(item, pending, None).await
+    }
+
+    pub(crate) async fn decide_named(
+        &self,
+        item: ItemId,
+        pending: Pending,
+        child_name: Option<&str>,
+    ) -> Resolution {
         let Some(human) = &self.human else {
             return Resolution::Ask(pending);
         };
-        let request = pending.request().clone();
+        let mut request = pending.request().clone();
+        request.child_name = child_name.map(str::to_owned);
         match human.decide(item, &request).await {
             PermissionDecision::Allow => {
                 let call = pending.call;
@@ -1526,6 +1600,7 @@ impl PolicyEngine {
                 ops: call.ops().to_vec(),
                 why,
                 presentation: None,
+                child_name: None,
             },
             call,
         }
@@ -1621,7 +1696,7 @@ impl PolicyEngine {
     fn matching<'r>(&self, rules: &'r [SourcedRule], op: &Op) -> Option<&'r SourcedRule> {
         rules
             .iter()
-            .find(|entry| entry.rule().matches(op, self.workspace.as_path()))
+            .find(|entry| entry.denies(op, self.workspace.as_path(), &self.allow))
     }
 
     /// Mint a permit for an explicit scope.
@@ -1629,7 +1704,7 @@ impl PolicyEngine {
     /// **Private to `grant.rs`, and that is the load-bearing half of
     /// Invariant W.** It used to be `pub`, reserved for "a later bypass mode
     /// (`--yolo`) minting a deliberately wide grant". §1 of
-    /// `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` removed that
+    /// `ARCHITECTURE.md` removed that
     /// use: bypass is a decision *whether to ask*, and a bypassed call is
     /// still scoped from the call, so nothing anywhere needs a wide grant.
     /// What was left was a public widening primitive kept for its own sake —
@@ -1801,7 +1876,7 @@ fn scope_of(call: &PreparedCall) -> Scope {
             Op::List { root, .. } => scope.list_paths.push(root.clone()),
             Op::Search { root, .. } => scope.search_paths.push(root.clone()),
             Op::Write { path, .. } => scope.write_paths.push(path.clone()),
-            Op::Spawn { spec } => scope.spawn = Some(spec.clone()),
+            Op::Spawn { spec } => scope.spawns.push(spec.clone()),
             Op::ReadEvidence { request } => scope.evidence = Some(request.clone()),
             Op::SessionProcess { id, action } => scope.session_process = Some((*id, *action)),
             Op::Opaque {
@@ -1846,7 +1921,7 @@ fn scope_of(call: &PreparedCall) -> Scope {
 /// These tests live inside `grant.rs` rather than under `tests/` because
 /// they need [`PolicyEngine::mint`], and `mint` is private to this module —
 /// that privacy is half of §2 of
-/// `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md`, and a test
+/// `ARCHITECTURE.md`, and a test
 /// binary that could reach it would be proof it is not private at all. What
 /// they check is what a `Scope` *means* once minted: the four path lists do
 /// not imply one another, `is_or_under` is component-wise and not a string
@@ -2188,6 +2263,7 @@ mod tests {
                 path: CanonPath::new("/ws/out.txt"),
             },
             presentation: None,
+            child_name: None,
         };
 
         assert_eq!(
@@ -2230,6 +2306,7 @@ mod tests {
                 path: CanonPath::new("/ws/read.txt"),
             },
             presentation: None,
+            child_name: None,
         };
 
         assert_eq!(
@@ -2531,7 +2608,7 @@ mod tests {
             list_paths: vec![CanonPath::new("/ws/listable")],
             search_paths: vec![CanonPath::new("/ws/searchable")],
             endpoints: vec!["api.example.com:443".to_string()],
-            spawn: Some(allowed_spawn.clone()),
+            spawns: vec![allowed_spawn.clone()],
             ..Scope::default()
         });
 

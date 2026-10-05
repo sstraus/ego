@@ -1,0 +1,33 @@
+# εgo documentation
+
+εgo supplies the operational layer between a model and work on your machine.
+These guides describe the implemented user surfaces in this checkout. Start with
+what you want to do; each guide explains the feature before its controls.
+
+| Your task | Guide |
+| --- | --- |
+| Install, choose a model, and send a first prompt | [Getting started](getting-started/README.md) |
+| Understand the units of work and uncertainty | [Concepts](concepts/README.md) |
+| Work in a terminal, steer, and use slash commands | [Interactive use](guides/interactive.md) |
+| Run in scripts, validate JSON, retry safely, and use agent files | [Automation](guides/automation.md) |
+| Find a command, option, default, or output contract | [CLI reference](reference/README.md) |
+| Configure a model, profile, perimeter, environment, or extension | [Configuration reference](reference/configuration.md) |
+| Use local, API-key, or subscription models | [Providers and login](guides/providers.md) |
+| Understand the model's tool surface | [Tools](guides/tools.md) |
+| Set authority and confinement | [Permissions and confinement](guides/permissions.md) |
+| Resume, branch, compact, inspect usage, and export | [Sessions and history](guides/sessions.md) |
+| Connect ACP, MCP, A2A, skills, hooks, or TUICommander | [Integrations](integrations/README.md) |
+| Diagnose a refusal or platform limitation | [Troubleshooting](guides/troubleshooting.md) |
+| Understand crate responsibilities and design | [Architecture](architecture.md) |
+
+The [generated command reference](reference/cli.md) remains at its generator-owned
+path. [Configuration](reference/configuration.md) identifies the source schemas.
+[CLI.md](../CLI.md), [SPEC.md](../SPEC.md), and [ARCHITECTURE.md](../ARCHITECTURE.md)
+remain design authorities; they include planned behavior and older examples, so
+use the source-backed guides and current binary help for invocation details.
+
+[Internals](internals/README.md) preserves research, dated decisions, evidence,
+metrics, and orchestration notes. These are historical records, not installation
+instructions or guarantees that a provider still accepts a dated example.
+
+Documentation verification is recorded in [the validation record](internals/documentation-validation.md).

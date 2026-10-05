@@ -1,0 +1,9 @@
+c3d56c1b-b6bf-57c3-bd6d-8ea5ac2aa516	example-worker-a	/workspace/other/checkout-15	Example task	01-01 12:00
+23834ae0-a14e-5e69-8dff-0e3681a1ac55	example-worker-b	/workspace/project/checkout-09	Example task	01-01 14:48
+b2bf18f3-c5ec-56ef-95ff-4d2d59bb86a4	example-worker-c	/workspace/project/checkout-08	Example task	01-01 14:48
+f220c875-f00f-5a25-b199-a3e6df603e81	example-worker-d	/workspace/project/checkout-13	Example task	01-01 15:32
+bacedc5e-cd0b-534e-ac98-d880d0ddd2f2	example-reviewer	/workspace/project/checkout-16	Example task	01-01 15:34
+ec07d385-51fd-5d74-a472-9917b30a6ad2	example-coordinator	/workspace/project/checkout-05	Example task	01-01 15:50
+548c5226-1a8b-581d-8851-848aba81f9b6	example-stale-a	/workspace/other/checkout-04	Example task	01-01 15:57
+503514b2-3048-52e1-a25a-a36caa63a4f1	example-stale-b	/workspace/project/checkout-10	Example task	01-01 16:09
+21b9e97f-0765-5296-9203-a671805285dd	example-stale-c	/workspace/project/checkout-11	Example task	01-01 16:16

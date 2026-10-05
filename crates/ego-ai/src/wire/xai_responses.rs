@@ -99,6 +99,8 @@ impl From<Inexpressible> for RequestRefused {
 
 #[derive(Debug, Serialize)]
 struct WireRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
     model: &'a str,
     stream: bool,
     store: bool,
@@ -272,6 +274,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         })
         .collect();
     let wire = WireRequest {
+        prompt_cache_key: super::cache::routing_key(req, "xai"),
         model: &req.model,
         stream: true,
         store: false,
@@ -348,6 +351,8 @@ struct Completed {
 struct EventError {
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -565,15 +570,14 @@ impl StreamDecoder {
                 match status.as_str() {
                     "incomplete" => self.finish_reason = Some(StopReason::Length),
                     "failed" | "cancelled" => {
-                        let message = event
-                            .response
-                            .and_then(|done| done.error)
+                        let error = event.response.and_then(|done| done.error);
+                        let kind = super::classify_stream_code(
+                            error.as_ref().and_then(|error| error.code.as_deref()),
+                        );
+                        let message = error
                             .and_then(|error| error.message)
                             .unwrap_or_else(|| format!("xAI reported response status {status}"));
-                        out.push(AiEvent::Error {
-                            message,
-                            kind: ErrorKind::Unclassified,
-                        });
+                        out.extend(super::streamed_failure(message, kind));
                         self.finish_reason = Some(StopReason::Error);
                     }
                     _ if !self.calls.is_empty() => self.finish_reason = Some(StopReason::ToolUse),
@@ -581,20 +585,23 @@ impl StreamDecoder {
                 }
             }
             "response.failed" | "error" => {
-                let message = event
+                let error = event
                     .response
                     .and_then(|response| response.error)
+                    .or(event.error);
+                let code = error
+                    .as_ref()
+                    .and_then(|error| error.code.clone())
+                    .or(event.code);
+                let kind = super::classify_stream_code(code.as_deref());
+                let message = error
                     .and_then(|error| error.message)
-                    .or_else(|| event.error.and_then(|error| error.message))
                     .or(event.message)
-                    .unwrap_or_else(|| match event.code {
+                    .unwrap_or_else(|| match code {
                         Some(code) => format!("xAI reported streamed Responses error {code}"),
                         None => "xAI reported a streamed Responses error".to_string(),
                     });
-                out.push(AiEvent::Error {
-                    message,
-                    kind: ErrorKind::Unclassified,
-                });
+                out.extend(super::streamed_failure(message, kind));
                 self.finish_reason = Some(StopReason::Error);
             }
             _ => {}

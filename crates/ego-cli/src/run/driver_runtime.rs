@@ -158,6 +158,7 @@ pub(super) async fn drive_execution<S: EventSink>(
     let interactive_metadata_ceilings = effective.ceilings.clone();
 
     let mut config = TurnConfig {
+        cache: effective.cache,
         system,
         identity: Some(AgentIdentity {
             version: crate::build_info::VERSION.to_owned(),
@@ -169,6 +170,12 @@ pub(super) async fn drive_execution<S: EventSink>(
         retry: args.retry,
         fallbacks: args.fallbacks.clone(),
     };
+
+    let exec_environment = effective
+        .exec
+        .policy()
+        .expect("admitted config has valid environment names");
+    let mut refresh_prompt = false;
 
     let turns = Turns {
         schema: compiled.as_ref(),
@@ -200,6 +207,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 config: config.clone(),
                 admission: Arc::clone(&evidence),
                 invocation,
+                retry_pause: Arc::new(TokioRetryPause),
             };
             let effect_ports = ToolEffectPorts::new(
                 &fs,
@@ -209,6 +217,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 $ports.one_hop_handle(),
                 $ports.duplex_handle(),
             )
+            .with_secret_values(ego_tools::secrets::from_env())
             .with_cancel($cancel.clone());
             let tools = match admitted_tools.as_ref() {
                 Some(source) => Tools::from_registry_with_source(
@@ -252,7 +261,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             let skill_owner: Arc<dyn SkillInvocationPort + '_> = ($skill_owner).clone();
             let loop_ = loop_.with_skill_invocation_port(skill_owner);
             let loop_ = match $active.replayed() {
-                Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
+                Some(replayed) => loop_.with_replayed_context(replayed),
                 None => loop_,
             };
             let loop_ = match elicitor.as_ref() {
@@ -281,7 +290,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                 $hook_ports.resolver_handle(),
                 $hook_ports.one_hop_handle(),
                 $hook_ports.duplex_handle(),
-            );
+            )
+            .with_secret_values(ego_tools::secrets::from_env());
             let leased_journal =
                 LeasedSharedJournal::new($active.writer(), &clock, sink, Producer::Main, $state);
             let journal = leased_journal.shared();
@@ -404,6 +414,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 session: active.id(),
                 state,
                 result,
+                selected_session: None,
                 mcp_errors: mcp_errors.clone(),
             };
             if let Some(artifact_store) = artifact_store.as_ref() {
@@ -418,6 +429,23 @@ pub(super) async fn drive_execution<S: EventSink>(
             Ok(ended)
         }
         Driver::Interactive { seat, between } => {
+            if seat.has_human()
+                && matches!(&args.session, crate::cli::SessionChoice::Resume(_))
+                && let Some(output) = text_output
+            {
+                let environment = crate::render::caps::Environment::read();
+                let capabilities = crate::render::Capabilities::of(
+                    &crate::render::caps::Terminal::from_process(args.no_color, &environment),
+                );
+                if let Err(error) = crate::render::replay::replay(
+                    active.writer(),
+                    active.id(),
+                    output,
+                    capabilities,
+                ) {
+                    diagnostics.note(&format!("the transcript could not be replayed: {error}"));
+                }
+            }
             let interactive_metadata =
                 SessionMetadata::new(Arc::clone(jsonl_store), Arc::new(clock));
             type CompactionRuntime = (
@@ -441,6 +469,9 @@ pub(super) async fn drive_execution<S: EventSink>(
             }
 
             enum EpochTransition<'store> {
+                Resume {
+                    meta: ego_core::store::session_store::SessionMeta,
+                },
                 Exit,
                 New {
                     target: ActiveSession<'store>,
@@ -468,6 +499,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 session: active.id(),
                 state: state.clone(),
                 result: Value::String(String::new()),
+                selected_session: None,
                 mcp_errors: mcp_errors.clone(),
             };
 
@@ -846,6 +878,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         if matches!(
                                             &last.termination,
                                             RunTermination::Provider { .. }
+                                                | RunTermination::ProviderUncertain { .. }
                                                 | RunTermination::UsageError { .. }
                                         ) {
                                             last.termination = RunTermination::Done;
@@ -973,20 +1006,28 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             prospective.retained_last_good(),
                                             !published
                                         );
-                                        let next_registry = match tools(
-                                            args.tools.as_ref(),
-                                            Some(prospective.core()),
-                                        ) {
-                                            Ok(registry) => registry,
-                                            Err(error) => {
-                                                last.termination = RunTermination::Failed {
-                                                    message: format!(
-                                                        "the rescanned skill catalogue could not rebuild model tools: {error}"
-                                                    ),
-                                                };
-                                                break 'epoch EpochTransition::Exit;
-                                            }
-                                        };
+                                        let next_registry =
+                                            match super::composition::tools_with_mode(
+                                                args.tools.as_ref(),
+                                                Some(prospective.core()),
+                                                effective
+                                                    .active_profile
+                                                    .as_ref()
+                                                    .map(|profile| profile.name.as_str()),
+                                                Some(Arc::new(jsonl_store.history())),
+                                                exec_environment.clone(),
+                                                super::composition::orchestration_mode(&effective),
+                                            ) {
+                                                Ok(registry) => registry,
+                                                Err(error) => {
+                                                    last.termination = RunTermination::Failed {
+                                                        message: format!(
+                                                            "the rescanned skill catalogue could not rebuild model tools: {error}"
+                                                        ),
+                                                    };
+                                                    break 'epoch EpochTransition::Exit;
+                                                }
+                                            };
                                         let capture = match catalogue.commit_rescan(prepared) {
                                             Ok(capture) => capture,
                                             Err(error) => {
@@ -1189,7 +1230,52 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Config,
                                     )) => {
-                                        diagnostics.note(&perimeter.text());
+                                        diagnostics.note(&crate::config::repl_text(
+                                            &effective,
+                                            skill_profile_layers.as_deref().unwrap_or_default(),
+                                            &perimeter,
+                                        ));
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Config(
+                                        arguments,
+                                    )) => {
+                                        if arguments == "perimeter" {
+                                            diagnostics.note(&perimeter.text());
+                                        } else {
+                                            match crate::config::repl_set_args(&arguments) {
+                                                Ok(set) => match crate::config::repl_set(&set) {
+                                                    Ok(receipt) => {
+                                                        diagnostics.note(&receipt);
+                                                        diagnostics.note("Saved to user base configuration; applies to future sessions. Current session authority is unchanged.");
+                                                        if let Some(warning) =
+                                                            crate::config::saved_override(
+                                                                &set,
+                                                                &effective,
+                                                                skill_profile_layers
+                                                                    .as_deref()
+                                                                    .unwrap_or_default(),
+                                                            )
+                                                        {
+                                                            diagnostics.note(&warning);
+                                                        }
+                                                        diagnostics.note(
+                                                            &crate::config::repl_text(
+                                                                &effective,
+                                                                skill_profile_layers
+                                                                    .as_deref()
+                                                                    .unwrap_or_default(),
+                                                                &perimeter,
+                                                            ),
+                                                        );
+                                                    }
+                                                    Err(error) => diagnostics.note(&format!(
+                                                        "config set failed: {error:?}"
+                                                    )),
+                                                },
+                                                Err(error) => diagnostics.note(&error.to_string()),
+                                            }
+                                        }
                                         continue;
                                     }
                                     // The same snapshot `ego doctor` prints,
@@ -1237,22 +1323,113 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         }
                                         continue;
                                     }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Sessions,
-                                    )) => {
-                                        match crate::catalogue::listing(
-                                            jsonl_store.as_ref(),
-                                            &root,
-                                            false,
-                                        ) {
-                                            Ok(metas) => diagnostics.note(
-                                                &crate::catalogue::table(&metas, false).join("\n"),
-                                            ),
-                                            Err(error) => diagnostics.note(&format!(
-                                                "the session catalogue could not be read: {error}"
-                                            )),
+                                    repl::Line::HostCommand(
+                                        command @ (repl::HostCommand::Action(
+                                            repl::actions::ActionId::Sessions,
+                                        )
+                                        | repl::HostCommand::History(_)),
+                                    ) => {
+                                        if !seat.has_human() {
+                                            match crate::catalogue::listing(jsonl_store.as_ref(), &root, true) {
+                                                Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
+                                                Err(error) => diagnostics.note(&format!("the session catalogue could not be read: {error}")),
+                                            }
+                                            continue;
                                         }
-                                        continue;
+                                        if pending_work {
+                                            diagnostics.note("a session cannot be selected while source work is pending");
+                                            continue;
+                                        }
+                                        let mut metas: Vec<_> =
+                                            match crate::catalogue::saved_sessions(
+                                                jsonl_store.as_ref(),
+                                            ) {
+                                                Ok(metas) => metas
+                                                    .into_iter()
+                                                    .filter(|meta| meta.id != active.id())
+                                                    .collect(),
+                                                Err(error) => {
+                                                    diagnostics.note(&format!("the session catalogue could not be read: {error}"));
+                                                    continue;
+                                                }
+                                            };
+                                        if let repl::HostCommand::History(query) = command {
+                                            let history = jsonl_store.history();
+                                            let hits =
+                                                match tokio::task::spawn_blocking(move || {
+                                                    history.matches(&query)
+                                                })
+                                                .await
+                                                {
+                                                    Ok(Ok(hits)) => hits,
+                                                    result => {
+                                                        diagnostics.note(&format!(
+                                                        "history could not be searched: {result:?}"
+                                                    ));
+                                                        continue;
+                                                    }
+                                                };
+                                            metas.retain(|meta| {
+                                                hits.iter().any(|hit| hit.id == meta.id)
+                                            });
+                                        }
+                                        let Some(target) = seat.pick_session(metas.clone()) else {
+                                            continue;
+                                        };
+                                        let Some(meta) =
+                                            metas.into_iter().find(|meta| meta.id == target)
+                                        else {
+                                            continue;
+                                        };
+                                        if !meta.workspace_root.is_dir() {
+                                            diagnostics
+                                                .note("the selected session root is unavailable");
+                                            continue;
+                                        }
+                                        let opened = match session::open(
+                                            jsonl_store.as_ref(),
+                                            &target,
+                                            &clock,
+                                        ) {
+                                            Ok(opened) => opened,
+                                            Err(error) => {
+                                                diagnostics.note(&format!("the selected session could not be opened: {error}"));
+                                                continue;
+                                            }
+                                        };
+                                        let target_state = opened.state.clone();
+                                        // Interrupted work requires the full `ego resume` recovery path.
+                                        if target_state.turns.values().any(|turn| !turn.completed)
+                                            || !target_state.unacknowledged_prompts().is_empty()
+                                            || target_state.pending_question().is_some()
+                                            || !target_state.live_attempts.is_empty()
+                                        {
+                                            diagnostics.note(&format!("session {target} has unfinished work; use ego resume {target}"));
+                                            continue;
+                                        }
+                                        if meta.workspace_root != root {
+                                            drop(opened);
+                                            break 'epoch EpochTransition::Resume { meta };
+                                        }
+                                        let target_owner = match ActiveSession::durable(
+                                            opened,
+                                            target_state,
+                                            EVIDENCE_CAP,
+                                        ) {
+                                            Ok(owner) => owner,
+                                            Err(error) => {
+                                                diagnostics.note(&format!("the selected session could not be replayed: {error}"));
+                                                continue;
+                                            }
+                                        };
+                                        if !seat.activate_session(target) {
+                                            diagnostics.note("the terminal could not activate the selected session");
+                                            continue;
+                                        }
+                                        diagnostics.note(&format!("resumed session {target}"));
+                                        break 'epoch EpochTransition::New {
+                                            target: target_owner,
+                                        };
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Usage,
@@ -1295,6 +1472,31 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             }
                                             Err(error) => diagnostics.note(&format!(
                                                 "the usage report could not be built: {error}"
+                                            )),
+                                        }
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Action(
+                                        repl::actions::ActionId::Refresh,
+                                    )) => {
+                                        if pending_work {
+                                            diagnostics.note("instructions cannot be refreshed while source work is pending");
+                                            continue;
+                                        }
+                                        match instructions(
+                                            &effective,
+                                            &args,
+                                            &root,
+                                            &cwd,
+                                            diagnostics,
+                                        ) {
+                                            Ok(system) => {
+                                                config.system = system;
+                                                refresh_prompt = true;
+                                                diagnostics.note("instructions refreshed; the next generation opens a new prompt epoch");
+                                            }
+                                            Err(error) => diagnostics.note(&format!(
+                                                "instructions were not refreshed: {error}"
                                             )),
                                         }
                                         continue;
@@ -1495,15 +1697,27 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             let target_skills = prepared_skills
                                                 .as_ref()
                                                 .map(crate::skill::PreparedSkillRescan::capture);
-                                            let target_registry = tools(
-                                                args.tools.as_ref(),
-                                                target_skills
-                                                    .as_ref()
-                                                    .map(crate::skill::SkillCatalogueCapture::core),
-                                            )
-                                            .map_err(|error| {
-                                                CompactionError::Internal(error.to_string())
-                                            })?;
+                                            let target_registry =
+                                                super::composition::tools_with_mode(
+                                                    args.tools.as_ref(),
+                                                    target_skills.as_ref().map(
+                                                        crate::skill::SkillCatalogueCapture::core,
+                                                    ),
+                                                    effective
+                                                        .active_profile
+                                                        .as_ref()
+                                                        .map(|profile| profile.name.as_str()),
+                                                    Some(Arc::new(jsonl_store.history())),
+                                                    effective.exec.policy().map_err(|error| {
+                                                        CompactionError::Internal(error.to_string())
+                                                    })?,
+                                                    super::composition::orchestration_mode(
+                                                        &effective,
+                                                    ),
+                                                )
+                                                .map_err(|error| {
+                                                    CompactionError::Internal(error.to_string())
+                                                })?;
                                             let target_tools: Vec<ToolDescriptor> = target_registry
                                                 .iter()
                                                 .map(RegisteredTool::descriptor)
@@ -1532,6 +1746,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 config: config.clone(),
                                                 admission: Arc::clone(&evidence),
                                                 invocation,
+                                                retry_pause: Arc::new(TokioRetryPause),
                                             };
                                             let effect_ports = ToolEffectPorts::new(
                                                 &fs,
@@ -1541,6 +1756,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 ports.one_hop_handle(),
                                                 ports.duplex_handle(),
                                             )
+                                            .with_secret_values(ego_tools::secrets::from_env())
                                             .with_cancel(compaction_cancel.clone());
                                             let compaction_tools = match admitted_tools.as_ref() {
                                                 Some(source) => Tools::from_registry_with_source(
@@ -1593,9 +1809,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 CompactionError::Internal(error.to_string())
                                             })?;
                                             if let Some(replayed) = active.replayed() {
-                                                compaction = compaction.with_ancestor_conversation(
-                                                    replayed.conversation().clone(),
-                                                );
+                                                compaction =
+                                                    compaction.with_replayed_context(replayed);
                                             }
                                             if let Some(elicitor) = elicitor.as_ref() {
                                                 compaction =
@@ -1821,6 +2036,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     .map_err(|message| RunTermination::Failed { message })?,
                                 Some(RuntimeResume::Model(_)) | None => loop_,
                             };
+                            let previous_epoch = state
+                                .prompt_snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.epoch);
+                            let loop_ = if refresh_prompt {
+                                loop_.with_prompt_refresh()
+                            } else {
+                                loop_
+                            };
                             let mut loop_ = loop_.with_interactive_control(&mut control);
                             let driven = match resumed_turn {
                                 Some(RuntimeResume::Model(turn)) => {
@@ -1881,12 +2105,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                         ),
                                                     ),
                                                 })
-                                                .or_else(|| {
-                                                    RunTermination::after_turn(
-                                                        outcome.exit_reason,
-                                                        outcome.denied,
-                                                    )
-                                                })
+                                                .or_else(|| RunTermination::after_outcome(&outcome))
                                                 .unwrap_or(RunTermination::Done);
                                             Some((
                                                 termination,
@@ -1910,6 +2129,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                             };
                             drop(loop_);
                             state = session_hooks.state.state();
+                            if state
+                                .prompt_snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.epoch)
+                                != previous_epoch
+                            {
+                                refresh_prompt = false;
+                            }
                             if let Some(status) = status.as_ref()
                                 && status.human
                             {
@@ -1954,6 +2181,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 session: active.id(),
                                 state: state.clone(),
                                 result,
+                                selected_session: None,
                                 mcp_errors: mcp_errors.clone(),
                             };
 
@@ -2006,6 +2234,17 @@ pub(super) async fn drive_execution<S: EventSink>(
                         last.state = source_state;
                         if let Err(termination) = session_end {
                             last.termination = termination;
+                        }
+                        break 'sessions Ok(last);
+                    }
+                    EpochTransition::Resume { meta } => {
+                        active.replace_state(source_state.clone());
+                        last.state = source_state;
+                        if let Err(termination) = session_end {
+                            last.termination = termination;
+                        } else {
+                            last.selected_session = Some(meta);
+                            seat.restore_control(control);
                         }
                         break 'sessions Ok(last);
                     }

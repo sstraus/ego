@@ -26,7 +26,17 @@ pub struct ExecParams {
     pub background: bool,
 }
 
-pub struct ExecTool;
+#[derive(Default)]
+pub struct ExecTool {
+    environment: EnvPolicy,
+}
+
+impl ExecTool {
+    /// Select the run-owned child environment before tool preparation.
+    pub fn with_environment(environment: EnvPolicy) -> Self {
+        Self { environment }
+    }
+}
 
 impl TypedTool for ExecTool {
     type Params = ExecParams;
@@ -74,7 +84,7 @@ impl TypedTool for ExecTool {
             params.argv.into_iter().map(OsString::from).collect(),
             cwd,
             timeout,
-            EnvPolicy::Inherited,
+            self.environment.clone(),
         )
         .map_err(|err| ToolError::InvalidParams(err.to_string()))?;
 

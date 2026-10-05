@@ -141,6 +141,7 @@ pub(super) async fn drive_headless_turn(
         config,
         admission: Arc::clone(&admission),
         invocation,
+        retry_pause: Arc::new(TokioRetryPause),
     };
     let fs = OsFs;
     let effect_ports = ToolEffectPorts::new(
@@ -151,6 +152,7 @@ pub(super) async fn drive_headless_turn(
         ports.one_hop_handle(),
         ports.duplex_handle(),
     )
+    .with_secret_values(ego_tools::secrets::from_env())
     .with_cancel(cancel.clone());
     let hook_policy = match recovered_policy.as_ref() {
         Some(policy) => Arc::clone(policy),
@@ -247,7 +249,7 @@ pub(super) async fn drive_headless_turn(
         None => loop_,
     };
     let loop_ = match active.replayed() {
-        Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
+        Some(replayed) => loop_.with_replayed_context(replayed),
         None => loop_,
     };
     let loop_ = match elicitor {

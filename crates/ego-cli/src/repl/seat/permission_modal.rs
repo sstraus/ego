@@ -96,6 +96,9 @@ fn headline_rows(request: &PermissionRequest) -> Vec<String> {
         "Allow {}?",
         truncate(&describe_operations(request.ops()), COMMAND_CAP)
     )];
+    if let Some(name) = request.child_name() {
+        rows[0] = format!("Child {}: {}", safe(name), rows[0]);
+    }
     if let Some(presentation) = request.presentation() {
         rows.push(risk_words(presentation.risk()));
     }
@@ -194,6 +197,7 @@ fn risk_words(risk: &RiskAssessment) -> String {
             RiskReason::ForeignEffectsUnknown => "calls an outside tool",
             RiskReason::NetworkEffectsUnknown => "uses the network",
             RiskReason::SecretRelease => "sends a secret",
+            RiskReason::OrchestrationPolicy => "coordinator operation",
         })
         .collect::<Vec<_>>()
         .join(", ");

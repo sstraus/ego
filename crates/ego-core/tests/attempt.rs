@@ -1,7 +1,7 @@
 //! Generation attempts: the identity a retry keeps, the identity it does not,
 //! and the delivery certainty that decides whether a retry is safe at all.
 //!
-//! See `docs/decisions/2026-08-20-generation-attempt-contract.md` and
+//! See `ARCHITECTURE.md` and
 //! `plans/m0b-vertical-slice.md` Steps 1-2.
 //!
 //! What these tests defend is one claim: **a generation and a wire attempt are
@@ -216,6 +216,7 @@ mod lifecycle {
 
     fn request_for(model: &str) -> GenRequest {
         GenRequest {
+            cache: None,
             model: model.to_string(),
             messages: Conversation::new(vec![Message::text(
                 Role::User,
@@ -493,7 +494,7 @@ mod lifecycle {
     /// This replaces `pending_is_not_a_terminal_state`. That test proved
     /// `Outcome::new` rejected `StopReason::Pending` and that a `Stop(Pending)`
     /// frame folded to `Aborted`; the variant was removed in
-    /// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`, so the guard
+    /// `ARCHITECTURE.md`, so the guard
     /// it exercised no longer exists — "not finished yet" is now the absence
     /// of a `StopReason`, which is what this asserts. The round-trip below
     /// is the other half: every variant that *can* be decoded is terminal, so

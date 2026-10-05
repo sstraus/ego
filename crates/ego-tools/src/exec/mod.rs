@@ -1,6 +1,8 @@
 //! Exact argv-native execution behind one run-owned process boundary.
 
 mod backend;
+#[cfg(target_os = "linux")]
+mod bwrap;
 mod denial;
 mod editor_process;
 mod identity;
@@ -37,7 +39,7 @@ pub use editor_process::{EditorProcessError, run_editor_process};
 pub use ego_core::permit::{ProcessError, ProcessExecutor};
 #[cfg(target_os = "linux")]
 pub use landlock::dispatch_helper as dispatch_landlock_helper;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use probe::dispatch_network_probe;
 pub use secret_child::{SecretChildError, SecretChildOutput, SecretChildRequest, run_secret_child};
 
@@ -321,6 +323,10 @@ impl Drop for GuardedExec {
 }
 
 impl ProcessExecutor for GuardedExec {
+    fn confinement(&self) -> Option<ego_core::permit::Confinement> {
+        Some(self.context.confinement())
+    }
+
     fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
         identity::capture(spec)
     }
@@ -538,6 +544,10 @@ impl RunEffectPorts {
         }
     }
 
+    pub fn process_handle(&self) -> Arc<dyn ProcessExecutor> {
+        Arc::clone(&self.process) as Arc<dyn ProcessExecutor>
+    }
+
     pub fn process(&self) -> &dyn ProcessExecutor {
         self.process.as_ref()
     }
@@ -578,6 +588,28 @@ async fn select_backend(
     limits: ExecLimits,
     log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
+    if policy.level() == ego_core::permit::Confinement::Off && !policy.offline() {
+        return MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
+            .map(|backend| (Arc::new(backend), Vec::new()));
+    }
+    match probe::bwrap(policy, cancel.clone(), limits, log).await {
+        Ok(selected)
+            if selected
+                .0
+                .capabilities()
+                .contains(policy.requirements().required()) =>
+        {
+            return Ok(selected);
+        }
+        Err(ProcessError::Cancelled) => return Err(ProcessError::Cancelled),
+        Err(error) => log.record(ProbeRecord {
+            suite: "bwrap.prerequisite".into(),
+            root: policy.workspace().as_path().to_path_buf(),
+            argv: vec!["/usr/bin/bwrap".into()],
+            outcome: error.to_string(),
+        }),
+        Ok(_) => {}
+    }
     if policy.level() == ego_core::permit::Confinement::Off {
         return MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
             .map(|backend| (Arc::new(backend), Vec::new()));
@@ -645,6 +677,21 @@ fn policy_digest_with_runtime_roots(
     )?;
     for root in runtime_roots {
         update_path_field(&mut hash, b"runtime_root", root.as_path().as_os_str())?;
+    }
+    update_digest_field(
+        &mut hash,
+        b"roots.count",
+        &(policy.roots().len() as u64).to_be_bytes(),
+    )?;
+    for root in policy.roots() {
+        update_path_field(&mut hash, b"root.path", root.path().as_path().as_os_str())?;
+        update_digest_field(
+            &mut hash,
+            b"root.access",
+            &[u8::from(
+                root.access() == ego_core::permit::RootAccess::ReadWrite,
+            )],
+        )?;
     }
     let identity = backend.identity();
     update_digest_field(&mut hash, b"backend.name", identity.name().as_bytes())?;

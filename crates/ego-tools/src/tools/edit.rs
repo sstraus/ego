@@ -1,7 +1,7 @@
 //! `edit`: one occurrence of one string, replaced, through the guarded seam.
 //!
 //! The first tool in the tree that needs **two** authorities for one call. See
-//! `docs/decisions/2026-08-23-an-edit-is-two-authorities-and-a-conditional-write.md`.
+//! `ARCHITECTURE.md`.
 
 use ego_core::permit::{
     Change, GuardedIo, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,

@@ -28,6 +28,7 @@ pub enum RiskReason {
     ForeignEffectsUnknown,
     NetworkEffectsUnknown,
     SecretRelease,
+    OrchestrationPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
