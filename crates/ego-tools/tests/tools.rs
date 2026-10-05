@@ -367,6 +367,110 @@ fn populated() -> Workspace {
     ws
 }
 
+mod credential_keys {
+    use super::*;
+
+    fn workspace() -> Workspace {
+        Workspace::with_rules(
+            Mode::Yolo,
+            Ruleset::from_layer(
+                PermCfg {
+                    allow: vec![Rule::load("read(**)").unwrap()],
+                    deny: vec![],
+                    judge: None,
+                },
+                Source::User,
+            ),
+        )
+    }
+
+    // Catches: a user read grant restores raw credential values in read and grep.
+    #[test]
+    fn reallowed_credentials_return_keys_and_grep_cannot_match_values() {
+        let ws = workspace();
+        ws.file(
+            ".env.local",
+            "# comment\nexport API_TOKEN=hidden-token\nPASSWORD=hidden-password\n",
+        );
+        assert_eq!(
+            ws.call("read", json!({"path": ".env.local"})).unwrap(),
+            "\nAPI_TOKEN\nPASSWORD\n"
+        );
+        std::os::unix::fs::symlink(ws.root.join(".env.local"), ws.root.join("read-alias")).unwrap();
+        assert_eq!(
+            ws.call("read", json!({"path": "read-alias"})).unwrap(),
+            "\nAPI_TOKEN\nPASSWORD\n"
+        );
+        let keys = ws
+            .call("grep", json!({"query": "API_TOKEN|PASSWORD"}))
+            .unwrap();
+        assert!(keys.contains(".env.local:2:API_TOKEN"), "{keys}");
+        assert!(keys.contains(".env.local:3:PASSWORD"), "{keys}");
+        let values = ws
+            .call("grep", json!({"query": "hidden-token|hidden-password"}))
+            .unwrap();
+        assert!(values.starts_with("no line under"), "{values}");
+        ws.file(
+            ".aws/credentials",
+            "[default]\naws_access_key_id = hidden-id\naws_secret_access_key = hidden-secret\n",
+        );
+        assert_eq!(
+            ws.call("read", json!({"path": ".aws/credentials"}))
+                .unwrap(),
+            "\naws_access_key_id\naws_secret_access_key\n"
+        );
+        ws.file("ordinary.txt", "API_TOKEN=ordinary-text\n");
+        assert_eq!(
+            ws.call("read", json!({"path": "ordinary.txt"})).unwrap(),
+            "API_TOKEN=ordinary-text\n"
+        );
+    }
+
+    // Catches: opaque or malformed credential formats fall back to raw content.
+    #[test]
+    fn opaque_and_malformed_credentials_fail_closed_in_read_and_grep() {
+        let ws = workspace();
+        for (path, bytes) in [
+            (".ssh/id_ed25519", "private-key-material"),
+            (".netrc", "machine host login user password secret"),
+            (".aws/token.json", "{\"token\":\"secret\"}"),
+            (".env", "TOKEN=first\nsecret continuation\n"),
+        ] {
+            ws.file(path, bytes);
+            let error = ws
+                .call("read", json!({"path": path}))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("key names"), "{path}: {error}");
+        }
+        let found = ws
+            .call("grep", json!({"query": "secret|private-key"}))
+            .unwrap();
+        assert!(found.starts_with("no line under"), "{found}");
+    }
+
+    // Catches: exec bypasses key-only reads via a re-allowed path or its symlink.
+    #[test]
+    fn exec_refuses_declared_credential_paths_including_symlinks_and_background() {
+        let ws = workspace();
+        let file = ws.file(".env", "TOKEN=secret\n");
+        std::os::unix::fs::symlink(&file, ws.root.join("alias")).unwrap();
+        for path in [".env", "alias"] {
+            for background in [false, true] {
+                let error = ws
+                    .call(
+                        "exec",
+                        json!({"argv": ["cat", path], "background": background}),
+                    )
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("protected credential"), "{error}");
+                assert!(error.contains("read"), "{error}");
+            }
+        }
+    }
+}
+
 mod registration {
     use super::*;
 

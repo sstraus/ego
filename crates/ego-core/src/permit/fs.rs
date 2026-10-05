@@ -490,6 +490,9 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         input: &'b [u8],
         scope: EffectScope,
     ) -> BoxFuture<'b, Result<ToolResult, ProcessError>> {
+        if let Err(error) = self.refuse_credential_exec(spec) {
+            return Box::pin(future::ready(Err(error)));
+        }
         if let Err(denied) = self.permit.allows_spawn(spec) {
             return Box::pin(future::ready(Err(ProcessError::Invariant(
                 denied.to_string(),
@@ -691,6 +694,31 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         }
     }
 
+    fn refuse_credential_exec(&self, spec: &SpawnSpec) -> Result<(), ProcessError> {
+        let Some(cwd) = spec.cwd() else {
+            return Ok(());
+        };
+        for arg in spec.argv() {
+            let named = Path::new(arg);
+            let joined = if named.is_absolute() {
+                named.to_path_buf()
+            } else {
+                cwd.as_path().join(named)
+            };
+            let canonical = self.fs.canonicalize(&joined).ok();
+            if crate::config::Ruleset::is_credential_path(&CanonPath::new(&joined))
+                || canonical
+                    .as_ref()
+                    .is_some_and(crate::config::Ruleset::is_credential_path)
+            {
+                return Err(ProcessError::Invariant(
+                    "exec cannot access a protected credential file; use read or grep to inspect key names".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Check every entry a traversal yielded, and fail the whole operation if
     /// any of them left the authorised subtree.
     ///
@@ -711,6 +739,62 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
     }
 }
 
+/// Project protected assignments before any bytes or matching verdicts reach a tool.
+fn credential_keys(path: &CanonPath, bytes: Vec<u8>) -> Result<Vec<u8>, IoDenied> {
+    if !crate::config::Ruleset::is_credential_path(path) {
+        return Ok(bytes);
+    }
+    let refused = || FsError::Io {
+        path: path.clone(),
+        message: "protected credential file has no supported key names format".into(),
+    };
+    let name = path
+        .as_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let env = name.starts_with(".env");
+    let aws = path
+        .as_path()
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == ".aws")
+        && matches!(name, "credentials" | "config");
+    if !env && !aws {
+        return Err(refused().into());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| refused())?;
+    let mut keys = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let line = if env {
+            line.strip_prefix("export ").unwrap_or(line).trim_start()
+        } else {
+            line
+        };
+        if line.is_empty()
+            || line.starts_with('#')
+            || (aws && (line.starts_with(';') || (line.starts_with('[') && line.ends_with(']'))))
+        {
+            keys.push('\n');
+            continue;
+        }
+        let (key, _) = line.split_once('=').ok_or_else(refused)?;
+        let key = key.trim();
+        if key.is_empty()
+            || !key.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || byte == b'_' || (aws && matches!(byte, b'-' | b'.'))
+            })
+            || (env && key.as_bytes()[0].is_ascii_digit())
+        {
+            return Err(refused().into());
+        }
+        keys.push_str(key);
+        keys.push('\n');
+    }
+    Ok(keys.into_bytes())
+}
+
 impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedMcpResume<'resume>> {
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied> {
         // Re-resolve now, at use time, rather than trusting `path` — see
@@ -724,7 +808,7 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, IoDenied> {
         let fresh = self.fs.canonicalize(path.as_path())?;
         self.permit.allows_read(&fresh)?;
-        Ok(self.fs.read(&fresh)?)
+        credential_keys(&fresh, self.fs.read(&fresh)?)
     }
 
     fn list(&self, req: &ScanRequest) -> Result<Scan, IoDenied> {
@@ -770,6 +854,11 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
             }
             budget -= bytes.len() as u64;
 
+            let Ok(bytes) = credential_keys(&fresh, bytes) else {
+                // Unsupported credential formats are not searchable as raw bytes.
+                continue;
+            };
+
             // Lossy, and on purpose: a binary file is not a reason to fail a
             // text search, and a matcher that never accepts a replacement
             // character simply will not match one.
@@ -788,6 +877,9 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
     }
 
     fn exec<'a>(&'a self, spec: &'a SpawnSpec) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+        if let Err(error) = self.refuse_credential_exec(spec) {
+            return Box::pin(future::ready(Err(error)));
+        }
         if let Err(denied) = self.permit.allows_spawn(spec) {
             return Box::pin(future::ready(Err(ProcessError::Invariant(
                 denied.to_string(),
@@ -801,6 +893,9 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
         id: DetachedExecId,
         spec: &'a SpawnSpec,
     ) -> BoxFuture<'a, Result<(), ProcessError>> {
+        if let Err(error) = self.refuse_credential_exec(spec) {
+            return Box::pin(future::ready(Err(error)));
+        }
         if let Err(denied) = self.permit.allows_spawn(spec) {
             return Box::pin(future::ready(Err(ProcessError::Invariant(
                 denied.to_string(),
