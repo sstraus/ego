@@ -978,6 +978,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         let next_registry = match tools(
                                             args.tools.as_ref(),
                                             Some(prospective.core()),
+                                            effective
+                                                .active_profile
+                                                .as_ref()
+                                                .map(|profile| profile.name.as_str()),
                                         ) {
                                             Ok(registry) => registry,
                                             Err(error) => {
@@ -1502,6 +1506,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 target_skills
                                                     .as_ref()
                                                     .map(crate::skill::SkillCatalogueCapture::core),
+                                                effective
+                                                    .active_profile
+                                                    .as_ref()
+                                                    .map(|profile| profile.name.as_str()),
                                             )
                                             .map_err(|error| {
                                                 CompactionError::Internal(error.to_string())

@@ -195,8 +195,14 @@ pub(super) fn instructions(
 pub(super) fn tools(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    profile: Option<&str>,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = builtins().into_iter().map(RegisteredTool::Effect).collect();
+    if profile == Some("coordinator") {
+        all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(
+            ego_tools::tools::MemoryLookup,
+        ))));
+    }
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     if let Some(skills) = skills.filter(|catalogue| !catalogue.specs().is_empty()) {
         all.push(RegisteredTool::skill(skills));
@@ -869,6 +875,11 @@ pub(super) fn prepared_materials(
         skill_capture
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
+        settings
+            .effective
+            .active_profile
+            .as_ref()
+            .map(|profile| profile.name.as_str()),
     )?;
     let slug = args
         .model
