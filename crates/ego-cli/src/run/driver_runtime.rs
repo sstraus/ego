@@ -200,6 +200,7 @@ pub(super) async fn drive_execution<S: EventSink>(
         ($active:expr, $cancel:expr, $ports:expr, $observation:expr, $probe_evidence:expr, $hooks:expr, $journal:expr, $skill_owner:expr) => {{
             let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&$ports)))
                 as Arc<dyn ego_ai::http::Http>;
+            let router = super::router::compose(Arc::clone(&http), &cwd);
             let runtime = GenerationRuntime {
                 source: source.bind(http, $cancel.clone(), run_deadline),
                 policy_source: Arc::clone(&policy_source),
@@ -257,6 +258,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             .map_err(|error| RunTermination::Failed {
                 message: error.to_string(),
             })?;
+            let loop_ = super::router::attach(loop_, router);
             let skill_owner: Arc<dyn SkillInvocationPort + '_> = ($skill_owner).clone();
             let loop_ = loop_.with_skill_invocation_port(skill_owner);
             let loop_ = match $active.replayed() {

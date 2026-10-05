@@ -155,6 +155,7 @@ mod port_adapters;
 pub use port_adapters::cancelled_termination;
 use port_adapters::*;
 mod headless_driver;
+mod router;
 use headless_driver::*;
 mod composition_root;
 pub(crate) mod profile_roots;

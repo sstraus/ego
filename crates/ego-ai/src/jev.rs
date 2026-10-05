@@ -1,6 +1,7 @@
 //! One Decisions client for router, destructive and wake questions.
 pub mod calibration;
 mod configured;
+pub mod router;
 use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method, bearer_header, public_header};
 pub use configured::ConfiguredDecisions;
 use ego_core::credentials::SecretMaterial;
@@ -37,6 +38,13 @@ impl std::fmt::Display for DecisionError {
     }
 }
 impl std::error::Error for DecisionError {}
+
+/// Validated answers and provider-reported USD cost; absent cost stays unknown.
+#[derive(Debug, Clone)]
+pub struct DecisionResponse {
+    pub answers: BTreeMap<String, f64>,
+    pub cost_usd: Option<String>,
+}
 
 /// No retry, implicit endpoint, or provider fallback is performed.
 pub struct DecisionsClient {
@@ -81,10 +89,22 @@ impl DecisionsClient {
     pub async fn ask_with_headers(
         &self,
         http: &dyn Http,
-        mut headers: Vec<ego_core::permit::HttpHeader>,
+        headers: Vec<ego_core::permit::HttpHeader>,
         state: &Value,
         questions: &BTreeMap<String, String>,
     ) -> Result<BTreeMap<String, f64>, DecisionError> {
+        self.ask_measured(http, headers, state, questions)
+            .await
+            .map(|reply| reply.answers)
+    }
+    /// Retain measured cost without retaining provider bodies or judged state.
+    pub async fn ask_measured(
+        &self,
+        http: &dyn Http,
+        mut headers: Vec<ego_core::permit::HttpHeader>,
+        state: &Value,
+        questions: &BTreeMap<String, String>,
+    ) -> Result<DecisionResponse, DecisionError> {
         if questions.is_empty()
             || questions
                 .iter()
@@ -133,7 +153,7 @@ impl DecisionsClient {
             if answers.len() != questions.len() {
                 return Err(DecisionError::InvalidResponse);
             }
-            questions
+            let answers = questions
                 .keys()
                 .map(|id| {
                     let answer = answers.get(id).ok_or(DecisionError::InvalidResponse)?;
@@ -149,7 +169,16 @@ impl DecisionsClient {
                     }
                     Ok((id.clone(), p))
                 })
-                .collect()
+                .collect::<Result<_, _>>()?;
+            let cost_usd = value
+                .get("usage")
+                .and_then(|usage| usage.get("cost"))
+                .filter(|cost| {
+                    cost.as_f64()
+                        .is_some_and(|cost| cost.is_finite() && cost >= 0.0)
+                })
+                .map(Value::to_string);
+            Ok(DecisionResponse { answers, cost_usd })
         })
         .await
         .map_err(|_| DecisionError::Timeout)?
