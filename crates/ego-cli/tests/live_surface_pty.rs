@@ -67,16 +67,38 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !completed.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
+    // Catches the completion-file race: the shell writes the file before its
+    // exit and output evidence settle. Observe delivery at a turn boundary
+    // instead of treating that file as a process-settlement barrier.
+    loop {
+        let start = output.len();
+        input.write_all(b"inspect the completed command\r").unwrap();
+        input.flush().unwrap();
+        while !normalized(&output[start..]).contains("DETACHED-NEXT-TURN") {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            output.extend(
+                reader
+                    .recv_timeout(remaining)
+                    .expect("settlement reply deadline"),
+            );
+        }
+        let start = output.len();
+        until_prompt_from_with_context(
+            &reader,
+            &mut output,
+            start,
+            deadline.saturating_duration_since(Instant::now()),
+            "detached settlement composer",
+        );
+        let generations = stub.generations();
+        let history = generations.last().expect("next generation")["messages"].to_string();
+        if (history.contains("exited code 0") && history.contains("DETACHED-DONE"))
+            || Instant::now() >= deadline
+        {
+            break;
+        }
     }
     let completion = std::fs::read_to_string(&completed).ok();
-    let start = output.len();
-    input.write_all(b"inspect the completed command\r").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "DETACHED-NEXT-TURN");
-    let start = output.len();
-    until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     let status = bounded_exit(child);
