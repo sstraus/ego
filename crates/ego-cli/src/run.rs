@@ -237,3 +237,65 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
 #[cfg(test)]
 #[path = "run/tests.rs"]
 mod tests;
+
+/// Inspect only IDs admitted in the current session's durable journal.
+fn background_tasks(
+    arguments: &str,
+    state: &SessionState,
+    process: &dyn ego_core::permit::ProcessExecutor,
+) -> String {
+    use ego_core::event::id::DetachedExecId;
+    let words: Vec<_> = arguments.split_whitespace().collect();
+    let (selected, cancel) = match words.as_slice() {
+        [] => (None, false),
+        [id] => (Some(*id), false),
+        ["cancel", id] => (Some(*id), true),
+        _ => return "usage: /tasks [ID | cancel ID]".into(),
+    };
+    let selected = match selected.map(str::parse::<DetachedExecId>).transpose() {
+        Ok(id) => id,
+        Err(_) => return "invalid background exec ID".into(),
+    };
+    if selected.is_some_and(|id| !state.detached_execs.contains_key(&id)) {
+        return "unknown background exec ID in this session".into();
+    }
+    let mut rows = Vec::new();
+    for (id, settled) in &state.detached_execs {
+        if selected.is_some_and(|selected| selected != *id) {
+            continue;
+        }
+        if cancel
+            && settled.is_none()
+            && let Err(error) = process.cancel_background(*id)
+        {
+            return error.to_string();
+        }
+        let snapshot = match settled
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| process.background_status(*id))
+        {
+            Ok(snapshot) => snapshot,
+            Err(ego_core::permit::ProcessError::UnknownBackground { .. }) => {
+                ego_core::permit::DetachedExecSnapshot {
+                    id: *id,
+                    outcome: Some(ego_core::permit::DetachedExecOutcome::Interrupted),
+                    stdout_tail: Vec::new(),
+                    stderr_tail: Vec::new(),
+                    stdout_omitted: 0,
+                    stderr_omitted: 0,
+                }
+            }
+            Err(error) => return error.to_string(),
+        };
+        rows.push(snapshot.model_text());
+        if cancel && snapshot.outcome.is_none() {
+            rows.push("cancellation requested".into());
+        }
+    }
+    if rows.is_empty() {
+        "background tasks: none".into()
+    } else {
+        rows.join("\n")
+    }
+}

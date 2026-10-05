@@ -4162,3 +4162,134 @@ fn perimeter_probe_temp_overlap_is_a_named_startup_refusal() {
         "{error}"
     );
 }
+
+// Catches: promotion respawns the command, drops turn-owned evidence, or loses session cancellation.
+#[cfg(unix)]
+#[test]
+fn detached_foreground_promotion_keeps_one_child_and_session_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = CanonPath::new(std::fs::canonicalize(directory.path()).unwrap());
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let foreground = run.ports.with_session_processes(&run.ports);
+    let process = foreground.process_handle();
+    let spec = SpawnSpec::new(
+        vec!["/bin/sh".into(), "-c".into(), "printf x >> launches; printf READY > ready; printf original-output; while [ ! -f release ]; do sleep 0.05; done".into()],
+        Some(root), Some(Duration::from_secs(10)), EnvPolicy::default(),
+    ).unwrap();
+    let spec = process.observe(&spec).unwrap();
+    let worker_process = Arc::clone(&process);
+    let worker = std::thread::spawn(move || block_on(worker_process.execute(&spec)));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !directory.path().join("ready").exists() {
+        assert!(Instant::now() < deadline, "child did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let id = process
+        .foreground_exec()
+        .expect("running foreground identity");
+    process.detach_foreground(id).unwrap();
+    let handle = worker.join().unwrap().unwrap();
+    assert!(handle.model_text().contains(&id.to_string()));
+    drop(process);
+    drop(foreground);
+    run.cancel.cancel(CancelCause::User);
+    assert!(
+        run.ports
+            .process()
+            .background_status(id)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("launches")).unwrap(),
+        b"x",
+        "promotion spawned a second child"
+    );
+    std::fs::write(directory.path().join("release"), "go").unwrap();
+    let snapshot = loop {
+        let snapshot = run.ports.process().background_status(id).unwrap();
+        if snapshot.outcome.is_some() {
+            break snapshot;
+        }
+        assert!(Instant::now() < deadline, "promoted child did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let ego_core::permit::DetachedExecOutcome::Exited { code, result } = snapshot.outcome.unwrap()
+    else {
+        panic!("foreground cancellation killed the promoted child");
+    };
+    assert_eq!(code, 0);
+    assert!(result.model_text().contains("original-output"));
+    for block in result.content {
+        if let Some(reference) = block.full_output {
+            assert!(
+                block_on(run.evidence.read_page(
+                    &ego_core::store::evidence::EvidenceRead::new(reference, 0).unwrap()
+                ))
+                .is_ok(),
+                "original session evidence was lost"
+            );
+        }
+    }
+}
+
+// Catches: foreground promotion selects an unconfined session backend instead of its original sandbox.
+#[cfg(unix)]
+#[test]
+fn detached_foreground_promotion_preserves_the_read_only_sandbox() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = CanonPath::new(std::fs::canonicalize(directory.path()).unwrap());
+    let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 64) else {
+        return;
+    };
+    let foreground = run.ports.with_session_processes(&run.ports);
+    let process = foreground.process_handle();
+    let spec = SpawnSpec::new(
+        vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "while [ ! -f release ]; do sleep 0.05; done; printf forbidden > forbidden".into(),
+        ],
+        Some(root),
+        Some(Duration::from_secs(10)),
+        EnvPolicy::default(),
+    )
+    .unwrap();
+    let spec = process.observe(&spec).unwrap();
+    let worker_process = Arc::clone(&process);
+    let worker = std::thread::spawn(move || block_on(worker_process.execute(&spec)));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let id = loop {
+        if let Some(id) = process.foreground_exec() {
+            break id;
+        }
+        assert!(Instant::now() < deadline, "foreground was not registered");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    process.detach_foreground(id).unwrap();
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .unwrap()
+            .model_text()
+            .contains(&id.to_string())
+    );
+    std::fs::write(directory.path().join("release"), "go").unwrap();
+    let outcome = loop {
+        if let Some(outcome) = run.ports.process().background_status(id).unwrap().outcome {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "sandboxed child did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        matches!(outcome, ego_core::permit::DetachedExecOutcome::Exited { code, .. } if code != 0),
+        "sandbox refused outcome: {outcome:?}"
+    );
+    assert!(
+        !directory.path().join("forbidden").exists(),
+        "promotion bypassed the original read-only sandbox"
+    );
+}

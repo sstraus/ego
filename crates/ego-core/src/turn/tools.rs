@@ -127,6 +127,10 @@ pub struct ToolEffectPorts<'a> {
 }
 
 impl<'a> ToolEffectPorts<'a> {
+    pub(crate) fn process(&self) -> &dyn ProcessExecutor {
+        self.process
+    }
+
     pub(crate) fn detached_status(
         &self,
         id: crate::event::id::DetachedExecId,

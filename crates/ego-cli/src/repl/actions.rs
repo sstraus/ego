@@ -33,6 +33,7 @@ pub enum ActionId {
     New,
     Name,
     Goal,
+    Tasks,
     Tools,
     Expand,
     Skills,
@@ -85,6 +86,7 @@ pub enum Dispatch {
     Fork(ego_core::event::id::ItemId),
     Hooks,
     Config(String),
+    Tasks(String),
     Prompt,
     Immediate,
     InteractiveIngress,
@@ -504,6 +506,11 @@ impl ActionRegistry {
             enabled(New, "new", "Create a durable session"),
             enabled(Name, "name", "Set durable session display metadata"),
             enabled(Goal, "goal", "Manage the persistent goal lifecycle"),
+            enabled(
+                Tasks,
+                "tasks",
+                "Inspect background exec — /tasks [ID | cancel ID]",
+            ),
             enabled(Tools, "tools", "Inspect available tools"),
             enabled(
                 Expand,
@@ -517,6 +524,11 @@ impl ActionRegistry {
             enabled(Version, "version", "Show packaged version information"),
         ])
         .expect("the final action surface is statically unique")
+        .with_binding(KeyBinding::new(
+            "Ctrl+B",
+            "backgrounds",
+            "Send the running exec to the background",
+        ))
         .with_binding(KeyBinding::new(
             "Esc",
             "interrupts",
@@ -790,6 +802,9 @@ impl ActionRegistry {
             let boundary = command.find(char::is_whitespace).unwrap_or(command.len());
             let name = &command[..boundary];
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
+            if name == "tasks" && self.resolve_slash(name) == Some(ActionId::Tasks) {
+                return Dispatch::Tasks(raw_arguments.trim().to_owned());
+            }
             if name == "history" && self.resolve_alias(name) == Some(ActionId::Sessions) {
                 if self.availability(ActionId::Sessions) != Availability::Enabled {
                     return Dispatch::Refused {

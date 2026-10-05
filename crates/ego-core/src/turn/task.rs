@@ -417,6 +417,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
             turn,
             join_all(work),
             InterruptDisposition::AwaitEffect,
+            None,
         )
         .await;
         match results {

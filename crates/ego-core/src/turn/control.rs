@@ -20,11 +20,13 @@ const CAPACITY: usize = 0;
 pub enum ControlError {
     Closed,
     Store(String),
+    Unavailable(String),
 }
 
 impl fmt::Display for ControlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Unavailable(message) => f.write_str(message),
             Self::Closed => f.write_str("the interactive turn coordinator is closed"),
             Self::Store(message) => write!(f, "the prompt was not durably accepted: {message}"),
         }
@@ -34,6 +36,9 @@ impl fmt::Display for ControlError {
 impl std::error::Error for ControlError {}
 
 pub(crate) enum ControlIntent {
+    Background {
+        reply: oneshot::Sender<Result<crate::event::id::DetachedExecId, ControlError>>,
+    },
     Submit {
         text: String,
         reply: oneshot::Sender<Result<QueueStatus, ControlError>>,
@@ -84,6 +89,21 @@ impl InteractiveIngress {
         }
         sender
             .send(ControlIntent::Submit { text, reply })
+            .await
+            .map_err(|_| ControlError::Closed)?;
+        drop(sender);
+        answer.await.map_err(|_| ControlError::Closed)?
+    }
+
+    /// Move the currently admitted exec into the session's detached registry.
+    pub async fn background(&self) -> Result<crate::event::id::DetachedExecId, ControlError> {
+        let (reply, answer) = oneshot::channel();
+        let mut sender = self.sender.lock().await;
+        if !self.admission.open.load(Ordering::Acquire) {
+            return Err(ControlError::Closed);
+        }
+        sender
+            .send(ControlIntent::Background { reply })
             .await
             .map_err(|_| ControlError::Closed)?;
         drop(sender);

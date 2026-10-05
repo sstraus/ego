@@ -1215,6 +1215,16 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         }
                                         continue;
                                     }
+                                    repl::Line::HostCommand(repl::HostCommand::Tasks(
+                                        arguments,
+                                    )) => {
+                                        diagnostics.note(&background_tasks(
+                                            &arguments,
+                                            &state,
+                                            session_hook_ports.process(),
+                                        ));
+                                        continue;
+                                    }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Help,
                                     )) => {
@@ -2020,6 +2030,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                             } else {
                                 Vec::new()
                             };
+                            let unsettled_before = state.unsettled_detached_execs();
                             let loop_ = build!(
                                 active,
                                 &turn_cancel,
@@ -2129,6 +2140,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                             };
                             drop(loop_);
                             state = session_hooks.state.state();
+                            for id in unsettled_before {
+                                if let Some(Some(snapshot)) = state.detached_execs.get(&id) {
+                                    diagnostics.note(&snapshot.model_text());
+                                }
+                            }
                             if state
                                 .prompt_snapshot
                                 .as_ref()

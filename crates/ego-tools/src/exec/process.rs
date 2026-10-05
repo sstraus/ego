@@ -54,6 +54,7 @@ pub(crate) struct RunProcessContext {
     capabilities: ExecCaps,
     background: Arc<Mutex<BTreeMap<DetachedExecId, BackgroundEntry>>>,
     background_changed: Arc<Condvar>,
+    foreground: Mutex<Option<DetachedExecId>>,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     /// The last profile rendered for a grant list, so a run of commands under
     /// the same grants shares one private profile file.
@@ -61,6 +62,7 @@ pub(crate) struct RunProcessContext {
 }
 
 struct BackgroundEntry {
+    promoted: bool,
     cancel: CancelToken,
     cancelled: bool,
     outcome: Option<DetachedExecOutcome>,
@@ -120,6 +122,7 @@ impl RunProcessContext {
             capabilities,
             background: Arc::new(Mutex::new(BTreeMap::new())),
             background_changed: Arc::new(Condvar::new()),
+            foreground: Mutex::new(None),
             sandbox_grants,
             widened: Mutex::new(None),
         }
@@ -134,9 +137,21 @@ impl RunProcessContext {
         id: DetachedExecId,
         spec: &SpawnSpec,
     ) -> Result<(), ProcessError> {
-        self.confinement
+        self.start_tracked(id, spec, self, true, None)
+    }
+
+    fn start_tracked(
+        self: &Arc<Self>,
+        id: DetachedExecId,
+        spec: &SpawnSpec,
+        execution: &Arc<Self>,
+        promoted: bool,
+        reply: Option<oneshot::Sender<Result<ToolResult, ProcessError>>>,
+    ) -> Result<(), ProcessError> {
+        execution
+            .confinement
             .requirements()
-            .check(self.capabilities)
+            .check(execution.capabilities)
             .map_err(ProcessError::MissingCapabilities)?;
         let cancel = CancelToken::new();
         let output = Arc::new(Mutex::new(LiveOutput::default()));
@@ -152,6 +167,7 @@ impl RunProcessContext {
             entries.insert(
                 id,
                 BackgroundEntry {
+                    promoted,
                     cancel: cancel.clone(),
                     cancelled: false,
                     outcome: None,
@@ -159,7 +175,7 @@ impl RunProcessContext {
                 },
             );
         }
-        let context = Arc::clone(self);
+        let context = Arc::clone(execution);
         let spec = spec.clone();
         let registry = Arc::clone(&self.background);
         let changed = Arc::clone(&self.background_changed);
@@ -173,12 +189,70 @@ impl RunProcessContext {
                 entry.outcome = Some(if entry.cancelled {
                     DetachedExecOutcome::Cancelled
                 } else {
-                    detached_outcome(result)
+                    detached_outcome(result.clone())
                 });
                 changed.notify_all();
             }
+            if let Some(reply) = reply {
+                let _ = reply.send(result);
+            }
         });
         Ok(())
+    }
+
+    pub(crate) fn foreground_exec(&self) -> Option<DetachedExecId> {
+        *self.foreground.lock().expect("foreground exec lock")
+    }
+
+    pub(crate) fn detach_foreground(&self, id: DetachedExecId) -> Result<(), ProcessError> {
+        let mut entries = self.background.lock().map_err(|_| {
+            ProcessError::Backend("background process registry lock poisoned".into())
+        })?;
+        let entry = entries
+            .get_mut(&id)
+            .ok_or(ProcessError::UnknownBackground { id })?;
+        entry.promoted = true;
+        Ok(())
+    }
+
+    pub(crate) async fn execute_promotable(
+        self: &Arc<Self>,
+        owner: &Arc<Self>,
+        spec: &SpawnSpec,
+    ) -> Result<ToolResult, ProcessError> {
+        let id = DetachedExecId::new();
+        let (reply, mut answer) = oneshot::channel();
+        owner.start_tracked(id, spec, self, false, Some(reply))?;
+        *self.foreground.lock().expect("foreground exec lock") = Some(id);
+        let mut tick = tokio::time::interval(Duration::from_millis(10));
+        let result = loop {
+            // Promotion wins over completion: the admitted handle must have
+            // one journal settlement even when the child exits at Ctrl+B.
+            let promoted = owner
+                .background
+                .lock()
+                .expect("background exec lock")
+                .get(&id)
+                .is_some_and(|entry| entry.promoted);
+            if promoted {
+                break Ok(ToolResult::builtin(format!("background exec id: {id}")));
+            }
+            if self.cancel.is_cancelled() {
+                owner.cancel_background(id)?;
+            }
+            tokio::select! {
+                result = &mut answer => break result.map_err(|error| {
+                    ProcessError::Backend(format!("process task failed: {error}"))
+                })?,
+                _ = tick.tick() => {},
+            }
+        };
+        *self.foreground.lock().expect("foreground exec lock") = None;
+        let mut entries = owner.background.lock().expect("background exec lock");
+        if entries.get(&id).is_some_and(|entry| !entry.promoted) {
+            entries.remove(&id);
+        }
+        result
     }
 
     pub(crate) fn background_status(
@@ -307,7 +381,9 @@ impl RunProcessContext {
         let context = ExecutionContext {
             backend,
             evidence: self.evidence.clone(),
-            cancel: self.cancel.clone(),
+            cancel: background_cancel
+                .clone()
+                .unwrap_or_else(|| self.cancel.clone()),
             limits: self.limits,
         };
         let spec = spec.clone();
