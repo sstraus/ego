@@ -232,6 +232,171 @@ fn successor_accepts_next_turn(action: &str) {
 const DSR_QUERY: &[u8] = b"\x1b[6n";
 const DSR_RESPONSE: &[u8] = b"\x1b[4;1R";
 
+// Catches: cooked type-ahead becomes one Ctrl-J batch and drops the second line.
+#[cfg(not(windows))]
+#[test]
+fn two_lines_submitted_before_composer_readiness_reach_the_session_once() {
+    let discovery = ReleaseGate::new();
+    // TERM enables Markdown rendering, which publishes complete blocks.
+    let (first, first_reply) = gated_paced_line("EARLY-FIRST-ANSWER\n");
+    let stub = Stub::start(Plan {
+        discovery_gate: Some(Arc::clone(&discovery)),
+        completions: vec![first, Reply::Sse(text("EARLY-SECOND-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 90,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let mut writer = pair.master.take_writer().expect("writer");
+    // Discovery is a real startup effect. Holding its reply prevents activation,
+    // without a timing guess or a production-only test hook.
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !stub
+        .requests()
+        .iter()
+        .any(|request| request.path == "/api/tags")
+    {
+        assert!(Instant::now() < deadline, "startup did not reach discovery");
+        thread::sleep(Duration::from_millis(10));
+    }
+    writer
+        .write_all(b"early alpha\rearly beta\r")
+        .expect("type-ahead");
+    writer.flush().expect("type-ahead flush");
+    let (mut input, dsr_responder, writer_join) = writer_owner(writer);
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((24, 90)),
+    );
+    let mut output = Vec::new();
+    drain(&reader, &mut output);
+    assert_eq!(rendered_prompt_count(&output), 0, "composer already opened");
+    discovery.release();
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !normalized(&output).contains("EARLY-FIRST-ANSWER") {
+        match reader.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(chunk) => output.extend(chunk),
+            Err(error) => panic!(
+                "first answer wait failed: {error}; requests: {:?}; journal: {}",
+                stub.requests(),
+                std::fs::read_to_string(
+                    ego.home_path()
+                        .join("sessions")
+                        .join(support::FIXTURE_SESSION_ID)
+                        .join("events.jsonl")
+                )
+                .unwrap_or_default(),
+            ),
+        }
+    }
+    // The native status omits the textual queue banner. The durable event is
+    // the queue acknowledgement, independent of the chosen presentation.
+    let journal = ego
+        .home_path()
+        .join("sessions")
+        .join(support::FIXTURE_SESSION_ID)
+        .join("events.jsonl");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    loop {
+        let queued_before_settlement = std::fs::read_to_string(&journal).expect("live journal");
+        if queued_before_settlement.lines().any(|line| {
+            // The writer may still be appending the last envelope.
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                return false;
+            };
+            event["payload"]["event"]["kind"]["kind"] == "PromptQueued"
+                && event["payload"]["event"]["kind"]["text"] == "early beta"
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "second input was not durably queued before provider settlement: {queued_before_settlement}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    first_reply.release();
+    until_normalized(&reader, &mut output, 0, "EARLY-SECOND-ANSWER");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    let events = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("durable session");
+    let events: Vec<serde_json::Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event envelope"))
+        .collect();
+    let prompts: Vec<&str> = events
+        .iter()
+        .filter(|event| event["payload"]["event"]["kind"]["kind"] == "UserPrompt")
+        .map(|event| {
+            event["payload"]["event"]["kind"]["text"]
+                .as_str()
+                .expect("prompt text")
+        })
+        .collect();
+    assert_eq!(prompts, ["early alpha", "early beta"]);
+    let queued: Vec<&str> = events
+        .iter()
+        .filter(|event| event["payload"]["event"]["kind"]["kind"] == "PromptQueued")
+        .map(|event| {
+            event["payload"]["event"]["kind"]["text"]
+                .as_str()
+                .expect("queued text")
+        })
+        .collect();
+    assert_eq!(queued, ["early beta"]);
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2, "provider turns: {generations:?}");
+    assert_eq!(count_exact_strings(&generations[0], "early alpha"), 1);
+    assert_eq!(count_exact_strings(&generations[0], "early beta"), 0);
+    assert_eq!(count_exact_strings(&generations[1], "early beta"), 1);
+    let mut screen = vt100::Parser::new(24, 90, 100);
+    screen.process(&output);
+    screen.screen_mut().set_scrollback(100);
+    let transcript = screen.screen().contents();
+    assert_eq!(
+        transcript.matches("early alpha").count(),
+        1,
+        "duplicate type-ahead: {transcript}"
+    );
+    assert_eq!(
+        transcript.matches("early beta").count(),
+        1,
+        "duplicate type-ahead: {transcript}"
+    );
+}
+
 fn double_ctrl_c_exit(status: &ExitStatus) -> bool {
     status.success() || cfg!(windows) && status.exit_code() == 0xC000_013A // STATUS_CONTROL_C_EXIT
 }
@@ -1869,7 +2034,7 @@ fn slash_action_stall_reports_command_and_waiting_step() {
 
 fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, previous: usize) {
     let deadline = Instant::now() + PROGRESS_DEADLINE;
-    while rendered_prompt_count(output) <= previous {
+    while support::ready_prompt_count(output) <= previous {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             drain(receiver, output);
@@ -5159,7 +5324,7 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
     let pair = NativePtySystem::default()
         .openpty(PtySize {
             rows: 40,
-            cols: 80,
+            cols: 90,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -5175,13 +5340,13 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
-    let prompt_count = rendered_prompt_count(&output);
+    let prompt_count = support::ready_prompt_count(&output);
     input.write_all(b"yes\r").expect("trust answer");
     input.flush().expect("trust answer flush");
     until_prompt_after(&reader, &mut output, prompt_count);
 
     for width in [80, 60, 40] {
-        let prompt_count = rendered_prompt_count(&output);
+        let prompt_count = support::ready_prompt_count(&output);
         pair.master
             .resize(PtySize {
                 rows: 40,
@@ -5193,7 +5358,7 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
         until_prompt_after(&reader, &mut output, prompt_count);
 
         let help_start = output.len();
-        let prompt_count = rendered_prompt_count(&output);
+        let prompt_count = support::ready_prompt_count(&output);
         input.write_all(b"/help\r").expect("help command");
         input.flush().expect("help command flush");
         until_normalized_without_new_generation(
@@ -5207,7 +5372,7 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
         until_prompt_after(&reader, &mut output, prompt_count);
 
         let doctor_start = output.len();
-        let prompt_count = rendered_prompt_count(&output);
+        let prompt_count = support::ready_prompt_count(&output);
         input.write_all(b"/doctor\r").expect("doctor command");
         input.flush().expect("doctor command flush");
         until_normalized_without_new_generation(

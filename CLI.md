@@ -925,6 +925,10 @@ History, completion, multiline editing, bracketed paste, and concurrent output
 use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
 
+The live seat enters raw mode before startup discovery, so lines typed before
+the composer appears retain their Enter boundaries without cooked terminal
+echo. The first starts a turn; further submitted lines enter the busy FIFO.
+
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
 /sessions /fork [message-id] /compact /clear /usage /statusline /export /doctor /quit /new
 /name /goal /tools /expand /skills /hooks /version`. These 25 commands are the complete
