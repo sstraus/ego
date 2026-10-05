@@ -33,12 +33,13 @@ intact during installation. On this project's development Mac, Cargo must run
 through the configured mbx shim; see [building from source](docs/getting-started/README.md).
 
 Choose a provider/model from `ego models`. For example, with an existing local
-Ollama installation and a downloaded completion model:
+Ollama installation:
 
 ```sh
+ollama pull qwen3
 ego models --provider ollama --refresh
 ego config set 'roots=[]'
-ego -m ollama/gemma4:e4b-mlx --thinking off
+ego -m ollama/qwen3 --thinking off
 ```
 
 Type a first prompt such as “Explain the main entry points in this repository.”
@@ -54,11 +55,16 @@ model, supply its API key or complete subscription login first; see
 | `ego run PROMPT` | One headless run; text, JSON, or live JSONL on stdout |
 | `ego acp` | ACP over stdio for a host such as TUICommander |
 
+The command set is `ego run`, `ego resume`, `ego fork`, `ego compact`,
+`ego export`, `ego ls`, `ego usage`, `ego models`, `ego hooks`, `ego doctor`,
+`ego acp`, `ego a2a`, `ego auth`, `ego mcp`, `ego config`, `ego roots`,
+`ego rules`, and `ego mcp-server`.
+
 A pipeline uses an explicit model and never prompts for permission or trust:
 
 ```sh
 printf '%s\n' 'Reply with one sentence about what a coding harness does.' | \
-  ego run -m ollama/gemma4:e4b-mlx --thinking off --no-tools --timeout 30s --output json -
+  ego run -m ollama/qwen3 --thinking off --no-tools --timeout 30s --output json -
 ```
 
 Headless work is untrusted and bare by default. Project configuration and ambient
