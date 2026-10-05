@@ -137,6 +137,10 @@ fn cancelling_an_open_permission_settles_the_packaged_prompt_as_cancelled() {
         if frame["method"] == "session/request_permission" {
             break frame;
         }
+        assert_ne!(
+            frame["id"], prompt_id,
+            "prompt completed before requesting permission: {frame}"
+        );
     };
     host.write_frame(serde_json::json!({
         "jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session},
