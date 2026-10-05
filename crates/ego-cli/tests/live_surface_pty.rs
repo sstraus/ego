@@ -248,6 +248,109 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     );
 }
 
+// Catches: settlement inside the launching turn is never announced, or is announced again.
+#[test]
+fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "echo $$ > child-pid; printf STARTED > started; while [ ! -f release ]; do sleep 0.05; done; printf REGRESSION-MARKER"],
+        "background": false,
+        "timeout_ms": 15000
+    });
+    let wait = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "while kill -0 $(cat child-pid) 2>/dev/null; do sleep 0.05; done"],
+        "timeout_ms": 15000
+    });
+    let gate = support::ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("regression_case", "exec", &arguments.to_string())),
+            Reply::GatedPaced {
+                head: String::new(),
+                tail: tool_call("regression_case", "exec", &wait.to_string()),
+                gate: Arc::clone(&gate),
+            },
+            Reply::Sse(text("REGRESSION-MARKER-DONE")),
+            Reply::Sse(text("REGRESSION-MARKER-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# detached exec critic fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "--mode",
+        "yolo",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"start the detached command\r").unwrap();
+    input.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !places.workspace_path().join("started").exists() {
+        assert!(Instant::now() < deadline, "foreground child never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    input.write_all(b"\x02").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "background exec id:");
+    places.file("release", "continue\n");
+    gate.release();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-DONE");
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let launch_output = normalized(&output[start..]);
+    let launch_history =
+        stub.generations().last().expect("launch generation")["messages"].to_string();
+    let next = output.len();
+    input.write_all(b"next turn\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, next, "REGRESSION-MARKER-DONE");
+    until_prompt_from(&reader, &mut output, next);
+    drain_until_quiet(&reader, &mut output);
+    let next_output = normalized(&output[next..]);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "REPL exit: {status:?}");
+    assert!(
+        launch_history.contains("exited code 0") && launch_history.contains("REGRESSION-MARKER"),
+        "child did not settle inside launching turn: {launch_history}"
+    );
+    assert_eq!(
+        launch_output.matches("exited code 0").count(),
+        1,
+        "launching-turn automatic settlement notice missing or duplicated: {launch_output}"
+    );
+    assert!(
+        !next_output.contains("exited code 0"),
+        "settlement announced twice: {next_output}"
+    );
+}
+
 // Catches: a second cross-root selection rebases a relative store under the selected project.
 #[test]
 fn repeated_cross_root_resume_preserves_relative_session_store() {
