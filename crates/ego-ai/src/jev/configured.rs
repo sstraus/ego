@@ -1,5 +1,5 @@
 //! Call-time credentials and OS canonicalization for the shared Jev client.
-use super::{DecisionError, DecisionsClient};
+use super::{DecisionError, DecisionResponse, DecisionsClient};
 use crate::http::{Http, bearer_header};
 use ego_core::{
     config::{JEV_ENDPOINT, JevAuth, JevConfig, JevSettings, JevUse},
@@ -64,6 +64,21 @@ impl ConfiguredDecisions {
         state: &Value,
         questions: &BTreeMap<String, String>,
     ) -> Result<Option<BTreeMap<String, f64>>, DecisionError> {
+        self.ask_measured(http, root, usage, calibrated, state, questions)
+            .await
+            .map(|reply| reply.map(|reply| reply.answers))
+    }
+    /// The same single exchange with provider-reported measurement metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ask_measured(
+        &self,
+        http: &dyn Http,
+        root: &Path,
+        usage: JevUse,
+        calibrated: bool,
+        state: &Value,
+        questions: &BTreeMap<String, String>,
+    ) -> Result<Option<DecisionResponse>, DecisionError> {
         if !calibrated {
             return Ok(None);
         }
@@ -111,7 +126,7 @@ impl ConfiguredDecisions {
             self.timeout,
         )?;
         client
-            .ask_with_headers(http, headers, state, questions)
+            .ask_measured(http, headers, state, questions)
             .await
             .map(Some)
     }

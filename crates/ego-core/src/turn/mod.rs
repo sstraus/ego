@@ -16,6 +16,8 @@ mod identity;
 mod journal;
 mod mcp_registry;
 mod policy;
+mod router;
+pub use router::{RouterOutcome, RouterStatus, TurnRouter};
 mod task;
 mod tools;
 
@@ -957,6 +959,9 @@ pub struct TurnLoop<'session, 'turn> {
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     task_usage: Option<Arc<dyn Fn() -> Usage + Send + Sync + 'turn>>,
     generation_role: GenerationRole,
+    router: Option<Arc<dyn TurnRouter>>,
+    routed_turn: Option<TurnId>,
+    routed_model: Option<ModelRef>,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
 }
@@ -1100,7 +1105,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             active_skill_invocations: BTreeMap::new(),
             task_usage: None,
             generation_role: GenerationRole::Main,
+            router: None,
+            routed_turn: None,
+            routed_model: None,
         })
+    }
+
+    /// Attach the per-turn judge without changing session model authority.
+    pub fn with_router(mut self, router: Arc<dyn TurnRouter>) -> Self {
+        self.router = Some(router);
+        self
     }
 
     /// Attach the stable host facts for the optional judge seat.
@@ -3125,6 +3139,65 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 );
             }
         };
+        if self.routed_turn != Some(turn) {
+            self.routed_turn = Some(turn);
+            self.routed_model = None;
+            if self.generation_role == GenerationRole::Main
+                && self.main_model_request().model().is_none()
+                && let (Some(router), Some(strong)) =
+                    (self.router.clone(), self.config.fallbacks.last().cloned())
+            {
+                let text = history
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == Role::User)
+                    .map(|message| {
+                        message
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                // The approved hop budget includes the whole routing operation.
+                let outcome = match await_controlled(
+                    &self.journal,
+                    &self.cancel,
+                    &mut self.control,
+                    turn,
+                    router.route(&text),
+                    InterruptDisposition::Return,
+                )
+                .await
+                {
+                    Controlled::Completed(outcome) => outcome,
+                    Controlled::Interrupted => {
+                        return Ok(Generated::Cancelled {
+                            cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                            pending: Vec::new(),
+                        });
+                    }
+                    Controlled::Failed(cause) => return Err(cause),
+                };
+                if outcome.status == RouterStatus::Strong {
+                    self.routed_model = Some(strong);
+                }
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::RouterDecision {
+                        model: self.routed_model.clone(),
+                        outcome,
+                    },
+                )?;
+            }
+        }
         let conversation = self.with_system(history);
         if !repairs.is_empty() {
             // Not a durable event: whether a repair becomes one is
@@ -3180,8 +3253,25 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let generation_id = first.generation();
         let mut next_attempt = first;
         let mut candidates = Vec::with_capacity(1 + self.config.fallbacks.len());
-        candidates.push(None);
-        candidates.extend(self.config.fallbacks.iter().cloned().map(Some));
+        let routed_model = if self.generation_role == GenerationRole::Main
+            && self.main_model_request().model().is_none()
+        {
+            self.routed_model.clone()
+        } else {
+            None
+        };
+        candidates.push(routed_model.clone());
+        if routed_model.is_some() {
+            candidates.push(None);
+        }
+        candidates.extend(
+            self.config
+                .fallbacks
+                .iter()
+                .filter(|model| Some(*model) != routed_model.as_ref())
+                .cloned()
+                .map(Some),
+        );
         let mut last_failure = None;
         let mut last_preflight_exit = ExitReason::Usage;
         let mut primary_model: Option<ModelRef> = None;
@@ -3200,6 +3290,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             loop {
                 let model_request = match candidate.as_ref() {
                     Some(model) => self.main_model_request().with_model(model.clone()),
+                    None if candidate_index > 0 => self.main_model_request(),
                     None => primary_model.as_ref().map_or_else(
                         || self.main_model_request(),
                         |model| self.main_model_request().with_model(model.clone()),

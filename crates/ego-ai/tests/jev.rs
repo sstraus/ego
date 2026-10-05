@@ -405,3 +405,73 @@ async fn explicit_api_key_gateway_resolves_the_named_environment_at_call_time() 
 
 #[path = "jev/destructive.rs"]
 mod destructive;
+
+// Catches: inverted/inexact calibrated bands, fabricated zero cost, off-root HTTP,
+// or a stalled exchange blocking the fixed-model fallback beyond the hop deadline.
+#[tokio::test]
+async fn router_honours_bands_root_off_unknown_cost_and_timeout() {
+    use ego_ai::jev::router::JevRouter;
+    use ego_core::{
+        config::{JevAuth, JevConfig, JevRoot, JevUseOverride},
+        turn::{RouterStatus, TurnRouter},
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    for (p, on, stall, priced, expected) in [
+        (0.15, true, false, true, RouterStatus::Cheap),
+        (0.55, true, false, true, RouterStatus::Strong),
+        (0.26, true, false, true, RouterStatus::Grey),
+        (0.9, true, false, false, RouterStatus::Strong),
+        (0.9, false, false, true, RouterStatus::Off),
+        (0.9, true, true, true, RouterStatus::Timeout),
+    ] {
+        // Reuse the captured response envelope; inject probabilities at the policy boundary.
+        let mut response = fixture()["response"].clone();
+        let mut answer = response["answers"]["wake"].clone();
+        answer["noul"] = json!(p);
+        response["answers"] = json!({"decision":answer});
+        if !priced {
+            response.as_object_mut().unwrap().remove("usage");
+        }
+        let calls = Arc::new(Mutex::new(vec![]));
+        let http = Arc::new(Recorder {
+            calls: calls.clone(),
+            response,
+            stall,
+        });
+        let config = JevConfig {
+            auth: JevAuth::Header {
+                name: "X-Test".into(),
+                value: "test".into(),
+            },
+            roots: vec![JevRoot {
+                path: tmp.path().to_string_lossy().into(),
+                endpoint: None,
+                wake: None,
+                destructive: None,
+                router: Some(JevUseOverride {
+                    on: Some(on),
+                    ..Default::default()
+                }),
+            }],
+            ..Default::default()
+        };
+        let router = JevRouter::new(config, tmp.path().into(), tmp.path().into(), http);
+        let start = std::time::Instant::now();
+        let outcome = router.route("bounded lookup").await;
+        assert_eq!(outcome.status, expected);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(calls.lock().unwrap().len(), usize::from(on));
+        if on && !stall {
+            assert_eq!(outcome.probability.unwrap().get(), p);
+            assert_eq!(outcome.cost_usd.is_some(), priced);
+        }
+        for call in calls.lock().unwrap().iter() {
+            let request: Value = serde_json::from_slice(call.body()).unwrap();
+            assert_eq!(request["state"], json!({"text":"bounded lookup"}));
+            assert_eq!(
+                request["provider"],
+                json!({"zdr":true,"data_collection":"deny"})
+            );
+        }
+    }
+}
