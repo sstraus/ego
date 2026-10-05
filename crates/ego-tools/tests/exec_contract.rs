@@ -3309,3 +3309,72 @@ fn macos_exec_paths_default_python_catches_runtime_root_widening_writes() {
     );
     assert!(!target.exists());
 }
+
+// Catches: the selected environment policy is lost between config resolution,
+// builtin preparation and the actual child process.
+#[test]
+fn configured_exec_environment_reaches_real_builtin_children() {
+    use ego_core::config::{ConfigLayer, Trust, resolve};
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().unwrap();
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(executable_text)],
+                deny: vec![],
+                judge: None,
+            },
+            Source::User,
+        ),
+    );
+    let fs = OsFs;
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    for (config, expected) in [
+        ("", "PATH=present"),
+        ("[exec]\nenv='core'", "PATH=present"),
+        ("[exec]\nenv='allowlist'\nenv_allowlist=[]", "PATH=absent"),
+        (
+            "[exec]\nenv='allowlist'\nenv_allowlist=['PATH']",
+            "PATH=present",
+        ),
+    ] {
+        let effective = resolve(
+            &[ConfigLayer::parse(Source::User, config).unwrap()],
+            Trust::Untrusted,
+            None,
+        )
+        .unwrap();
+        let registry =
+            ego_tools::tools::builtins_with_environment(effective.exec.policy().unwrap());
+        let tools = TurnTools::new(
+            &registry,
+            ToolEffectPorts::new(
+                &fs,
+                run.ports.process(),
+                &run.evidence,
+                run.ports.resolver_handle(),
+                run.ports.one_hop_handle(),
+                run.ports.duplex_handle(),
+            ),
+            root.clone(),
+        );
+        let params = serde_json::json!({
+            "argv": [executable_text, "--ignored", "--exact",
+                "exec_contract_fixture_reports_environment_presence_without_values",
+                "--nocapture", "--", "PATH"],
+            "timeout_ms": 10000
+        });
+        let (tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("fixture command must be authorized");
+        };
+        let output = block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap();
+        assert!(
+            format!("{output:?}").contains(expected),
+            "{config}: {output:?}"
+        );
+    }
+}

@@ -64,6 +64,7 @@ const fn decide(input: AdmissionInput) -> Admission {
 pub(super) fn admit(
     args: &super::Args,
     effective_sandbox: Option<Confinement>,
+    offline: bool,
     driver: &super::Driver<'_>,
     root: &std::path::Path,
     home: Option<&std::path::Path>,
@@ -80,7 +81,7 @@ pub(super) fn admit(
         start,
         cli_sandbox: args.sandbox,
         effective_sandbox,
-        offline: args.offline,
+        offline,
         acknowledged: false,
     }) {
         Admission::ProceedOff | Admission::Preserve => Ok(None),
@@ -111,6 +112,7 @@ pub(super) fn admit(
 pub(super) fn admit(
     _args: &super::Args,
     _effective_sandbox: Option<Confinement>,
+    _offline: bool,
     _driver: &super::Driver<'_>,
     _root: &std::path::Path,
     _home: Option<&std::path::Path>,

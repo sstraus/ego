@@ -1438,6 +1438,20 @@ Orphan candidates from a crashed parent are never silently removed.
 The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
 candidate retention for every editor result.
 
+Child process controls are opt-in. `ego config set 'exec.env="inherit"'`
+keeps the full inherited environment (the default). `exec.env="core"` keeps
+PATH, HOME, USER, LOGNAME, SHELL, TMPDIR, TMP, TEMP, LANG, LC_ALL, LC_CTYPE,
+SYSTEMROOT, WINDIR, COMSPEC and PATHEXT if present. `exec.env="allowlist"`
+keeps only names in `exec.env_allowlist`, for example
+`ego config set 'exec.env_allowlist=["PATH","HOME"]'`; an empty list keeps none.
+These controls apply to built-in exec children, including rebuilt tool registries.
+They do not change provider credentials, MCP declarations or hook environments.
+Base and profile fields use normal per-field precedence; unset restores inheritance.
+
+`ego config set 'network="off"'` applies the existing `--offline` guarantees
+and capability checks. `network="on"` is the default and never clears an
+explicit `--offline` invocation.
+
 Effective perimeter inspection warns when canonical roots overlap the workspace
 or a read root is covered by a read-write root. These warnings do not change
 access. A missing or unresolvable configured path is reported as a warning and

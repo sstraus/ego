@@ -555,8 +555,10 @@ impl ChildHost for CliChildHost {
                 .resolve(&args)
                 .map_err(|error| error.to_string())
                 .and_then(|effective| {
-                    self.executor
-                        .admit_child_authority(&effective, args.offline)
+                    self.executor.admit_child_authority(
+                        &effective,
+                        args.offline || effective.network == ego_core::config::Network::Off,
+                    )
                 }),
             None => rooted_settings(
                 &args,

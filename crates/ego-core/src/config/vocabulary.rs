@@ -120,6 +120,9 @@ pub enum ManagedConfigKey {
     Thinking,
     Mode,
     Sandbox,
+    ExecEnv,
+    ExecEnvAllowlist,
+    Network,
     Budget,
     Bare,
     PermissionsJudge,
@@ -129,7 +132,7 @@ pub enum ManagedConfigKey {
 }
 
 impl ManagedConfigKey {
-    const BASE: [Self; 8] = [
+    const BASE: [Self; 11] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
@@ -138,16 +141,22 @@ impl ManagedConfigKey {
         Self::Bare,
         Self::PermissionsJudge,
         Self::StatuslineSegments,
+        Self::ExecEnv,
+        Self::ExecEnvAllowlist,
+        Self::Network,
     ];
-    const PROFILE: [Self; 6] = [
+    const PROFILE: [Self; 9] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
         Self::Sandbox,
         Self::Budget,
         Self::PermissionsJudge,
+        Self::ExecEnv,
+        Self::ExecEnvAllowlist,
+        Self::Network,
     ];
-    const CI_PROFILE: [Self; 8] = [
+    const CI_PROFILE: [Self; 11] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
@@ -156,6 +165,9 @@ impl ManagedConfigKey {
         Self::PermissionsJudge,
         Self::SessionDir,
         Self::ArtifactDir,
+        Self::ExecEnv,
+        Self::ExecEnvAllowlist,
+        Self::Network,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -164,6 +176,9 @@ impl ManagedConfigKey {
             Self::Thinking => "thinking",
             Self::Mode => "mode",
             Self::Sandbox => "sandbox",
+            Self::ExecEnv => "exec.env",
+            Self::ExecEnvAllowlist => "exec.env_allowlist",
+            Self::Network => "network",
             Self::Budget => "budget",
             Self::Bare => "bare",
             Self::PermissionsJudge => "permissions.judge",
@@ -189,6 +204,9 @@ impl ManagedConfigKey {
             "thinking" => Ok(Self::Thinking),
             "mode" => Ok(Self::Mode),
             "sandbox" => Ok(Self::Sandbox),
+            "exec.env" => Ok(Self::ExecEnv),
+            "exec.env_allowlist" => Ok(Self::ExecEnvAllowlist),
+            "network" => Ok(Self::Network),
             "budget" => Ok(Self::Budget),
             "bare" => Ok(Self::Bare),
             "permissions.judge" => Ok(Self::PermissionsJudge),
@@ -223,6 +241,9 @@ pub enum ManagedConfigValue {
     Thinking(ThinkingLevel),
     Mode(Mode),
     Sandbox(Confinement),
+    ExecEnv(super::ExecEnvironment),
+    ExecEnvAllowlist(Vec<String>),
+    Network(super::Network),
     Budget(Budget),
     Bare(bool),
     PermissionsJudge(ModelRef),
@@ -243,6 +264,14 @@ impl ManagedConfigValue {
             ManagedConfigKey::Thinking => decode(key, value).map(Self::Thinking),
             ManagedConfigKey::Mode => decode(key, value).map(Self::Mode),
             ManagedConfigKey::Sandbox => decode(key, value).map(Self::Sandbox),
+            ManagedConfigKey::ExecEnv => decode(key, value).map(Self::ExecEnv),
+            ManagedConfigKey::Network => decode(key, value).map(Self::Network),
+            ManagedConfigKey::ExecEnvAllowlist => {
+                let names: Vec<String> = decode(key, value)?;
+                crate::permit::EnvPolicy::allow_only(names.iter().map(String::as_str))
+                    .map_err(|error| UserConfigError::new(error.to_string()))?;
+                Ok(Self::ExecEnvAllowlist(names))
+            }
             ManagedConfigKey::Budget => decode(key, value).map(Self::Budget),
             ManagedConfigKey::Bare => decode(key, value).map(Self::Bare),
             ManagedConfigKey::PermissionsJudge => decode(key, value).map(Self::PermissionsJudge),
@@ -269,6 +298,24 @@ impl ManagedConfigValue {
             }
             Self::Thinking(thinking) => toml::Value::String(thinking.as_str().to_owned()),
             Self::Mode(mode) => toml::Value::String(mode.as_str().to_owned()),
+            Self::ExecEnv(env) => toml::Value::String(
+                match env {
+                    super::ExecEnvironment::Inherit => "inherit",
+                    super::ExecEnvironment::Core => "core",
+                    super::ExecEnvironment::Allowlist => "allowlist",
+                }
+                .into(),
+            ),
+            Self::ExecEnvAllowlist(names) => {
+                toml::Value::Array(names.iter().cloned().map(toml::Value::String).collect())
+            }
+            Self::Network(network) => toml::Value::String(
+                match network {
+                    super::Network::On => "on",
+                    super::Network::Off => "off",
+                }
+                .into(),
+            ),
             Self::Sandbox(sandbox) => toml::Value::String(sandbox.to_string()),
             Self::Budget(budget) => toml::Value::String(canonical_budget(budget)),
             Self::Bare(bare) => toml::Value::Boolean(*bare),

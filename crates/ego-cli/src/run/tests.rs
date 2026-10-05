@@ -1047,7 +1047,12 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
         crate::skill::SkillCatalogue::discover(discovery, &["help", "skills", "hooks", "quit"])
             .expect("skill catalogue");
     let before = catalogue.capture().expect("initial capture");
-    let before_registry = tools(None, Some(before.core())).expect("initial tool registry");
+    let before_registry = tools(
+        None,
+        Some(before.core()),
+        ego_core::permit::EnvPolicy::Inherited,
+    )
+    .expect("initial tool registry");
     std::fs::create_dir_all(user.join("new-valid")).expect("new skill directory");
     std::fs::write(
         user.join("new-valid/SKILL.md"),
@@ -1062,8 +1067,12 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
             .iter()
             .any(|spec| spec.name() == "new-valid")
     );
-    let prospective_registry = tools(None, Some(prospective.core()))
-        .expect("prospective capture supplies model tool preflight");
+    let prospective_registry = tools(
+        None,
+        Some(prospective.core()),
+        ego_core::permit::EnvPolicy::Inherited,
+    )
+    .expect("prospective capture supplies model tool preflight");
     assert!(
         prospective_registry
             .iter()
@@ -1071,11 +1080,23 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
     );
 
     let selected = vec!["not-a-tool".to_owned()];
-    assert!(tools(Some(&selected), Some(prospective.core())).is_err());
+    assert!(
+        tools(
+            Some(&selected),
+            Some(prospective.core()),
+            ego_core::permit::EnvPolicy::Inherited
+        )
+        .is_err()
+    );
     let after = catalogue.capture().expect("capture after failed preflight");
     assert!(std::sync::Arc::ptr_eq(&before.core(), &after.core()));
     assert_eq!(before.snapshot_digest(), after.snapshot_digest());
-    let after_registry = tools(None, Some(after.core())).expect("unchanged registry");
+    let after_registry = tools(
+        None,
+        Some(after.core()),
+        ego_core::permit::EnvPolicy::Inherited,
+    )
+    .expect("unchanged registry");
     assert_eq!(
         before_registry
             .iter()
@@ -1791,7 +1812,12 @@ fn a_tool_less_protocol_session_offers_no_tool_to_ask_a_seat_for() {
             ..crate::cli::SessionShape::default()
         },
     );
-    let offered = composition::tools(tool_less.tools.as_ref(), None).expect("an empty selection");
+    let offered = composition::tools(
+        tool_less.tools.as_ref(),
+        None,
+        ego_core::permit::EnvPolicy::Inherited,
+    )
+    .expect("an empty selection");
     assert!(
         offered.is_empty(),
         "a tool-less session offered {} tools",
@@ -1800,9 +1826,13 @@ fn a_tool_less_protocol_session_offers_no_tool_to_ask_a_seat_for() {
 
     let ordinary = protocol_args(None, crate::cli::SessionShape::default());
     assert!(
-        !composition::tools(ordinary.tools.as_ref(), None)
-            .expect("no selection at all")
-            .is_empty(),
+        !composition::tools(
+            ordinary.tools.as_ref(),
+            None,
+            ego_core::permit::EnvPolicy::Inherited
+        )
+        .expect("no selection at all")
+        .is_empty(),
         "an unshaped session must still offer the builtins"
     );
 }

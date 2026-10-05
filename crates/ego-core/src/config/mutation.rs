@@ -218,6 +218,12 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
             | (ManagedConfigKey::Thinking, ManagedConfigValue::Thinking(_))
             | (ManagedConfigKey::Mode, ManagedConfigValue::Mode(_))
             | (ManagedConfigKey::Sandbox, ManagedConfigValue::Sandbox(_))
+            | (ManagedConfigKey::ExecEnv, ManagedConfigValue::ExecEnv(_))
+            | (
+                ManagedConfigKey::ExecEnvAllowlist,
+                ManagedConfigValue::ExecEnvAllowlist(_)
+            )
+            | (ManagedConfigKey::Network, ManagedConfigValue::Network(_))
             | (ManagedConfigKey::Budget, ManagedConfigValue::Budget(_))
             | (ManagedConfigKey::Bare, ManagedConfigValue::Bare(_))
             | (

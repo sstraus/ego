@@ -67,6 +67,9 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
             ManagedConfigKey::StatuslineSegments,
             "ui.statusline.segments",
         ),
+        (ManagedConfigKey::ExecEnv, "exec.env"),
+        (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
+        (ManagedConfigKey::Network, "network"),
     ];
     let profile = [
         (ManagedConfigKey::Model, "model"),
@@ -75,6 +78,9 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::Sandbox, "sandbox"),
         (ManagedConfigKey::Budget, "budget"),
         (ManagedConfigKey::PermissionsJudge, "permissions.judge"),
+        (ManagedConfigKey::ExecEnv, "exec.env"),
+        (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
+        (ManagedConfigKey::Network, "network"),
     ];
     let ci = [
         (ManagedConfigKey::Model, "model"),
@@ -85,6 +91,9 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::PermissionsJudge, "permissions.judge"),
         (ManagedConfigKey::SessionDir, "session_dir"),
         (ManagedConfigKey::ArtifactDir, "artifact_dir"),
+        (ManagedConfigKey::ExecEnv, "exec.env"),
+        (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
+        (ManagedConfigKey::Network, "network"),
     ];
     for (key, spelling) in base.iter().chain(profile.iter()).chain(ci.iter()) {
         assert_eq!(key.as_str(), *spelling);

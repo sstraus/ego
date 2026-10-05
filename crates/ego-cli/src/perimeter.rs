@@ -33,7 +33,11 @@ pub fn observe(
             "warning: configured perimeter roots could not be admitted: {error}"
         ))
     })?;
-    let confinement = RunConfinement::new(effective.sandbox.unwrap_or_default(), false, workspace)
-        .map_err(|error| UsageError(error.to_string()))?;
+    let confinement = RunConfinement::new(
+        effective.sandbox.unwrap_or_default(),
+        effective.network == ego_core::config::Network::Off,
+        workspace,
+    )
+    .map_err(|error| UsageError(error.to_string()))?;
     Ok(Perimeter::session(&confinement, &effective, &roots))
 }

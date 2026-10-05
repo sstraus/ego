@@ -119,6 +119,9 @@ fn real_adapter_reads_exact_stored_values_in_canonical_order_without_writes() {
                 ManagedConfigKey::StatuslineSegments,
                 Some(ManagedConfigValue::StatuslineSegments(Vec::new()))
             ),
+            (ManagedConfigKey::ExecEnv, None),
+            (ManagedConfigKey::ExecEnvAllowlist, None),
+            (ManagedConfigKey::Network, None),
         ]
     );
     assert_eq!(io.writes.load(Ordering::SeqCst), 0);
@@ -146,7 +149,10 @@ fn profile_and_ci_are_exact_authorities_and_missing_profile_is_empty() {
             (ManagedConfigKey::Mode, None),
             (ManagedConfigKey::Sandbox, None),
             (ManagedConfigKey::Budget, None),
-            (ManagedConfigKey::PermissionsJudge, None)
+            (ManagedConfigKey::PermissionsJudge, None),
+            (ManagedConfigKey::ExecEnv, None),
+            (ManagedConfigKey::ExecEnvAllowlist, None),
+            (ManagedConfigKey::Network, None),
         ]
     );
     let ci = store
@@ -169,6 +175,9 @@ fn profile_and_ci_are_exact_authorities_and_missing_profile_is_empty() {
                 ManagedConfigKey::ArtifactDir,
                 Some(ManagedConfigValue::Path(PathBuf::from("/artifacts")))
             ),
+            (ManagedConfigKey::ExecEnv, None),
+            (ManagedConfigKey::ExecEnvAllowlist, None),
+            (ManagedConfigKey::Network, None),
         ]
     );
     let missing = store

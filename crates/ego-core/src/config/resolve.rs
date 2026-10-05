@@ -83,6 +83,8 @@ pub struct Effective {
     pub thinking: Option<ThinkingLevel>,
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    pub exec: super::ExecLayer,
+    pub network: super::Network,
     /// Winning layer for the selected sandbox, absent for the default.
     pub sandbox_source: Option<Source>,
     /// Winning layer for the active profile roots.
@@ -164,6 +166,8 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         thinking,
         mode,
         sandbox,
+        exec,
+        network,
         exec_paths,
         permissions,
         budget,
@@ -180,6 +184,8 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (thinking.is_some(), "thinking"),
         (mode.is_some(), "mode"),
         (sandbox.is_some(), "sandbox"),
+        (exec.is_some(), "exec"),
+        (network.is_some(), "network"),
         (exec_paths.is_some(), "exec_paths"),
         (permissions.is_some(), "permissions"),
         (budget.is_some(), "budget"),
@@ -330,6 +336,8 @@ fn resolve_inner(
     let mut thinking = None;
     let mut mode = None;
     let mut sandbox = None;
+    let mut exec = super::ExecLayer::default();
+    let mut network = super::Network::default();
     let mut sandbox_source = None;
     let mut roots_source = None;
     let mut exec_paths = Vec::new();
@@ -385,6 +393,25 @@ fn resolve_inner(
         {
             sandbox = Some(value);
             sandbox_source = Some(sourced.source);
+        }
+        for controls in sourced
+            .value
+            .exec
+            .iter()
+            .chain(profile.and_then(|profile| profile.exec.as_ref()))
+        {
+            if controls.env.is_some() {
+                exec.env = controls.env;
+            }
+            if controls.env_allowlist.is_some() {
+                exec.env_allowlist = controls.env_allowlist.clone();
+            }
+        }
+        if let Some(value) = profile
+            .and_then(|profile| profile.network)
+            .or(sourced.value.network)
+        {
+            network = value;
         }
         if let Some(paths) = profile
             .and_then(|profile| profile.exec_paths.as_ref())
@@ -569,6 +596,8 @@ fn resolve_inner(
         thinking,
         mode,
         sandbox,
+        exec,
+        network,
         sandbox_source,
         roots_source,
         exec_paths,

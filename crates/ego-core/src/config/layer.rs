@@ -112,6 +112,63 @@ where
         .collect()
 }
 
+/// Environment inherited by built-in exec children.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecEnvironment {
+    #[default]
+    Inherit,
+    Core,
+    Allowlist,
+}
+
+/// Opt-in child environment controls. Absent fields preserve lower-layer values.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecLayer {
+    pub env: Option<ExecEnvironment>,
+    pub env_allowlist: Option<Vec<String>>,
+}
+
+impl ExecLayer {
+    /// Derive the existing process policy without capturing environment values.
+    pub fn policy(&self) -> Result<crate::permit::EnvPolicy, crate::permit::EnvNameError> {
+        use crate::permit::EnvPolicy;
+        match self.env.unwrap_or_default() {
+            ExecEnvironment::Inherit => Ok(EnvPolicy::Inherited),
+            ExecEnvironment::Core => EnvPolicy::allow_only([
+                "PATH",
+                "HOME",
+                "USER",
+                "LOGNAME",
+                "SHELL",
+                "TMPDIR",
+                "TMP",
+                "TEMP",
+                "LANG",
+                "LC_ALL",
+                "LC_CTYPE",
+                "SYSTEMROOT",
+                "WINDIR",
+                "COMSPEC",
+                "PATHEXT",
+            ]),
+            ExecEnvironment::Allowlist => {
+                EnvPolicy::allow_only(self.env_allowlist.iter().flatten().map(String::as_str))
+            }
+        }
+    }
+}
+
+/// Networking posture; off is the existing offline contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Network {
+    #[default]
+    On,
+    Off,
+}
+
 /// The overrides a `[profile.NAME]` table may apply on top of the layer that
 /// defines it (`CLI.md` §7, `--profile NAME`).
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -122,6 +179,8 @@ pub struct ProfileLayer {
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    pub exec: Option<ExecLayer>,
+    pub network: Option<Network>,
     /// Additional read and executable roots; absence preserves lower authority.
     pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
@@ -811,6 +870,8 @@ pub struct ConfigLayer {
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
+    pub exec: Option<ExecLayer>,
+    pub network: Option<Network>,
     /// Additional read and executable roots; absence preserves lower authority.
     pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
@@ -872,6 +933,21 @@ impl ConfigLayer {
                     "profile `{name}` cannot declare `roots`; only the system and user layers may widen where a run can reach"
                 ),
             });
+        }
+        for exec in value.exec.iter().chain(
+            value
+                .profile
+                .values()
+                .filter_map(|profile| profile.exec.as_ref()),
+        ) {
+            if let Some(names) = &exec.env_allowlist {
+                crate::permit::EnvPolicy::allow_only(names.iter().map(String::as_str)).map_err(
+                    |error| ConfigError::Invalid {
+                        source,
+                        message: error.to_string(),
+                    },
+                )?;
+            }
         }
         let exec_paths = value.exec_paths.iter().flatten().chain(
             value

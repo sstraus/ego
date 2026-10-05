@@ -637,6 +637,17 @@ fn managed_value(
             ManagedConfigKey::Thinking => parsed.thinking.map(ManagedConfigValue::Thinking),
             ManagedConfigKey::Mode => parsed.mode.map(ManagedConfigValue::Mode),
             ManagedConfigKey::Sandbox => parsed.sandbox.map(ManagedConfigValue::Sandbox),
+            ManagedConfigKey::ExecEnv => parsed
+                .exec
+                .as_ref()
+                .and_then(|exec| exec.env)
+                .map(ManagedConfigValue::ExecEnv),
+            ManagedConfigKey::ExecEnvAllowlist => parsed
+                .exec
+                .as_ref()
+                .and_then(|exec| exec.env_allowlist.clone())
+                .map(ManagedConfigValue::ExecEnvAllowlist),
+            ManagedConfigKey::Network => parsed.network.map(ManagedConfigValue::Network),
             ManagedConfigKey::Budget => parsed.budget.clone().map(ManagedConfigValue::Budget),
             ManagedConfigKey::Bare => parsed.bare.map(ManagedConfigValue::Bare),
             ManagedConfigKey::PermissionsJudge => parsed
@@ -659,6 +670,17 @@ fn managed_value(
                 ManagedConfigKey::Thinking => profile.thinking.map(ManagedConfigValue::Thinking),
                 ManagedConfigKey::Mode => profile.mode.map(ManagedConfigValue::Mode),
                 ManagedConfigKey::Sandbox => profile.sandbox.map(ManagedConfigValue::Sandbox),
+                ManagedConfigKey::ExecEnv => profile
+                    .exec
+                    .as_ref()
+                    .and_then(|exec| exec.env)
+                    .map(ManagedConfigValue::ExecEnv),
+                ManagedConfigKey::ExecEnvAllowlist => profile
+                    .exec
+                    .as_ref()
+                    .and_then(|exec| exec.env_allowlist.clone())
+                    .map(ManagedConfigValue::ExecEnvAllowlist),
+                ManagedConfigKey::Network => profile.network.map(ManagedConfigValue::Network),
                 ManagedConfigKey::Budget => profile.budget.clone().map(ManagedConfigValue::Budget),
                 ManagedConfigKey::PermissionsJudge => profile
                     .permissions
@@ -765,6 +787,9 @@ fn managed_path(key: ManagedConfigKey) -> &'static [&'static str] {
         ManagedConfigKey::Thinking => &["thinking"],
         ManagedConfigKey::Mode => &["mode"],
         ManagedConfigKey::Sandbox => &["sandbox"],
+        ManagedConfigKey::ExecEnv => &["exec", "env"],
+        ManagedConfigKey::ExecEnvAllowlist => &["exec", "env_allowlist"],
+        ManagedConfigKey::Network => &["network"],
         ManagedConfigKey::Budget => &["budget"],
         ManagedConfigKey::Bare => &["bare"],
         ManagedConfigKey::PermissionsJudge => &["permissions", "judge"],

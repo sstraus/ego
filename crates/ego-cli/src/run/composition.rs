@@ -195,8 +195,12 @@ pub(super) fn instructions(
 pub(super) fn tools(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
-    let mut all: Vec<_> = builtins().into_iter().map(RegisteredTool::Effect).collect();
+    let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
+        .into_iter()
+        .map(RegisteredTool::Effect)
+        .collect();
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     if let Some(skills) = skills.filter(|catalogue| !catalogue.specs().is_empty()) {
         all.push(RegisteredTool::skill(skills));
@@ -644,6 +648,7 @@ pub(super) fn admit_windows_unconfined_start(
     let Some(confinement) = windows_unconfined::admit(
         args,
         settings.effective.sandbox,
+        settings.confinement.offline(),
         driver,
         &settings.root,
         home,
@@ -654,9 +659,12 @@ pub(super) fn admit_windows_unconfined_start(
     };
 
     settings.effective.sandbox = Some(confinement);
-    settings.confinement =
-        RunConfinement::new(confinement, args.offline, CanonPath::new(&settings.root))
-            .map_err(|error| UsageError(error.to_string()))?;
+    settings.confinement = RunConfinement::new(
+        confinement,
+        settings.confinement.offline(),
+        CanonPath::new(&settings.root),
+    )
+    .map_err(|error| UsageError(error.to_string()))?;
     Ok(())
 }
 
@@ -773,7 +781,7 @@ pub(super) fn finish_rooted_settings(
 
     let confinement = RunConfinement::new(
         effective.sandbox.unwrap_or_default(),
-        args.offline,
+        args.offline || effective.network == ego_core::config::Network::Off,
         CanonPath::new(&root),
     )
     .map_err(|err| UsageError(err.to_string()))?
@@ -869,6 +877,11 @@ pub(super) fn prepared_materials(
         skill_capture
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
+        settings
+            .effective
+            .exec
+            .policy()
+            .map_err(|error| UsageError(error.to_string()))?,
     )?;
     let slug = args
         .model

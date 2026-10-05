@@ -1173,7 +1173,7 @@ async fn attempt(
         backend,
     );
     let fs = crate::fs::OsFs;
-    let registry: Vec<Arc<dyn Tool>> = vec![Arc::new(Typed(crate::tools::ExecTool))];
+    let registry: Vec<Arc<dyn Tool>> = vec![Arc::new(Typed(crate::tools::ExecTool::default()))];
     let tools = Tools::new(
         &registry,
         ToolEffectPorts::new(
