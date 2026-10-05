@@ -3346,6 +3346,143 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
     writer_join.join().expect("writer thread");
 }
 
+/// Catches: cancelling an unmetered stream marks known session cost unknown and hides its status cell.
+#[test]
+fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("KNOWN-USAGE")),
+            paced_line("PARTIAL-REPLY\n", Duration::from_secs(5)),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((40, 100)),
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input
+        .write_all(b"first turn\r")
+        .expect("submit completed turn");
+    input.flush().expect("completed turn flush");
+    until_normalized(&reader, &mut output, 0, "KNOWN-USAGE");
+    until_normalized(&reader, &mut output, 0, "$0.000");
+    let turn_start = output.len();
+    input.write_all(b"cancel check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, turn_start, "PARTIAL-REPLY");
+    drain_until_quiet(&reader, &mut output);
+    let mut streaming_screen = vt100::Parser::new(40, 100, 0);
+    streaming_screen.process(&output);
+    assert!(
+        streaming_screen.screen().contents().contains("Esc cancels"),
+        "reply must still be streaming when Esc is sent: {:?}",
+        streaming_screen.screen().contents()
+    );
+    let cancel_start = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    until_prompt_from(&reader, &mut output, cancel_start);
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(40, 100, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+
+    let log = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("session log");
+    assert!(
+        log.contains(r#""exit_reason":{"Cancelled":"User"}"#),
+        "Esc must cancel the streamed turn: {log}"
+    );
+    let status = visible
+        .lines()
+        .rev()
+        .find(|line| line.contains("qwen3 · "))
+        .expect("idle status row");
+    assert!(
+        status.contains("$0.000"),
+        "cancel must retain status cost: {visible:?}"
+    );
+    let usage_start = output.len();
+    input.write_all(b"/usage\r").expect("usage command");
+    input.flush().expect("usage flush");
+    until_normalized(&reader, &mut output, usage_start, "workspace");
+    until_local_action_completed(
+        &reader,
+        &mut output,
+        usage_start,
+        "usage",
+        SLASH_ACTION_DEADLINE,
+    );
+    drain_until_quiet(&reader, &mut output);
+    let usage = normalized(&output[usage_start..]);
+    assert!(usage.contains("0.0000 USD"), "known usage cost: {usage:?}");
+    assert!(
+        !usage.contains("unknown"),
+        "cancelled local turn is still free: {usage:?}"
+    );
+    assert!(
+        usage.lines().any(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            fields
+                .windows(3)
+                .any(|values| values == ["main", "10", "4"])
+        }),
+        "completed token counts survive: {usage:?}"
+    );
+
+    let quit_start = output.len();
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    until_normalized(&reader, &mut output, quit_start, "unsent drafts");
+    bounded_exit(child);
+    drain(&reader, &mut output);
+    assert!(
+        normalized(&output[quit_start..]).contains("unsent drafts"),
+        "/quit must be accepted before the process exits: {:?}",
+        normalized(&output[quit_start..]),
+    );
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+}
+
 /// catches: Esc on a running tool leaving no tool row and no receipt, and its
 /// `thinking for` row staying in the scrollback.
 #[cfg(unix)]
