@@ -10092,7 +10092,7 @@ mod turn {
                 _: &PrepareCtx<'_>,
             ) -> Result<PreparedCall, ToolError> {
                 Ok(PreparedCall::new(
-                    self.name().into(),
+                    self.name(),
                     Op::ProtocolConnect {
                         target: ego_core::permit::NetworkTarget::parse(&params.path)
                             .map_err(|error| ToolError::InvalidParams(error.to_string()))?,

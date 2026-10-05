@@ -6092,7 +6092,16 @@ fn tool_turn_with_completions(
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
+    let status = bounded_exit(child);
+    if cancel_children {
+        assert_eq!(
+            status.exit_code(),
+            130,
+            "the cancelled turn owns the final exit"
+        );
+    } else {
+        assert!(status.success());
+    }
     drop(input);
     drop(pair);
     reader_join.join().expect("reader thread");
