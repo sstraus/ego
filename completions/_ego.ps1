@@ -335,6 +335,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         'ego;config;ls' {
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'json')
+            [CompletionResult]::new('--effective', '--effective', [CompletionResultType]::ParameterName, 'Show the effective run perimeter instead of stored values')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

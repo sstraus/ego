@@ -393,6 +393,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--profile=[]:NAME:_default' \
 '--json[]' \
+'--effective[Show the effective run perimeter instead of stored values]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0

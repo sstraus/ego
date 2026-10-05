@@ -4162,7 +4162,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 25] = [
+    const COMMANDS: [&str; 26] = [
         "help",
         "model",
         "thinking",
@@ -4178,6 +4178,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "usage",
         "statusline",
         "export",
+        "config",
         "doctor",
         "quit",
         "new",

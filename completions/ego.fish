@@ -231,6 +231,7 @@ complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcomma
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from unset" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -l profile -r
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -l json
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -l effective -d 'Show the effective run perimeter instead of stored values'
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from edit" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand rules; and not __fish_seen_subcommand_from ls allow deny revoke remember explain" -s h -l help -d 'Print help'
