@@ -1265,10 +1265,20 @@ where
 
     pub async fn close(&self, id: SessionId) -> Result<ClosedSession, LifecycleError> {
         self.metadata.meta(id)?;
-        if self.runs.activity(id).await? == SessionActivity::Uncertain {
-            return Err(LifecycleError::EffectUncertain);
+        match self.runs.cancel_and_settle(id).await {
+            Err(LifecycleError::EffectUncertain)
+                if self.runs.activity(id).await? == SessionActivity::Uncertain =>
+            {
+                // Abandon the session without claiming its effect was resolved.
+                // Keep the run log intact and durably prevent later activation.
+                self.quarantine(id)?;
+                Ok(ClosedSession {
+                    id,
+                    cancelled: false,
+                })
+            }
+            result => result,
         }
-        self.runs.cancel_and_settle(id).await
     }
 }
 
