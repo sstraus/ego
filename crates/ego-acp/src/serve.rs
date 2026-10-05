@@ -3380,12 +3380,17 @@ where
                     // attachment. Retrying an uncertain effect cannot recover it.
                     match controller.status_by_session(durable_session).await {
                         Ok(snapshot) if snapshot.status() == RunStatus::Uncertain => {
+                            let recovery = format!(
+                                "run {} has an uncertain effect; close this session with `session/close` and start a new chat with `session/new`",
+                                snapshot.run_id(),
+                            );
+                            let message = match snapshot.settlement() {
+                                Some(settlement) => failure_message(&recovery, settlement),
+                                None => recovery,
+                            };
                             return responder.respond_with_error(Error::new(
                                 ErrorCode::InternalError.into(),
-                                format!(
-                                    "run {} has an uncertain effect; close this session with `session/close` and start a new chat with `session/new`",
-                                    snapshot.run_id(),
-                                ),
+                                message,
                             ));
                         }
                         Ok(_) | Err(RunError::Store(StoreError::NotFound)) => {}
