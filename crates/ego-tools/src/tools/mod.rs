@@ -1,8 +1,8 @@
 //! The builtins: `read`, `glob`, `grep`, `write`, `edit`, `exec`, and
 //! `read_tool_result`.
 //!
-//! See `docs/decisions/2026-08-21-reading-without-reading-everything.md` and
-//! `docs/decisions/2026-08-21-three-tools-on-a-real-filesystem.md`. Each
+//! See `ARCHITECTURE.md` and
+//! `ARCHITECTURE.md`. Each
 //! prepares a *different* operation, because listing, searching and reading
 //! are three different authorities: a `glob` that prepared `Op::Read` over its
 //! root would be handed the right to read every byte under it, having asked
@@ -12,7 +12,7 @@
 //! one that produces a *mutating* op, and until it existed `ModeApprover`
 //! approved every call this workspace could make in every mode — so the five
 //! modes, the `plan` floor and every rule with a `write(...)` head were
-//! machinery with no reachable input (`docs/13-effect-tools.md` §0).
+//! machinery with no reachable input (`ARCHITECTURE.md` §0).
 //!
 //! `edit` is the fifth and it is also not one more of the same. It is the only
 //! one that prepares *two* operations for one call — a `Read` and a `Write` of

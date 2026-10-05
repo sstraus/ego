@@ -509,7 +509,7 @@ pub enum RateSource {
 /// *not* the same type. A `PricingRevision` names a price list; a
 /// subscription and a locally served model have none, and labelling their
 /// figures as though a table produced them is the confusion
-/// `docs/decisions/2026-08-21-how-a-model-is-metered.md` §4 refused. This
+/// `ARCHITECTURE.md` §4 refused. This
 /// names the policy that says "not metered in currency" — which is
 /// checkable, where a fabricated all-zero price list is not.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -522,7 +522,7 @@ pub struct MeteringRevision(pub String);
 /// from a captured response if you know *where on the wire* it was read.
 /// `field` is data — the name of a place — never something anything
 /// dispatches on: `ego-core` cannot name a wire format
-/// (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §8), and every
+/// (`ARCHITECTURE.md` §8), and every
 /// decoder that can read a cost feeds the same
 /// [`AiEvent::ProviderCost`](crate::generator::port::AiEvent::ProviderCost).
 ///

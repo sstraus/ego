@@ -159,7 +159,7 @@ omitted when empty: two states, identical bytes.
 | `ego config` | **yes** | `get`, `set`, `unset`, `ls`, and whole-document `edit` use one strict atomic user-config transaction; stored profiles are explicit targets and management ignores ambient `EGO_PROFILE` |
 | `ego rules` | **yes** | `ls`, `allow`, `deny`, `revoke`, `remember`, and `explain` share the canonical rule grammar, atomic user store, and effective policy service; management ignores ambient `EGO_PROFILE` and never executes the explained call |
 | `ego usage` | **yes** | reports the versioned main/judge/compaction/total accounting DTO for this workspace; `--period` accepts `all` or a positive `s`/`m`/`h` duration and `--json` emits the same DTO. The text view is a compact `session model role in out cached cache_hit cost` table that hides role rows with no activity unless `--all-roles` is given; the flag is presentation only and never reaches the JSON report |
-| `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
+| `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `ARCHITECTURE.md` §6.2 |
 | `ego doctor` | **yes** | one ordered, versioned, redacted `HealthSnapshot` over nine sections, rendered as text or `--json`. It reads existing facts only: it never logs in, refreshes a credential or a catalogue, reloads an extension, edits config, or calls a hosted provider. `/doctor` renders the same snapshot, and a fact ego cannot observe without mutating something is reported `not_checked` with its reason rather than omitted |
 
 All four M0b demonstrations now have an entry point (`ARCHITECTURE.md` §8): an
@@ -360,7 +360,7 @@ ever written, and the hole is invisible because the rule still reads
 correctly. `bash(...)` is a parse error whose message names `exec` rather than
 an alias for it. The heads are `read`, `write`, `list`, `search`, `exec`,
 `net` and `tool` — grammar in
-`docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md`, which
+`ARCHITECTURE.md`, which
 corrects the example this line used to carry.
 
 `tool(server/name)` is the one user-facing authority for an opaque foreign
@@ -551,7 +551,7 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--max-turns`, `--timeout` | **yes** | |
 | `--tools`, `--no-tools` | **yes** | part of §3's general session shape, so `ego acp` takes them too. `--no-tools` there is the session that can never ask for a permission seat |
 | `-C`, `-c/--set`, `--profile` | **yes** | `--profile` is part of §3's general session shape, so `ego acp` takes it too. `-C` it already shared; `-c/--set` it does not take |
-| `-q`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §1 |
+| `-q`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `ARCHITECTURE.md` §1 |
 | `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--allow`/`--deny` are part of §3's general session shape, so `ego acp` takes them too; `--mode` and its two spellings are not part of it. `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. All seven rule heads enforce: `read`, `write`, `list`, `search`, `exec`, `net`, and `tool` — `net` matches `Op::Connect`/`Op::ProtocolConnect` and `tool` matches `Op::Opaque`, both of which this build now produces. This sentence is derived from `parse.rs`'s `OPERATIONS` table by `the_documents_name_the_rule_heads_the_parser_actually_enforces`, not maintained beside it. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; a matching `write(pattern)` allow covers its same-file replacement read without a separate `read(pattern)` allow. The glob still limits the target; explicit read/write denies, workspace boundaries, and plan mode still apply. A standalone read still needs read authorization; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
 | `--sandbox` | **yes** | `ro\|workspace\|off`, default `workspace`, enforced by the measured platform backend before a prepared process can launch; an unavailable required capability fails closed |
 | `-f`, `--file`, `--var` | **yes** | strict version-1 agent files load through the existing bounded YAML implementation, apply their configuration layer below flags, and substitute declared body variables. M4 extracts the shared envelope for skills and still owns the direct executable shebang end-to-end proof, not these flags' availability |
@@ -614,7 +614,7 @@ whether free text is accepted. A script answers it with
 not an answer guessed against a different question.
 
 `paused` is the one reason that carries **no** payload and asks nothing. The
-session stopped because a host called `_ego/pause` (§ `docs/06-acp.md`), and
+session stopped because a host called `_ego/pause` (§ `ARCHITECTURE.md`), and
 the only thing that moves it again is that host calling `_ego/resume`. It is
 exit 6 and deliberately not exit 3 for exactly that reason: a script that reads
 3 goes looking for a `denied`/`denied_by` pair or a `question` object, and a
@@ -690,7 +690,7 @@ decided**: every party in the evaluation order was consulted and the question
 is still open, which is the case `--allow` answers and the only one where the
 absence of an authority is itself the fact. Present-or-absent, per §4.2's rule
 for this format. See
-`docs/decisions/2026-08-21-an-exit-code-that-names-who-refused.md`.
+`ARCHITECTURE.md`.
 
 The three remedies are alternatives because they act on different axes, and
 one of them is not a permission at all: **the workspace boundary belongs to
@@ -755,7 +755,7 @@ are relative to `FILE` and cannot leave that file's directory. `--bare` together
 `--instructions` is a conflict for the applicability matrix above, not for the
 loader — from a resolved posture alone, "the user demanded bare" and "the
 workspace is untrusted" are the same value and want opposite answers. See
-`docs/decisions/2026-08-21-instructions-a-workspace-may-hand-a-model.md`.
+`ARCHITECTURE.md`.
 
 ### 4.6 `ego ls --output json|jsonl` (the catalogue)
 
@@ -812,7 +812,7 @@ every row would carry the same path.
 §4.1, §4.2 and §4.6 are contracts with a *program*. This one is a contract with
 a **screen or a file**, and they are not the same contract with escapes
 removed. Full argument in
-`docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md`.
+`ARCHITECTURE.md`.
 
 **Redirected — a pipe, a file, `TERM=dumb`, `--output json|jsonl`.** stdout
 carries the model's own markdown, byte for byte: nothing wrapped, nothing
@@ -877,7 +877,7 @@ level changes nothing a run does, is recorded in none of its evidence, and
 belongs in neither the generated reference nor the completions. It is also the
 shape a host can use: something spawning `ego acp` sets variables for its child
 and cannot inject arguments into a command line it did not compose. See
-`docs/decisions/2026-09-07-diagnostics-get-a-destination-before-a-switch.md`.
+`ARCHITECTURE.md`.
 
 ## 5. Agent files — the scripting language
 
@@ -910,7 +910,7 @@ keys mirror their CLI flags one-to-one — the file *is* a saved command line
 plus a prompt, not an untyped map of every present or future flag. The one
 strict bounded YAML envelope is shared with skills; the complete format,
 limits, variable equality, relative-path, and failure contract is
-`docs/decisions/2026-08-29-agent-files-share-one-strict-yaml-envelope.md`.
+`ARCHITECTURE.md`.
 Nothing else examined has this as a first-class, executable unit (Claude
 Code's slash commands are REPL-only; pi's prompt templates are not
 executables).
@@ -919,7 +919,7 @@ executables).
 
 A skill is a strict `SKILL.md` under `/etc/ego/skills`, `$EGO_HOME/skills`, or
 trusted `<workspace>/.ego/skills`. It uses current Agent Skills frontmatter and
-the supported current Claude extensions documented in `docs/20-agent-skills.md`.
+the supported current Claude extensions documented in `ARCHITECTURE.md`.
 εgo does not scan `.claude/skills`: compatible metadata and bodies are portable,
 while storage aliases would create a second trust and precedence namespace.
 
@@ -1116,7 +1116,7 @@ sequence.
 `wl-paste`/`xclip`, Windows `CF_DIB`. A pasteboard image, or an entire
 bracketed paste that names an existing supported image file, stages a
 removable chip and submits with the next turn through the same durable
-`--attach` path (`docs/decisions/2026-09-29-interactive-image-paste.md`).
+`--attach` path (`ARCHITECTURE.md`).
 Escape removes the newest staged chip. Pasteboard text, and a path that is
 missing or not a supported image, remain ordinary editor text; an
 unsupported or unknown model capability refuses staging before any bytes are
@@ -1319,7 +1319,7 @@ compaction attempt's usage and cost. The action is disabled while a generation,
 permission, tool batch, or accepted prompt is active; saved drafts require
 confirmation and remain with the source. The complete decision and prompt
 contract are in
-`docs/decisions/2026-08-24-compaction-seeds-a-clean-session.md`.
+`ARCHITECTURE.md`.
 
 #### Transition identity, output, and host parity
 
@@ -1411,7 +1411,7 @@ it. Tool admission remains current. The snapshot is captured on the first admitt
 instructions and opens a new epoch on the next admitted generation; it refuses
 while source work is pending. Live runtime and host facts are transient data
 before current user intent. Provider cache fields remain regression case, with decisions in
-`docs/decisions/2026-09-30-conversation-fork-cache-prefix.md`.
+`ARCHITECTURE.md`.
 
 ## 7. Configuration
 
@@ -1569,7 +1569,7 @@ Codex backend reads one. Most rows declare none: `anthropic`, `openai`,
 `ollama` send no `user-agent` at all, and nothing downstream fills one in.
 Sending no name is not the same as sending someone else's, which is the whole
 of what was removed. maintainer ruled it on 2026-09-05
-(`docs/decisions/2026-08-22-subscription-login-is-built-in-plus-two-overrides.md`
+(`ARCHITECTURE.md`
 §1 and §3, amended), and a test fails the build that reintroduces one.
 
 Some vendors gate a subscription flow on their own client's identity, so ego's
@@ -1593,7 +1593,7 @@ editor-plugin-version = "copilot-chat/0.35.0"
 copilot-integration-id = "vscode-chat"
 ```
 
-`docs/16-subscription-login.md` §7.8 carries the same values with their pinned
+`ARCHITECTURE.md` §7.8 carries the same values with their pinned
 client source, the vendor terms each one touches — Anthropic reserves OAuth to
 its own applications; GitHub's four are a VS Code extension version gate — and
 which requests it reaches. It reaches all of them: generation, `ego auth
@@ -1657,17 +1657,17 @@ subscription providers enumerate their own models.
 
 The `openai` rows are shipped and selectable. The row speaks the public
 Responses contract, and
-`docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`
+`ARCHITECTURE.md`
 admits a public row on a published contract with passing deterministic
 fixtures. It amends
-`docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`,
+`ARCHITECTURE.md`,
 which required a sanitized recording of a live call first: no such recording
 exists, and withholding the row made every operator's key useless against a
 documented endpoint to avoid an error that announces itself — a wrong Responses
 body is a `400` from OpenAI on the first call. `ego models` lists the row as
 available once `OPENAI_API_KEY` resolves and as `missing_credential` when it
 does not.
-See `docs/decisions/2026-09-07-a-builtin-catalogue-layer-below-system-and-user.md`.
+See `ARCHITECTURE.md`.
 
 `openai-codex/gpt-5.6-sol` is the current built-in ChatGPT/Codex subscription
 default. It becomes available after `ego auth login openai-codex` stores its
@@ -1679,7 +1679,7 @@ actual subscription endpoint. The subscription has no built-in monetary rate;
 it uses subscription metering. Its currently expressible reasoning default is
 `low`; image input, opaque reasoning-state carryover, parallel tool calls, and
 hard tool limits are not claimed for the private subscription contract.
-See `docs/decisions/2026-09-12-openai-codex-subscription-bootstrap-ceiling.md`.
+See `ARCHITECTURE.md`.
 
 A full entry, with every field the schema accepts:
 
@@ -1733,7 +1733,7 @@ listing snapshot, and the `FRESHNESS` column says `current` or `cached`
 precisely so a stale one is visible. Every generation boundary re-resolves the
 model against these files, the live provider row and the current credential —
 a cached row is never handed to a request
-(`docs/decisions/2026-08-25-the-catalogue-is-a-snapshot-not-generation-authority.md`).
+(`ARCHITECTURE.md`).
 Only supplied rows come from this file, and they are rebuilt on every
 invocation rather than cached at all; the cache holds only *discovered* rows,
 from providers that enumerate themselves.

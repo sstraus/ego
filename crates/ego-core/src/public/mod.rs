@@ -87,7 +87,7 @@ pub enum InstructionSource {
 
 /// One instruction file a run loaded, described but **never quoted**.
 ///
-/// `docs/08-codex-critique.md` I2 asks for each path, digest and scope to be
+/// `ARCHITECTURE.md` I2 asks for each path, digest and scope to be
 /// recorded in the public start event, and asks for the *text* to stay out of
 /// it. Those are one requirement, not two: the stream this rides is what a CI
 /// job archives, and an `AGENTS.md` is one symlink away from being something
@@ -103,7 +103,7 @@ pub struct InstructionDescriptor {
     /// It describes the file, not the prompt: the assembler frames what it
     /// sends, so a digest over the framed text would change with the framing
     /// and prove nothing about the repository. See
-    /// `docs/decisions/2026-08-21-a-binary-that-produces-the-exit-code.md` §4.
+    /// `ARCHITECTURE.md` §4.
     pub sha256: String,
     /// How many bytes that digest covers.
     pub bytes: u64,
@@ -631,7 +631,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         }),
         // `window` is deliberately not projected. It reaches consumers through
         // the reduction a sink is handed beside the event
-        // (`docs/decisions/2026-08-21-what-a-sink-is-handed.md`), which is
+        // (`ARCHITECTURE.md`), which is
         // where the only reader of it — the ACP `UsageUpdate` denominator —
         // already looks. Carrying it here as well would put the same fact on
         // two versioned surfaces that could then disagree, and would cost a

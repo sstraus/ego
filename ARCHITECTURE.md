@@ -2,7 +2,7 @@
 
 Date: 2026-08-19; M5 contract freeze: 2026-09-03. Status: **ratified by
 maintainer** after adversarial review
-(`docs/08-codex-critique.md`) and triage (`docs/10-triage.md`).
+(`ARCHITECTURE.md`) and triage (`ARCHITECTURE.md`).
 Resolves the eight open questions of `SPEC.md` §4. Evidence citations refer to
 the dossier in `docs/`. Statements labelled M5 target are required final
 behavior, not claims about the current binary.
@@ -18,7 +18,7 @@ That single sentence is the architecture; everything below is its consequence.
 ## 1. The event model (the load-bearing decision)
 
 State is a **reduction over an append-only event log** (pi's reducer,
-`docs/02-pi.md` §3, generalised):
+`ARCHITECTURE.md` §3, generalised):
 
 ```
 SessionTitleChanged | SessionDeleted | PromptQueued |
@@ -43,7 +43,7 @@ regression case added the durable display-name and soft-delete transitions liste
 above. M5 further extends the same event log for durable goal transitions; the
 accepted lifecycle, replay, fork, compaction, and projection semantics are
 fixed in
-`docs/decisions/2026-09-03-session-metadata-and-goals-are-durable-state.md`.
+`ARCHITECTURE.md`.
 Goal event kinds are not present until regression case lands and therefore are not
 included in the current exhaustive list above.
 
@@ -128,7 +128,7 @@ Rules:
   import `rmcp`, parse MCP frames, or own MCP lifecycle state.
 - `ego-mcp` adapts current rmcp tools into `ego-core::Tool` objects and its
   resources/prompts into the core-owned `ContextSource`. It owns what rmcp does not provide
-  (`docs/04-crates.md` §1): immutable admitted snapshots, access policy,
+  (`ARCHITECTURE.md` §1): immutable admitted snapshots, access policy,
   startup/reload admission, truthful health, input validation posture, and
   foreign-domain egress integration. It selects MCP 2026-07-28 explicitly and
   enters the workspace only after the accepted MCP ADR's SDK release gate.
@@ -144,7 +144,7 @@ their own crates so their heavyweight dependencies stay out of the core.
 
 ### 3.1 Provider layer (`ego-ai`)
 
-pi's taxonomy (`docs/02-pi.md` §2): few **wire formats**, many **providers**.
+pi's taxonomy (`ARCHITECTURE.md` §2): few **wire formats**, many **providers**.
 
 ```rust
 /// One implementation per API shape, and a mapping is told nothing about
@@ -152,7 +152,7 @@ pi's taxonomy (`docs/02-pi.md` §2): few **wire formats**, many **providers**.
 ///
 /// The target is six providers end-to-end; the mappings are fewer, and how
 /// many is decided by measurement rather than by a vendor's badge — see
-/// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §9
+/// `ARCHITECTURE.md` §9
 /// and `crates/ego-ai/tests/conformance.rs`. Ollama is the worked example: it
 /// speaks the openai-completions shape everywhere except the output-ceiling
 /// field, fails conformance check 1 on that one difference, and therefore has
@@ -229,13 +229,13 @@ private ChatGPT Codex contract; Gemini uses stable v1 Interactions, never the
 conformance; live entitled-model recordings remain separately reported
 evidence. Cost conformance enumerates every selectable profile and requires a
 third independent decoder path. The accepted selectability amendment is
-`docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`.
+`ARCHITECTURE.md`.
 Provider resolution also converges every source on the one non-cloneable,
 zeroizing lifetime in
-`docs/decisions/2026-09-03-provider-credentials-share-one-zeroizing-lifetime.md`;
+`ARCHITECTURE.md`;
 catalogue, model, event, manifest, and diagnostic records remain secret-free.
 
-Carried over from fx because it is cheap and correct (`docs/01-fx.md` §2.4):
+Carried over from fx because it is cheap and correct (`ARCHITECTURE.md` §2.4):
 **delivery certainty** — `DeliveryCertainty { DefinitelyUnsent, PossiblySent }`
 tracked per attempt, deciding whether a retry is safe or might double-bill.
 In M5 one core turn coordinator owns every attempt: `--retry N` permits at
@@ -245,7 +245,7 @@ must prove capability and request expressibility before a fresh attempt.
 Possibly-sent work never retries or falls back automatically. Each attempt
 keeps its own identity, reservation, digest, settlement, usage, and cost; the
 turn folds them without rewriting history. The complete failure contract is
-`docs/decisions/2026-09-03-one-turn-owns-every-retry-and-fallback-attempt.md`.
+`ARCHITECTURE.md`.
 
 Per-generation usage and cost are first-class outputs of `parse_stream`, not an
 afterthought — the CLI's `--budget` and ACP's `UsageUpdate` both feed off them.
@@ -260,7 +260,7 @@ what is *configured* rather than what is admitted, because admission starts
 servers, and it reports the model catalogue as `not_checked` rather than
 enumerate a provider. `--offline` (pi's flag) asserts no non-loopback egress — enforced at
 the `Http` seam, not by convention — which is also the air-gapped posture for
-the server deployment (`docs/09-server-companion.md`). Cost accounting reports
+the server deployment (`ARCHITECTURE.md`). Cost accounting reports
 zero-cost usage rather than pretending local tokens are billable.
 
 ### 3.2 Tools (`ego-core`, resolves §4.3)
@@ -286,7 +286,7 @@ trait Tool: Send + Sync {
 ### 3.3 The environment seam (`ego-core`)
 
 ```rust
-trait Env: Send + Sync {          // pi's harness/env, docs/02-pi.md §3
+trait Env: Send + Sync {          // pi's harness/env, ARCHITECTURE.md §3
     fn fs(&self) -> &dyn Fs;      // read, write, glob, stat
     fn spawn(&self, cmd: Command, confinement: &Confinement) -> BoxFuture<Spawned>;
 }
@@ -301,7 +301,7 @@ trait Clock: Send + Sync {        // event/time.rs — the only reader of wall t
 // millisecond an `Envelope.ts` is. The turn loop needs a clock and nothing
 // else from the environment, and a port it can satisfy with one type is
 // cheaper than an `Env` it would have to stub.
-// Corrected by docs/decisions/2026-08-21-the-turn-loop.md §2.
+// Corrected by ARCHITECTURE.md §2.
 
 trait SessionStore: Send + Sync {
     fn append(&self, id: &SessionId, ev: &Event) -> Result<()>;
@@ -332,7 +332,7 @@ second human-input boundary.
    `edits` (auto-approves workspace writes) · `yolo` (bypass).
 2. **Rules** — persistent, scoped (project/user), with **stable IDs**,
    listable and revocable without the original context, storable without
-   executing (`rules remember`). fx's contract verbatim (`docs/01-fx.md`
+   executing (`rules remember`). fx's contract verbatim (`ARCHITECTURE.md`
    §2.2). Rules are a **formal grammar with a canonical AST** (R9), matched
    against `PreparedCall` structure — argv, resolved paths, endpoints — never
    against rendered shell strings; `ego rules explain <tool> <args>` shows the
@@ -422,7 +422,7 @@ operations, widenings and exact parameters behind a details key (`CLI.md` §6).
   canonical permission engine, and durable rendered-content digests prevent a
   skill from self-granting or changing underneath resume. Current Agent Skills
   and Claude frontmatter is implemented or refused by field name; shell
-  injection is never a skill capability. See `docs/20-agent-skills.md` and the
+  injection is never a skill capability. See `ARCHITECTURE.md` and the
   accepted skills ADR. Executable agent files (`CLI.md` §5) reuse configuration
   and permission mechanisms but remain top-level run inputs, not skills.
 - **Hooks**: one asynchronous `Hook` port owns the current stable
@@ -437,7 +437,7 @@ operations, widenings and exact parameters behind a details key (`CLI.md` §6).
   experimental fields and handlers fail admission explicitly. M1 finalizes
   stable identity, source/digest, and typed start/settlement evidence only; M4
   builds the strict catalogue, runner, four adapters, and inspection surfaces.
-  See `docs/21-claude-hook-parity.md` and the accepted hook ADR.
+  See `ARCHITECTURE.md` and the accepted hook ADR.
 
 ### 3.6 Extensibility posture (plugins without a plugin system)
 
@@ -463,7 +463,7 @@ exactly one thing that this does not: it lets a profile be written in a
 file does not exist yet, so the table would have one caller, be populated by
 the same constructors it serves, and live in the same crate. It arrives with
 the file, and nothing built now has to be undone for it
-(`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §3,
+(`ARCHITECTURE.md` §3,
 amended 2026-08-22).
 
 A dynamic loader (WASM or dylib) is
@@ -476,7 +476,7 @@ same registries" — no redesign, so deferring costs nothing.
 **Tokio, multi-thread, Send futures — but all decision logic is pure and sync.**
 
 - The ACP SDK 2.0 is Send-based on multi-thread tokio (verified,
-  `docs/06-acp.md` §6); rmcp and reqwest are tokio-native. A sync core would
+  `ARCHITECTURE.md` §6); rmcp and reqwest are tokio-native. A sync core would
   bridge against the entire dependency ecosystem.
 - The testability argument for a sync core is answered differently: the
   reducer, the permission classifier, truncation, compaction selection — the
@@ -536,14 +536,14 @@ Migrations: the header record carries the codec version; a migration is a
 streaming rewrite that preserves (or explicitly refuses) unknown records. The
 catalogue is a directory scan over manifests with an mtime cache; if that is
 ever slow, the fix is an index file. fx's manifest-acceptance rules (recent +
-`id` and `workspace_root` match, `docs/03-tuicommander.md` §2.5) are adopted.
+`id` and `workspace_root` match, `ARCHITECTURE.md` §2.5) are adopted.
 
 Display names and goals are authoritative ordered log events, never mutable
 manifest fields. The manifest and ACP session-info notification are rebuildable
 projections. Metadata-only `ego resume` operations take the normal writer lease
 and expected revision but do not start a model turn; fork and compaction carry
 the ratified lineage state explicitly. See
-`docs/decisions/2026-09-03-session-metadata-and-goals-are-durable-state.md`.
+`ARCHITECTURE.md`.
 
 ## 6. Terminal approach (resolves §4.6)
 
@@ -572,13 +572,13 @@ composer are the only ephemeral rows; every redraw preserves the in-progress
 buffer; input and rendered events cross bounded channels with explicit
 backpressure; every interactive state has a plain non-TTY representation; and
 golden-transcript tests cover narrow widths, resize, wide graphemes, and
-interleaved input/output. `docs/decisions/2026-08-24-the-surface-keeps-the-seat-live.md`
+interleaved input/output. `ARCHITECTURE.md`
 supersedes the earlier sequential-seat implementation decision.
 
 ## 7. ACP integration (resolves §4.7)
 
 Verified against current primary sources on 2026-09-03; full record in
-`docs/06-acp.md`. M5 serves stable ACP v1 only while v2 remains Draft. It
+`ARCHITECTURE.md`. M5 serves stable ACP v1 only while v2 remains Draft. It
 completes the selected v1 lifecycle, model/config, metadata, usage/cost,
 streaming, question, image, and permission surface through shared durable core
 services. Protocol v2 projections and goldens remain expiry evidence, not a
@@ -603,7 +603,7 @@ adapter now advertises and serves standard load, list, tip fork, resume, delete,
 and close through `SessionLifecycle`. Message-selected forks and inherited
 message projection are extensions planned in `plans/conversation-fork.md`.
 The accepted system-only prompt snapshot and volatile host placement are
-recorded in `docs/decisions/2026-09-30-conversation-fork-cache-prefix.md`; tool
+recorded in `ARCHITECTURE.md`; tool
 admission remains current on every generation.
 
 ## 8. Sequencing (resolves §4.8)

@@ -1,6 +1,6 @@
 //! The turn loop: the one component that runs a turn and writes the log.
 //!
-//! See `docs/decisions/2026-08-21-the-turn-loop.md`. Named `turn` rather than
+//! See `ARCHITECTURE.md`. Named `turn` rather than
 //! the plan's `loop`, which is a keyword and would spell every reference
 //! `r#loop`.
 //!
@@ -215,7 +215,7 @@ where
 }
 
 /// A cooperative cancellation signal
-/// (`docs/decisions/2026-08-21-the-turn-loop.md` §4).
+/// (`ARCHITECTURE.md` §4).
 ///
 /// A concrete type and not a trait: there is exactly one way to implement
 /// "someone asked to stop", and a trait would buy an indirection for it. Not

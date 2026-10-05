@@ -1,7 +1,7 @@
 //! The provider-neutral conversation: what a valid tool-use history is, and
 //! what happens to one that a crash left half-finished.
 //!
-//! See `docs/decisions/2026-08-21-tool-use-history.md`. The invariants tested
+//! See `ARCHITECTURE.md`. The invariants tested
 //! here are the ones *every* wire format shares — a result answers an earlier
 //! call, exactly once, and no call is left hanging. Rules only one provider
 //! has (Anthropic's grouping and ordering; chat-completions' encodability)

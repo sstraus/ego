@@ -24,7 +24,7 @@ fn checkpoint() -> String {
         "# Ordered next steps",
         "Continue the main generation.",
         "# Critical references",
-        "docs/decisions/2026-08-24-compaction-seeds-a-clean-session.md",
+        "ARCHITECTURE.md",
     ]
     .join("\n")
 }

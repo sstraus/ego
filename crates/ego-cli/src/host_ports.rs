@@ -9,7 +9,7 @@
 //! agree.
 //!
 //! They are not ports in the sense
-//! `docs/decisions/2026-09-07-a-port-needs-two-real-implementations.md` means:
+//! `ARCHITECTURE.md` means:
 //! nothing here is a boundary this crate owns. They are the *adapters* that
 //! answer ports `ego-acp` and `ego-mcp` own, and one adapter can answer both.
 //!

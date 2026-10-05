@@ -1,6 +1,6 @@
 //! What a ceiling is written as, and what a resolved one holds.
 //!
-//! `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §§4 and 8.
+//! `ARCHITECTURE.md` §§4 and 8.
 //!
 //! ## Why the grammar lives here and not on the flag
 //!

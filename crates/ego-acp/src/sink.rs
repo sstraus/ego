@@ -84,7 +84,7 @@ impl EventSink for AcpSink {
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         // The complete entry point includes reduced usage and tool progress.
         // That is why `publish` carries the reduction. See
-        // `docs/decisions/2026-08-21-what-a-sink-is-handed.md`.
+        // `ARCHITECTURE.md`.
         for update in project_acp_updates_v1(event, state, &self.caps, &self.root) {
             let notification = v1::SessionNotification::new(self.session.clone(), update);
             if let Err(err) = self.connection.send_notification(notification) {

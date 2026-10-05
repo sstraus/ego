@@ -1,6 +1,6 @@
 //! Reading the money a provider states it will charge for one request.
 //!
-//! See `docs/decisions/2026-08-21-how-a-model-is-metered.md` §5 and §8.
+//! See `ARCHITECTURE.md` §5 and §8.
 //!
 //! maintainer's constraint on this path is that it be **wire-format independent**:
 //! one mechanism, fed by any provider that states a cost, never an OpenRouter

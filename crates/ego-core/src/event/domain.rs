@@ -120,7 +120,7 @@ pub enum SubagentTerminal {
 /// CLI printed `timeout`, and replay, JSONL and ACP would give three accounts
 /// of one fact. A limit applied *between* turns is not here — that is the run
 /// level's, where it is true. See
-/// `docs/decisions/2026-08-21-two-levels-of-ending.md`.
+/// `ARCHITECTURE.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CancelCause {
     /// A human asked for it — `SIGINT`, or an interactive interrupt.
@@ -164,7 +164,7 @@ pub enum ExitReason {
     /// nothing was sent, and from [`Internal`] because nothing of ours
     /// failed — the invocation and the resolved model disagree, and the
     /// caller is the only party who can settle it. See
-    /// `docs/decisions/2026-08-21-a-request-the-model-will-not-take.md`.
+    /// `ARCHITECTURE.md`.
     ///
     /// [`Provider`]: ExitReason::Provider
     /// [`Internal`]: ExitReason::Internal
@@ -247,7 +247,7 @@ pub enum OccupancyProvenance {
 /// rename. Renaming or re-tagging an existing variant or field is a
 /// `CODEC_VERSION` bump plus a migration, not a fixture update. (This note
 /// used to say "adding a variant or a field is fine", which was overbroad;
-/// corrected in `docs/decisions/2026-08-21-attempt-accounting-ledger.md`.)
+/// corrected in `ARCHITECTURE.md`.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
@@ -412,7 +412,7 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowed: Option<bool>,
         /// The rules, the mode, the boundary or the party that decided —
-        /// `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §7.
+        /// `ARCHITECTURE.md` §7.
         ///
         /// `Option` because a required field would not decode from a record
         /// written before it existed, which this type's own doc comment names
@@ -448,7 +448,7 @@ pub enum EventKind {
     /// One attempt reached a terminal state.
     ///
     /// Carries no money. `UsageUpdated` is the single accounting fact
-    /// (`docs/decisions/2026-08-21-attempt-accounting-ledger.md`); two events
+    /// (`ARCHITECTURE.md`); two events
     /// carrying the same figure are two events that can disagree once they
     /// are bytes on disk. The `UsageReport` inside `outcome` is the
     /// provider's own report, kept as *evidence* about the bookings rather

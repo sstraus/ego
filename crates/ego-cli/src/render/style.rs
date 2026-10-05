@@ -7,7 +7,7 @@
 //! the deepest form allowed, snapping to the xterm cube or to the sixteen
 //! basics only where it must.
 //!
-//! `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §2 is
+//! `ARCHITECTURE.md` §2 is
 //! the reason `fg` and `bg` are separate options rather than one "colour": the
 //! diff writes background and the syntax pass writes foreground, and a type
 //! that could hold only one of them would force one of the two to win.

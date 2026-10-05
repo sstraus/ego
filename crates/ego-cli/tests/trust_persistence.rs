@@ -3,7 +3,7 @@
 //!
 //! Driven through a real pseudo-terminal because the question only exists
 //! where a human seat does. See
-//! `docs/decisions/2026-09-05-a-trust-answer-is-remembered-per-root.md`.
+//! `ARCHITECTURE.md`.
 
 mod support;
 

@@ -1,7 +1,7 @@
 //! Tables laid out in cells, and a table that will not fit turned into
 //! something that will.
 //!
-//! `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §3. The
+//! `ARCHITECTURE.md` §3. The
 //! two decisions worth restating where the code is:
 //!
 //! **Width is measured, never assumed.** A model emits a markdown table with

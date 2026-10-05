@@ -1370,7 +1370,7 @@ mod reducer {
 
     // --- the attempt ledger ------------------------------------------------
     //
-    // See `docs/decisions/2026-08-21-attempt-accounting-ledger.md`. The
+    // See `ARCHITECTURE.md`. The
     // reducer is total, so "refused" means the variant's effect is not
     // applied and a typed `Refusal` is recorded — the envelope bookkeeping
     // still happens either way.

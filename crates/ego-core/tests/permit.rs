@@ -152,7 +152,7 @@ mod permit {
     }
 
     // --- policy: what a `PreparedCall` is actually authorised to do ---
-    // `docs/decisions/2026-08-21-the-turn-loop.md` §1.
+    // `ARCHITECTURE.md` §1.
 
     /// The engine an operator gets when they configure nothing: `default`
     /// mode, no rules of their own.
@@ -367,7 +367,7 @@ mod permit {
 
     // --- the evaluation order ---------------------------------------------
     //
-    // `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6. The order
+    // `ARCHITECTURE.md` §6. The order
     // is the whole security property: what each step decides matters less
     // than which step gets asked first, so every test below pins a *pair* of
     // steps against each other rather than one step on its own.
@@ -803,7 +803,7 @@ mod permit {
     }
 
     // --- what a denial tells the operator about lifting it ---
-    // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md` §3, §5a.
+    // `ARCHITECTURE.md` §3, §5a.
 
     /// An engine denying `raw`, with that rule carried by `origins`.
     fn denying(raw: &str, origins: &[Source]) -> PolicyEngine {
@@ -914,7 +914,7 @@ mod permit {
 
     // --- listing and searching: looking without reading -------------------
     //
-    // See `docs/decisions/2026-08-21-reading-without-reading-everything.md`.
+    // See `ARCHITECTURE.md`.
 
     fn list_call(root: &str, pattern: &str) -> PreparedCall {
         PreparedCall::new(
@@ -1440,7 +1440,7 @@ mod permit {
 
     // --- Leg 2 of Invariant W: containment ------------------------------
     //
-    // `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` calls this leg
+    // `ARCHITECTURE.md` calls this leg
     // **evidence, and not proof**, and that framing is load-bearing. Leg 1 is
     // decided by the compiler and is total. This is a check over a domain
     // somebody chose, and it is true of the domain it generated and silent

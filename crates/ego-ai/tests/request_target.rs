@@ -1,7 +1,7 @@
 //! A row carries a base, a mapping owns its path, and the two are joined in
 //! exactly one place.
 //!
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §2
+//! `ARCHITECTURE.md` §2
 //! splits them so that a mapping cannot learn who it serves: what it is handed
 //! is a [`RequestTarget`], which has a base, a list of headers it may not
 //! interpret, and no provider id at all. The split has a second consequence
@@ -59,7 +59,7 @@ fn the_shipped_rows_address_the_endpoints_their_providers_serve() {
 /// return.
 ///
 /// A gateway serving this wire format under a prefix is not hypothetical —
-/// `docs/12-cline-provider-survey.md` lists forty compatible bases — and the
+/// `ARCHITECTURE.md` lists forty compatible bases — and the
 /// wrong answer here is a request sent to a real server at the wrong path,
 /// which comes back as a 404 blamed on the provider.
 #[test]

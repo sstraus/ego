@@ -1,6 +1,6 @@
 //! Opening a session for writing: lease, repair, resume — in that order.
 //!
-//! See `docs/decisions/2026-08-21-opening-a-session-for-writing.md`. The five
+//! See `ARCHITECTURE.md`. The five
 //! durable-store pieces (`recover`, `resume`, the lease, and the two snapshot
 //! APIs) were each correct and each uncalled; this is the composition of the
 //! three that belong to opening. Snapshot writing is deliberately not here —

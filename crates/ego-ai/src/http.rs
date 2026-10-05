@@ -601,7 +601,7 @@ pub(crate) async fn fetch(
 /// `ego::body` is off in every filter `ego-cli` builds unless an operator names
 /// the target, so `EGO_LOG=info` — the level someone sets to watch something
 /// else entirely — does not print this.
-/// `docs/decisions/2026-09-07-diagnostics-get-a-destination-before-a-switch.md`
+/// `ARCHITECTURE.md`
 /// §3a.
 pub(crate) fn refusal(answer: &Exchange) -> String {
     tracing::warn!(

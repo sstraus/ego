@@ -2,7 +2,7 @@
 //!
 //! # Why this is a third mapping
 //!
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §4
+//! `ARCHITECTURE.md` §4
 //! allows a provider to differ in exactly three places. Gemini's Interactions
 //! API differs in the request's *shape* and the stream's *event model*, like
 //! Anthropic — but it differs from Anthropic too, which is the point of having

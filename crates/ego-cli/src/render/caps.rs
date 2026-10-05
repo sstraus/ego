@@ -1,6 +1,6 @@
 //! What this terminal can be told, decided once.
 //!
-//! `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §1: no
+//! `ARCHITECTURE.md` §1: no
 //! call site reads an environment variable and no call site formats an escape
 //! by hand. Everything a renderer is allowed to do is a field on
 //! [`Capabilities`], and [`Capabilities::of`] is the only function that decides

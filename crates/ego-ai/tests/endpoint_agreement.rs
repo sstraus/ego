@@ -1,7 +1,7 @@
 //! The rule grammar's host canonicaliser and the `--offline` seam's must not
 //! disagree about what a spelling means.
 //!
-//! `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §5's
+//! `ARCHITECTURE.md` §5's
 //! last bullet wanted one shared classifier, with `http.rs` as its first
 //! caller. **That is not what shipped, and the reason is recorded here because
 //! the ADR is wrong about it rather than merely unimplemented** — see the

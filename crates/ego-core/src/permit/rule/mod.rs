@@ -1,6 +1,6 @@
 //! The permission rule grammar: one language for four surfaces.
 //!
-//! `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md`.
+//! `ARCHITECTURE.md`.
 //! `--allow` on the command line, `permissions.allow` in four config layers,
 //! `allow:` in an agent file's frontmatter and `ego rules ls` are supposed to
 //! speak one language, and `CLI.md:29-31` states that as a requirement: "The

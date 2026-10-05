@@ -1,6 +1,6 @@
 //! The out-of-band half: what ego tells the host that is not text on a screen.
 //!
-//! `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §4 sets
+//! `ARCHITECTURE.md` §4 sets
 //! the rule: an unknown OSC is discarded by every emulator in the matrix, so
 //! the risk of emitting one is not garbage on screen — it is a capability
 //! claimed and never delivered. Every sequence here appears in that matrix,

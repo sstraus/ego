@@ -921,7 +921,7 @@ fn a2a_requires_listen_and_inherits_the_acp_sandbox_ceiling() {
 /// untrusted, and an untrusted resolution discards the Project and Local
 /// layers, so the config file an operator would have written the key into is
 /// read by nobody. See
-/// `docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`.
+/// `ARCHITECTURE.md`.
 #[test]
 fn acp_takes_a_confinement_ceiling_by_name() {
     for (spelling, expected) in [
@@ -1384,9 +1384,9 @@ fn the_documents_name_the_rule_heads_the_parser_actually_enforces() {
     let rows = [
         ("CLI.md", row(include_str!("../../../CLI.md"))),
         (
-            "docs/18-pi-hermes-slash-command-parity.md",
+            "ARCHITECTURE.md",
             row(include_str!(
-                "../../../docs/18-pi-hermes-slash-command-parity.md"
+                "../../../ARCHITECTURE.md"
             )),
         ),
     ];

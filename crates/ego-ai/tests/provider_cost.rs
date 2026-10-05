@@ -1,7 +1,7 @@
 //! Two providers that agree about nothing on the wire, settling through one
 //! `ego-core` path.
 //!
-//! See `docs/decisions/2026-08-21-how-a-model-is-metered.md` §8, whose rule
+//! See `ARCHITECTURE.md` §8, whose rule
 //! this file exists to make falsifiable:
 //!
 //! > Adding a second provider-reported decoder must require no change to

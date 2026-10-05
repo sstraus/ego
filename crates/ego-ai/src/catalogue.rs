@@ -1,7 +1,7 @@
 //! What `--model P/M` resolves to: an endpoint, what the model can do, and
 //! what it costs.
 //!
-//! See `docs/decisions/2026-08-21-what-a-model-resolves-to.md`,
+//! See `ARCHITECTURE.md`,
 //! `ARCHITECTURE.md` §3.1 and `CLI.md`'s `--model` contract.
 //!
 //! Two sources, and the split is the whole design. A **hosted** model's
@@ -50,7 +50,7 @@ pub const OLLAMA: &str = "ollama";
 /// A [`MeteringRevision`] and deliberately not a `PricingRevision`: there is
 /// no price list here to attribute anything to, and the all-zero quote this
 /// used to be spelled through claimed there was
-/// (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §4).
+/// (`ARCHITECTURE.md` §4).
 pub const LOCAL_UNMETERED: &str = "ego/builtin/ollama-local-unmetered/v1";
 
 /// Everything a generation needs to know about the model it is about to run.
@@ -73,7 +73,7 @@ pub struct ResolvedModel {
     /// What this build knows the row costs, which may be nothing.
     ///
     /// Split from `metering` along the line
-    /// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3 draws: the
+    /// `ARCHITECTURE.md` §3 draws: the
     /// metering is a fact about the billing arrangement, the rates are a fact
     /// about our knowledge, and a run that configured no ceiling looks no
     /// rates up at all.
@@ -170,7 +170,7 @@ impl<'de> Deserialize<'de> for ModelSlug {
 /// [`Builtin`](Self::Builtin) is not a configuration layer, which is why the
 /// name of this type is now a little wide for it. It is the catalogue
 /// compiled into the binary, and it exists because
-/// `docs/decisions/2026-09-07-a-builtin-catalogue-layer-below-system-and-user.md`
+/// `ARCHITECTURE.md`
 /// amended the ban on built-in facts: an installation with an API key and no
 /// files could not run a hosted model at all, and "write a `models.toml`
 /// first" is not an out-of-the-box path. It stays *below* both files, so
@@ -810,14 +810,14 @@ pub enum ResolveError {
     /// sentence is false in the one direction that matters: it sends an
     /// operator to look for missing code, when what is missing is a sanitized
     /// live recording only their own key can produce
-    /// (`docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`).
+    /// (`ARCHITECTURE.md`).
     ///
     /// [`ProviderMappingUnavailable`]: ResolveError::ProviderMappingUnavailable
     LivePromotionPending { provider: String, mapping: String },
     /// A hosted model with no supplied **capabilities**.
     ///
     /// Narrowed from "no pricing or capabilities" by
-    /// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3: pricing is no
+    /// `ARCHITECTURE.md` §3: pricing is no
     /// longer required, and "cannot be bounded" is no longer the reason,
     /// because a run that asked for no ceiling does not need bounding.
     HostedModelNotConfigured { slug: String },
@@ -988,7 +988,7 @@ pub fn unmetered() -> Metering {
 /// billing arrangement would be the same fabrication the all-zero quote was.
 /// An operator who pays a flat fee for a row supplies this the way they
 /// supply a [`HostedModel`] — the "explicitly operator-supplied, pinned
-/// source" slot of `docs/decisions/2026-08-21-how-a-model-is-metered.md` §7.
+/// source" slot of `ARCHITECTURE.md` §7.
 ///
 /// What it buys them: the gate reserves zero, so a *monetary* `--budget`
 /// admits every generation and says so through
@@ -1004,7 +1004,7 @@ pub fn subscription(revision: &str) -> Metering {
 /// A row metered in currency and settled from whatever table priced it.
 ///
 /// The ordinary hosted case. It takes no quote: under
-/// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3 the rates travel
+/// `ARCHITECTURE.md` §3 the rates travel
 /// beside the metering rather than inside it, so "this row is billed in
 /// money" and "we hold rates for it" stay two separate assertions. A row with
 /// no rates is still this — the provider still charges — and settles as
@@ -1194,7 +1194,7 @@ impl Catalogue {
     /// `if slug.provider == catalogue::OLLAMA` and call one of two functions,
     /// which is a caller that must know which providers are daemons in order
     /// to resolve any of them. The row knows
-    /// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// (`ARCHITECTURE.md`
     /// §4), so the branch is gone and the second daemon costs a constructor
     /// rather than an arm in another crate.
     ///
@@ -1207,7 +1207,7 @@ impl Catalogue {
     /// read again: a resolver whose endpoint authenticates (xAI publishes
     /// prices per key) must send the same credential the generation will, and
     /// a second read of the environment could disagree with the first
-    /// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// (`ARCHITECTURE.md`
     /// §6).
     pub async fn resolve(
         &self,
@@ -1295,7 +1295,7 @@ impl Catalogue {
 /// provider served behind a path prefix. Ollama is the only caller and the
 /// only daemon with a control plane at all; a second one is the point at which
 /// this stops being a function and becomes the daemon resolver's business
-/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §2
+/// (`ARCHITECTURE.md` §2
 /// names this as the one casualty of the base/path split).
 pub fn control_plane(row: &ProviderRow, path: &str) -> Result<Url, ResolveError> {
     let mut url = row.base().clone();

@@ -61,7 +61,7 @@ pub struct Usage {
     /// is left after the two cache categories are taken out; a mapping that
     /// receives an already-exclusive figure passes it through, and one that
     /// receives an inclusive figure subtracts. Asserted per profile by check
-    /// 4 of `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// 4 of `ARCHITECTURE.md`
     /// §9, which is where it can actually fail.
     pub uncached_input_tokens: u64,
     /// Input tokens served from the provider's prompt cache.
@@ -221,7 +221,7 @@ impl Usage {
 /// Whether a session is running, holding, or held.
 ///
 /// Three states and not a `bool`, because the middle one is the whole point.
-/// `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-session.md`
+/// `ARCHITECTURE.md`
 /// requires that `_ego/pause` report `paused` **only** once the durable
 /// boundary exists and report `pending` before then: an indivisible provider,
 /// permission or tool effect that is already in flight settles truthfully
@@ -876,7 +876,7 @@ impl QuestionContinuation {
 /// is just the fold, with no second addition rule for `CostDelta` to disagree
 /// with [`CumulativeCost::add_delta`]. A correction collapses all of one
 /// attempt's entries into a single revised one. See
-/// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`.
+/// `ARCHITECTURE.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Charge {
     /// Which durable generation fact owns this spend, or whether it predates

@@ -1,6 +1,6 @@
 //! The pricing cache: immutable blobs, one mutable pointer, and a clock.
 //!
-//! `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §6.1 is the contract
+//! `ARCHITECTURE.md` §6.1 is the contract
 //! these tests hold. §6 as originally written said two things that do not
 //! compose — the artefacts are immutable and named by their content hash, and
 //! a table older than a stated age is refused — and a content hash is not a

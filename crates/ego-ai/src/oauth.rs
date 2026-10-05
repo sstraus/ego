@@ -35,7 +35,7 @@ const USER_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:user_code";
 /// One constant rather than a literal per request, because the rule it carries
 /// is a single rule: ego names ego, on every flow and every provider, and a
 /// vendor's own client string is an operator's `[auth.<provider>.headers]`
-/// decision (`docs/16-subscription-login.md` §7.8). A second spelling here is
+/// decision (`ARCHITECTURE.md` §7.8). A second spelling here is
 /// how the first exception gets in.
 pub const EGO_USER_AGENT: &str = concat!("ego/", env!("CARGO_PKG_VERSION"));
 

@@ -5,7 +5,7 @@
 //! exit 0, which reads as a broken command rather than an empty store. The
 //! explanation is a diagnostic and therefore stderr: the stdout shapes of
 //! `config ls` and `rules ls` are fixed by
-//! `docs/decisions/2026-08-25-the-user-config-is-one-atomic-transaction.md`
+//! `ARCHITECTURE.md`
 //! and by the rule ADR, and an extra row on stdout would corrupt both.
 
 mod support;

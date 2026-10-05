@@ -1,7 +1,7 @@
 //! The turn loop: what a turn writes down, and what it does when something
 //! goes wrong.
 //!
-//! See `docs/decisions/2026-08-21-the-turn-loop.md` and
+//! See `ARCHITECTURE.md` and
 //! `plans/m0b-vertical-slice.md` Step 10.
 
 use std::cell::RefCell;
@@ -5846,7 +5846,7 @@ mod turn {
 
     // --- how this generation is metered, said out loud ---
     //
-    // `docs/decisions/2026-08-21-how-a-model-is-metered.md` §6. Three of the
+    // `ARCHITECTURE.md` §6. Three of the
     // four arrangements make a monetary `--budget` inert, and an operator who
     // set one has to be told that before the run rather than inferring it
     // from a limit that never fired.

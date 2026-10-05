@@ -1,6 +1,6 @@
 //! `net(...)` patterns: a parsed authority, never a URL.
 //!
-//! `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §5.
+//! `ARCHITECTURE.md` §5.
 //! `POTENTIALS.md` P19 records that `http://2130706433/` and
 //! `http://127.0.0.1/` are the same destination spelled two ways, and that
 //! comparing host strings does not know it. The grammar closes that at the

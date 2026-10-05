@@ -122,7 +122,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// Where an [`Envelope`](super::domain::Envelope)'s observation time comes
-/// from (`docs/decisions/2026-08-21-the-turn-loop.md` §2).
+/// from (`ARCHITECTURE.md` §2).
 ///
 /// A port rather than a `Timestamp::now()`, for the reason this whole type
 /// exists: a timestamp that reads the system clock from inside the domain
