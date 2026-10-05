@@ -125,7 +125,6 @@ pub(super) async fn drive_headless_turn(
     let execution_capabilities = observation.capabilities();
     let http =
         Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
-    let router = super::router::compose(Arc::clone(&http), cwd);
     let journal = SharedJournal::new(Journal::new(
         active.id(),
         active.store(),
@@ -136,7 +135,7 @@ pub(super) async fn drive_headless_turn(
     ));
     let instructions_loaded = config.system.is_some();
     let runtime = GenerationRuntime {
-        source: source.bind(Arc::clone(&http), cancel.clone(), run_deadline),
+        source: source.bind(http, cancel.clone(), run_deadline),
         policy_source: Arc::clone(&policy_source),
         gate: gate.clone(),
         config,
@@ -238,7 +237,6 @@ pub(super) async fn drive_headless_turn(
     })?
     .with_skill_invocation_port(skill_owner.clone())
     .with_pause_token(pause.clone());
-    let loop_ = super::router::attach(loop_, router);
     let loop_ = match recovered_policy.as_ref() {
         Some(policy) => loop_
             .with_hook_policy(Arc::clone(policy))
@@ -257,7 +255,6 @@ pub(super) async fn drive_headless_turn(
         Some(elicitor) => loop_.with_elicitor(elicitor),
         None => loop_,
     };
-    let loop_ = super::composition::with_destructive_judge(loop_, http);
     let loop_ = super::composition::with_permission_analysis(loop_, hook_trust);
     let mut loop_ = if judge_available {
         loop_.with_judge(JudgeContext {

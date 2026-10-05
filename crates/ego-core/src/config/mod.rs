@@ -5,7 +5,6 @@
 
 mod discovery;
 mod error;
-mod jev;
 mod layer;
 mod mutation;
 mod resolve;
@@ -43,9 +42,4 @@ pub use windows_unconfined::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger, Unc
 pub use workspace_trust::{
     ExecutableDeclaration, ExecutableSurface, ProgramEvidence, TRUST_DIGEST_MAX_BYTES,
     TrustInventory, TrustLedger, TrustRecord, TrustedContent,
-};
-
-pub use jev::{
-    JEV_ENDPOINT, JevAuth, JevConfig, JevFail, JevPolicy, JevRoot, JevSettings, JevUse,
-    JevUseOverride, Probability,
 };

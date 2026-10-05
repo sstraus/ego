@@ -1129,42 +1129,6 @@ impl PolicyEngine {
         }
     }
 
-    pub(crate) fn destructive_candidate(&self, call: &PreparedCall) -> bool {
-        (self.mode == Mode::Auto || (self.coordinator && self.mode == Mode::Default))
-            && self.risk(call).class == super::analysis::RiskClass::Unknown
-            && call.tool() == "exec"
-            && call.ops().len() == 1
-            && call.ops().iter().all(|op| matches!(op, Op::Spawn { .. }))
-    }
-
-    pub(crate) fn settle_destructive(
-        &self,
-        mut pending: Pending,
-        opinion: super::analysis::DestructiveOpinion,
-    ) -> Resolution {
-        if !self.destructive_candidate(pending.call()) {
-            return Resolution::Ask(pending);
-        }
-        match opinion {
-            super::analysis::DestructiveOpinion::Safe { model } => {
-                let call = pending.call;
-                let permit = self.mint(scope_of(&call));
-                Resolution::Settled(Ok(Authorized {
-                    call,
-                    permit,
-                    by: Authority::DestructiveJudge { model },
-                }))
-            }
-            super::analysis::DestructiveOpinion::Card => {
-                if let Some(presentation) = pending.ask.presentation.as_mut() {
-                    presentation.risk.class = super::analysis::RiskClass::High;
-                }
-                Resolution::Ask(pending)
-            }
-            super::analysis::DestructiveOpinion::CurrentJudge => Resolution::Ask(pending),
-        }
-    }
-
     fn coordinator_high(&self, call: &PreparedCall) -> bool {
         self.coordinator && self.risk(call).class == super::analysis::RiskClass::High
     }

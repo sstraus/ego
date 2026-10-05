@@ -252,10 +252,6 @@ pub enum ExportEvent {
         candidate: ModelRef,
         decision: ExportFallbackDecision,
     },
-    RouterDecision {
-        model: Option<ModelRef>,
-        outcome: crate::turn::RouterOutcome,
-    },
     ExecutionObserved {
         observation: ExecObservation,
         probe_evidence: Option<crate::store::evidence::EvidenceRef>,
@@ -911,10 +907,6 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 decision,
             }
         }
-        EventKind::RouterDecision { model, outcome } => ExportEvent::RouterDecision {
-            model: model.clone(),
-            outcome: outcome.clone(),
-        },
         EventKind::ExecutionObserved {
             observation,
             probe_evidence,

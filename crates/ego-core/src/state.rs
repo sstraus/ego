@@ -1999,7 +1999,7 @@ impl SessionState {
                     self.prompt_snapshot = Some(snapshot.clone());
                 }
             }
-            EventKind::FallbackDecision { .. } | EventKind::RouterDecision { .. } => {}
+            EventKind::FallbackDecision { .. } => {}
             EventKind::ExecutionObserved { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
