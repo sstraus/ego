@@ -1,6 +1,8 @@
 //! Exact argv-native execution behind one run-owned process boundary.
 
 mod backend;
+#[cfg(target_os = "linux")]
+mod bwrap;
 mod denial;
 mod editor_process;
 mod identity;
@@ -36,7 +38,7 @@ pub use editor_process::{EditorProcessError, run_editor_process};
 pub use ego_core::permit::{ProcessError, ProcessExecutor};
 #[cfg(target_os = "linux")]
 pub use landlock::dispatch_helper as dispatch_landlock_helper;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use probe::dispatch_network_probe;
 pub use secret_child::{SecretChildError, SecretChildOutput, SecretChildRequest, run_secret_child};
 
@@ -525,6 +527,28 @@ async fn select_backend(
     limits: ExecLimits,
     log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
+    if policy.level() == ego_core::permit::Confinement::Off && !policy.offline() {
+        return MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
+            .map(|backend| (Arc::new(backend), Vec::new()));
+    }
+    match probe::bwrap(policy, cancel.clone(), limits, log).await {
+        Ok(selected)
+            if selected
+                .0
+                .capabilities()
+                .contains(policy.requirements().required()) =>
+        {
+            return Ok(selected);
+        }
+        Err(ProcessError::Cancelled) => return Err(ProcessError::Cancelled),
+        Err(error) => log.record(ProbeRecord {
+            suite: "bwrap.prerequisite".into(),
+            root: policy.workspace().as_path().to_path_buf(),
+            argv: vec!["/usr/bin/bwrap".into()],
+            outcome: error.to_string(),
+        }),
+        Ok(_) => {}
+    }
     if policy.level() == ego_core::permit::Confinement::Off {
         return MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
             .map(|backend| (Arc::new(backend), Vec::new()));

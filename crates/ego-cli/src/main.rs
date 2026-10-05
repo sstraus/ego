@@ -18,7 +18,7 @@ use ego_core::turn::CancelToken;
 fn main() -> std::process::ExitCode {
     // Behavioural network probes are hidden child modes, not CLI commands.
     // Dispatch them before clap or any provider/configuration work.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(delivered) = ego_tools::exec::dispatch_network_probe(std::env::args_os()) {
         return if delivered {
             std::process::ExitCode::SUCCESS

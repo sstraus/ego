@@ -2100,19 +2100,6 @@ fn offline_http_refuses_before_dns_or_socket() {
         ego_core::turn::CancelToken::new(),
         HttpCallTimeout::default(),
     );
-    #[cfg(target_os = "linux")]
-    {
-        match result {
-            Err(error) => assert!(
-                matches!(error, ProcessError::MissingCapabilities(_)),
-                "offline construction failed for an unrelated reason: {error:?}"
-            ),
-            Ok(_) => panic!("Linux offline construction unexpectedly succeeded"),
-        }
-        assert!(resolver.calls.lock().expect("calls").is_empty());
-        assert!(server.finish().is_empty(), "offline opened no socket");
-    }
-    #[cfg(not(target_os = "linux"))]
     {
         let fixture = match result {
             Ok(fixture) => fixture,
@@ -2150,4 +2137,11 @@ fn offline_http_refuses_before_dns_or_socket() {
         assert!(resolver.calls.lock().expect("calls").is_empty());
         assert!(server.finish().is_empty(), "offline opened no socket");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "hosts the shared offline probe child"]
+fn __ego_internal_network_probe_v1() {
+    assert!(ego_tools::exec::dispatch_network_probe(std::env::args_os()).expect("probe envelope"));
 }
