@@ -1776,3 +1776,108 @@ async fn malformed_unknown_and_wrong_root_requests_return_explicit_errors() {
     }
     connection.finish().await;
 }
+
+// Catches: nested forks replaying an ancestor's discarded tail, losing local
+// frames, or treating a tombstoned ancestor as unavailable.
+#[tokio::test]
+async fn critic_nested_fork_keeps_each_cutoff_and_local_ids_after_ancestor_deletion() {
+    let fixture = support::DurableAcpFixture::new();
+    let (root, root_items) = fixture.seed_settled_messages(ROOT);
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (fork, _) = connection
+        .request(
+            "session/fork",
+            serde_json::json!({
+                "sessionId": root, "cwd": ROOT, "mcpServers": [],
+                "_meta": {"ego": {"atMessageId": root_items[0]}}
+            }),
+        )
+        .await;
+    let child = fork["result"]["sessionId"].as_str().unwrap().to_owned();
+    connection.announced().await;
+    let child_first = fixture.append_settled_message(&child, "child first");
+    let child_tail = fixture.append_settled_message(&child, "discarded child tail");
+    let (fork, _) = connection
+        .request(
+            "session/fork",
+            serde_json::json!({
+                "sessionId": child, "cwd": ROOT, "mcpServers": [],
+                "_meta": {"ego": {"atMessageId": child_first}}
+            }),
+        )
+        .await;
+    let grandchild = fork["result"]["sessionId"].as_str().unwrap().to_owned();
+    connection.announced().await;
+    let local = fixture.append_settled_message(&grandchild, "grandchild local");
+    for parent in [&root, &child] {
+        let (deleted, _) = connection
+            .request(
+                "session/delete",
+                serde_json::json!({
+                    "sessionId": parent
+                }),
+            )
+            .await;
+        assert!(deleted.get("error").is_none(), "{deleted}");
+    }
+    connection.finish().await;
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (loaded, _) = connection
+        .request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": grandchild, "cwd": ROOT, "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let announced = connection.announced().await;
+    let messages = updates(&announced)
+        .into_iter()
+        .filter(|params| params["update"]["sessionUpdate"] == "user_message_chunk")
+        .map(|params| &params["update"])
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 3, "discarded tails replayed: {messages:?}");
+    for (message, expected) in messages.iter().zip([root_items[0], child_first, local]) {
+        assert_eq!(message["messageId"], expected.to_string());
+    }
+    assert_eq!(messages[0]["_meta"]["ego"]["inherited"], true);
+    assert_eq!(messages[1]["_meta"]["ego"]["inherited"], true);
+    assert!(messages[2]["_meta"]["ego"].get("inherited").is_none());
+    assert_eq!(
+        loaded["result"]["_meta"]["ego"]["lineage"]["rootSessionId"],
+        root
+    );
+    assert_eq!(
+        loaded["result"]["_meta"]["ego"]["lineage"]["sourceDeleted"],
+        true
+    );
+    let (before, _) = connection
+        .request("session/list", serde_json::json!({"cwd": ROOT}))
+        .await;
+    for hidden in [root_items[1], child_tail] {
+        let (refused, _) = connection
+            .request(
+                "session/fork",
+                serde_json::json!({
+                    "sessionId": grandchild, "cwd": ROOT, "mcpServers": [],
+                    "_meta": {"ego": {"atMessageId": hidden}}
+                }),
+            )
+            .await;
+        assert!(
+            refused.get("error").is_some(),
+            "hidden tail became forkable: {refused}"
+        );
+    }
+    let (after, _) = connection
+        .request("session/list", serde_json::json!({"cwd": ROOT}))
+        .await;
+    assert_eq!(
+        before["result"]["sessions"], after["result"]["sessions"],
+        "refused forks published sessions"
+    );
+    connection.finish().await;
+}
