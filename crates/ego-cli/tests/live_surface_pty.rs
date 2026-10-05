@@ -6643,10 +6643,25 @@ fn tool_turn(
         })
         .collect();
     completions.push(Reply::Sse(text(TOOL_TURN_DONE)));
-    let stub = Stub::start(Plan {
+    tool_turn_with_completions(cols, files, completions, expand, None)
+}
+
+fn tool_turn_with_completions(
+    cols: u16,
+    files: &[(&str, &str)],
+    completions: Vec<Reply>,
+    expand: bool,
+    children_gate: Option<(Arc<ReleaseGate>, bool)>,
+) -> ToolTurnScreens {
+    let plan = Plan {
         completions,
         ..Plan::default()
-    });
+    };
+    let stub = if children_gate.is_some() {
+        Stub::start_concurrent(plan)
+    } else {
+        Stub::start(plan)
+    };
     let ego = Ego::against(&stub)
         .conversing()
         .args([
@@ -6657,7 +6672,11 @@ fn tool_turn(
             "--mode",
             "yolo",
             "--sandbox",
-            "off",
+            if children_gate.is_some() {
+                "workspace"
+            } else {
+                "off"
+            },
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# tool row fixture\n");
@@ -6690,7 +6709,62 @@ fn tool_turn(
     let start = output.len();
     input.write_all(b"use the tools\r").expect("turn");
     input.flush().expect("turn flush");
-    until_normalized(&reader, &mut output, start, TOOL_TURN_DONE);
+    let cancel_children = children_gate.as_ref().is_some_and(|(_, cancel)| *cancel);
+    if let Some((gate, cancel)) = children_gate {
+        let deadline = Instant::now() + PROGRESS_DEADLINE;
+        loop {
+            let requests = stub.requests();
+            if requests
+                .iter()
+                .filter(|request| request.path.ends_with("/chat/completions"))
+                .count()
+                >= 3
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                gate.release();
+                panic!("both task children must reach the provider concurrently: {requests:?}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if cancel {
+            input.write_all(b"\x1b").expect("cancel task children");
+            input.flush().expect("cancel task children flush");
+            until_normalized(&reader, &mut output, start, "Interrupted by user");
+        }
+        gate.release();
+        let generations = stub.generations();
+        let live_context = |generation: &serde_json::Value| {
+            generation["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|message| message["content"].as_str())
+                .find(|content| content.contains("- Posture:"))
+                .expect("the real CLI supplies authoritative live posture")
+                .to_owned()
+        };
+        let parent_system = live_context(&generations[0]);
+        assert!(
+            parent_system.contains("sandbox: workspace; network: online"),
+            "{parent_system}"
+        );
+        for child in &generations[1..3] {
+            let child_system = live_context(child);
+            for fact in parent_system.lines().filter(|line| {
+                line.starts_with("- Posture:") || line.starts_with("- Workspace root:")
+            }) {
+                assert!(
+                    child_system.contains(fact),
+                    "child widened parent posture: {child_system}"
+                );
+            }
+        }
+    }
+    if !cancel_children {
+        until_normalized(&reader, &mut output, start, TOOL_TURN_DONE);
+    }
     let screen_lines = |output: &[u8]| {
         let mut screen = vt100::Parser::new(rows, cols, 0);
         screen.process(output);
@@ -6726,7 +6800,16 @@ fn tool_turn(
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
+    let status = bounded_exit(child);
+    if cancel_children {
+        assert_eq!(
+            status.exit_code(),
+            130,
+            "the cancelled turn owns the final exit"
+        );
+    } else {
+        assert!(status.success());
+    }
     drop(input);
     drop(pair);
     reader_join.join().expect("reader thread");
@@ -8321,4 +8404,132 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
         receipt,
         target["id"].as_str().expect("successor id").to_owned(),
     )
+}
+
+fn two_task_calls() -> String {
+    let first = tool_call("one", "task", r#"{"name":"one","prompt":"read calc.py"}"#);
+    let second = tool_call("two", "task", r#"{"name":"two","prompt":"read calc.py"}"#);
+    let (head, tail) = first.split_once("\n\n").unwrap();
+    let mut frame: serde_json::Value =
+        serde_json::from_str(head.strip_prefix("data: ").unwrap()).unwrap();
+    let other: serde_json::Value = serde_json::from_str(
+        second
+            .split_once("\n\n")
+            .unwrap()
+            .0
+            .strip_prefix("data: ")
+            .unwrap(),
+    )
+    .unwrap();
+    let mut second_call = other["choices"][0]["delta"]["tool_calls"][0].clone();
+    second_call["index"] = serde_json::json!(1);
+    frame["choices"][0]["delta"]["tool_calls"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_call);
+    format!("data: {frame}\n\n{tail}")
+}
+
+// Catches: concurrent task rows interleaving their labels or overwriting the composer.
+#[test]
+fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
+    let tasks = two_task_calls();
+    let gate = ReleaseGate::new();
+    let child = || Reply::GatedPaced {
+        head: String::new(),
+        tail: tool_call("read1", "read", r#"{"path":"calc.py"}"#),
+        gate: gate.clone(),
+    };
+    let screens = tool_turn_with_completions(
+        120,
+        &[("calc.py", "hello\n")],
+        vec![
+            Reply::Sse(tasks),
+            child(),
+            child(),
+            Reply::Sse(text("child final")),
+            Reply::Sse(text("child final")),
+            Reply::Sse(text(TOOL_TURN_DONE)),
+        ],
+        false,
+        Some((gate.clone(), false)),
+    );
+    let lines = &screens.after_turn;
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("↳ one ›") && line.contains("read calc.py"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("↳ two ›") && line.contains("read calc.py"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("task one"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("task two"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert!(
+        lines.last().is_some_and(|line| line.starts_with('>')),
+        "{lines:?}"
+    );
+}
+
+// Catches: Esc returning to the composer while a child still owns a live attempt.
+#[test]
+fn esc_cancels_both_task_children_and_restores_one_idle_composer() {
+    let gate = ReleaseGate::new();
+    let held = || Reply::GatedPaced {
+        head: String::new(),
+        tail: text("must not finish"),
+        gate: gate.clone(),
+    };
+    let screens = tool_turn_with_completions(
+        120,
+        &[],
+        vec![Reply::Sse(two_task_calls()), held(), held()],
+        false,
+        Some((gate.clone(), true)),
+    );
+    let visible = screens.after_turn.join("\n");
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "{visible}"
+    );
+    assert_eq!(
+        screens
+            .after_turn
+            .iter()
+            .filter(|line| line.contains("✗ task") && line.contains("Cancelled"))
+            .count(),
+        2,
+        "{visible}"
+    );
+    assert!(
+        screens
+            .after_turn
+            .last()
+            .is_some_and(|line| line.starts_with('>')),
+        "{visible}"
+    );
+    assert!(!visible.contains("must not finish"), "{visible}");
 }

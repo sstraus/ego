@@ -203,6 +203,7 @@ pub(super) fn tools(
         .map(RegisteredTool::Effect)
         .collect();
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
+    all.push(RegisteredTool::Task);
     if let Some(source) = history {
         for tool in [
             ego_core::history::HistoryTool::Search,
