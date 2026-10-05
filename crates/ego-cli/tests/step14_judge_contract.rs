@@ -302,9 +302,11 @@ fn auto_allow_uses_one_toolless_judge_and_then_executes_the_exact_call() {
     );
 }
 
+// Catches: reusing an opinion across distinct session read roots after 8b4597f3.
+// The whole captured policy digest participates in the analysis key.
 #[cfg(unix)]
 #[test]
-fn two_process_sessions_reuse_one_paid_analysis_and_mint_fresh_audit_authority() {
+fn two_process_sessions_reanalyse_changed_read_roots_and_mint_fresh_audit_authority() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let stub = Stub::start(Plan {
@@ -313,6 +315,7 @@ fn two_process_sessions_reuse_one_paid_analysis_and_mint_fresh_audit_authority()
             judge_response("allow", "one exact observed image"),
             Reply::Sse(text("first done")),
             exec_request(),
+            judge_response("allow", "second session read root"),
             Reply::Sse(text("second done")),
         ],
         ..Plan::default()
@@ -348,13 +351,13 @@ fn two_process_sessions_reuse_one_paid_analysis_and_mint_fresh_audit_authority()
     assert_eq!(finished.code, Some(0), "{}", finished.stderr);
     assert_eq!(
         stub.generations().len(),
-        5,
-        "the second session must not generate a judge opinion"
+        6,
+        "each session has a different captured MCP read root and needs its own opinion"
     );
-    assert_eq!(
+    assert_ne!(
         std::fs::read(cache_path).unwrap(),
         before,
-        "a hit must not rewrite the cache"
+        "a different policy digest must publish a distinct cached opinion"
     );
     let mut decisions = Vec::new();
     let mut judge_generations = 0;
@@ -376,18 +379,14 @@ fn two_process_sessions_reuse_one_paid_analysis_and_mint_fresh_audit_authority()
             }
         }
     }
-    assert_eq!(judge_generations, 1);
+    assert_eq!(judge_generations, 2);
     assert_eq!(decisions.len(), 2);
     assert_ne!(
         decisions[0].0, decisions[1].0,
         "the permits belong to distinct sessions"
     );
     assert!(decisions.iter().any(|(_, authority)| authority == "judge"));
-    assert!(
-        decisions
-            .iter()
-            .any(|(_, authority)| authority == "cached_judge")
-    );
+    assert!(decisions.iter().all(|(_, authority)| authority == "judge"));
 }
 
 #[test]
