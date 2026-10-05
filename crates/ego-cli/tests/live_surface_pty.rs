@@ -7223,7 +7223,18 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
     let start = output.len();
     input.write_all(format!("/{action}\r").as_bytes()).unwrap();
     input.flush().unwrap();
-    until_local_action_completed(&reader, &mut output, start, action, PROGRESS_DEADLINE);
+    // A prompt redraw can occur while the checkpoint generation is still running.
+    // Wait for the actual publication receipt before quitting the successor.
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        if action == "compact" {
+            "compacted session"
+        } else {
+            "forked session"
+        },
+    );
     drain_until_quiet(&reader, &mut output);
     let receipt = normalized(&output[start..]);
     input.write_all(b"/quit\r").unwrap();
