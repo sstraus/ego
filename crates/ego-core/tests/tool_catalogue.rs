@@ -389,6 +389,7 @@ fn loop_with_session_state(
         },
         admission: Arc::new(EvidenceAdmissionService::new()),
         invocation: RunInvocationId::new(),
+        retry_pause: Arc::new(NoRetryPause),
     };
     let session = Session {
         id: SessionId::new(),
@@ -1085,4 +1086,13 @@ fn oversized_host_context_is_bounded_without_splitting_unicode_or_user_text() {
             text: "the user decides".into()
         }]
     );
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
+    }
 }

@@ -208,6 +208,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 config: config.clone(),
                 admission: Arc::clone(&evidence),
                 invocation,
+                retry_pause: Arc::new(TokioRetryPause),
             };
             let effect_ports = ToolEffectPorts::new(
                 &fs,
@@ -880,6 +881,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         if matches!(
                                             &last.termination,
                                             RunTermination::Provider { .. }
+                                                | RunTermination::ProviderUncertain { .. }
                                                 | RunTermination::UsageError { .. }
                                         ) {
                                             last.termination = RunTermination::Done;
@@ -1747,6 +1749,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 config: config.clone(),
                                                 admission: Arc::clone(&evidence),
                                                 invocation,
+                                                retry_pause: Arc::new(TokioRetryPause),
                                             };
                                             let effect_ports = ToolEffectPorts::new(
                                                 &fs,
@@ -2108,12 +2111,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                         ),
                                                     ),
                                                 })
-                                                .or_else(|| {
-                                                    RunTermination::after_turn(
-                                                        outcome.exit_reason,
-                                                        outcome.denied,
-                                                    )
-                                                })
+                                                .or_else(|| RunTermination::after_outcome(&outcome))
                                                 .unwrap_or(RunTermination::Done);
                                             Some((
                                                 termination,

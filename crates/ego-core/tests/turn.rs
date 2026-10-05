@@ -1929,6 +1929,7 @@ mod turn {
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
+            retry_pause: Arc::new(NoRetryPause),
         }
     }
 
@@ -6826,6 +6827,7 @@ mod turn {
                     config,
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             );
@@ -6932,6 +6934,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             );
@@ -7171,6 +7174,7 @@ mod turn {
                 },
                 admission: Arc::new(EvidenceAdmissionService::new()),
                 invocation: RunInvocationId::new(),
+                retry_pause: Arc::new(NoRetryPause),
             };
             let observation = ego_core::permit::ExecObservation::new(
                 ego_core::permit::BackendIdentity::new("test", "1"),
@@ -7463,6 +7467,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -7592,6 +7597,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -7655,6 +7661,7 @@ mod turn {
                         },
                         admission: Arc::new(EvidenceAdmissionService::new()),
                         invocation: RunInvocationId::new(),
+                        retry_pause: Arc::new(NoRetryPause),
                     },
                     tools,
                 );
@@ -7722,6 +7729,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             );
@@ -7813,6 +7821,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -7912,6 +7921,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -7990,6 +8000,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             );
@@ -8061,6 +8072,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -8143,6 +8155,7 @@ mod turn {
                         },
                         admission: Arc::new(EvidenceAdmissionService::new()),
                         invocation: RunInvocationId::new(),
+                        retry_pause: Arc::new(NoRetryPause),
                     },
                     tools,
                 )
@@ -8249,6 +8262,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -8366,6 +8380,7 @@ mod turn {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -8803,14 +8818,19 @@ mod turn {
                 ["primary-model", "fallback-model"]
             );
 
-            // A possibly-sent transient failure is terminal for automatic
-            // delivery, even though its error class would otherwise retry.
+            // A possibly-sent transient failure that already showed output
+            // is terminal for automatic delivery, even though its error class
+            // would otherwise retry (maintainer decision 2026-10-05 retries only
+            // the possibly-sent attempts that showed nothing).
             let trace = GenerationTrace::default();
             let source = Arc::new(
                 ScriptedGenerationSource::new([Ok(profile(
                     primary,
                     false,
                     vec![
+                        AiEvent::TextDelta {
+                            text: "partial".to_owned(),
+                        },
                         AiEvent::Error {
                             message: "connection lost after write".to_owned(),
                             kind: ErrorKind::Transient,
@@ -8843,6 +8863,349 @@ mod turn {
             assert_eq!(
                 trace.steps.lock().unwrap().as_slice(),
                 ["resolve:Main", "generate:primary-model"]
+            );
+        }
+
+        /// The wait a retried attempt asked for, and optionally a host that
+        /// cancels the turn while it waits.
+        #[derive(Default)]
+        struct RecordedPause {
+            delays: Mutex<Vec<std::time::Duration>>,
+            cancel_on_wait: Option<CancelToken>,
+        }
+
+        impl ego_core::turn::RetryPause for RecordedPause {
+            fn pause(&self, delay: std::time::Duration) -> BoxFuture<'static, ()> {
+                self.delays.lock().unwrap().push(delay);
+                match &self.cancel_on_wait {
+                    Some(cancel) => {
+                        cancel.cancel(ego_core::event::domain::CancelCause::Host);
+                        Box::pin(futures::future::pending())
+                    }
+                    None => Box::pin(futures::future::ready(())),
+                }
+            }
+        }
+
+        fn run_retrying(
+            fx: &Fixture,
+            source: Arc<ScriptedGenerationSource>,
+            retry: u32,
+            pause: Arc<RecordedPause>,
+            cancel: CancelToken,
+        ) -> ego_core::turn::TurnOutcome {
+            let gate = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    cancel,
+                ),
+                GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
+                    source,
+                    gate: gate.clone(),
+                    config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
+                        system: None,
+                        identity: None,
+                        token_ceiling: None,
+                        retry,
+                        fallbacks: Vec::new(),
+                    },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
+                    retry_pause: pause,
+                },
+                tools,
+            );
+            block_on(turn.run("are you there?")).expect("the store accepted every append")
+        }
+
+        const OVERLOADED: &str = "Our servers are currently overloaded. Please try again later.";
+
+        /// The live failure's shape: an answered stream whose only content is
+        /// a provider error event.
+        fn overloaded(retry_after: Option<std::time::Duration>) -> Vec<AiEvent> {
+            vec![
+                AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
+                AiEvent::Error {
+                    message: OVERLOADED.to_owned(),
+                    kind: ErrorKind::Transient,
+                },
+                AiEvent::ProviderFailure {
+                    cause: OVERLOADED.to_owned(),
+                    retry_after,
+                },
+                AiEvent::Stop(StopReason::Error),
+            ]
+        }
+
+        fn retries(fx: &Fixture) -> Vec<(u32, u32, u64, String)> {
+            fx.sink
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    PublicEvent::ProviderRetry {
+                        attempt,
+                        limit,
+                        delay_ms,
+                        cause,
+                        ..
+                    } => Some((attempt, limit, delay_ms, cause)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// regression case — catches: a possibly-sent transient failure that
+        /// showed nothing is never retried, and six immediate retries all
+        /// land on a provider that is still overloaded.
+        #[test]
+        fn a_transient_failure_that_showed_nothing_retries_six_times_with_backoff_then_settles_known()
+         {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new((0..7).map(|_| {
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        overloaded(None),
+                        &trace,
+                        Some(1_024),
+                    ))
+                }))
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let pause = Arc::new(RecordedPause::default());
+            let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+
+            assert_eq!(
+                trace.requests.lock().unwrap().len(),
+                7,
+                "one attempt plus six retries"
+            );
+            assert_eq!(
+                *pause.delays.lock().unwrap(),
+                [1, 2, 4, 8, 16, 32].map(std::time::Duration::from_secs),
+                "exponential backoff between attempts"
+            );
+            assert_eq!(
+                retries(&fx),
+                (1..=6)
+                    .map(|n| (n, 6, 1_000 << (n - 1), OVERLOADED.to_owned()))
+                    .collect::<Vec<_>>(),
+                "every retry is announced with its counter, wait and cause"
+            );
+            assert_eq!(outcome.exit_reason, ExitReason::Provider);
+            assert_eq!(
+                outcome.provider_failure,
+                Some(ego_core::turn::ProviderFailure {
+                    cause: OVERLOADED.to_owned(),
+                    effect_known: true,
+                })
+            );
+            assert_eq!(
+                RunTermination::after_outcome(&outcome),
+                Some(RunTermination::Provider {
+                    message: OVERLOADED.to_owned()
+                }),
+                "an exhausted plan is a known failure, named once"
+            );
+        }
+
+        /// regression case — catches: a provider-stated `Retry-After` ignored
+        /// in favour of the local backoff, or obeyed past the ceiling.
+        #[test]
+        fn a_retry_waits_for_the_providers_retry_after_and_a_long_one_stops_the_plan() {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        overloaded(Some(std::time::Duration::from_secs(3))),
+                        &trace,
+                        Some(1_024),
+                    )),
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        vec![
+                            AiEvent::TextDelta {
+                                text: "back".to_owned(),
+                            },
+                            AiEvent::Stop(StopReason::Stop),
+                        ],
+                        &trace,
+                        Some(1_024),
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let pause = Arc::new(RecordedPause::default());
+            let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+            assert!(outcome.ok, "the retried attempt answered");
+            assert_eq!(
+                *pause.delays.lock().unwrap(),
+                [std::time::Duration::from_secs(3)]
+            );
+            assert_eq!(outcome.provider_failure, None);
+
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([Ok(profile(
+                    "ollama/primary-model",
+                    false,
+                    overloaded(Some(std::time::Duration::from_secs(120))),
+                    &trace,
+                    Some(1_024),
+                ))])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let pause = Arc::new(RecordedPause::default());
+            let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+            assert_eq!(trace.requests.lock().unwrap().len(), 1);
+            assert!(pause.delays.lock().unwrap().is_empty());
+            assert!(retries(&fx).is_empty());
+            assert_eq!(outcome.exit_reason, ExitReason::Provider);
+        }
+
+        /// regression case — catches: a retry that shows the user the same
+        /// text or runs the same tool call twice.
+        #[test]
+        fn an_attempt_that_showed_output_before_failing_is_not_retried() {
+            let lost = |head: AiEvent, reported: bool| {
+                let mut script = vec![
+                    head,
+                    AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
+                    AiEvent::Error {
+                        message: "the response stream failed".to_owned(),
+                        kind: ErrorKind::Transient,
+                    },
+                ];
+                if reported {
+                    script.push(AiEvent::ProviderFailure {
+                        cause: OVERLOADED.to_owned(),
+                        retry_after: None,
+                    });
+                }
+                script.push(AiEvent::Stop(StopReason::Error));
+                script
+            };
+            for (head, reported, effect_known) in [
+                (
+                    AiEvent::TextDelta {
+                        text: "half an answer".to_owned(),
+                    },
+                    false,
+                    false,
+                ),
+                (
+                    AiEvent::ReasoningDelta {
+                        text: "thinking".to_owned(),
+                    },
+                    false,
+                    false,
+                ),
+                (
+                    AiEvent::ToolCall {
+                        call_id: "call-288".to_owned(),
+                        name: "read".to_owned(),
+                        args: r#"{"path":"/ws/a"}"#.to_owned(),
+                    },
+                    true,
+                    true,
+                ),
+            ] {
+                let trace = GenerationTrace::default();
+                let source = Arc::new(
+                    ScriptedGenerationSource::new((0..2).map(|_| {
+                        Ok(profile(
+                            "ollama/primary-model",
+                            false,
+                            lost(head.clone(), reported),
+                            &trace,
+                            Some(1_024),
+                        ))
+                    }))
+                    .with_trace(trace.clone()),
+                );
+                let fx = Fixture::new(vec![]);
+                let pause = Arc::new(RecordedPause::default());
+                let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+                assert_eq!(trace.requests.lock().unwrap().len(), 1, "{head:?}");
+                assert!(pause.delays.lock().unwrap().is_empty(), "{head:?}");
+                assert!(retries(&fx).is_empty(), "{head:?}");
+                assert_eq!(outcome.exit_reason, ExitReason::Provider, "{head:?}");
+                let failure = outcome
+                    .provider_failure
+                    .clone()
+                    .expect("a provider failure");
+                assert_eq!(
+                    failure.effect_known, effect_known,
+                    "only a lost exchange after output is uncertain: {head:?}"
+                );
+                assert_eq!(
+                    matches!(
+                        RunTermination::after_outcome(&outcome),
+                        Some(RunTermination::ProviderUncertain { .. })
+                    ),
+                    !effect_known,
+                    "{head:?}"
+                );
+            }
+        }
+
+        /// regression case — catches: a backoff wait the host cannot stop.
+        #[test]
+        fn a_retry_wait_is_cancellable_by_the_host() {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new((0..2).map(|_| {
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        overloaded(None),
+                        &trace,
+                        Some(1_024),
+                    ))
+                }))
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let cancel = CancelToken::new();
+            let pause = Arc::new(RecordedPause {
+                delays: Mutex::default(),
+                cancel_on_wait: Some(cancel.clone()),
+            });
+            let outcome = run_retrying(&fx, source, 6, pause.clone(), cancel);
+            assert_eq!(
+                outcome.exit_reason,
+                ExitReason::Cancelled(ego_core::event::domain::CancelCause::Host)
+            );
+            assert_eq!(pause.delays.lock().unwrap().len(), 1, "the wait began");
+            assert_eq!(
+                trace.requests.lock().unwrap().len(),
+                1,
+                "no attempt follows a cancelled wait"
             );
         }
 
@@ -10776,5 +11139,14 @@ mod turn {
             }));
             assert!(state.refusals.is_empty());
         }
+    }
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
     }
 }

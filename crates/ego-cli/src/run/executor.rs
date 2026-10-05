@@ -19,6 +19,15 @@
 //! and claim an independence this code does not have.
 use super::*;
 
+/// Retries an ACP turn spends on a transient provider failure that showed
+/// nothing, before it settles as a known failure.
+///
+/// maintainer decision 2026-10-05 (regression case): a human watching an AI chat is
+/// served better by six visible retries with backoff than by a turn that dies
+/// on the first overload. A headless `ego run` keeps `--retry 0` by default,
+/// because a script owns its own retry policy and reads exit 4 for it.
+pub(super) const ACP_PROVIDER_RETRIES: u32 = 6;
+
 pub(super) fn public_result_artifact(
     result: Value,
 ) -> Result<PublishedRunArtifact, RunExecutorError> {
@@ -37,6 +46,7 @@ pub(super) fn run_executor_error(termination: RunTermination) -> RunExecutorErro
     RunExecutorError::new(match termination {
         RunTermination::UsageError { message }
         | RunTermination::Provider { message }
+        | RunTermination::ProviderUncertain { message }
         | RunTermination::ContextOverflow { message }
         | RunTermination::Failed { message } => message,
         other => format!(
@@ -59,6 +69,14 @@ pub(super) fn settlement(termination: RunTermination) -> Result<RunSettlement, R
         RunTermination::Signalled(Signal::Term) => Ok(RunSettlement::cancelled(CancelReason::Host)),
         RunTermination::BudgetExceeded => Ok(RunSettlement::completed()),
         RunTermination::ContextOverflow { .. } => Ok(RunSettlement::ContextOverflow),
+        // A known failure, not an executor error: the turn ended and its
+        // effect is known, so the run settles and the next prompt is admitted.
+        // Only `ProviderUncertain` falls to the catch-all below and leaves the
+        // run uncertain. regression case: an overloaded provider settled every
+        // provider failure as uncertain and wedged the conversation.
+        RunTermination::Provider { message } => Ok(RunSettlement::Interrupted {
+            diagnostic: Some(message),
+        }),
         // Not the catch-all below: an executor error says the run could not
         // be carried out, and a paused run was carried out exactly as far as
         // it was asked to go. It is a settlement, and the one the host that
@@ -580,6 +598,7 @@ impl CliCompactionCommand {
             config,
             admission: Arc::clone(&self.admission),
             invocation,
+            retry_pause: Arc::new(TokioRetryPause),
         };
         let effect_ports = ToolEffectPorts::new(
             &fs,
@@ -714,8 +733,10 @@ impl CliRunExecutor {
         store: Arc<JsonlStore>,
         admission: Arc<EvidenceAdmissionService>,
     ) -> Self {
+        let mut args = protocol_args(session_dir, shape);
+        args.retry = ACP_PROVIDER_RETRIES;
         Self {
-            args: protocol_args(session_dir, shape),
+            args,
             store,
             concurrency: None,
             frozen: None,

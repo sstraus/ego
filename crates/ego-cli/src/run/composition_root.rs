@@ -350,6 +350,8 @@ impl CliPrepared {
                     diagnostic: Some(format!("configuration error: {message}")),
                 });
             }
+            // Nothing was generated yet, so the failure's effect is known.
+            Err(termination @ RunTermination::Provider { .. }) => return settlement(termination),
             Err(error) => return Err(run_executor_error(error)),
         };
         drop(proof_directory);

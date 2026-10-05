@@ -658,6 +658,7 @@ mod turn_execution_observation {
                     },
                     admission: Arc::new(EvidenceAdmissionService::new()),
                     invocation: RunInvocationId::new(),
+                    retry_pause: Arc::new(NoRetryPause),
                 },
                 tools,
             )
@@ -801,5 +802,14 @@ mod turn_execution_observation {
             Some(ego_core::public::PublicEvent::TurnStarted { .. })
         ));
         assert_eq!(fixture.generator.calls().len(), 1);
+    }
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
     }
 }

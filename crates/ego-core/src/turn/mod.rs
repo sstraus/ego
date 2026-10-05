@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use futures::StreamExt;
 use futures::future::{Either, select};
@@ -390,6 +391,28 @@ pub struct TurnOutcome {
     pub denied: Option<Denial>,
     /// Direct product result when the turn was a forked skill invocation.
     pub skill: Option<crate::skill::SkillInvocationOutcome>,
+    /// Why the turn's last generation plan stopped on a provider failure,
+    /// when `exit_reason` is [`ExitReason::Provider`] and the plan got that
+    /// far. `None` for a provider failure decided before any attempt, such as
+    /// a model that could not be resolved.
+    pub provider_failure: Option<ProviderFailure>,
+}
+
+/// A provider failure as the run reports it to a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFailure {
+    /// What failed, once, in words a host may show: the provider's typed
+    /// message when it sent one, otherwise a sentence chosen by the error
+    /// class. Never a raw upstream body.
+    pub cause: String,
+    /// Whether the effect of the failed attempt is known.
+    ///
+    /// Known when the attempt emitted no output, or when the provider itself
+    /// reported the failure: the turn ended, nothing more will arrive, and the
+    /// session may take the next prompt. Unknown only when output had already
+    /// arrived and the exchange was then lost, because nobody can say what the
+    /// provider did with the rest.
+    pub effect_known: bool,
 }
 
 /// A turn that could not be written down.
@@ -612,6 +635,63 @@ pub struct GenerationRuntime {
     pub config: TurnConfig,
     pub admission: Arc<EvidenceAdmissionService>,
     pub invocation: RunInvocationId,
+    /// Waits between two attempts of one generation plan.
+    pub retry_pause: Arc<dyn RetryPause>,
+}
+
+/// The wait before a retried attempt.
+///
+/// A port because this crate owns no runtime that can sleep. The turn races
+/// the returned future against cancellation and host intents, so an
+/// implementation only waits and never needs to watch the turn.
+pub trait RetryPause: Send + Sync {
+    fn pause(&self, delay: Duration) -> futures::future::BoxFuture<'static, ()>;
+}
+
+/// The first backoff interval; each later retry doubles it (1, 2, 4, 8, 16
+/// and 32 seconds for the six retries of the default plan).
+pub const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
+
+/// The longest wait a retry accepts. The exponential interval is capped at
+/// it; a provider `Retry-After` above it is a provider saying the condition
+/// is not momentary, so the plan stops instead of retrying early.
+pub const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
+
+/// The wait before retry number `retry` (1-based) of one candidate.
+///
+/// A provider-stated `Retry-After` replaces the exponential interval, because
+/// it is the provider's own answer to when the next request can succeed.
+/// `None` means the plan must not wait that long and stops.
+pub fn retry_delay(retry: u32, retry_after: Option<Duration>) -> Option<Duration> {
+    match retry_after {
+        Some(stated) => (stated <= RETRY_MAX_DELAY).then_some(stated),
+        None => Some(
+            RETRY_BASE_DELAY
+                .saturating_mul(1_u32 << retry.saturating_sub(1).min(16))
+                .min(RETRY_MAX_DELAY),
+        ),
+    }
+}
+
+/// The cause a host is told when a generation fails.
+///
+/// The provider's own typed words when it sent any; otherwise a sentence
+/// chosen by the error class, because the operator-facing `Error.message` may
+/// carry a raw upstream body that must not cross to a host.
+fn provider_cause(reported: Option<&str>, kind: Option<ErrorKind>) -> String {
+    match reported {
+        Some(cause) => cause.to_owned(),
+        None => match kind {
+            Some(ErrorKind::Transient) => {
+                "the provider is temporarily unavailable or the network failed"
+            }
+            Some(ErrorKind::Refused) => "the provider refused the credential or the account",
+            Some(ErrorKind::Invalid) => "the provider rejected the request",
+            Some(ErrorKind::ContextOverflow) => "the provider context window is exhausted",
+            Some(ErrorKind::Unclassified) | None => "the provider or the network failed",
+        }
+        .to_owned(),
+    }
 }
 
 /// Stable host facts used only after policy reaches the optional judge seat.
@@ -850,6 +930,7 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                 AiEvent::ReasoningDelta { .. }
                 | AiEvent::ReasoningState(_)
                 | AiEvent::DeliveryObserved(_)
+                | AiEvent::ProviderFailure { .. }
                 | AiEvent::Stop(_) => {}
             }
         }
@@ -964,6 +1045,9 @@ pub struct TurnLoop<'session, 'turn> {
     routed_model: Option<ModelRef>,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
+    retry_pause: Arc<dyn RetryPause>,
+    /// Set when the last generation plan stopped on a provider failure.
+    provider_failure: Option<ProviderFailure>,
 }
 
 struct HookBindingState<'session> {
@@ -1108,6 +1192,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             router: None,
             routed_turn: None,
             routed_model: None,
+            retry_pause: runtime.retry_pause,
+            provider_failure: None,
         })
     }
 
@@ -1901,6 +1987,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                 exit_reason: ExitReason::PermissionRequired,
                                 denied: None,
                                 skill: None,
+                                provider_failure: None,
                             })
                         }
                         ToolOutcome::Ended(exit_reason) => Ok(TurnOutcome {
@@ -1909,6 +1996,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             exit_reason,
                             denied: None,
                             skill: None,
+                            provider_failure: None,
                         }),
                         ToolOutcome::Answered { .. }
                         | ToolOutcome::Executed { .. }
@@ -2085,6 +2173,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     exit_reason: ExitReason::PermissionRequired,
                     denied: None,
                     skill: None,
+                    provider_failure: None,
                 });
             }
         };
@@ -2113,6 +2202,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             exit_reason,
             denied,
             skill: None,
+            provider_failure: self
+                .provider_failure
+                .take()
+                .filter(|_| exit_reason == ExitReason::Provider),
         })
     }
 
@@ -2484,6 +2577,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     exit_reason: ExitReason::PermissionRequired,
                     denied: None,
                     skill: None,
+                    provider_failure: None,
                 });
             }
         };
@@ -2504,6 +2598,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             exit_reason,
             denied,
             skill: None,
+            provider_failure: self
+                .provider_failure
+                .take()
+                .filter(|_| exit_reason == ExitReason::Provider),
         })
     }
 
@@ -3111,6 +3209,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
     /// One generation: reserve, stream it into the log, settle.
     async fn generate(&mut self, turn: TurnId) -> Result<Generated, StoreError> {
+        self.provider_failure = None;
         // A log this build wrote cannot fail here: the guard in `drain` refuses
         // a reused call id before it is ever appended. A log written before
         // that guard existed can, and there is nothing to do about it from
@@ -3634,21 +3733,61 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     return Ok(Generated::Ended(ExitReason::Provider));
                 }
 
-                let stopped = (
-                    terminal,
-                    settlement.outcome.stop(),
-                    drained.pending,
-                    drained.error_kind,
-                );
-                let safely_unsent_error = settlement.outcome.stop() == StopReason::Error
-                    && settlement.outcome.delivery() == DeliveryCertainty::DefinitelyUnsent;
-                if safely_unsent_error {
-                    let retry_same = stopped.3 == Some(ErrorKind::Transient)
-                        && additional_attempts < self.config.retry;
-                    if retry_same {
-                        additional_attempts += 1;
-                        continue;
+                let stop = settlement.outcome.stop();
+                let unsent = settlement.outcome.delivery() == DeliveryCertainty::DefinitelyUnsent;
+                let (reported, retry_after) = drained.provider_failure.unzip();
+                let cause = provider_cause(reported.as_deref(), drained.error_kind);
+                self.provider_failure = matches!(
+                    stop,
+                    StopReason::Error | StopReason::Aborted | StopReason::Deferred
+                )
+                .then(|| ProviderFailure {
+                    cause: cause.clone(),
+                    effect_known: !drained.emitted_output || reported.is_some(),
+                });
+                // maintainer decision 2026-10-05, amending the attempt-ownership
+                // ADR: a transient failure that showed nothing is retried even
+                // when it was possibly sent. Output already shown is never
+                // shown twice, so an attempt that emitted any is final.
+                let retryable = stop == StopReason::Error
+                    && drained.error_kind == Some(ErrorKind::Transient)
+                    && (unsent || !drained.emitted_output);
+                if retryable
+                    && additional_attempts < self.config.retry
+                    && let Some(delay) = retry_delay(additional_attempts + 1, retry_after.flatten())
+                {
+                    additional_attempts += 1;
+                    self.journal.publish(&PublicEvent::ProviderRetry {
+                        turn,
+                        attempt: additional_attempts,
+                        limit: self.config.retry,
+                        delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                        kind: ErrorKind::Transient,
+                        cause,
+                    })?;
+                    let pause = self.retry_pause.pause(delay);
+                    match await_controlled(
+                        &self.journal,
+                        &self.cancel,
+                        &mut self.control,
+                        turn,
+                        pause,
+                        InterruptDisposition::Return,
+                    )
+                    .await
+                    {
+                        Controlled::Completed(()) if !self.cancel.is_cancelled() => continue,
+                        Controlled::Completed(()) | Controlled::Interrupted => {
+                            return Ok(Generated::Cancelled {
+                                cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                                pending: Vec::new(),
+                            });
+                        }
+                        Controlled::Failed(cause) => return Err(cause),
                     }
+                }
+                let stopped = (terminal, stop, drained.pending, drained.error_kind);
+                if stop == StopReason::Error && unsent {
                     last_failure = Some(stopped);
                     break;
                 }
@@ -3995,6 +4134,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut stated_cost: Option<Money> = None;
         let mut accounting_booked = false;
         let mut private_tool_use = false;
+        let mut emitted_output = false;
+        let mut provider_failure = None;
         let settlement_currency = self.settlement_currency;
 
         loop {
@@ -4019,6 +4160,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     break;
                 }
             };
+            emitted_output |= matches!(
+                event,
+                AiEvent::TextDelta { .. }
+                    | AiEvent::ReasoningDelta { .. }
+                    | AiEvent::ReasoningState(_)
+                    | AiEvent::ToolCall { .. }
+            );
             let appended = match event {
                 AiEvent::TextDelta { text } => {
                     assembled.push_str(&text);
@@ -4197,6 +4345,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 // Folded by `AttemptStream` into the outcome, which is what
                 // `AttemptSettled` carries. A second spelling in the log
                 // would be a second place for it to disagree.
+                AiEvent::ProviderFailure { cause, retry_after } => {
+                    provider_failure = Some((cause, retry_after));
+                    Ok(())
+                }
                 AiEvent::DeliveryObserved(_) | AiEvent::Stop(_) => Ok(()),
             };
 
@@ -4278,6 +4430,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             private_text: assembled,
             private_tool_use,
             accounting_booked,
+            emitted_output,
+            provider_failure,
         }
     }
 
@@ -5846,4 +6000,11 @@ struct Drained {
     private_tool_use: bool,
     /// Whether this drain appended at least one charge for the attempt.
     accounting_booked: bool,
+    /// Whether the attempt emitted anything a reader can observe: text,
+    /// reasoning, or a tool call. A retry of an attempt that did would show
+    /// that output twice.
+    emitted_output: bool,
+    /// The last host-safe failure the provider itself reported, and its
+    /// `Retry-After`, if it reported one.
+    provider_failure: Option<(String, Option<Duration>)>,
 }

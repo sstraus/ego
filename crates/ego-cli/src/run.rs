@@ -194,6 +194,7 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
         RunTermination::TaskFailed => "the answer never satisfied the schema".to_string(),
         RunTermination::UsageError { message }
         | RunTermination::Provider { message }
+        | RunTermination::ProviderUncertain { message }
         | RunTermination::ContextOverflow { message } => message.clone(),
         RunTermination::Failed { message } => message.clone(),
         RunTermination::QuestionRequired { question } => format!(

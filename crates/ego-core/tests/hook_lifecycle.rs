@@ -730,6 +730,7 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
+            retry_pause: Arc::new(NoRetryPause),
         },
         tools,
     )
@@ -1614,4 +1615,13 @@ fn admitted_skill_instruction_crosses_real_hook_boundary_once_before_child_start
     block_on(runner.run_occurrence(&catalogue, Producer::Main, occurrence))
         .expect("instruction hook boundary");
     assert_eq!(port.calls(), vec![HookLifecycle::InstructionsLoaded]);
+}
+
+/// Retries in these tests do not wait on a wall clock.
+struct NoRetryPause;
+
+impl ego_core::turn::RetryPause for NoRetryPause {
+    fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::ready(()))
+    }
 }

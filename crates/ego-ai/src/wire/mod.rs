@@ -256,8 +256,8 @@ pub fn failed(message: String, delivery: DeliveryCertainty, kind: ErrorKind) -> 
 /// mappings differ in what a *frame* means — `openai-completions` has a
 /// `[DONE]` sentinel and `anthropic-messages` has a terminal event — and agree
 /// completely about what a *response* means: a transport error is three
-/// events, a non-200 is three events, and a 200 is bytes fed to a decoder
-/// until they run out. That agreement is not a coincidence to be re-derived
+/// events, a non-200 is those three plus its host-safe cause, and a 200 is
+/// bytes fed to a decoder until they run out. That agreement is not a coincidence to be re-derived
 /// per mapping; it is `AttemptStream`'s contract, and one implementation of it
 /// is one place to get it wrong.
 ///
@@ -327,14 +327,15 @@ pub(crate) fn decode_response(
                     ));
                 }
                 let kind = classify_status(response.status);
-                let message = read_error_body(response.status, response.body).await;
+                let retry_after = retry_after(&response.headers);
+                let (message, cause) = read_error_body(response.status, response.body).await;
                 // The same three events, with the certainty already read off
                 // the status above rather than off a failure: a response at
-                // all proves the request arrived.
-                Some((
-                    failed(message, DeliveryCertainty::PossiblySent, kind).to_vec(),
-                    State::Done,
-                ))
+                // all proves the request arrived. The provider answered, so
+                // its host-safe cause goes before the terminal `Stop`.
+                let mut events = failed(message, DeliveryCertainty::PossiblySent, kind).to_vec();
+                events.insert(2, AiEvent::ProviderFailure { cause, retry_after });
+                Some((events, State::Done))
             }
             State::Body {
                 mut body,
@@ -404,6 +405,57 @@ pub(crate) fn classify_status(status: u16) -> ErrorKind {
     }
 }
 
+/// A provider's `Retry-After`, when it states a delay in seconds.
+///
+/// The HTTP-date form is not read: it needs a wall clock this mapping does not
+/// own, and the providers ego speaks send seconds. An unreadable value is no
+/// value, so the turn falls back to its own backoff.
+fn retry_after(headers: &[ego_core::permit::HttpHeader]) -> Option<std::time::Duration> {
+    let header = headers
+        .iter()
+        .find(|header| header.name() == "retry-after")?;
+    std::str::from_utf8(header.value())
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
+}
+
+/// What a streamed Responses error `code` says about retrying.
+///
+/// Shared by the three Responses mappings, which publish one code vocabulary.
+/// Only the codes OpenAI documents for a momentary condition are `Transient`;
+/// any other code, and a missing one, stays `Unclassified` on the same
+/// fail-closed rule as [`classify_status`]. `insufficient_quota` is not here
+/// on purpose: it shares a status with a rate limit and never clears by
+/// waiting.
+pub(crate) fn classify_stream_code(code: Option<&str>) -> ErrorKind {
+    match code {
+        Some("server_is_overloaded" | "rate_limit_exceeded" | "server_error") => {
+            ErrorKind::Transient
+        }
+        _ => ErrorKind::Unclassified,
+    }
+}
+
+/// The two events a streamed provider error emits: the log's `Error`, and the
+/// host-safe [`AiEvent::ProviderFailure`]. `message` is the provider's typed
+/// `message` field (or a sentence naming its code), never a raw body, so it
+/// serves as both.
+pub(crate) fn streamed_failure(message: String, kind: ErrorKind) -> [AiEvent; 2] {
+    [
+        AiEvent::Error {
+            message: message.clone(),
+            kind,
+        },
+        AiEvent::ProviderFailure {
+            cause: message,
+            retry_after: None,
+        },
+    ]
+}
+
 /// How much of a non-200 body is read before giving up on it.
 ///
 /// An error body is a small JSON object. A cap is here because the far side
@@ -444,7 +496,10 @@ const IDENTITY_HINT: &str = "if this provider gates on a client identity ego \
      does not ship, `docs/16-subscription-login.md` §7.8 is the \
      `[auth.<provider>.headers]` recipe";
 
-pub(crate) async fn read_error_body(status: u16, mut body: crate::http::ByteStream) -> String {
+pub(crate) async fn read_error_body(
+    status: u16,
+    mut body: crate::http::ByteStream,
+) -> (String, String) {
     let mut raw = Vec::new();
     while let Some(chunk) = body.next().await {
         match chunk {
@@ -461,20 +516,32 @@ pub(crate) async fn read_error_body(status: u16, mut body: crate::http::ByteStre
         }
     }
     let text = String::from_utf8_lossy(&raw);
-    let said = match serde_json::from_str::<ErrorEnvelope>(&text) {
-        Ok(envelope) => format!(
-            "the provider returned HTTP {status}: {}",
-            envelope.error.message
-        ),
-        Err(_) if text.trim().is_empty() => {
-            format!("the provider returned HTTP {status} with an empty body")
+    // The second string is what a host may be shown: the status and the
+    // envelope's typed message, never a body that parsed as no envelope.
+    let (said, cause) = match serde_json::from_str::<ErrorEnvelope>(&text) {
+        Ok(envelope) => {
+            let said = format!(
+                "the provider returned HTTP {status}: {}",
+                envelope.error.message
+            );
+            (said.clone(), said)
         }
-        Err(_) => format!("the provider returned HTTP {status}: {}", text.trim()),
+        Err(_) if text.trim().is_empty() => {
+            let said = format!("the provider returned HTTP {status} with an empty body");
+            (said.clone(), said)
+        }
+        Err(_) => (
+            format!("the provider returned HTTP {status}: {}", text.trim()),
+            format!("the provider returned HTTP {status}"),
+        ),
     };
     // `402` is deliberately not here. It is the third member of the `Refused`
     // class and it means an empty wallet, which no header fixes.
     match status {
-        401 | 403 => format!("{said} — {IDENTITY_HINT}"),
-        _ => said,
+        401 | 403 => (
+            format!("{said} — {IDENTITY_HINT}"),
+            format!("{cause} — {IDENTITY_HINT}"),
+        ),
+        _ => (said, cause),
     }
 }
