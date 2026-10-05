@@ -7,7 +7,7 @@ use ego_tools::fs::OsFs;
 /// Resolve the roots the active profile declared against the real filesystem.
 /// Any refusal is a startup failure: a profile that asks for more reach than
 /// it may have must not quietly run with less.
-pub(super) fn admit(effective: &Effective) -> Result<Vec<ProfileRoot>, String> {
+pub(crate) fn admit(effective: &Effective) -> Result<Vec<ProfileRoot>, String> {
     if effective.roots.is_empty() {
         return Ok(Vec::new());
     }

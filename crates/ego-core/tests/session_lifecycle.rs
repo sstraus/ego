@@ -42,6 +42,7 @@ struct DurableState {
     entries: Vec<(SessionId, SessionEntry)>,
     fail_meta: bool,
     inject_meta_failure: bool,
+    quarantined: Vec<SessionId>,
 }
 
 #[derive(Clone, Default)]
@@ -249,6 +250,13 @@ impl SessionLifecycleStore for FakeStore {
             store: self.clone(),
         }))
     }
+    fn quarantine(&self, id: SessionId) -> Result<(), StoreError> {
+        self.0.lock().unwrap().quarantined.push(id);
+        Ok(())
+    }
+    fn is_quarantined(&self, id: SessionId) -> Result<bool, StoreError> {
+        Ok(self.0.lock().unwrap().quarantined.contains(&id))
+    }
     fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication {
         let mut state = self.0.lock().unwrap();
         let source = match seed.lineage() {
@@ -283,8 +291,17 @@ impl SessionLifecycleStore for FakeStore {
 }
 
 impl ReplaySource for FakeStore {
-    fn lineage(&self, _session: &SessionId) -> Result<Option<SessionLineage>, ReplaySourceError> {
-        Ok(None)
+    fn lineage(&self, session: &SessionId) -> Result<Option<SessionLineage>, ReplaySourceError> {
+        Ok(ego_core::state::SessionState::replay(
+            self.entries(session)?
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    SessionEntry::Event(event) => Some(event),
+                    _ => None,
+                }),
+        )
+        .lineage)
     }
     fn entries(&self, session: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
         Ok(Some(
@@ -616,6 +633,45 @@ fn delete_only_hides_target_and_keeps_ancestor_replay_and_descendants() {
         futures::executor::block_on(service.resume(child, PathBuf::from("/workspace").as_path()))
             .is_ok()
     );
+}
+
+/// Catches a quarantine that hides a session from `list` only, or only until
+/// the next connection: every way to reach it must answer unknown, and its
+/// neighbours must stay visible.
+#[test]
+fn a_quarantined_session_is_unknown_to_every_operation_and_its_neighbours_stay() {
+    let (service, _store, _runs) = service();
+    let root = PathBuf::from("/workspace");
+    let refused = service.create(root.clone()).unwrap().id;
+    let kept = service.create(root.clone()).unwrap().id;
+    service.quarantine(refused).unwrap();
+    service.quarantine(refused).unwrap();
+
+    let listed = service.list(None, 10, Some(&root)).unwrap();
+    assert_eq!(
+        listed.items.iter().map(|meta| meta.id).collect::<Vec<_>>(),
+        vec![kept]
+    );
+    assert!(matches!(
+        service.meta(refused),
+        Err(LifecycleError::UnknownSession)
+    ));
+    assert!(matches!(
+        futures::executor::block_on(service.load(refused, &root)),
+        Err(LifecycleError::UnknownSession)
+    ));
+    assert!(matches!(
+        futures::executor::block_on(service.resume(refused, &root)),
+        Err(LifecycleError::UnknownSession)
+    ));
+    assert!(matches!(
+        futures::executor::block_on(service.fork(refused)),
+        Err(LifecycleError::UnknownSession)
+    ));
+    assert!(matches!(
+        service.hold(refused),
+        Err(LifecycleError::UnknownSession)
+    ));
 }
 
 #[test]
@@ -1051,4 +1107,224 @@ fn a_hold_whose_boundary_never_arrived_is_still_releasable() {
         "an interrupted pause left the session with no way out"
     );
     assert_eq!(service.hold(id).unwrap(), HoldState::Running);
+}
+
+// regression case: cut after the whole answered turn, never at item creation.
+fn fork_turn(
+    store: &FakeStoreControl,
+    source: SessionId,
+    text: &str,
+    ok: Option<bool>,
+) -> (ItemId, ItemId, Seq) {
+    let mut prompt = event(text, store.event_count(source) as u64 + 1);
+    let user = prompt.env.item.unwrap();
+    let turn = prompt.env.turn;
+    store.append_event(source, prompt.clone());
+    prompt.env.seq.next();
+    prompt.env.id = EventId::new();
+    let assistant = ItemId::new();
+    prompt.env.item = Some(assistant);
+    prompt.kind = EventKind::AssistantMessage {
+        text: format!("answer {text}"),
+    };
+    store.append_event(source, prompt.clone());
+    if let Some(ok) = ok {
+        prompt.env.seq.next();
+        prompt.env.id = EventId::new();
+        prompt.env.item = None;
+        prompt.env.turn = turn;
+        prompt.kind = EventKind::TurnCompleted {
+            ok,
+            exit_reason: ego_core::event::domain::ExitReason::Completed,
+        };
+        store.append_event(source, prompt.clone());
+    }
+    (user, assistant, prompt.env.seq)
+}
+
+#[test]
+fn fork_at_user_and_assistant_of_turn_two_preserves_the_full_answer_not_later_turns() {
+    let (service, store, _) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap().id;
+    fork_turn(&store, source, "one", Some(true));
+    let (user, assistant, cutoff) = fork_turn(&store, source, "two", Some(true));
+    fork_turn(&store, source, "three", Some(true));
+    fork_turn(&store, source, "four", Some(true));
+    for item in [user, assistant] {
+        let child = futures::executor::block_on(service.fork_at(source, item))
+            .unwrap()
+            .id;
+        assert_eq!(
+            fork_state(&store, child).lineage,
+            Some(SessionLineage::Fork {
+                source,
+                at_seq: cutoff
+            })
+        );
+        let replay = ego_core::session::ReplayContext::new(&store.0, &store.0)
+            .replay(&child)
+            .unwrap();
+        let bytes = serde_json::to_string(replay.conversation()).unwrap();
+        assert!(bytes.contains("answer two"));
+        assert!(!bytes.contains("three"));
+        assert!(!bytes.contains("four"));
+    }
+}
+
+#[test]
+fn fork_at_incomplete_failed_and_foreign_items_refuses_without_publishing_a_target() {
+    use ego_core::session::ForkError;
+    let (service, store, _) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let other = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let (_, foreign, _) = fork_turn(&store, other, "foreign", Some(true));
+    let (_, failed, _) = fork_turn(&store, source, "failed", Some(false));
+    let (_, incomplete, _) = fork_turn(&store, source, "incomplete", None);
+    let before = store.0.0.lock().unwrap().metadata.len();
+    for (item, expected) in [
+        (failed, ForkError::UnsettledTurn),
+        (incomplete, ForkError::UnsettledTurn),
+        (foreign, ForkError::UnknownItem),
+    ] {
+        assert!(
+            matches!(futures::executor::block_on(service.fork_at(source, item)), Err(LifecycleError::Fork(error)) if error == expected)
+        );
+    }
+    assert_eq!(store.0.0.lock().unwrap().metadata.len(), before);
+}
+
+#[test]
+fn fork_at_ancestor_uses_ancestor_identity_and_rejects_items_beyond_inherited_cutoff() {
+    let (service, store, _) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let (_, item, cutoff) = fork_turn(&store, source, "one", Some(true));
+    let child = futures::executor::block_on(service.fork_at(source, item))
+        .unwrap()
+        .id;
+    let (_, hidden, _) = fork_turn(&store, source, "later", Some(true));
+    let sibling = futures::executor::block_on(service.fork_at(child, item))
+        .unwrap()
+        .id;
+    assert_eq!(
+        fork_state(&store, sibling).lineage,
+        Some(SessionLineage::Fork {
+            source,
+            at_seq: cutoff
+        })
+    );
+    assert!(matches!(
+        futures::executor::block_on(service.fork_at(child, hidden)),
+        Err(LifecycleError::Fork(
+            ego_core::session::ForkError::UnknownItem
+        ))
+    ));
+}
+
+#[test]
+fn fork_at_uses_cutoff_title_and_goal_instead_of_current_metadata() {
+    let (service, store, _) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let meta = metadata_fixture(&store);
+    meta.set_title(
+        &lease(&store, source),
+        expected(&store, source),
+        Some("old title".into()),
+    )
+    .unwrap();
+    let goal = meta
+        .set_goal(
+            &lease(&store, source),
+            expected(&store, source),
+            "old objective".into(),
+            GoalOwner::Operator,
+            Default::default(),
+        )
+        .unwrap();
+    let (_, item, _) = fork_turn(&store, source, "one", Some(true));
+    meta.set_title(
+        &lease(&store, source),
+        expected(&store, source),
+        Some("new title".into()),
+    )
+    .unwrap();
+    meta.transition_goal(
+        &lease(&store, source),
+        expected(&store, source),
+        GoalTransition::Achieved {
+            attested_by: GoalOwner::Operator,
+            evidence: None,
+        },
+    )
+    .unwrap();
+    meta.set_goal(
+        &lease(&store, source),
+        expected(&store, source),
+        "new objective".into(),
+        GoalOwner::Operator,
+        Default::default(),
+    )
+    .unwrap();
+    let child = futures::executor::block_on(service.fork_at(source, item))
+        .unwrap()
+        .id;
+    let state = fork_state(&store, child);
+    assert_eq!(state.title.as_deref(), Some("old title"));
+    assert_eq!(state.goal.as_ref().unwrap().objective, "old objective");
+    assert_eq!(state.goal.unwrap().derived_from, Some(goal.value.id));
+}
+
+fn fork_state(store: &FakeStoreControl, id: SessionId) -> ego_core::state::SessionState {
+    ego_core::state::SessionState::replay(
+        store
+            .0
+            .entries(&id)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                SessionEntry::Event(event) => Some(event),
+                _ => None,
+            }),
+    )
+}
+
+#[test]
+fn fork_at_rejects_reasoning_and_compaction_checkpoint_ids_instead_of_accepting_storage_items() {
+    let (service, store, _) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let (_, hidden, _) = fork_turn(&store, source, "old", Some(true));
+    let target = SessionId::new();
+    let seed = TargetSeed::compaction(
+        source,
+        expected(&store, source),
+        1,
+        "checkpoint".into(),
+        Timestamp::from_millis(1),
+    );
+    store.0.publish_fork(target, &seed);
+    let checkpoint = seed.event().env.item.unwrap();
+    assert!(matches!(
+        futures::executor::block_on(service.fork_at(target, checkpoint)),
+        Err(LifecycleError::Fork(
+            ego_core::session::ForkError::CompactionBoundary
+        ))
+    ));
+    assert!(matches!(
+        futures::executor::block_on(service.fork_at(target, hidden)),
+        Err(LifecycleError::Fork(
+            ego_core::session::ForkError::UnknownItem
+        ))
+    ));
+    let mut reasoning = event("", store.event_count(source) as u64 + 1);
+    let item = reasoning.env.item.unwrap();
+    reasoning.kind = EventKind::ReasoningDelta {
+        text: "not a message".into(),
+    };
+    store.append_event(source, reasoning);
+    assert!(matches!(
+        futures::executor::block_on(service.fork_at(source, item)),
+        Err(LifecycleError::Fork(
+            ego_core::session::ForkError::NotMessage
+        ))
+    ));
 }

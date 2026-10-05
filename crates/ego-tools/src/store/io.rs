@@ -160,8 +160,26 @@ pub enum AtomicReplacePublication {
     PublishedDurabilityUncertain { diagnostic: String },
 }
 
+/// One private diagnostic owner; implementations retain an exclusively created handle.
+pub trait PrivateLogWriter: Send {
+    /// Write a bounded record, or discard it once this owner's cap is exhausted.
+    fn append(&mut self, line: &[u8]) -> io::Result<()>;
+}
+
 /// The filesystem operations the durable session adapters need, and nothing else.
 pub trait StoreIo: Send + Sync {
+    /// Exclusively create one retained owner file; never reopen an existing log.
+    fn open_private_log(
+        &self,
+        _root: &Path,
+        _max_bytes: u64,
+    ) -> io::Result<Box<dyn PrivateLogWriter>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private log creation unavailable",
+        ))
+    }
+
     /// Atomically publish a private advisory document. Unsupported adapters
     /// report a cache miss; they must not silently publish with wider permissions.
     fn replace_atomic_private(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
@@ -579,6 +597,14 @@ fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
 pub struct OsIo;
 
 impl StoreIo for OsIo {
+    fn open_private_log(
+        &self,
+        root: &Path,
+        max_bytes: u64,
+    ) -> io::Result<Box<dyn PrivateLogWriter>> {
+        super::private_log::open(root, max_bytes)
+    }
+
     fn replace_atomic_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         match replace_atomic_publication_with_privacy(path, bytes, Barrier::Fsync, true)? {
             ReplacePublication::PublishedDurably => Ok(()),

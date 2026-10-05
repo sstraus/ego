@@ -1,9 +1,11 @@
 //! Private execution-backend seam.
 
 use std::ffi::{OsStr, OsString};
+use std::sync::Arc;
 
 use ego_core::permit::{
-    BackendIdentity, EnvName, EnvPolicy, ExecCaps, ProcessError, RunConfinement, SpawnSpec,
+    BackendIdentity, EnvName, EnvPolicy, ExecCaps, ProcessError, RunConfinement, SandboxGrant,
+    SpawnSpec,
 };
 use tokio::process::Command;
 
@@ -22,20 +24,34 @@ pub(crate) trait Backend: Send + Sync {
     }
     fn maximum_demonstrable_caps(&self) -> ExecCaps;
     fn launch_prefix(&self) -> LaunchPrefix;
+
+    /// This backend with human-allowed paths added, or `None` when the
+    /// mechanism cannot express a per-path grant after admission. The result
+    /// keeps the identity and verified capabilities of the backend it came
+    /// from; it only adds reach the human named.
+    fn widened(&self, _grants: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
+        Ok(None)
+    }
+
+    /// Whether [`Self::widened`] returns a backend. A human is asked to open a
+    /// path only on a backend that can act on the answer.
+    fn can_widen(&self) -> bool {
+        false
+    }
 }
 
 /// A mechanism selected only after paired production-path probes. Its
 /// [`Backend`] implementation forwards mechanism facts and launch data;
 /// verified bits remain separate in [`Self::capabilities`].
 pub(crate) struct MeasuredBackend {
-    inner: std::sync::Arc<dyn Backend>,
+    inner: Arc<dyn Backend>,
     capabilities: ExecCaps,
     _scratch: Option<tempfile::TempDir>,
 }
 
 impl MeasuredBackend {
     pub(crate) fn new(
-        inner: std::sync::Arc<dyn Backend>,
+        inner: Arc<dyn Backend>,
         capabilities: ExecCaps,
         scratch: Option<tempfile::TempDir>,
     ) -> Result<Self, ProcessError> {
@@ -71,6 +87,14 @@ impl Backend for MeasuredBackend {
 
     fn launch_prefix(&self) -> LaunchPrefix {
         self.inner.launch_prefix()
+    }
+
+    fn widened(&self, grants: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
+        self.inner.widened(grants)
+    }
+
+    fn can_widen(&self) -> bool {
+        self.inner.can_widen()
     }
 }
 
@@ -199,5 +223,15 @@ impl Backend for super::seatbelt::SeatbeltBackend {
 
     fn launch_prefix(&self) -> LaunchPrefix {
         super::seatbelt::SeatbeltBackend::launch_prefix(self)
+    }
+
+    fn widened(&self, grants: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
+        let widened: Arc<dyn Backend> =
+            Arc::new(super::seatbelt::SeatbeltBackend::widened(self, grants)?);
+        Ok(Some(widened))
+    }
+
+    fn can_widen(&self) -> bool {
+        true
     }
 }

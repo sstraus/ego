@@ -26,47 +26,69 @@ pub(super) fn run_model_picker(
     }
     let result = loop {
         let view = picker.lock().expect("model picker lock").view();
-        let width = status.lock().expect("surface status lock").width;
-        let height = crossterm::terminal::size()
-            .map(|(_, height)| usize::from(height))
-            .unwrap_or(24);
+        let status_width = status.lock().expect("surface status lock").width;
+        let terminal = crossterm::terminal::size().ok();
+        let width = picker_width(status_width, terminal.map(|(width, _)| usize::from(width)));
+        let height = terminal.map_or(24, |(_, height)| usize::from(height));
         let prompt = Question::new(
             model_picker_prompt(&view, width, height),
             Arc::clone(status),
         );
         let line = answer(false, editor.read_line(&prompt));
-        let input = match &line {
-            Line::HostCommand(HostCommand::ModelPicker(command)) => model_picker_input(command),
-            Line::HostCommand(_) => None,
-            Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => Some(PickerInput::Escape),
-            Line::Blank | Line::Submitted(_) | Line::Refused(_) => None,
-        };
-        let Some(input) = input else {
-            continue;
-        };
-        let outcome = picker.lock().expect("model picker lock").input(input);
-        match outcome {
-            Ok(PickerInputOutcome::Closed(outcome)) => match outcome {
-                PickerOutcome::Cancelled => {
-                    break matches!(&line, Line::Ended | Line::ExternalBreak(_)).then_some(line);
-                }
-                PickerOutcome::ModelSwitch(request) => {
-                    break Some(Line::HostCommand(HostCommand::ModelSwitch(request)));
-                }
-            },
-            Ok(PickerInputOutcome::Consumed | PickerInputOutcome::FocusChanged(_)) => {
-                status.lock().expect("surface status lock").notice = None;
-                repaint_status(status);
+        let inputs = match &line {
+            Line::HostCommand(HostCommand::ModelPicker(_)) => {
+                std::mem::take(&mut status.lock().expect("surface status lock").picker_keys)
+                    .iter()
+                    .filter_map(|command| model_picker_input(command))
+                    .collect()
             }
-            Err(error) => {
-                status.lock().expect("surface status lock").notice = Some(error.to_string());
-                repaint_status(status);
+            Line::HostCommand(_) => Vec::new(),
+            Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => vec![PickerInput::Escape],
+            Line::Blank | Line::Submitted(_) | Line::Refused(_) => Vec::new(),
+        };
+        let mut finished = None;
+        for input in inputs {
+            let outcome = picker.lock().expect("model picker lock").input(input);
+            match outcome {
+                Ok(PickerInputOutcome::Closed(outcome)) => {
+                    finished = Some(match outcome {
+                        PickerOutcome::Cancelled => {
+                            matches!(&line, Line::Ended | Line::ExternalBreak(_))
+                                .then(|| line.clone())
+                        }
+                        PickerOutcome::ModelSwitch(request) => {
+                            Some(Line::HostCommand(HostCommand::ModelSwitch(request)))
+                        }
+                    });
+                    break;
+                }
+                Ok(PickerInputOutcome::Consumed | PickerInputOutcome::FocusChanged(_)) => {
+                    status.lock().expect("surface status lock").notice = None;
+                    repaint_status(status);
+                }
+                Err(error) => {
+                    status.lock().expect("surface status lock").notice = Some(error.to_string());
+                    repaint_status(status);
+                }
             }
+        }
+        if let Some(result) = finished {
+            break result;
         }
     };
     leave_modal(editor, phase, status, saved, after);
     status.lock().expect("surface status lock").model_picker = previous_picker;
     result
+}
+
+/// The columns a picker draws in. The status width is only recorded once the
+/// session is set up, so a picker that opens before that (the first-run one)
+/// reads the terminal instead of drawing in the 40-column floor.
+fn picker_width(status_width: usize, terminal: Option<usize>) -> usize {
+    match status_width {
+        0 => terminal.unwrap_or(0),
+        width => width,
+    }
 }
 
 fn model_picker_input(command: &str) -> Option<PickerInput> {
@@ -76,35 +98,65 @@ fn model_picker_input(command: &str) -> Option<PickerInput> {
         "enter" => Some(PickerInput::Enter),
         "session" => Some(PickerInput::SessionOnly),
         "escape" => Some(PickerInput::Escape),
-        number => number
-            .strip_prefix("number:")?
-            .parse()
-            .ok()
-            .map(PickerInput::Number),
+        "backspace" => Some(PickerInput::Backspace),
+        other => match other.strip_prefix("char:") {
+            Some(typed) => typed.chars().next().map(PickerInput::Char),
+            None => other
+                .strip_prefix("number:")?
+                .parse()
+                .ok()
+                .map(PickerInput::Number),
+        },
     }
 }
+
+/// Model rows a terminal must still show before the typing hint is dropped.
+const MIN_VISIBLE_MODELS: usize = 3;
 
 fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> String {
     let width = width.max(40);
     let mut rows = Vec::new();
     match view.focus {
         PickerFocus::Model => {
-            let instructions = wrap_instruction(
-                "Up/Down or number selects. Enter continues; Esc cancels.",
-                width,
-            );
+            let (full, compact) = if view.persistent_only {
+                (
+                    "Type to filter; Up/Down or number selects. Enter continues; Esc cancels.",
+                    "Enter continues; Esc cancels.",
+                )
+            } else {
+                (
+                    "Type to filter; Up/Down or number selects. Enter continues, then s = this session only; Esc cancels.",
+                    "Enter continues, then s = this session only; Esc cancels.",
+                )
+            };
+            // A short terminal keeps its rows and gives up the typing hint.
+            let mut instructions = wrap_instruction(full, width);
+            if height.saturating_sub(3 + instructions.len()) < MIN_VISIBLE_MODELS {
+                instructions = wrap_instruction(compact, width);
+            }
             let visible_rows = height.saturating_sub(3 + instructions.len()).max(1);
             let selected = view
                 .models
                 .iter()
                 .position(|row| view.current_id.as_deref() == Some(row.slug.to_string().as_str()));
             let (start, end) = window_bounds(view.models.len(), visible_rows, selected);
-            rows.push(format!(
+            let title = format!(
                 "Select model ({}-{end} of {})",
                 if end == 0 { 0 } else { start + 1 },
                 view.models.len()
-            ));
+            );
+            rows.push(if view.filter.is_empty() {
+                title
+            } else {
+                truncate_cells(&format!("{title} · filter: {}", view.filter), width)
+            });
             rows.push("✓ available; ! unavailable".to_string());
+            if view.models.is_empty() {
+                rows.push(truncate_cells(
+                    &format!("No model matches \"{}\"; Backspace edits.", view.filter),
+                    width,
+                ));
+            }
             rows.extend(
                 view.models[start..end]
                     .iter()
@@ -117,13 +169,13 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
                         } else {
                             " "
                         };
-                        model_row(
-                            marker,
-                            index + 1,
-                            &id,
-                            availability_symbol(&row.availability),
-                            width,
-                        )
+                        let symbol = availability_symbol(&row.availability);
+                        let suffix = if view.current_model.as_deref() == Some(id.as_str()) {
+                            format!(" {symbol} current")
+                        } else {
+                            format!(" | {symbol}")
+                        };
+                        model_row(marker, index + 1, &id, &suffix, width)
                     }),
             );
             rows.extend(instructions);
@@ -163,7 +215,12 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
                     } else {
                         " "
                     };
-                    format!("{marker} {}. {reasoning:?}", index + 1)
+                    let current = if view.current_reasoning == Some(*reasoning) {
+                        " ✓ current"
+                    } else {
+                        ""
+                    };
+                    format!("{marker} {}. {reasoning:?}{current}", index + 1)
                 },
             ));
             rows.extend(instructions);
@@ -188,9 +245,8 @@ fn availability_symbol(availability: &ego_ai::catalogue::ModelAvailability) -> &
     }
 }
 
-fn model_row(marker: &str, index: usize, slug: &str, availability: &str, width: usize) -> String {
+fn model_row(marker: &str, index: usize, slug: &str, suffix: &str, width: usize) -> String {
     let prefix = format!("{marker} {index}. ");
-    let suffix = format!(" | {availability}");
     let slug_width = width.saturating_sub(prefix.width() + suffix.width());
     format!("{prefix}{}{suffix}", truncate_cells(slug, slug_width))
 }
@@ -230,6 +286,9 @@ mod tests {
             focus: PickerFocus::Model,
             current_id: Some("openai-codex/gpt-5.6-sol".to_owned()),
             selected_model: None,
+            filter: String::new(),
+            current_model: Some("openai-codex/gpt-5.6-sol".to_owned()),
+            current_reasoning: None,
             models: vec![
                 ModelPickerRow {
                     slug: ModelSlug::parse("openai-codex/gpt-5.6-sol").unwrap(),
@@ -250,6 +309,13 @@ mod tests {
             reasoning: Vec::new(),
             persistent_only: true,
         }
+    }
+
+    #[test]
+    fn a_picker_before_session_setup_draws_in_the_terminal_width() {
+        assert_eq!(picker_width(0, Some(120)), 120);
+        assert_eq!(picker_width(100, Some(120)), 100);
+        assert_eq!(picker_width(0, None), 0);
     }
 
     #[test]

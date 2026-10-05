@@ -376,7 +376,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__config__subcmd__ls)
-            opts="-h --profile --json --help"
+            opts="-h --profile --json --effective --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -474,12 +474,16 @@ _ego() {
             return 0
             ;;
         ego__subcmd__fork)
-            opts="-C -h --session-dir --output --help"
+            opts="-C -h --at --session-dir --output --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --at)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --session-dir)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

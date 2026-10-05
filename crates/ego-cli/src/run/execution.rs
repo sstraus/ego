@@ -64,6 +64,21 @@ async fn resolve_invocation_phase(
                 });
             }
             let chosen_session = chosen(args, &settings.root, None).map_err(usage)?;
+            if matches!(args.session, crate::cli::SessionChoice::Resume(_))
+                && settings.effective.model.is_none()
+                && args.model.is_none()
+            {
+                settings.effective.model = chosen_session
+                    .store
+                    .list()
+                    .map_err(|error| RunTermination::Failed {
+                        message: format!("could not read the resumed session model: {error}"),
+                    })?
+                    .into_iter()
+                    .find(|session| session.id == chosen_session.id)
+                    .and_then(|session| session.model)
+                    .map(ModelRef);
+            }
             select_startup_model(args, &mut settings, driver, cancel, diagnostics).await?;
             let selected_mcp =
                 config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
@@ -125,7 +140,8 @@ async fn open_scope_phase(
         .as_ref()
         .expect("the resolved invocation owns its settings until materialization");
     if !args.quiet
-        && matches!(&host.driver, Driver::Interactive { seat, .. } if seat.has_human())
+        && let Driver::Interactive { seat, .. } = &host.driver
+        && seat.has_human()
         && let Some(model) = args.model.as_deref().or_else(|| {
             settings
                 .effective
@@ -135,8 +151,9 @@ async fn open_scope_phase(
         })
     {
         host.diagnostics.note(&format!(
-            "ego {} · {model}\n     /help commands · Option+P models",
-            env!("CARGO_PKG_VERSION")
+            "ego {} · {model}\n{}",
+            env!("CARGO_PKG_VERSION"),
+            seat.key_hints()
         ));
     }
     let mcp_scope = crate::provider_http::McpProcessScope::for_run(
@@ -185,6 +202,7 @@ struct ResumePreparation<'store> {
     mode: Mode,
     policy_selection: GenerationPolicySelection,
     policy_source: Arc<dyn GenerationPolicySource>,
+    perimeter: crate::perimeter::Perimeter,
     invocation: RunInvocationId,
     run_id: RunId,
     resume_plan: Option<ResumePlan>,
@@ -227,6 +245,11 @@ fn prepare_resume_phase<'store>(
         GenerationPolicySelection::new(mode, settings.effective.permissions.clone());
     let profile_roots = super::profile_roots::admit(&settings.effective)
         .map_err(|message| RunTermination::Failed { message })?;
+    let perimeter = crate::perimeter::Perimeter::session(
+        &settings.confinement,
+        &settings.effective,
+        &profile_roots,
+    );
     let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
         CliGenerationPolicySource::new(
             policy_selection.clone(),
@@ -275,6 +298,7 @@ fn prepare_resume_phase<'store>(
         mode,
         policy_selection,
         policy_source,
+        perimeter,
         invocation,
         run_id,
         resume_plan,
@@ -306,6 +330,7 @@ pub(super) struct MaterializedRun<'store> {
     pub(super) mode: Mode,
     pub(super) policy_selection: GenerationPolicySelection,
     pub(super) policy_source: Arc<dyn GenerationPolicySource>,
+    pub(super) perimeter: crate::perimeter::Perimeter,
     pub(super) invocation: RunInvocationId,
     pub(super) run_id: RunId,
     pub(super) resume_plan: Option<ResumePlan>,
@@ -329,6 +354,7 @@ fn materialize_run_phase<'store>(
         mode,
         policy_selection,
         policy_source,
+        perimeter,
         invocation,
         run_id,
         resume_plan,
@@ -456,6 +482,7 @@ fn materialize_run_phase<'store>(
         mode,
         policy_selection,
         policy_source,
+        perimeter,
         invocation,
         run_id,
         resume_plan,
@@ -547,7 +574,7 @@ async fn admit_run_phase<'store>(
                 .expect("the materialized run owns its opened session"),
             materialized
                 .context
-                .take()
+                .clone()
                 .expect("the run context is admitted exactly once"),
         )?,
         (
@@ -569,7 +596,7 @@ async fn admit_run_phase<'store>(
                     .expect("the materialized run owns its opened session"),
                 materialized
                     .context
-                    .take()
+                    .clone()
                     .expect("the foreign run context is admitted after recovery"),
             )?;
             resume = Some(RuntimeResume::Foreign {
@@ -610,7 +637,7 @@ async fn admit_run_phase<'store>(
     {
         seat.busy();
     }
-    debug_assert!(materialized.context.is_none());
+    debug_assert!(materialized.context.is_some());
     let mcp_status = scoped.mcp_registry.status();
     Ok(AdmittedRun {
         opened: materialized

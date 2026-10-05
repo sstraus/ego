@@ -298,6 +298,29 @@ fn fresh_adapter_rebuilds_catalogue_from_header_only_durable_state() {
     assert_eq!(restarted.list().unwrap()[0].id, id);
 }
 
+/// Catches a quarantine kept in memory or needing the writer lease: it must
+/// survive a new adapter over the same directory and be set while another
+/// writer holds the session.
+#[test]
+fn quarantine_is_durable_and_needs_no_writer_lease() {
+    let dir = tempdir().unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let first = store(dir.path(), Arc::clone(&calls));
+    let id = SessionId::new();
+    let other = SessionId::new();
+    for session in [id, other] {
+        first
+            .publish_empty_session(session, Path::new("/workspace"), Timestamp::from_millis(1))
+            .unwrap();
+    }
+    let _writer = first.acquire_inactive_lease(id).ok().unwrap();
+    first.quarantine(id).unwrap();
+    first.quarantine(id).unwrap();
+    let restarted = store(dir.path(), calls);
+    assert!(restarted.is_quarantined(id).unwrap());
+    assert!(!restarted.is_quarantined(other).unwrap());
+}
+
 #[test]
 fn writer_lease_excludes_a_second_writer_for_the_same_session() {
     let dir = tempdir().unwrap();

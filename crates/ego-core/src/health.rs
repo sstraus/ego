@@ -15,6 +15,9 @@
 //!
 //! See `docs/decisions/2026-09-03-doctor-observes-one-redacted-health-snapshot.md`.
 
+/// The narrowly scoped operator-visible perimeter.
+pub mod perimeter;
+
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -241,6 +244,14 @@ impl HealthDetail {
     /// path from the machine ego is running on.
     pub fn fixed(text: &'static str) -> Self {
         Self(text.to_owned())
+    }
+
+    /// Publish only the typed admitted perimeter under the 2026-10-04 exception.
+    ///
+    /// Its paths originate from RunConfinement and admitted ProfileRoot values;
+    /// its remaining fields are closed vocabulary. Other details still sanitize.
+    pub fn perimeter(perimeter: &perimeter::Perimeter) -> Self {
+        Self(perimeter.text())
     }
 
     pub fn as_str(&self) -> &str {

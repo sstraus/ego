@@ -80,11 +80,9 @@ impl TypedTool for EditTool {
         let path = resolve(ctx, &params.path)?;
         Ok(PreparedCall::new(
             self.name(),
-            // Two operations, because the tool performs two. `classify` and
-            // `scope_of` already treat a call's ops as a conjunction, so this
-            // needs a `read(...)` rule *and* a `write(...)` rule — and a
-            // `write(...)` rule alone cannot authorise the read it does.
-            // `docs/13-effect-tools.md` Step C, second invariant.
+            // Both effects remain declared and guarded. A matching write
+            // allow covers this same-file replacement's supporting read;
+            // explicit read denies still refuse the call.
             Op::Read { path: path.clone() },
         )
         .with_op(Op::Write {

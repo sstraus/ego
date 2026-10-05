@@ -492,9 +492,29 @@ pub enum PolicyDenied {
     },
     /// Session evidence authority is valid only as the call's sole operation.
     EvidenceMustStandAlone { tool: String },
+    /// The human declined the call and said what to do instead. The only
+    /// refusal the model is told about: the words are the answer, so the run
+    /// continues with them as the tool result.
+    Redirected { tool: String, instruction: String },
 }
 
 impl PolicyDenied {
+    /// A read, list or search the workspace boundary refused.
+    ///
+    /// The one refusal the model can act on and nobody can lift mid-run: no
+    /// mode, rule or answer moves the boundary (`CLI.md` §4.4), and the call
+    /// changed nothing, so the turn has nothing to stop for. The caller
+    /// returns it to the model as a failed tool result and the turn goes on.
+    pub fn is_unreachable_read(&self) -> bool {
+        matches!(
+            self,
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::Read | OpName::List | OpName::Search,
+                ..
+            }
+        )
+    }
+
     /// Who refused, for `EventKind::PermissionDecided`.
     ///
     /// One authority in every arm, and that is the shape of a refusal rather
@@ -520,6 +540,7 @@ impl PolicyDenied {
                 by.clone()
             }
             PolicyDenied::EvidenceMustStandAlone { .. } => Authority::SessionEvidence,
+            PolicyDenied::Redirected { .. } => Authority::Party,
         }
     }
 }
@@ -622,6 +643,10 @@ impl fmt::Display for PolicyDenied {
             PolicyDenied::EvidenceMustStandAlone { tool } => write!(
                 f,
                 "{tool} may not combine session evidence with another operation"
+            ),
+            PolicyDenied::Redirected { tool, instruction } => write!(
+                f,
+                "{tool} was not run: the user declined it and said: {instruction}"
             ),
         }
     }
@@ -748,6 +773,7 @@ pub struct PermissionPresentation {
     schema: Value,
     risk: super::analysis::RiskAssessment,
     remember: Result<RememberPlan, String>,
+    suggested: Result<RememberPlan, String>,
 }
 
 impl PermissionPresentation {
@@ -763,8 +789,15 @@ impl PermissionPresentation {
         &self.risk
     }
 
+    /// The exact rule for each operation of the call.
     pub fn remember_plan(&self) -> Result<&RememberPlan, &str> {
         self.remember.as_ref().map_err(String::as_str)
+    }
+
+    /// The rules offered to a human who asks not to be asked again; see
+    /// [`RuleManagement::suggest_remember`].
+    pub fn suggested_remember_plan(&self) -> Result<&RememberPlan, &str> {
+        self.suggested.as_ref().map_err(String::as_str)
     }
 }
 
@@ -1129,19 +1162,29 @@ impl PolicyEngine {
     ) -> Classification {
         match self.classify(call) {
             Classification::Ask(mut pending) => {
-                let remember = RuleManagement::remember(
+                let represent = |plan: Result<RememberPlan, _>| {
+                    plan.map_err(
+                        |error: crate::config::rule_management::RuleManagementError| {
+                            format!("this call cannot be represented by a persistent rule: {error}")
+                        },
+                    )
+                };
+                let remember = represent(RuleManagement::remember(
                     &pending.call,
                     ManagedRuleEffect::Allow,
                     self.workspace.as_path(),
-                )
-                .map_err(|error| {
-                    format!("this call cannot be represented by a persistent rule: {error}")
-                });
+                ));
+                let suggested = represent(RuleManagement::suggest_remember(
+                    &pending.call,
+                    ManagedRuleEffect::Allow,
+                    self.workspace.as_path(),
+                ));
                 pending.ask.presentation = Some(Box::new(PermissionPresentation {
                     parameters: input.parameters,
                     schema: input.schema,
                     risk: super::analysis::assess(&pending.call),
                     remember,
+                    suggested,
                 }));
                 Classification::Ask(pending)
             }
@@ -1299,7 +1342,7 @@ impl PolicyEngine {
             call.ops()
                 .iter()
                 .filter(|op| matches!(op, Op::Opaque { .. }))
-                .all(|op| self.matching(&self.allow, op).is_some())
+                .all(|op| self.matching_allow(op).is_some())
         });
         let mut rules: Vec<RuleAuthority> = Vec::new();
         let mut yolo_authorized_secret_egress = false;
@@ -1307,7 +1350,26 @@ impl PolicyEngine {
             if delegated_support == Some(index) {
                 continue;
             }
-            let Some(entry) = self.matching(&self.allow, op) else {
+            // A conditional replacement reads the same file it writes. Its
+            // matching write allow covers that supporting read, but the first
+            // pass still checks read denies and boundaries independently.
+            let supporting_write = match (call.ops(), op) {
+                (
+                    [
+                        Op::Read { path: read },
+                        write @ Op::Write {
+                            path,
+                            change: Change::Replace { .. },
+                        },
+                    ],
+                    Op::Read { .. },
+                ) if read == path => Some(write),
+                _ => None,
+            };
+            let Some(entry) = self
+                .matching_allow(op)
+                .or_else(|| supporting_write.and_then(|write| self.matching_allow(write)))
+            else {
                 if self.mode == Mode::Yolo && matches!(op, Op::SecretEgress { .. }) {
                     yolo_authorized_secret_egress = true;
                     continue;
@@ -1441,6 +1503,13 @@ impl PolicyEngine {
                     Authority::Party,
                 )),
             },
+            PermissionDecision::DenyWithInstruction { instruction } => Resolution::HumanSettled {
+                request,
+                result: Err(PolicyDenied::Redirected {
+                    tool: pending.call.into_parts().0,
+                    instruction,
+                }),
+            },
             PermissionDecision::Amend { params } => Resolution::Reclassify { request, params },
         }
     }
@@ -1537,6 +1606,12 @@ impl PolicyEngine {
         }
 
         Ok(())
+    }
+
+    fn matching_allow(&self, op: &Op) -> Option<&SourcedRule> {
+        self.allow
+            .iter()
+            .find(|entry| entry.rule().matches_allow(op, self.workspace.as_path()))
     }
 
     /// The first rule in `rules` that covers `op`, if any.

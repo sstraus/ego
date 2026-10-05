@@ -1,6 +1,6 @@
 //! The inbound ACP adapter over core's rooted run controller.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -53,7 +53,7 @@ use ego_core::session_lifecycle::{
 };
 use ego_core::sink::EventSink;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
-use ego_core::turn::AdmittedToolSource;
+use ego_core::turn::{AdmittedToolSource, HostClient};
 use ego_listen::{Bound, ConnectionGate, GuardedAccepted, Peer, serve_connections};
 use futures::channel::oneshot;
 use futures::future::Either;
@@ -159,10 +159,10 @@ impl AcpNotices {
                 session.clone(),
                 project_notice_v1(notice),
             ));
-        if sent.is_err() {
-            if let Some(removed) = connections.remove(session) {
-                removed.closed_watcher.abort();
-            }
+        if sent.is_err()
+            && let Some(removed) = connections.remove(session)
+        {
+            removed.closed_watcher.abort();
         }
         sent
     }
@@ -402,6 +402,12 @@ pub trait SessionMcpAdmission: Send + Sync {
     fn admitted_tools(&self) -> Arc<dyn AdmittedToolSource>;
     fn mcp_errors(&self) -> &[String];
     fn mcp_runtime(&self) -> Arc<dyn McpRuntimeBinding>;
+    /// The confinement this session's MCP processes were started under, when
+    /// the admission owns any. A later pick of another sandbox is refused: a
+    /// server admitted under one confinement cannot be moved into another.
+    fn pinned_confinement(&self) -> Option<Confinement> {
+        None
+    }
     fn cancel_active(&self) {}
     fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
@@ -416,12 +422,33 @@ pub type McpSessionAdmissionFuture = Pin<
     >,
 >;
 
+/// The sandbox pick a session's MCP servers are admitted under, with the
+/// observation measured for it. The observation is absent only where the
+/// connection has no confinement admission to measure it.
+#[derive(Clone)]
+pub struct McpConfinement {
+    pub level: Confinement,
+    pub observation: Option<ExecObservation>,
+}
+
+/// What a session's MCP admission may rely on. Servers are admitted after the
+/// session exists and its confinement is measured, never before: admission
+/// starts their processes.
+#[derive(Clone)]
+pub struct McpAdmissionContext {
+    pub session: SessionId,
+    pub root: RunRoot,
+    /// Absent where the connection has no session controls.
+    pub confinement: Option<McpConfinement>,
+}
+
 /// Consumer-owned boundary that atomically admits one ACP session's servers.
 pub trait McpSessionAdmitter: Send + Sync {
     fn admit(
         &self,
         servers: Vec<v1::McpServer>,
         connection: Option<ConnectionTo<Client>>,
+        context: McpAdmissionContext,
     ) -> McpSessionAdmissionFuture;
 
     fn mcp_notification(
@@ -477,6 +504,10 @@ pub trait RunBindingsBuilder: Send + Sync {
         root: &RunRoot,
         session_approval: Arc<AtomicBool>,
     ) -> ego_core::run::RunExecutionBindings;
+
+    /// The session was closed, deleted, loaded or resumed: whatever a person
+    /// allowed for "this session" ends with it, like the exec session approval.
+    fn end_session(&self, _session: &v1::SessionId) {}
 }
 
 /// Production ACP bindings: live updates plus the existing question adapter.
@@ -484,6 +515,11 @@ pub trait RunBindingsBuilder: Send + Sync {
 pub struct AcpRunBindingsBuilder {
     controls: Option<Arc<dyn SessionControls>>,
     permission_rules: Option<Arc<dyn crate::permission::PermissionRuleWriter>>,
+    sandbox_store: Option<Arc<dyn crate::sandbox::SandboxGrantStore>>,
+    /// One list per session: a session answer outlives the prompt that asked
+    /// and ends with the session (`end_session`). Keyed by the wire session id.
+    sandbox_sessions:
+        std::sync::Mutex<std::collections::HashMap<String, crate::sandbox::SessionSandboxGrants>>,
 }
 
 impl AcpRunBindingsBuilder {
@@ -495,7 +531,18 @@ impl AcpRunBindingsBuilder {
         Self {
             controls,
             permission_rules: None,
+            sandbox_store: None,
+            sandbox_sessions: std::sync::Mutex::default(),
         }
+    }
+
+    /// Keep "allow always" sandbox answers for the workspace in `store`.
+    pub fn with_sandbox_store(
+        mut self,
+        store: Option<Arc<dyn crate::sandbox::SandboxGrantStore>>,
+    ) -> Self {
+        self.sandbox_store = store;
+        self
     }
 
     pub fn with_permission_rules(
@@ -525,6 +572,13 @@ impl EventSinkFactory for AcpSinkFactory {
 }
 
 impl RunBindingsBuilder for AcpRunBindingsBuilder {
+    fn end_session(&self, session: &v1::SessionId) {
+        self.sandbox_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session.0.as_ref());
+    }
+
     fn build(
         &self,
         connection: ConnectionTo<Client>,
@@ -543,6 +597,20 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
                 .with_rule_writer(self.permission_rules.clone())
                 .with_session_approval(session_approval)
                 .approver();
+        let session_grants = Arc::clone(
+            self.sandbox_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(session.0.to_string())
+                .or_default(),
+        );
+        let sandbox_grants = crate::sandbox::AcpSandboxGrants::new(
+            session.clone(),
+            connection.clone(),
+            root.as_path().to_path_buf(),
+            self.sandbox_store.clone(),
+            session_grants,
+        );
         let bindings = ego_core::run::RunExecutionBindings::new(
             Arc::new(AcpSinkFactory {
                 connection,
@@ -551,7 +619,8 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
             }),
             Some(elicitor),
         )
-        .with_human(human);
+        .with_human(human)
+        .with_sandbox_grants(Arc::new(sandbox_grants));
         match &self.controls {
             Some(controls) => bindings.with_controls(Arc::clone(controls)),
             None => bindings,
@@ -911,6 +980,19 @@ impl Sessions {
                  before the first prompt, or start a new session",
             ));
         }
+        if let (Some(pinned), SessionControlChange::Sandbox(pick)) = (
+            registered
+                .mcp
+                .as_ref()
+                .and_then(|mcp| mcp.pinned_confinement()),
+            &change,
+        ) && pinned != *pick
+        {
+            return Err(refused_params(format!(
+                "this session's MCP servers already run under the `{pinned}` sandbox: \
+                 pick the sandbox when the session is created, or start a new session"
+            )));
+        }
         // Keep the registration lock until the synchronous pick has landed.
         // `begin` cannot publish busy and read a different selection between
         // the eligibility check and this write.
@@ -1206,10 +1288,11 @@ async fn admit_mcp(
     admitter: &dyn McpSessionAdmitter,
     servers: Vec<v1::McpServer>,
     connection: Option<ConnectionTo<Client>>,
+    context: McpAdmissionContext,
 ) -> Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError> {
     validate_mcp_servers(&servers)?;
     let supplied = !servers.is_empty();
-    match admitter.admit(servers, connection).await {
+    match admitter.admit(servers, connection, context).await {
         Ok(Some(admission)) if supplied => Ok(Some(admission)),
         Ok(Some(_)) => Err(McpSessionAdmissionError::new(
             "an empty ACP MCP selection unexpectedly produced live authority",
@@ -1222,16 +1305,34 @@ async fn admit_mcp(
     }
 }
 
+/// What the client said about itself in `initialize`, kept for every run the
+/// connection starts.
+#[derive(Debug, Clone, Default)]
+struct ClientInit {
+    capabilities: CapabilityCapture,
+    host: Option<HostClient>,
+}
+
 fn session_bindings(
     builder: &dyn RunBindingsBuilder,
     connection: ConnectionTo<Client>,
     session: v1::SessionId,
-    capabilities: CapabilityCapture,
+    client: &ClientInit,
     root: &RunRoot,
     mcp: Option<&Arc<dyn SessionMcpAdmission>>,
     session_approval: Arc<AtomicBool>,
 ) -> RunExecutionBindings {
-    let bindings = builder.build(connection, session, capabilities, root, session_approval);
+    let bindings = builder.build(
+        connection,
+        session,
+        client.capabilities,
+        root,
+        session_approval,
+    );
+    let bindings = match &client.host {
+        Some(host) => bindings.with_host(host.clone()),
+        None => bindings,
+    };
     match mcp {
         Some(mcp) => bindings.with_mcp(
             mcp.admitted_tools(),
@@ -1417,6 +1518,7 @@ fn unsupported_block(what: &str) -> String {
 /// resume path.
 async fn hold<const RELEASE: bool>(
     lifecycle: Option<&dyn LifecycleOperations>,
+    unadmitted: &UnadmittedSessions,
     request: &AcpHoldRequest<RELEASE>,
     responder: Responder<serde_json::Value>,
 ) -> Result<(), Error> {
@@ -1448,6 +1550,9 @@ async fn hold<const RELEASE: bool>(
             );
         }
     };
+    if let Err(error) = unadmitted.refuse(session) {
+        return responder.respond_with_error(error);
+    }
     let outcome = if RELEASE {
         lifecycle.release(session, request_id).await
     } else {
@@ -1546,8 +1651,12 @@ trait LifecycleOperations: Send + Sync {
     fn fork(
         &self,
         id: SessionId,
+        target: SessionId,
     ) -> LifecycleFuture<'_, ego_core::session_lifecycle::CreatedSession>;
     fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
+    /// Hide a session this server refused to open, durably and without its
+    /// writer lease.
+    fn quarantine(&self, id: SessionId) -> Result<(), LifecycleError>;
     fn close(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
     fn pause(&self, id: SessionId, request: RequestId) -> LifecycleFuture<'_, HoldState>;
     /// `release` and not `resume`, which this trait already uses for
@@ -1608,12 +1717,17 @@ where
     fn fork(
         &self,
         id: SessionId,
+        target: SessionId,
     ) -> LifecycleFuture<'_, ego_core::session_lifecycle::CreatedSession> {
-        Box::pin(SessionLifecycle::fork(self, id))
+        Box::pin(SessionLifecycle::fork_as(self, id, target))
     }
 
     fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()> {
         Box::pin(async move { SessionLifecycle::delete(self, id).await.map(|_| ()) })
+    }
+
+    fn quarantine(&self, id: SessionId) -> Result<(), LifecycleError> {
+        SessionLifecycle::quarantine(self, id)
     }
 
     fn close(&self, id: SessionId) -> LifecycleFuture<'_, ()> {
@@ -1689,6 +1803,198 @@ fn selected_confinement(
         .observation(session, sandbox)
         .map_err(|error| control_error(&error))?;
     Ok(selections.with_sandbox_observation(sandbox, observation))
+}
+
+/// A session request whose MCP selection arrived whole.
+///
+/// The protocol library drops a server whose transport it does not know and
+/// hands over the rest, so an unknown transport would be admitted as an empty
+/// selection. Counting the raw entries against the parsed ones refuses the
+/// request before any session exists.
+#[derive(Debug, Clone)]
+struct McpChecked<R>(R);
+
+impl<R: JsonRpcMessage> JsonRpcMessage for McpChecked<R> {
+    fn matches_method(method: &str) -> bool {
+        R::matches_method(method)
+    }
+
+    fn method(&self) -> &str {
+        self.0.method()
+    }
+
+    fn to_untyped_message(&self) -> Result<UntypedMessage, Error> {
+        self.0.to_untyped_message()
+    }
+
+    fn parse_message(method: &str, params: &impl Serialize) -> Result<Self, Error> {
+        let request = R::parse_message(method, params)?;
+        let raw = serde_json::to_value(params)
+            .map_err(|error| Error::internal_error().data(error.to_string()))?;
+        let supplied = raw
+            .get("mcpServers")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        let parsed = request
+            .to_untyped_message()?
+            .params
+            .get("mcpServers")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        if supplied != parsed {
+            return Err(refused_params(
+                "an MCP server uses a transport this agent does not know",
+            ));
+        }
+        Ok(Self(request))
+    }
+}
+
+impl<R: JsonRpcRequest> JsonRpcRequest for McpChecked<R> {
+    type Response = R::Response;
+}
+
+/// Sessions a request has created in the store and not yet finished opening.
+///
+/// Measuring a session's confinement needs it to exist, and its servers are
+/// admitted only after that. Until admission settles the session is hidden:
+/// not listed, not loadable, not forkable. A host sees it only once it is whole.
+#[derive(Clone, Default)]
+struct UnadmittedSessions(Arc<Mutex<HashSet<SessionId>>>);
+
+impl UnadmittedSessions {
+    fn hold(&self, session: SessionId) -> UnadmittedSession {
+        self.lock().insert(session);
+        UnadmittedSession {
+            sessions: self.clone(),
+            session,
+            hidden_for_good: false,
+        }
+    }
+
+    fn contains(&self, session: SessionId) -> bool {
+        self.lock().contains(&session)
+    }
+
+    fn refuse(&self, session: SessionId) -> Result<(), Error> {
+        if self.contains(session) {
+            return Err(lifecycle_error(&LifecycleError::UnknownSession));
+        }
+        Ok(())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<SessionId>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// One hidden session. Dropping it publishes the session; `discard` takes it
+/// back out of the store instead.
+struct UnadmittedSession {
+    sessions: UnadmittedSessions,
+    session: SessionId,
+    hidden_for_good: bool,
+}
+
+impl UnadmittedSession {
+    /// Delete the session this request created and cannot finish opening. A
+    /// session that cannot be deleted (another writer holds it) is quarantined
+    /// in the store, so every connection and every later server hides it; only
+    /// if that fails too does it stay hidden for the life of this server. The
+    /// request fails either way; durable exclusion requires quarantine to succeed.
+    async fn discard(
+        mut self,
+        lifecycle: Option<&dyn LifecycleOperations>,
+        refusal: Error,
+    ) -> Error {
+        let Some(lifecycle) = lifecycle else {
+            return refusal;
+        };
+        match lifecycle.delete(self.session).await {
+            Ok(_) => refusal,
+            Err(error) => {
+                if let Err(quarantine) = lifecycle.quarantine(self.session) {
+                    // DEFERRED (2026-10-04): maintainer accepts failed quarantine publication
+                    // plus a writer-held deletion lease. No durable write can hide the
+                    // refused id; ACP stdio reconnect starts a new process and may expose it.
+                    self.hidden_for_good = true;
+                    tracing::error!(%quarantine, session = %self.session, "a refused session could not be quarantined");
+                }
+                tracing::error!(%error, session = %self.session, "a refused session could not be deleted");
+                Error::internal_error().data(format!(
+                    "{}; the session it created could not be removed: {error}",
+                    refusal.data.as_ref().map_or_else(
+                        || refusal.message.clone(),
+                        |data| data
+                            .as_str()
+                            .map_or_else(|| data.to_string(), str::to_owned),
+                    )
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for UnadmittedSession {
+    fn drop(&mut self) {
+        if !self.hidden_for_good {
+            self.sessions.lock().remove(&self.session);
+        }
+    }
+}
+
+/// Whether admitting these servers starts a local process.
+fn spawns_process(servers: &[v1::McpServer]) -> bool {
+    servers
+        .iter()
+        .any(|server| matches!(server, v1::McpServer::Stdio(_)))
+}
+
+/// Admit the MCP servers a session request supplied.
+///
+/// The caller has already measured the session's confinement: admission starts
+/// the servers' processes, and they start under the pick this reads.
+async fn admit_session_mcp(
+    admitter: &dyn McpSessionAdmitter,
+    servers: Vec<v1::McpServer>,
+    connection: ConnectionTo<Client>,
+    controls: Option<&Arc<dyn SessionControls>>,
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
+    session: SessionId,
+    root: &RunRoot,
+) -> Result<Option<Arc<dyn SessionMcpAdmission>>, Error> {
+    validate_mcp_servers(&servers).map_err(refused_params)?;
+    if servers.is_empty() {
+        return Ok(None);
+    }
+    let confinement = match controls.filter(|_| spawns_process(&servers)) {
+        Some(controls) => {
+            let state = controls
+                .state(session)
+                .map_err(|error| control_error(&error))?;
+            let level = state.sandbox.current.ok_or_else(|| {
+                control_error(&ControlError::Internal(
+                    "the ACP sandbox control has no current confinement".to_owned(),
+                ))
+            })?;
+            let observation = admission
+                .map(|admission| admission.observation(session, level))
+                .transpose()
+                .map_err(|error| control_error(&error))?;
+            Some(McpConfinement { level, observation })
+        }
+        None => None,
+    };
+    let context = McpAdmissionContext {
+        session,
+        root: root.clone(),
+        confinement,
+    };
+    admit_mcp(admitter, servers, Some(connection), context)
+        .await
+        .map_err(refused_params)
 }
 
 /// The option ids the trust form offers. They are ego's, not the host's: the
@@ -1768,15 +2074,12 @@ fn trust_question(
 /// before this function existed. Only an explicit `trusted` grants anything.
 async fn selected_trust(
     request: QuestionRequest,
-    connection: &ConnectionTo<Client>,
-    session: &v1::SessionId,
-    capabilities: CapabilityCapture,
+    elicitor: AcpQuestionAdapter,
     selections: RunSelections,
     admission: &dyn SessionTrustAdmission,
     root: &RunRoot,
     fingerprint: &str,
 ) -> RunSelections {
-    let elicitor = AcpQuestionAdapter::live(session.clone(), capabilities, connection.clone());
     let question = ItemId::new();
     let outcome = match elicitor.elicit(question, request).await {
         Ok(outcome) => outcome,
@@ -2165,7 +2468,8 @@ where
     I: IdSource + 'static,
 {
     let sessions = Sessions::new(controller.retention().completed_receipts());
-    let client_capabilities = Arc::new(Mutex::new(CapabilityCapture::default()));
+    let unadmitted = UnadmittedSessions::default();
+    let client_capabilities = Arc::new(Mutex::new(ClientInit::default()));
     let advertises_compaction = compaction.is_some();
     let advertises_lifecycle = lifecycle.is_some();
     Agent
@@ -2183,10 +2487,18 @@ where
                             ),
                         ));
                     };
-                    client_capabilities
-                        .lock()
-                        .expect("initialize capability lock poisoned")
-                        .capture_initialize(&request.client_capabilities);
+                    {
+                        let mut client = client_capabilities
+                            .lock()
+                            .expect("initialize capability lock poisoned");
+                        client
+                            .capabilities
+                            .capture_initialize(&request.client_capabilities);
+                        client.host = request.client_info.as_ref().map(|info| HostClient {
+                            name: info.name.clone(),
+                            version: info.version.clone(),
+                        });
+                    }
                     responder.respond(
                         v1::InitializeResponse::new(answer)
                             .agent_capabilities(capabilities(
@@ -2205,6 +2517,7 @@ where
         .on_receive_request(
             {
                 let sessions = sessions.clone();
+                let unadmitted = unadmitted.clone();
                 let roots = Arc::clone(&roots);
                 let ids = Arc::clone(&ids);
                 let mcp_admitter = Arc::clone(&mcp_admitter);
@@ -2212,8 +2525,9 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
-                async move |request: v1::NewSessionRequest, responder, cx: ConnectionTo<Client>| {
+                async move |McpChecked(request): McpChecked<v1::NewSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let sessions = sessions.clone();
+                    let unadmitted = unadmitted.clone();
                     let roots = Arc::clone(&roots);
                     let ids = Arc::clone(&ids);
                     let mcp_admitter = Arc::clone(&mcp_admitter);
@@ -2236,22 +2550,65 @@ where
                             );
                         }
                     };
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
-                        Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(refused_params(error)),
-                    };
+                    if let Err(error) = validate_mcp_servers(&request.mcp_servers) {
+                        return responder.respond_with_error(refused_params(error));
+                    }
                     let start_request = RequestId::from_uuid(ids.next_uuid());
                     let session = RequestId::session_id(start_request);
                     let id = v1::SessionId::new(session.to_string());
+                    // Hidden before it exists so no list or load can see it
+                    // between creation and admission.
+                    let hidden = unadmitted.hold(session);
                     if let Some(lifecycle) = &lifecycle
                         && let Err(error) =
                             lifecycle.create_with_id(session, root.as_path().to_path_buf())
                     {
                         return responder.respond_with_error(lifecycle_error(&error));
                     }
-                    let pending_measurement = confinement
-                        .as_ref()
-                        .map(|admission| admission.initialize(session, root.clone()));
+                    // Supplied servers start processes, which start under the
+                    // session's measured confinement: measure first, admit
+                    // after, and take the session back if either refuses so a
+                    // refused request leaves no empty session behind.
+                    // Only a server that starts a process needs the measurement
+                    // before admission; the others keep the deferred offer.
+                    let admits_mcp = !request.mcp_servers.is_empty();
+                    let measures_first = spawns_process(&request.mcp_servers);
+                    let mcp = if admits_mcp {
+                        let measured = if measures_first {
+                            initialize_confinement(confinement.as_ref(), session, &root).await
+                        } else {
+                            Ok(())
+                        };
+                        let admitted = match measured {
+                            Ok(()) => admit_session_mcp(
+                                mcp_admitter.as_ref(),
+                                request.mcp_servers,
+                                cx.clone(),
+                                controls.as_ref(),
+                                confinement.as_ref(),
+                                session,
+                                &root,
+                            )
+                            .await,
+                            Err(error) => Err(error),
+                        };
+                        match admitted {
+                            Ok(mcp) => mcp,
+                            Err(error) => {
+                                let error = hidden.discard(lifecycle.as_deref(), error).await;
+                                return responder.respond_with_error(error);
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let pending_measurement = (!measures_first)
+                        .then(|| {
+                            confinement
+                                .as_ref()
+                                .map(|admission| admission.initialize(session, root.clone()))
+                        })
+                        .flatten();
                     let attachment_root = root.clone();
                     let _ = sessions.open(
                         id.clone(),
@@ -2271,6 +2628,7 @@ where
                     } else {
                         None
                     };
+                    drop(hidden);
                     // The response first, the announcement after it. A
                     // `session_info_update` names a session by an id the client
                     // learns from *this* response, so a client that indexes
@@ -2324,6 +2682,7 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let roots = Arc::clone(&roots);
+                let unadmitted = unadmitted.clone();
                 async move |request: v1::ListSessionsRequest, responder, _cx| {
                     let Some(lifecycle) = &lifecycle else {
                         return responder.respond_with_error(Error::method_not_found());
@@ -2332,21 +2691,35 @@ where
                         Ok(root) => root,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
-                    let cursor = match request.cursor.map(SessionCursor::parse).transpose() {
+                    let mut cursor = match request.cursor.map(SessionCursor::parse).transpose() {
                         Ok(cursor) => cursor,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
-                    let page = match lifecycle.list(cursor.as_ref(), root.as_ref().map(RunRoot::as_path)) {
-                        Ok(page) => page,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                    // A hidden session is filtered out of its page, so keep
+                    // reading pages until the response holds as many rows as
+                    // a full page, and the cursor always names the last row
+                    // read: no visible row is skipped or left behind.
+                    let mut visible = Vec::new();
+                    let mut wanted = None;
+                    let next_cursor = loop {
+                        let page = match lifecycle.list(cursor.as_ref(), root.as_ref().map(RunRoot::as_path)) {
+                            Ok(page) => page,
+                            Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                        };
+                        let wanted = *wanted.get_or_insert(page.items.len());
+                        visible.extend(page.items.into_iter().filter(|meta| !unadmitted.contains(meta.id)));
+                        match page.next_cursor {
+                            Some(next) if visible.len() < wanted => cursor = Some(next),
+                            next => break next,
+                        }
                     };
-                    let items = page.items.into_iter().map(|meta| {
+                    let items = visible.into_iter().map(|meta| {
                         lifecycle.hold(meta.id).map(|hold| session_info(meta, hold))
                     }).collect::<Result<Vec<_>, _>>();
                     match items {
                         Ok(items) => responder.respond(
                             v1::ListSessionsResponse::new(items)
-                                .next_cursor(page.next_cursor.map(|cursor| cursor.to_string())),
+                                .next_cursor(next_cursor.map(|cursor| cursor.to_string())),
                         ),
                         Err(error) => responder.respond_with_error(lifecycle_error(&error)),
                     }
@@ -2358,6 +2731,7 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
+                let unadmitted = unadmitted.clone();
                 let controller = Arc::clone(&controller);
                 let roots = Arc::clone(&roots);
                 let ids = Arc::clone(&ids);
@@ -2368,9 +2742,10 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
-                async move |request: v1::LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
+                async move |McpChecked(request): McpChecked<v1::LoadSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
+                    let unadmitted = unadmitted.clone();
                     let controller = Arc::clone(&controller);
                     let roots = Arc::clone(&roots);
                     let ids = Arc::clone(&ids);
@@ -2395,6 +2770,9 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(id) {
+                        return responder.respond_with_error(error);
+                    }
                     if sessions.is_busy(&request.session_id) {
                         return responder.respond_with_error(Error::invalid_request().data(
                             format!("session {} already has a turn running", request.session_id),
@@ -2417,19 +2795,31 @@ where
                     {
                         return responder.respond_with_error(error);
                     }
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
+                    let mcp = match admit_session_mcp(
+                        mcp_admitter.as_ref(),
+                        request.mcp_servers,
+                        cx.clone(),
+                        controls.as_ref(),
+                        confinement.as_ref(),
+                        id,
+                        &root,
+                    )
+                    .await
+                    {
                         Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(refused_params(error)),
+                        Err(error) => return responder.respond_with_error(error),
                     };
-                    let capabilities = *client_capabilities
+                    let client = client_capabilities
                         .lock()
-                        .expect("initialize capability lock poisoned");
+                        .expect("initialize capability lock poisoned")
+                        .clone();
                     let session_approval = Arc::new(AtomicBool::new(false));
+                    bindings_builder.end_session(&request.session_id);
                     let bindings = session_bindings(
                         bindings_builder.as_ref(),
                         cx.clone(),
                         request.session_id.clone(),
-                        capabilities,
+                        &client,
                         &root,
                         mcp.as_ref(),
                         Arc::clone(&session_approval),
@@ -2493,6 +2883,7 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
+                let unadmitted = unadmitted.clone();
                 let controller = Arc::clone(&controller);
                 let roots = Arc::clone(&roots);
                 let ids = Arc::clone(&ids);
@@ -2503,9 +2894,10 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
-                async move |request: v1::ResumeSessionRequest, responder, cx: ConnectionTo<Client>| {
+                async move |McpChecked(request): McpChecked<v1::ResumeSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
+                    let unadmitted = unadmitted.clone();
                     let controller = Arc::clone(&controller);
                     let roots = Arc::clone(&roots);
                     let ids = Arc::clone(&ids);
@@ -2530,6 +2922,9 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(id) {
+                        return responder.respond_with_error(error);
+                    }
                     if sessions.is_busy(&request.session_id) {
                         return responder.respond_with_error(Error::invalid_request().data(
                             format!("session {} already has a turn running", request.session_id),
@@ -2548,19 +2943,31 @@ where
                     {
                         return responder.respond_with_error(error);
                     }
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
+                    let mcp = match admit_session_mcp(
+                        mcp_admitter.as_ref(),
+                        request.mcp_servers,
+                        cx.clone(),
+                        controls.as_ref(),
+                        confinement.as_ref(),
+                        id,
+                        &root,
+                    )
+                    .await
+                    {
                         Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(refused_params(error)),
+                        Err(error) => return responder.respond_with_error(error),
                     };
-                    let capabilities = *client_capabilities
+                    let client = client_capabilities
                         .lock()
-                        .expect("initialize capability lock poisoned");
+                        .expect("initialize capability lock poisoned")
+                        .clone();
                     let session_approval = Arc::new(AtomicBool::new(false));
+                    bindings_builder.end_session(&request.session_id);
                     let bindings = session_bindings(
                         bindings_builder.as_ref(),
                         cx.clone(),
                         request.session_id.clone(),
-                        capabilities,
+                        &client,
                         &root,
                         mcp.as_ref(),
                         Arc::clone(&session_approval),
@@ -2618,15 +3025,17 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
+                let unadmitted = unadmitted.clone();
                 let roots = Arc::clone(&roots);
                 let ids = Arc::clone(&ids);
                 let mcp_admitter = Arc::clone(&mcp_admitter);
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
-                async move |request: v1::ForkSessionRequest, responder, cx: ConnectionTo<Client>| {
+                async move |McpChecked(request): McpChecked<v1::ForkSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
+                    let unadmitted = unadmitted.clone();
                     let roots = Arc::clone(&roots);
                     let ids = Arc::clone(&ids);
                     let mcp_admitter = Arc::clone(&mcp_admitter);
@@ -2647,6 +3056,9 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(source) {
+                        return responder.respond_with_error(error);
+                    }
                     let root = match roots.resolve(&request.cwd) {
                         Ok(root) => root,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
@@ -2654,27 +3066,49 @@ where
                     if let Err(error) = lifecycle.resume(source, root.as_path()).await {
                         return responder.respond_with_error(lifecycle_error(&error));
                     }
-                    // Admission precedes publication of the child so an MCP
-                    // refusal cannot leave an unexplained durable fork. If
-                    // the later lifecycle transition refuses, this temporary
-                    // connection authority is dropped without attachment.
-                    let mcp = match admit_mcp(mcp_admitter.as_ref(), request.mcp_servers, Some(cx.clone())).await {
-                        Ok(mcp) => mcp,
-                        Err(error) => return responder.respond_with_error(refused_params(error)),
-                    };
-                    let child = match lifecycle.fork(source).await {
+                    if let Err(error) = validate_mcp_servers(&request.mcp_servers) {
+                        return responder.respond_with_error(refused_params(error));
+                    }
+                    // Hidden before the fork publishes it, so no list or load
+                    // can see the child between publication and admission.
+                    let child = SessionId::new();
+                    let hidden = unadmitted.hold(child);
+                    let child = match lifecycle.fork(source, child).await {
                         Ok(child) => child.id,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
                     let attachment = match lifecycle.resume(child, root.as_path()).await {
                         Ok(attachment) => attachment,
-                        Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                        Err(error) => {
+                            let error = hidden
+                                .discard(Some(lifecycle.as_ref()), lifecycle_error(&error))
+                                .await;
+                            return responder.respond_with_error(error);
+                        }
                     };
-                    if let Err(error) =
-                        initialize_confinement(confinement.as_ref(), child, &root).await
-                    {
-                        return responder.respond_with_error(error);
-                    }
+                    // The child's processes start under the child's measured
+                    // confinement, so the child exists first. An MCP refusal
+                    // takes it back rather than leaving an unexplained fork.
+                    let admitted = match initialize_confinement(confinement.as_ref(), child, &root).await {
+                        Ok(()) => admit_session_mcp(
+                            mcp_admitter.as_ref(),
+                            request.mcp_servers,
+                            cx.clone(),
+                            controls.as_ref(),
+                            confinement.as_ref(),
+                            child,
+                            &root,
+                        )
+                        .await,
+                        Err(error) => Err(error),
+                    };
+                    let mcp = match admitted {
+                        Ok(mcp) => mcp,
+                        Err(error) => {
+                            let error = hidden.discard(Some(lifecycle.as_ref()), error).await;
+                            return responder.respond_with_error(error);
+                        }
+                    };
                     let child_id = v1::SessionId::new(child.to_string());
                     let _ = sessions.open(
                         child_id.clone(),
@@ -2684,6 +3118,7 @@ where
                         mcp,
                         Arc::new(AtomicBool::new(false)),
                     );
+                    drop(hidden);
                     // The child's id reaches the client here and nowhere else,
                     // so its own announcement cannot precede this. The failure
                     // compensation that used to close the child is gone with
@@ -2706,10 +3141,14 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
+                let bindings_builder = Arc::clone(&bindings_builder);
+                let unadmitted = unadmitted.clone();
                 let notices = notices.clone();
                 async move |request: v1::DeleteSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
+                    let bindings_builder = Arc::clone(&bindings_builder);
+                    let unadmitted = unadmitted.clone();
                     let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
@@ -2720,11 +3159,15 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(id) {
+                        return responder.respond_with_error(error);
+                    }
                     match lifecycle.delete(id).await {
                         Ok(()) => {
                             if let Some(mcp) = sessions.close(&request.session_id) {
                                 mcp.close().await;
                             }
+                            bindings_builder.end_session(&request.session_id);
                             notices.unregister(&request.session_id);
                             responder.respond(v1::DeleteSessionResponse::new())
                         }
@@ -2739,10 +3182,14 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let sessions = sessions.clone();
+                let bindings_builder = Arc::clone(&bindings_builder);
+                let unadmitted = unadmitted.clone();
                 let notices = notices.clone();
                 async move |request: v1::CloseSessionRequest, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
+                    let bindings_builder = Arc::clone(&bindings_builder);
+                    let unadmitted = unadmitted.clone();
                     let notices = notices.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
@@ -2753,11 +3200,15 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(id) {
+                        return responder.respond_with_error(error);
+                    }
                     match lifecycle.close(id).await {
                         Ok(()) => {
                             if let Some(mcp) = sessions.close(&request.session_id) {
                                 mcp.close().await;
                             }
+                            bindings_builder.end_session(&request.session_id);
                             notices.unregister(&request.session_id);
                             responder.respond(v1::CloseSessionResponse::new())
                         }
@@ -2791,11 +3242,13 @@ where
                 async move |notification: v1::CancelNotification, _cx| {
                     match sessions.cancel(&notification.session_id) {
                         Cancellation::Admitted(key, mcp) => {
-                            if let Some(mcp) = mcp {
-                                mcp.cancel_active();
-                            }
                             if let Err(error) = controller.cancel_admitted(&key).await {
                                 tracing::warn!(%error, "ACP cancellation could not be applied");
+                            }
+                            // The run must observe cancellation before a transport
+                            // failure can finish its tool and start another generation.
+                            if let Some(mcp) = mcp {
+                                mcp.cancel_active();
                             }
                         }
                         // Recorded, not applied: there is no run to cancel
@@ -2814,6 +3267,7 @@ where
         .on_receive_request(
             {
                 let sessions = sessions.clone();
+                let unadmitted = unadmitted.clone();
                 let controller = Arc::clone(&controller);
                 let spawner = Arc::clone(&spawner);
                 let ids = Arc::clone(&ids);
@@ -2829,6 +3283,9 @@ where
                         Ok(id) => id,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(durable_session) {
+                        return responder.respond_with_error(error);
+                    }
                     // Serialized, so a numeric `41` and a string `"41"` stay
                     // two different requests exactly as JSON-RPC says they are.
                     let command = serde_json::to_string(responder.id())
@@ -2890,24 +3347,20 @@ where
                             );
                         }
                     };
-                    let capabilities = *client_capabilities
+                    let client = client_capabilities
                         .lock()
-                        .expect("initialize capability lock poisoned");
-                    let bindings = bindings_builder.build(
+                        .expect("initialize capability lock poisoned")
+                        .clone();
+                    let capabilities = client.capabilities;
+                    let bindings = session_bindings(
+                        bindings_builder.as_ref(),
                         cx.clone(),
                         id.clone(),
-                        capabilities,
+                        &client,
                         &correlation.root,
+                        correlation.mcp.as_ref(),
                         Arc::clone(&correlation.session_approval),
                     );
-                    let bindings = match correlation.mcp.as_ref() {
-                        Some(mcp) => bindings.with_mcp(
-                            mcp.admitted_tools(),
-                            mcp.mcp_errors().to_vec(),
-                            mcp.mcp_runtime(),
-                        ),
-                        None => bindings,
-                    };
                     // Everything below runs off the event loop. `selected_trust`
                     // awaits the host, and an ACP handler that awaits a client
                     // round-trip stops the connection from processing messages
@@ -3002,9 +3455,11 @@ where
                                         let answered = {
                                             let question = std::pin::pin!(selected_trust(
                                                 request,
-                                                &connection,
-                                                &id,
-                                                capabilities,
+                                                AcpQuestionAdapter::live(
+                                                    id.clone(),
+                                                    capabilities,
+                                                    connection.clone(),
+                                                ),
                                                 selections,
                                                 trust.as_ref().expect("question needs trust admission").as_ref(),
                                                 &root,
@@ -3169,10 +3624,12 @@ where
         .on_receive_request(
             {
                 let compaction = compaction.clone();
+                let unadmitted = unadmitted.clone();
                 move |request: AcpCompactRequest,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let compaction = compaction.clone();
+                    let unadmitted = unadmitted.clone();
                     async move {
                     let Some(compaction) = compaction else {
                         return responder.respond_with_error(Error::method_not_found());
@@ -3198,6 +3655,9 @@ where
                             );
                         }
                     };
+                    if let Err(error) = unadmitted.refuse(source) {
+                        return responder.respond_with_error(error);
+                    }
                     match compaction
                         .compact(CompactionTransitionRequest { request_id, source })
                         .await
@@ -3221,11 +3681,13 @@ where
         .on_receive_request(
             {
                 let lifecycle = lifecycle.clone();
+                let unadmitted = unadmitted.clone();
                 move |request: AcpHoldRequest<false>,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let lifecycle = lifecycle.clone();
-                    async move { hold(lifecycle.as_deref(), &request, responder).await }
+                    let unadmitted = unadmitted.clone();
+                    async move { hold(lifecycle.as_deref(), &unadmitted, &request, responder).await }
                 }
             },
             on_receive_request!(),
@@ -3233,11 +3695,13 @@ where
         .on_receive_request(
             {
                 let lifecycle = lifecycle.clone();
+                let unadmitted = unadmitted.clone();
                 move |request: AcpHoldRequest<true>,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let lifecycle = lifecycle.clone();
-                    async move { hold(lifecycle.as_deref(), &request, responder).await }
+                    let unadmitted = unadmitted.clone();
+                    async move { hold(lifecycle.as_deref(), &unadmitted, &request, responder).await }
                 }
             },
             on_receive_request!(),
@@ -3246,6 +3710,7 @@ where
             {
                 let controls = controls.clone();
                 let sessions = sessions.clone();
+                let unadmitted = unadmitted.clone();
                 let confinement = confinement.clone();
                 async move |request: v1::SetSessionConfigOptionRequest, responder, _cx| {
                     // Absent controls are unavailable, not partially emulated:
@@ -3258,6 +3723,9 @@ where
                         Ok(session) => session,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    if let Err(error) = unadmitted.refuse(session) {
+                        return responder.respond_with_error(error);
+                    }
                     // Read the offer, resolve against it, then stage. Reading
                     // first is what makes "a value ego never offered" and "a
                     // control ego never advertised" the same refusal instead of

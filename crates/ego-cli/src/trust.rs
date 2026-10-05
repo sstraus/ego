@@ -754,7 +754,7 @@ fn content(root: &Path, path: &Path) -> Option<TrustedContent> {
 /// The sibling lock is held across read-modify-write. Publication uses a
 /// mode-0600 temporary file, `fsync`, then `rename`, so concurrent launches do
 /// not lose each other's records and readers never observe a torn document.
-struct LockedJsonStore<T> {
+pub(crate) struct LockedJsonStore<T> {
     home: PathBuf,
     name: &'static str,
     document: PhantomData<T>,
@@ -764,7 +764,7 @@ impl<T> LockedJsonStore<T>
 where
     T: Default + DeserializeOwned + Serialize,
 {
-    fn new(home: &Path, name: &'static str) -> Self {
+    pub(crate) fn new(home: &Path, name: &'static str) -> Self {
         Self {
             home: home.to_path_buf(),
             name,
@@ -779,7 +779,7 @@ where
     /// Read without the lock: `rename` publishes the whole document at once,
     /// so a reader sees either the old file or the new one and never a torn
     /// one. Only the read-modify-write below needs exclusion.
-    fn read(&self) -> Result<T, String> {
+    pub(crate) fn read(&self) -> Result<T, String> {
         let path = self.path();
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -791,7 +791,7 @@ where
         serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))
     }
 
-    fn update(&self, change: impl FnOnce(&mut T)) -> Result<(), String> {
+    pub(crate) fn update(&self, change: impl FnOnce(&mut T)) -> Result<(), String> {
         let mut lock = self.open_lock()?;
         let _guard = lock
             .write()

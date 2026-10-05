@@ -1241,10 +1241,9 @@ async fn acp_bridge(
         let Some(id) = frame.get("id").cloned() else {
             if method == "notifications/cancelled" {
                 if let Some(request_id) = params.as_ref().and_then(|params| params.get("requestId"))
+                    && let Some(request) = active.lock().await.remove(&request_id.to_string())
                 {
-                    if let Some(request) = active.lock().await.remove(&request_id.to_string()) {
-                        request.abort();
-                    }
+                    request.abort();
                 }
                 continue;
             }

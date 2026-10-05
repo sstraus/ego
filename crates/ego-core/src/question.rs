@@ -64,6 +64,10 @@ impl QuestionTarget {
 pub struct QuestionOption {
     pub id: String,
     pub label: String,
+    /// One short sentence that tells the human what choosing this option
+    /// means. Shown under the label; omit it when the label says enough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl QuestionOption {
@@ -71,7 +75,13 @@ impl QuestionOption {
         Self {
             id: id.into(),
             label: label.into(),
+            description: None,
         }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
     }
 }
 
@@ -377,10 +387,13 @@ impl HumanInputTool for AskQuestionTool {
     }
 }
 
+/// The name the model calls the question tool by.
+pub const ASK_QUESTION_TOOL: &str = "ask_question";
+
 /// The model-facing descriptor shared by every host adapter.
 pub fn ask_question_descriptor() -> ToolDescriptor {
     ToolDescriptor {
-        name: "ask_question".to_string(),
+        name: ASK_QUESTION_TOOL.to_string(),
         description: "Ask the human one structured question and wait for its answer".to_string(),
         parameters: schemars::schema_for!(QuestionRequest).to_value(),
     }

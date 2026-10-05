@@ -14,8 +14,8 @@ use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::EffectScope;
 use ego_core::permit::{
     CleanupCertainty, DetachedExecOutcome, DetachedExecSnapshot, DuplexEnd, DuplexSession,
-    DuplexSettlement, ExecCaps, ProcessError, RunConfinement, SpawnSpec, StreamProvenance,
-    ToolContentBlock, ToolResult, TransportError, TransportFailure,
+    DuplexSettlement, ExecCaps, ProcessError, RunConfinement, SandboxGrant, SandboxGrantPort,
+    SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult, TransportError, TransportFailure,
 };
 use ego_core::store::evidence::{EvidenceError, EvidenceStore as _, EvidenceWriter};
 use ego_core::turn::CancelToken;
@@ -26,14 +26,22 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::store::SessionEvidenceStore;
+use crate::suspension::ActiveClock;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
 use super::ExecLimits;
 use super::backend::{Backend, executable, prefixed_command};
+use super::denial;
 use super::process_tree::ManagedChild;
+
+/// Questions one command may put to the human before its refusal is final.
+/// Each answer can reveal one more path, so the bound is a few paths, not one.
+const MAX_SANDBOX_QUESTIONS: usize = 3;
 
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
+
+type WidenedBackend = (Vec<SandboxGrant>, Arc<dyn Backend>);
 
 /// Process state captured once and shared by the run's normal and duplex
 /// process adapters.
@@ -46,6 +54,10 @@ pub(crate) struct RunProcessContext {
     capabilities: ExecCaps,
     background: Arc<Mutex<BTreeMap<DetachedExecId, BackgroundEntry>>>,
     background_changed: Arc<Condvar>,
+    sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
+    /// The last profile rendered for a grant list, so a run of commands under
+    /// the same grants shares one private profile file.
+    widened: Mutex<Option<WidenedBackend>>,
 }
 
 struct BackgroundEntry {
@@ -93,6 +105,7 @@ impl RunProcessContext {
         limits: ExecLimits,
         confinement: RunConfinement,
         capabilities: ExecCaps,
+        sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     ) -> Self {
         Self {
             backend,
@@ -103,6 +116,8 @@ impl RunProcessContext {
             capabilities,
             background: Arc::new(Mutex::new(BTreeMap::new())),
             background_changed: Arc::new(Condvar::new()),
+            sandbox_grants,
+            widened: Mutex::new(None),
         }
     }
 
@@ -259,8 +274,34 @@ impl RunProcessContext {
             .requirements()
             .check(self.capabilities)
             .map_err(ProcessError::MissingCapabilities)?;
+        match (&self.sandbox_grants, &handler) {
+            (Some(grants), None) => {
+                self.execute_asking(grants.as_ref(), spec, background_cancel, live_output)
+                    .await
+            }
+            _ => {
+                self.spawn_once(
+                    Arc::clone(&self.backend),
+                    spec,
+                    handler,
+                    background_cancel,
+                    live_output,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn spawn_once(
+        &self,
+        backend: Arc<dyn Backend>,
+        spec: &SpawnSpec,
+        handler: Option<(Vec<u8>, EffectScope)>,
+        background_cancel: Option<CancelToken>,
+        live_output: Option<Arc<Mutex<LiveOutput>>>,
+    ) -> Result<ToolResult, ProcessError> {
         let context = ExecutionContext {
-            backend: Arc::clone(&self.backend),
+            backend,
             evidence: self.evidence.clone(),
             cancel: self.cancel.clone(),
             limits: self.limits,
@@ -272,6 +313,121 @@ impl RunProcessContext {
             })
             .await
             .map_err(|error| ProcessError::Backend(format!("process task failed: {error}")))?
+    }
+
+    /// Run a command, and when the sandbox refuses a path it names, ask the
+    /// human whether to open that one path and run it again.
+    ///
+    /// The command is re-run only after it has exited unsuccessfully, so no
+    /// process of the first attempt is still alive; whatever it did before the
+    /// refusal is not undone, and the human is told which path the retry is
+    /// for.
+    async fn execute_asking(
+        &self,
+        grants: &dyn SandboxGrantPort,
+        spec: &SpawnSpec,
+        background_cancel: Option<CancelToken>,
+        live_output: Option<Arc<Mutex<LiveOutput>>>,
+    ) -> Result<ToolResult, ProcessError> {
+        let mut questions = 0;
+        loop {
+            let granted = grants.granted();
+            let backend = self.backend_under(&granted)?;
+            let (code, mut result) = match self
+                .spawn_once(
+                    backend,
+                    spec,
+                    None,
+                    background_cancel.clone(),
+                    live_output.clone(),
+                )
+                .await
+            {
+                Err(ProcessError::Exit { code, result }) => (code, result),
+                other => return other,
+            };
+            let Some(found) = denial::analyze(spec, &result, &self.confinement, &granted) else {
+                return Err(ProcessError::Exit { code, result });
+            };
+            let outcome = match &found.request {
+                Some(_) if !self.backend.can_widen() => denial::Outcome::CannotWiden,
+                Some(request) if questions < MAX_SANDBOX_QUESTIONS => {
+                    questions += 1;
+                    match self
+                        .ask_until_cancelled(grants, request, spec, background_cancel.as_ref())
+                        .await
+                    {
+                        Some(true) => continue,
+                        Some(false) => denial::Outcome::Declined,
+                        None => return Err(ProcessError::Cancelled),
+                    }
+                }
+                Some(_) => denial::Outcome::QuestionLimit,
+                None => denial::Outcome::NobodyToAsk,
+            };
+            result.content.push(ToolContentBlock::builtin(denial::note(
+                &found,
+                &self.confinement,
+                outcome,
+            )));
+            return Err(ProcessError::Exit { code, result });
+        }
+    }
+
+    /// The person's answer, or `None` when the run was cancelled first: a
+    /// question nobody answers must not hold a cancelled run open.
+    async fn ask_until_cancelled(
+        &self,
+        grants: &dyn SandboxGrantPort,
+        request: &SandboxGrant,
+        spec: &SpawnSpec,
+        background_cancel: Option<&CancelToken>,
+    ) -> Option<bool> {
+        let command = denial::command_line(spec);
+        let question = grants.ask_for(request, &command);
+        tokio::pin!(question);
+        loop {
+            tokio::select! {
+                answer = &mut question => return Some(answer),
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                    if self.cancel.is_cancelled()
+                        || background_cancel.is_some_and(CancelToken::is_cancelled)
+                    {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The backend with `granted` added, or the admitted one when nothing is
+    /// granted or the mechanism cannot express a per-path grant.
+    fn backend_under(&self, granted: &[SandboxGrant]) -> Result<Arc<dyn Backend>, ProcessError> {
+        // A stored grant the profile cannot express (a hand-edited ledger) is
+        // left out, so it cannot make every command of the workspace fail.
+        let granted = granted
+            .iter()
+            .filter(|grant| denial::renderable(grant.path.as_path()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let granted = granted.as_slice();
+        if granted.is_empty() {
+            return Ok(Arc::clone(&self.backend));
+        }
+        let mut cache = self
+            .widened
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((known, backend)) = cache.as_ref()
+            && known.as_slice() == granted
+        {
+            return Ok(Arc::clone(backend));
+        }
+        let Some(widened) = self.backend.widened(granted)? else {
+            return Ok(Arc::clone(&self.backend));
+        };
+        *cache = Some((granted.to_vec(), Arc::clone(&widened)));
+        Ok(widened)
     }
 
     pub(crate) async fn spawn_duplex(
@@ -380,7 +536,7 @@ async fn execute(
         // helper a descriptor for a filesystem device.
         drop(stdin);
     }
-    let started = Instant::now();
+    let started = ActiveClock::start();
     let mut status = None;
     let mut descendants_cleaned = false;
     let mut stdout_pending = None;
@@ -628,7 +784,7 @@ async fn spawn_duplex(
     };
 
     let delivery = Arc::new(AtomicBool::new(false));
-    let started = tokio::time::Instant::now();
+    let started = ActiveClock::start();
     let supervisor = start_duplex_supervisor(
         child,
         context.cancel.clone(),
@@ -833,7 +989,7 @@ fn start_duplex_supervisor(
     child: ManagedChild,
     cancel: CancelToken,
     timeout: Option<Duration>,
-    started: tokio::time::Instant,
+    started: ActiveClock,
     grace: Duration,
 ) -> DuplexSupervisor {
     let (control, receiver) = mpsc::unbounded_channel();
@@ -848,7 +1004,7 @@ async fn supervise_duplex_child(
     mut control: mpsc::UnboundedReceiver<DuplexControl>,
     cancel: CancelToken,
     timeout: Option<Duration>,
-    started: tokio::time::Instant,
+    started: ActiveClock,
     grace: Duration,
 ) -> (DuplexEnd, CleanupCertainty) {
     loop {
@@ -1313,5 +1469,221 @@ fn status_error(status: ExitStatus, result: ToolResult) -> ProcessError {
             signal: None,
             result,
         }
+    }
+}
+
+#[cfg(test)]
+mod sandbox_question_tests {
+    use std::ffi::OsString;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ego_core::event::domain::CancelCause;
+    use ego_core::event::id::SessionId;
+    use ego_core::permit::{
+        BackendIdentity, CanonPath, Confinement, EnvPolicy, ExecCaps, ProcessError, RunConfinement,
+        SandboxGrant, SandboxGrantPort, SpawnSpec,
+    };
+    use futures::future::BoxFuture;
+
+    use super::*;
+    use crate::exec::backend::LaunchPrefix;
+    use crate::exec::null::NullBackend;
+
+    /// Unconfined like [`NullBackend`], but claims it can open one more path.
+    struct Widening;
+
+    impl Backend for Widening {
+        fn identity(&self) -> BackendIdentity {
+            NullBackend.identity()
+        }
+
+        fn maximum_demonstrable_caps(&self) -> ExecCaps {
+            ExecCaps::null()
+        }
+
+        fn launch_prefix(&self) -> LaunchPrefix {
+            NullBackend.launch_prefix()
+        }
+
+        fn widened(&self, _: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
+            Ok(Some(Arc::new(NullBackend)))
+        }
+
+        fn can_widen(&self) -> bool {
+            true
+        }
+    }
+
+    /// A seat that counts questions and, when `hang`, never answers.
+    struct Seat {
+        asked: AtomicUsize,
+        hang: bool,
+    }
+
+    impl SandboxGrantPort for Seat {
+        fn granted(&self) -> Vec<SandboxGrant> {
+            Vec::new()
+        }
+
+        fn ask<'a>(&'a self, _: &'a SandboxGrant) -> BoxFuture<'a, bool> {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            if self.hang {
+                Box::pin(std::future::pending())
+            } else {
+                Box::pin(async { true })
+            }
+        }
+    }
+
+    struct Rig {
+        context: RunProcessContext,
+        cancel: CancelToken,
+        seat: Arc<Seat>,
+        spec: SpawnSpec,
+        _dirs: Vec<tempfile::TempDir>,
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test Tokio runtime")
+            .block_on(future)
+    }
+
+    /// A run whose child exits 1 printing a refusal for a file outside the
+    /// workspace that its own command line names.
+    fn rig(backend: Arc<dyn Backend>, hang: bool) -> Rig {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let evidence = tempfile::tempdir().expect("evidence");
+        let target = std::fs::canonicalize(outside.path())
+            .expect("canonical outside")
+            .join("f");
+        std::fs::write(&target, "x").expect("outside file");
+        let confinement = RunConfinement::new(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(std::fs::canonicalize(workspace.path()).expect("canonical workspace")),
+        )
+        .expect("confinement");
+        let cancel = CancelToken::new();
+        let seat = Arc::new(Seat {
+            asked: AtomicUsize::new(0),
+            hang,
+        });
+        let context = RunProcessContext::new(
+            backend,
+            SessionEvidenceStore::open(evidence.path(), SessionId::new(), 1024 * 1024)
+                .expect("evidence store"),
+            cancel.clone(),
+            ExecLimits::new(4096, Duration::from_millis(250)).expect("limits"),
+            confinement.clone(),
+            ExecCaps::READ_SCOPED
+                .union(ExecCaps::WRITE_SCOPED)
+                .union(ExecCaps::WRITE_DENIED)
+                .union(ExecCaps::NO_IP_NETWORK),
+            Some(Arc::clone(&seat) as Arc<dyn SandboxGrantPort>),
+        );
+        let spec = SpawnSpec::new(
+            vec![
+                OsString::from("/bin/sh"),
+                OsString::from("-c"),
+                OsString::from("printf '%s: Operation not permitted\\n' \"$0\" >&2; exit 1"),
+                target.into_os_string(),
+            ],
+            Some(confinement.workspace().clone()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .expect("spawn spec");
+        Rig {
+            context,
+            cancel,
+            seat,
+            spec,
+            _dirs: vec![workspace, outside, evidence],
+        }
+    }
+
+    /// Catches: on a backend that cannot widen after admission (Landlock) the
+    /// person is asked, answers yes, and is told a grant is in force although
+    /// the retry runs under the same confinement.
+    #[test]
+    fn a_backend_that_cannot_widen_is_never_asked_and_says_so() {
+        let rig = rig(Arc::new(NullBackend), false);
+        let outcome = block_on(rig.context.execute(&rig.spec));
+        let Err(ProcessError::Exit { result, .. }) = outcome else {
+            panic!("the forged refusal exits 1: {outcome:?}");
+        };
+        assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 0);
+        let text = result
+            .content
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("cannot open extra paths"), "{text}");
+    }
+
+    /// Catches: a sandbox question nobody answers holds a cancelled run open
+    /// forever, because `ask` is awaited without watching the run's cancel
+    /// token.
+    #[test]
+    fn a_cancelled_run_does_not_wait_for_a_sandbox_answer() {
+        let rig = rig(Arc::new(Widening), true);
+        let cancel = rig.cancel.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            cancel.cancel(CancelCause::User);
+        });
+        let outcome = block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), rig.context.execute(&rig.spec)).await
+        });
+        canceller.join().expect("canceller thread");
+        assert!(
+            matches!(outcome, Ok(Err(ProcessError::Cancelled))),
+            "{outcome:?}"
+        );
+        assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// Catches: merging sandbox questions with detached execution loses the
+    /// command's cancellation token and leaves an unanswered question running.
+    #[test]
+    fn a_cancelled_detached_exec_does_not_wait_for_a_sandbox_answer() {
+        let rig = rig(Arc::new(Widening), true);
+        let context = Arc::new(rig.context);
+        let id = DetachedExecId::new();
+        context
+            .start_background(id, &rig.spec)
+            .expect("start detached exec");
+        block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while rig.seat.asked.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                context.cancel_background(id).expect("cancel detached exec");
+                loop {
+                    let status = context.background_status(id).expect("detached status");
+                    if let Some(outcome) = status.outcome {
+                        assert!(
+                            matches!(outcome, DetachedExecOutcome::Cancelled),
+                            "{outcome:?}"
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("cancel must settle without a sandbox answer");
+        });
+        assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 1);
+        assert!(
+            !rig.cancel.is_cancelled(),
+            "command cancellation must not cancel the run"
+        );
     }
 }

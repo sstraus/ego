@@ -182,6 +182,25 @@ impl Osc {
         }
     }
 
+    /// Blocked on a person: the awaiting state and, when `notify`, one
+    /// notification naming the tool.
+    ///
+    /// Emitted only where the question is put to the person (the terminal
+    /// owner's modal), never from the permission *request* event: a judge or a
+    /// stored rule can still settle a request after it is raised, and nobody
+    /// should be told to come back for a question that answers itself.
+    pub fn awaiting(&self, tool: &str, notify: bool) -> String {
+        let notification = if notify {
+            self.notify(
+                crate::DISPLAY_NAME,
+                &format!("permission needed for {tool}"),
+            )
+        } else {
+            String::new()
+        };
+        [self.state(State::Awaiting), notification].concat()
+    }
+
     /// OSC 133 A — a prompt is about to be drawn.
     pub fn prompt_start(&self) -> String {
         self.osc133("A", None)
@@ -437,5 +456,23 @@ mod tests {
         assert_eq!(osc.output_start(), "\x1b]133;C\x07");
         assert_eq!(osc.output_end(0), "\x1b]133;D;0\x07");
         assert_eq!(osc.output_end(3), "\x1b]133;D;3\x07");
+    }
+
+    #[test]
+    fn a_wait_is_the_state_plus_one_notification_spelled_for_the_host() {
+        assert_eq!(
+            tuic().awaiting("bash", true),
+            "\x1b]7770;state=awaiting\x07\x1b]777;notify;εgo;permission needed for bash\x07"
+        );
+        assert_eq!(
+            standard().awaiting("bash", true),
+            "\x1b]9;εgo: permission needed for bash\x07"
+        );
+        // Quiet drops the notification and never the state.
+        assert_eq!(
+            tuic().awaiting("bash", false),
+            "\x1b]7770;state=awaiting\x07"
+        );
+        assert_eq!(off().awaiting("bash", true), "");
     }
 }

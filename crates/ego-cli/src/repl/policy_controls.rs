@@ -483,6 +483,12 @@ impl PolicyApplicationOwner {
 
 impl PermissionRuleApplication for PolicyApplicationOwner {
     fn remember_allow(&self, plan: RememberPlan) -> Result<String, PolicyControlError> {
+        let rules = plan
+            .candidates
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         let preview = RememberPreview::presented(ManagedRuleEffect::Allow, plan);
         let PolicyControlOutcome::Rule { receipt, .. } =
             self.apply_permission(PermissionInput::ConfirmRemember(preview))?
@@ -491,12 +497,12 @@ impl PermissionRuleApplication for PolicyApplicationOwner {
                 diagnostic: "remembering a presented call returned a non-rule outcome".into(),
             });
         };
-        let mut rows =
-            crate::rules::render_remember_result_rows(&UserConfigTarget::Base, Some(&receipt));
+        let mut sentence = format!("Remembered: you will not be asked again for {rules}.");
         if let Some(warning) = crate::rules::publication_warning_text(&receipt.publication()) {
-            rows.push(warning);
+            sentence.push(' ');
+            sentence.push_str(&warning);
         }
-        Ok(rows.join("; "))
+        Ok(sentence)
     }
 }
 

@@ -232,7 +232,7 @@ impl RuleManagement {
             match rules
                 .allow
                 .iter()
-                .find(|entry| entry.rule().matches(op, workspace))
+                .find(|entry| entry.rule().matches_allow(op, workspace))
             {
                 Some(entry) => authorities.push(explained_authority(
                     operation,
@@ -254,17 +254,38 @@ impl RuleManagement {
         }
     }
 
+    /// The exact rule for every operation of the call.
     pub fn remember(
         call: &PreparedCall,
         effect: ManagedRuleEffect,
         workspace: &Path,
+    ) -> Result<RememberPlan, RuleManagementError> {
+        Self::plan(call, |op| Self::remember_op(op, effect, workspace))
+    }
+
+    /// The rules offered to a human who asks not to be asked again: an argv
+    /// prefix for `exec` and the whole workspace for writes, so the rule
+    /// matches the next call and not only this one. Every other operation
+    /// keeps its exact form, and so does a command whose prefix would
+    /// authorise code the human never saw (see [`exec_prefix`]).
+    pub fn suggest_remember(
+        call: &PreparedCall,
+        effect: ManagedRuleEffect,
+        workspace: &Path,
+    ) -> Result<RememberPlan, RuleManagementError> {
+        Self::plan(call, |op| Self::suggest_op(op, effect, workspace))
+    }
+
+    fn plan(
+        call: &PreparedCall,
+        mut derive: impl FnMut(&Op) -> Result<(Rule, Vec<OmittedDimension>), RuleManagementError>,
     ) -> Result<RememberPlan, RuleManagementError> {
         let mut candidates = Vec::new();
         let mut candidate_operations = Vec::new();
         let mut omitted = Vec::new();
         let mut omitted_operations = Vec::new();
         for (operation, op) in call.ops().iter().enumerate() {
-            let (candidate, dimensions) = Self::remember_op(op, effect, workspace)?;
+            let (candidate, dimensions) = derive(op)?;
             if !candidates.contains(&candidate) {
                 candidates.push(candidate);
                 candidate_operations.push(operation);
@@ -280,6 +301,42 @@ impl RuleManagement {
             candidate_operations,
             omitted_operations,
         })
+    }
+
+    fn suggest_op(
+        op: &Op,
+        effect: ManagedRuleEffect,
+        workspace: &Path,
+    ) -> Result<(Rule, Vec<OmittedDimension>), RuleManagementError> {
+        match op {
+            Op::Write { path, .. } => {
+                ensure_workspace(path.as_path(), workspace)?;
+                let text = workspace
+                    .to_str()
+                    .map(|text| text.trim_end_matches('/'))
+                    .filter(|text| !text.is_empty() && !text.contains('*'))
+                    .ok_or_else(|| RuleManagementError::NonPersistible(op.name()))?;
+                let pattern = PathPattern::parse(&format!("{text}/**"))
+                    .map_err(|_| RuleManagementError::NonPersistible(op.name()))?;
+                Ok((Rule::Write(pattern), vec![OmittedDimension::Change]))
+            }
+            Op::Spawn { spec } => match exec_prefix(spec.argv()) {
+                Some(prefix) => {
+                    let pattern = ArgvPattern::parse(&prefix)
+                        .map_err(|_| RuleManagementError::NonPersistible(op.name()))?;
+                    Ok((
+                        Rule::Exec(pattern),
+                        vec![
+                            OmittedDimension::Cwd,
+                            OmittedDimension::Timeout,
+                            OmittedDimension::Environment,
+                        ],
+                    ))
+                }
+                None => Self::remember_op(op, effect, workspace),
+            },
+            _ => Self::remember_op(op, effect, workspace),
+        }
     }
 
     pub fn remember_op(
@@ -448,6 +505,38 @@ fn operation_subject(op: &Op, workspace: &Path) -> String {
             unreachable!("filesystem subjects returned above")
         }
     }
+}
+
+/// Recognized program families whose next bare word names a subcommand.
+/// Suggestions retain that named action; other program shapes stay exact.
+const SUBCOMMAND_PROGRAMS: &[&str] = &[
+    "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh",
+];
+
+/// Suggest only a program-plus-subcommand prefix, never a program wildcard.
+/// This follows the documented Claude Code prefix shape; paths, options,
+/// wrappers, interpreters and unrecognized programs use exact argv instead.
+fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
+    let program = argv.first()?.to_str()?;
+    if !SUBCOMMAND_PROGRAMS.contains(&program) {
+        return None;
+    }
+    let subcommand = argv.get(1)?.to_str()?;
+    if !is_plain_word(subcommand) {
+        return None;
+    }
+    Some(format!("{program} {subcommand} *"))
+}
+
+/// A command word made only of characters no shell, glob or path syntax
+/// gives a meaning to. Leading `-` is excluded so an option is never taken for
+/// a subcommand, and so is a leading `+` (a `cargo +toolchain` selector).
+fn is_plain_word(word: &str) -> bool {
+    !word.is_empty()
+        && !word.starts_with(['-', '+'])
+        && word.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '+' | '-')
+        })
 }
 
 fn render_argv(argv: &[std::ffi::OsString]) -> Option<String> {

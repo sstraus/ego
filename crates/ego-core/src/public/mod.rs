@@ -532,7 +532,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             turn,
             item: item?,
             kind: ItemKind::Question,
-            name: Some("ask_question".to_string()),
+            name: Some(crate::question::ASK_QUESTION_TOOL.to_string()),
             text: Some(
                 serde_json::to_string(&QuestionReport::from_request(item?, target, request))
                     .expect("a validated question report always serializes"),

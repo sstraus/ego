@@ -67,6 +67,10 @@ impl GenerationToolCatalogue {
     pub(crate) fn instructions(&self) -> &[crate::mcp::McpServerInstructions] {
         self.authority.instructions()
     }
+
+    pub(crate) fn mcp_servers(&self) -> Vec<String> {
+        self.authority.server_names()
+    }
 }
 
 /// A model call after the mixed registry has selected its typed boundary.

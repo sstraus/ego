@@ -16,6 +16,7 @@ mod path;
 mod prepared_call;
 mod roots;
 pub mod rule;
+mod sandbox_grant;
 mod scan;
 mod scope;
 mod spawn;
@@ -47,6 +48,7 @@ pub use prepared_call::{
     SecretEgressAuthority, SessionProcessAction,
 };
 pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots};
+pub use sandbox_grant::{SandboxAccess, SandboxGrant, SandboxGrantPort};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;
 pub use spawn::{

@@ -14,13 +14,17 @@ pub mod selector;
 pub mod status;
 pub mod surface;
 
+/// What Esc leaves in the transcript, whether it stopped a turn or answered a
+/// permission modal.
+pub(crate) const INTERRUPTED_RECEIPT: &str = "Interrupted by user";
+
 pub(crate) use policy_controls::PermissionRuleApplication;
 pub(crate) use seat::Confirmation;
 pub(crate) use seat::effective_statusline_segments;
-pub(crate) use seat::render_action_help;
 pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };
+pub(crate) use seat::{render_action_help, render_key_hints};
 
 use actions::{ActionId, ExportSelection, SkillSurfaceAction};
 use ego_core::skill::AdmittedSkillOperation;
@@ -43,6 +47,7 @@ pub(super) const CLIPBOARD_PASTE_COMMAND: &str = "ego:clipboard-paste";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCommand {
     Action(ActionId),
+    Fork(ego_core::event::id::ItemId),
     SessionMetadata(crate::cli::SessionMetadataOperation),
     Policy(PolicyControlRequest),
     Skill(AdmittedSkillOperation),

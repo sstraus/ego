@@ -12,3 +12,4 @@
 # cargo-mutants scratch output: a run leaves a full copy of the tree behind.
 mutants.out/
 mutants.out.old/
+.env

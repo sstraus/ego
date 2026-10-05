@@ -1,4 +1,7 @@
+use super::edit_mode::PICKER_KEYS;
+use super::permission_modal::{compact_prompt, details_prompt};
 use super::*;
+use crate::render::osc::State;
 
 pub(super) fn enter_modal(
     editor: &mut Reedline,
@@ -15,6 +18,7 @@ pub(super) fn enter_modal(
     {
         let mut status = status.lock().expect("surface status lock");
         status.notice = None;
+        status.modal_since = Some(Instant::now());
         if let Some(snapshot) = status.snapshot.as_mut() {
             snapshot.set_modal(true);
         }
@@ -40,8 +44,21 @@ pub(super) fn leave_modal(
     ]);
     {
         let mut status = status.lock().expect("surface status lock");
+        let status = &mut *status;
         status.origin = saved.origin;
         status.notice = None;
+        // Keys of an unfinished burst belong to the modal that is closing.
+        status.picker_keys.clear();
+        // The turn's elapsed time leaves out the wait for the person, and
+        // only the part of the wait that fell inside the running turn: a modal
+        // that outlived its turn must not push the next one into the future.
+        if let Some(since) = status.modal_since.take()
+            && let Some(started) = status.activity_since.as_mut()
+        {
+            let waited = since.max(*started).elapsed();
+            *started += waited;
+            status.modal_waited += waited;
+        }
         if let Some(snapshot) = status.snapshot.as_mut() {
             snapshot.set_modal(false);
         }
@@ -234,71 +251,61 @@ pub(super) fn answer_control(
                 .lock()
                 .expect("surface status lock")
                 .permission_modal = true;
-            let prompt = Question::new(permission_prompt(&request), Arc::clone(surface.status));
+            let capabilities = surface
+                .status
+                .lock()
+                .expect("surface status lock")
+                .permission_capabilities;
+            let mut prompt = Question::new(compact_prompt(&request), Arc::clone(surface.status));
+            tell_host(surface.status, |osc, quiet| {
+                osc.awaiting(request.tool(), !quiet)
+            });
             let mut notice = None;
             let decision = loop {
                 match modal_line(editor, surface, &prompt) {
+                    // The keys: `n` asks what to do instead; typed words below
+                    // are the plain prompt and stay a bare refusal.
                     Line::HostCommand(HostCommand::PermissionDecision(decision)) => {
-                        match parse_permission(&decision) {
-                            Some(PermissionWord::Allow) => break PermissionDecision::Allow,
-                            Some(PermissionWord::Deny) => break PermissionDecision::Deny,
-                            Some(PermissionWord::Amend) => {
-                                surface
-                                    .status
-                                    .lock()
-                                    .expect("surface status lock")
-                                    .permission_modal = false;
-                                break amendment(editor, surface, &request);
+                        match decision.as_str() {
+                            "details" => {
+                                prompt = Question::new(
+                                    details_prompt(&request, capabilities),
+                                    Arc::clone(surface.status),
+                                );
                             }
-                            Some(PermissionWord::Remember) => {
-                                match remember_permission(surface.status, &request) {
-                                    Ok(receipt) => {
-                                        notice = Some(receipt);
-                                        break PermissionDecision::Allow;
-                                    }
-                                    Err(error) => {
-                                        notice = Some(format!("remember failed: {error}"));
-                                        break PermissionDecision::Deny;
-                                    }
+                            "deny" => break decline(editor, surface),
+                            _ => match parse_permission(&decision) {
+                                Some(word) => {
+                                    break settle_permission(
+                                        editor,
+                                        surface,
+                                        &request,
+                                        word,
+                                        &mut notice,
+                                    );
                                 }
-                            }
-                            None => continue,
+                                None => continue,
+                            },
                         }
                     }
                     Line::Submitted(answer) => match parse_permission(&answer) {
-                        Some(PermissionWord::Allow) => break PermissionDecision::Allow,
-                        Some(PermissionWord::Deny) => break PermissionDecision::Deny,
-                        Some(PermissionWord::Amend) => {
-                            surface
-                                .status
-                                .lock()
-                                .expect("surface status lock")
-                                .permission_modal = false;
-                            break amendment(editor, surface, &request);
-                        }
-                        Some(PermissionWord::Remember) => {
-                            match remember_permission(surface.status, &request) {
-                                Ok(receipt) => {
-                                    notice = Some(receipt);
-                                    break PermissionDecision::Allow;
-                                }
-                                Err(error) => {
-                                    notice = Some(format!("remember failed: {error}"));
-                                    break PermissionDecision::Deny;
-                                }
-                            }
+                        Some(word) => {
+                            break settle_permission(editor, surface, &request, word, &mut notice);
                         }
                         None => continue,
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         break PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         break PermissionDecision::Deny;
                     }
                     Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
                 }
             };
+            tell_host(surface.status, |osc, _| osc.state(State::Busy));
             (
                 Reply::Permission(reply, decision, notice),
                 EditPhase::Busy,
@@ -350,9 +357,8 @@ pub(super) fn answer_control(
             let _ = sender.send(accepted);
         }
         Reply::Permission(sender, decision, notice) => {
-            if let Some(notice) = notice {
-                surface.status.lock().expect("surface status lock").notice = Some(notice);
-                repaint_status(surface.status);
+            if let Some(receipt) = notice {
+                commit_to_transcript(surface.status, &receipt);
             }
             let _ = sender.send(decision);
         }
@@ -414,7 +420,8 @@ fn answer_question_selector(
         request
             .options
             .iter()
-            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone())),
+            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone()))
+            .chain(offers_other(request).then(|| SelectorOption::new(OTHER_ID, OTHER_LABEL))),
     )));
     surface
         .status
@@ -428,28 +435,52 @@ fn answer_question_selector(
             question_selector_prompt(request, &selector),
             Arc::clone(surface.status),
         );
-        match modal_line(editor, surface, &prompt) {
+        let queued = queued_selector_line(surface.status);
+        match queued.unwrap_or_else(|| modal_line(editor, surface, &prompt)) {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = question_selector_key(&command) else {
+                let Some(key) = next_selector_key(surface.status, &command) else {
                     continue;
                 };
-                let mut selector = selector.lock().expect("question selector lock");
-                selector.key(key);
+                let mut guard = selector.lock().expect("question selector lock");
+                guard.key(key);
                 if key == SelectorKey::Escape {
                     break QuestionOutcome::Cancelled;
                 }
                 if key != SelectorKey::Enter {
-                    drop(selector);
+                    drop(guard);
                     surface.status.lock().expect("surface status lock").notice = None;
                     repaint_status(surface.status);
                     continue;
                 }
-                let answer = match selector.result() {
-                    Some(SelectorValue::Single(id)) => QuestionAnswer::single(id.clone()),
-                    Some(SelectorValue::Multiple(ids)) => QuestionAnswer::multiple(ids.clone()),
-                    Some(SelectorValue::FreeText(_)) | None => continue,
+                let result = guard.result().cloned();
+                drop(guard);
+                let wants_other = match &result {
+                    Some(SelectorValue::Single(id)) => id == OTHER_ID,
+                    Some(SelectorValue::Multiple(ids)) => ids.iter().any(|id| id == OTHER_ID),
+                    Some(SelectorValue::FreeText(_)) | None => false,
                 };
-                drop(selector);
+                let typed = if wants_other {
+                    match other_text(editor, surface, &selector) {
+                        OtherEntry::Text(text) => Some(text),
+                        OtherEntry::Back => continue,
+                        OtherEntry::Settled(outcome) => break outcome,
+                    }
+                } else {
+                    None
+                };
+                let answer = match (result, typed) {
+                    (Some(SelectorValue::Single(_)), Some(text)) => QuestionAnswer::single(text),
+                    (Some(SelectorValue::Single(id)), None) => QuestionAnswer::single(id),
+                    (Some(SelectorValue::Multiple(ids)), typed) => {
+                        QuestionAnswer::multiple(ids.into_iter().map(|id| {
+                            match (&typed, id == OTHER_ID) {
+                                (Some(text), true) => text.clone(),
+                                _ => id,
+                            }
+                        }))
+                    }
+                    _ => continue,
+                };
                 match answer.validate_for(request) {
                     Ok(()) => break QuestionOutcome::Answered(answer),
                     Err(error) => {
@@ -473,7 +504,66 @@ fn answer_question_selector(
     outcome
 }
 
-pub(super) fn question_selector_key(command: &str) -> Option<SelectorKey> {
+/// An option id is never empty (`QuestionRequest::validate` refuses one), so
+/// the empty id names the `Other` row without colliding with a real option.
+const OTHER_ID: &str = "";
+const OTHER_LABEL: &str = "Other";
+const OTHER_DESCRIPTION: &str = "Type your own answer";
+
+/// The `Other` row exists only where the schema lets the model accept free
+/// text alongside the options.
+fn offers_other(request: &QuestionRequest) -> bool {
+    request.free_text && matches!(request.mode, QuestionMode::Single | QuestionMode::Multiple)
+}
+
+enum OtherEntry {
+    Text(String),
+    /// A blank line or Esc: the selector is still open.
+    Back,
+    Settled(QuestionOutcome),
+}
+
+/// Reads the free-text answer behind the `Other` row. The selector keys are
+/// released while the human types and taken back before returning to it.
+fn other_text(
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
+    selector: &Arc<Mutex<Selector>>,
+) -> OtherEntry {
+    {
+        let mut status = surface.status.lock().expect("surface status lock");
+        status.question_selector = None;
+        // Queued keys belong to the selector this entry replaces; replayed
+        // after backing out they would act on a stale choice. Keys the editor
+        // has not read yet are typed-ahead input for the entry and stay.
+        status.picker_keys.clear();
+    }
+    let prompt = Question::new(format!("{OTHER_LABEL}: "), Arc::clone(surface.status));
+    let entry = loop {
+        match modal_line(editor, surface, &prompt) {
+            Line::Submitted(text) if !text.trim().is_empty() => {
+                break OtherEntry::Text(text.trim().to_string());
+            }
+            Line::Submitted(_) | Line::Blank | Line::HostCommand(HostCommand::ModalEscape) => {
+                break OtherEntry::Back;
+            }
+            Line::Interrupted => break OtherEntry::Settled(QuestionOutcome::Declined),
+            Line::Ended | Line::ExternalBreak(_) => {
+                break OtherEntry::Settled(QuestionOutcome::Unavailable);
+            }
+            Line::Refused(_) | Line::HostCommand(_) => {}
+        }
+    };
+    surface
+        .status
+        .lock()
+        .expect("surface status lock")
+        .question_selector = Some(Arc::clone(selector));
+    repaint_status(surface.status);
+    entry
+}
+
+fn question_selector_key(command: &str) -> Option<SelectorKey> {
     match command {
         "up" => Some(SelectorKey::Up),
         "down" => Some(SelectorKey::Down),
@@ -488,6 +578,30 @@ pub(super) fn question_selector_key(command: &str) -> Option<SelectorKey> {
     }
 }
 
+/// The selector line a burst of keys already supplied, if one is waiting.
+///
+/// The editor parses a whole burst before running its first command and drops
+/// the rest, so the edit mode queues every selector key in
+/// `SurfaceStatus::picker_keys` — the queue the model picker uses — and the
+/// loop applies them one at a time through this and [`next_selector_key`].
+pub(super) fn queued_selector_line(status: &SharedStatus) -> Option<Line> {
+    let waiting = !status
+        .lock()
+        .expect("surface status lock")
+        .picker_keys
+        .is_empty();
+    waiting.then(|| Line::HostCommand(HostCommand::QuestionSelector(PICKER_KEYS.to_owned())))
+}
+
+/// The oldest queued selector key; `command` is only the wake-up that carried it.
+pub(super) fn next_selector_key(status: &SharedStatus, _command: &str) -> Option<SelectorKey> {
+    let mut status = status.lock().expect("surface status lock");
+    if status.picker_keys.is_empty() {
+        return None;
+    }
+    question_selector_key(&status.picker_keys.remove(0))
+}
+
 pub(super) fn question_selector_prompt(
     request: &QuestionRequest,
     selector: &Arc<Mutex<Selector>>,
@@ -495,24 +609,36 @@ pub(super) fn question_selector_prompt(
     let selector = selector.lock().expect("question selector lock");
     let current = selector.current_id();
     let selected = selector.selected_ids();
+    let multiple = request.mode == QuestionMode::Multiple;
+    let other = offers_other(request)
+        .then(|| QuestionOption::new(OTHER_ID, OTHER_LABEL).with_description(OTHER_DESCRIPTION));
     let mut rows = vec![request.prompt.clone()];
-    rows.extend(request.options.iter().enumerate().map(|(index, option)| {
+    for (index, option) in request.options.iter().chain(other.as_ref()).enumerate() {
         let marker = if current == Some(option.id.as_str()) {
             ">"
         } else {
             " "
         };
-        if request.mode == QuestionMode::Multiple {
-            let checked = if selected.contains(&option.id.as_str()) {
-                "x"
-            } else {
-                " "
-            };
-            format!("{marker} [{checked}] {}. {}", index + 1, option.label)
+        let checked = if selected.contains(&option.id.as_str()) {
+            "x"
         } else {
-            format!("{marker} {}. {}", index + 1, option.label)
+            " "
+        };
+        let lead = if multiple {
+            format!("{marker} [{checked}] {}. ", index + 1)
+        } else {
+            format!("{marker} {}. ", index + 1)
+        };
+        let indent = " ".repeat(lead.chars().count());
+        rows.push(format!("{lead}{}", option.label));
+        if let Some(description) = option
+            .description
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            rows.push(format!("{indent}{description}"));
         }
-    }));
+    }
     rows.push(if request.mode == QuestionMode::Multiple {
         "Up/Down moves; Space or number toggles; Enter answers; Esc cancels. ".to_string()
     } else {
@@ -627,6 +753,7 @@ fn amendment(
     editor: &mut Reedline,
     surface: &mut ModalSurface<'_>,
     request: &PermissionRequest,
+    notice: &mut Option<String>,
 ) -> PermissionDecision {
     let Some(presentation) = request.presentation() else {
         surface.status.lock().expect("surface status lock").notice =
@@ -659,10 +786,12 @@ fn amendment(
                         Ok(()) => break,
                         Err(error) => inline_permission_error(surface.status, error),
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         return PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        *notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         return PermissionDecision::Deny;
                     }
                     Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -686,10 +815,12 @@ fn amendment(
                         Ok(()) => break,
                         Err(error) => inline_permission_error(surface.status, error),
                     },
-                    Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                    Line::Ended | Line::ExternalBreak(_) => {
                         return PermissionDecision::Deny;
                     }
-                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                    Line::Interrupted
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        *notice = Some(crate::repl::INTERRUPTED_RECEIPT.to_owned());
                         return PermissionDecision::Deny;
                     }
                     Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -1100,7 +1231,10 @@ fn remember_permission(
     let presentation = request
         .presentation()
         .ok_or_else(|| "this permission request has no presentation facts".to_owned())?;
-    let plan = presentation.remember_plan().map_err(str::to_owned)?.clone();
+    let plan = presentation
+        .suggested_remember_plan()
+        .map_err(str::to_owned)?
+        .clone();
     let application = status
         .lock()
         .map_err(|_| "the permission surface is unavailable".to_owned())?
@@ -1112,58 +1246,90 @@ fn remember_permission(
         .map_err(|error| error.to_string())
 }
 
-fn permission_prompt(request: &PermissionRequest) -> String {
-    let rendered = request.to_string();
-    let operations = rendered.lines().skip(1).collect::<Vec<_>>().join("\n");
-    let mut rows = vec![
-        format!(
-            "Call: {}",
-            serde_json::to_string(request.tool()).expect("a tool name always serializes")
-        ),
-        format!(
-            "Reason: {}",
-            serde_json::to_string(&request.why().to_string())
-                .expect("a permission reason always serializes")
-        ),
-    ];
-    if !operations.is_empty() {
-        rows.push(format!("Operations:\n{operations}"));
+/// Write one out-of-band signal straight to the terminal.
+///
+/// Called only from the terminal owner, between reads, so nothing else is
+/// painting. It does not go through the row output: that holds text until a
+/// newline, and a wait has no more rows coming.
+fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
+    let signals = status.lock().expect("surface status lock").signals;
+    let Some((osc, quiet)) = signals else {
+        return;
+    };
+    let bytes = signal(osc, quiet);
+    if bytes.is_empty() {
+        return;
     }
-    if let Some(presentation) = request.presentation() {
-        rows.push(format!(
-            "Risk: {:?} ({})",
-            presentation.risk().class,
-            presentation
-                .risk()
-                .reasons
-                .iter()
-                .map(|reason| format!("{reason:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        rows.push(format!(
-            "Parameters:\n{}",
-            serde_json::to_string_pretty(presentation.parameters())
-                .expect("JSON parameters always serialize")
-        ));
-        match presentation.remember_plan() {
-            Ok(plan) => {
-                rows.push("Remember would add:".into());
-                rows.extend(
-                    plan.candidate_rows()
-                        .map(|(operation, rule)| format!("- operation {operation}: {rule}")),
-                );
-                for (operation, dimension) in plan.omission_rows() {
-                    rows.push(format!(
-                        "- widening for operation {operation}: omits {dimension:?}"
-                    ));
-                }
-            }
-            Err(error) => rows.push(format!("Remember unavailable: {error}")),
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(bytes.as_bytes());
+    let _ = stdout.flush();
+}
+
+/// Resolve one answered key or word. `notice` receives the receipt that goes
+/// to the transcript.
+fn settle_permission(
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
+    request: &PermissionRequest,
+    word: PermissionWord,
+    notice: &mut Option<String>,
+) -> PermissionDecision {
+    match word {
+        PermissionWord::Allow => PermissionDecision::Allow,
+        PermissionWord::Deny => PermissionDecision::Deny,
+        PermissionWord::Amend => {
+            surface
+                .status
+                .lock()
+                .expect("surface status lock")
+                .permission_modal = false;
+            amendment(editor, surface, request, notice)
         }
+        PermissionWord::Remember => match remember_permission(surface.status, request) {
+            Ok(receipt) => {
+                *notice = Some(receipt);
+                PermissionDecision::Allow
+            }
+            Err(error) => {
+                *notice = Some(format!("Not remembered, and the call was refused: {error}"));
+                PermissionDecision::Deny
+            }
+        },
     }
-    rows.push("[y] allow [n] deny [e] edit [r] remember ".into());
-    rows.join("\n")
+}
+
+/// `n`: ask what to do instead. An empty answer is a plain refusal; words go
+/// back to the model as the tool result.
+fn decline(editor: &mut Reedline, surface: &mut ModalSurface<'_>) -> PermissionDecision {
+    surface
+        .status
+        .lock()
+        .expect("surface status lock")
+        .permission_modal = false;
+    let prompt = Question::new(
+        "What should it do instead? (Enter alone just says no) ".to_owned(),
+        Arc::clone(surface.status),
+    );
+    match modal_line(editor, surface, &prompt) {
+        Line::Submitted(text) if !text.trim().is_empty() => {
+            PermissionDecision::DenyWithInstruction {
+                instruction: text.trim().to_owned(),
+            }
+        }
+        _ => PermissionDecision::Deny,
+    }
+}
+
+/// One row into the transcript, through the same printer the run output uses.
+fn commit_to_transcript(status: &SharedStatus, row: &str) {
+    let transcript = status
+        .lock()
+        .expect("surface status lock")
+        .transcript
+        .clone();
+    if let Some(transcript) = transcript {
+        let _ = transcript.send(format!("{row}\n"));
+    }
 }
 
 /// The prompt: two characters and nothing else.

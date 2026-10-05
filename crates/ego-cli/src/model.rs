@@ -761,11 +761,11 @@ mod tests {
     #[test]
     fn an_openai_codex_request_assembles_from_the_builtin_catalogue_alone() {
         let hosted = crate::facts::builtin_only();
-        let slug = ModelSlug::parse("openai-codex/gpt-6-sol").expect("a valid Codex slug");
+        let slug = ModelSlug::parse("openai-codex/gpt-6.1-sol").expect("a valid Codex slug");
         assert!(
             hosted
                 .iter()
-                .any(|(key, _)| key == "openai-codex/gpt-6-sol"),
+                .any(|(key, _)| key == "openai-codex/gpt-6.1-sol"),
             "the builtin catalogue does not carry the Codex default",
         );
 

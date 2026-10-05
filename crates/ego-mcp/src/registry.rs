@@ -255,6 +255,7 @@ impl McpCandidateError {
 struct CandidateFailure {
     failure: McpFailure,
     authorization: Option<CandidateAuthorizationFailure>,
+    detail: Option<String>,
 }
 
 struct CandidateAuthorizationFailure {
@@ -268,12 +269,16 @@ impl CandidateFailure {
         Self {
             failure,
             authorization: None,
+            detail: None,
         }
     }
 
     fn admission(error: McpCandidateError) -> Self {
         match error {
-            McpCandidateError::Invalid { .. } => Self::materialization(McpFailure::InvalidValue),
+            McpCandidateError::Invalid { cause } => Self {
+                detail: Some(cause),
+                ..Self::materialization(McpFailure::InvalidValue)
+            },
             McpCandidateError::AuthorizationRequired {
                 issuer,
                 protected_resource,
@@ -285,12 +290,18 @@ impl CandidateFailure {
                     protected_resource,
                     scopes,
                 }),
+                detail: None,
             },
         }
     }
 
     fn sanitized_cause(&self) -> &'static str {
         failure_message(self.failure)
+    }
+
+    /// Public diagnostics contain only the fixed failure classification.
+    fn diagnostic_message(&self) -> String {
+        self.sanitized_cause().to_owned()
     }
 }
 
@@ -988,6 +999,14 @@ impl McpCapturePin for McpRegistryCapture {
     fn instructions(&self) -> &[McpServerInstructions] {
         &self.inner.instructions
     }
+
+    fn server_names(&self) -> Vec<String> {
+        self.inner
+            .servers
+            .iter()
+            .map(|server| server.identity.as_str().to_owned())
+            .collect()
+    }
 }
 
 /// Bound and order what the captured servers said about themselves.
@@ -1292,7 +1311,7 @@ fn failed_server_status(
         authorization,
         diagnostic: Some(McpServerDiagnostic {
             failure: failure.failure,
-            message: Arc::from(failure.sanitized_cause()),
+            message: Arc::from(failure.diagnostic_message()),
         }),
     }
 }
@@ -1895,6 +1914,11 @@ impl McpRegistryController {
         failure: &CandidateFailure,
         predecessor: &Arc<AdmittedRegistrySnapshot>,
     ) -> Result<(), McpRegistryError> {
+        if let Some(cause) = &failure.detail {
+            let _ = self
+                .journal
+                .record_private_diagnostic(server.as_str(), cause);
+        }
         if let Some(authorization) = &failure.authorization {
             self.journal
                 .append(McpRegistryEvent::AuthorizationRequired {
@@ -2649,6 +2673,14 @@ mod collapsed_mcp_red {
     }
 
     impl McpRegistryJournal for Journal {
+        fn record_private_diagnostic(
+            &self,
+            _server: &str,
+            _cause: &str,
+        ) -> Result<(), McpRegistryJournalError> {
+            Ok(())
+        }
+
         fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
             self.events.lock().expect("events").push(event);
             Ok(())

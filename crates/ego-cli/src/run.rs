@@ -87,10 +87,10 @@ use ego_core::subagent::{
     RecoveryCut,
 };
 use ego_core::turn::{
-    AdmittedToolSource, CancelToken, GenerationPolicySource, GenerationRuntime, InteractiveControl,
-    Journal, JudgeContext, PauseToken, QueueStatus, RegisteredTool, Session, SharedJournal,
-    ToolEffectPorts, ToollessGenerationOwner, Tools, TurnAbandoned, TurnConfig, TurnLoop,
-    TurnOutcome, interactive_control,
+    AdmittedToolSource, AgentIdentity, CancelToken, GenerationPolicySource, GenerationRuntime,
+    InteractiveControl, Journal, JudgeContext, PauseToken, QueueStatus, RegisteredTool, Session,
+    SharedJournal, ToolEffectPorts, ToollessGenerationOwner, Tools, TurnAbandoned, TurnConfig,
+    TurnLoop, TurnOutcome, interactive_control,
 };
 use ego_core::usage::{UsagePeriod, UsageReportService};
 use ego_mcp::McpRegistryController;
@@ -158,7 +158,7 @@ use port_adapters::*;
 mod headless_driver;
 use headless_driver::*;
 mod composition_root;
-mod profile_roots;
+pub(crate) mod profile_roots;
 use composition_root::*;
 pub use composition_root::{CliPrepared, DirectPreflight, preflight_ci};
 mod execution;

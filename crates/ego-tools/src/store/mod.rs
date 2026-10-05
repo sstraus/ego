@@ -9,6 +9,7 @@ mod evidence;
 mod io;
 mod jsonl_store;
 mod lease;
+mod private_log;
 mod run_artifact;
 mod snapshot;
 mod writer;
@@ -17,7 +18,7 @@ pub use blob::SessionBlobStore;
 pub use evidence::SessionEvidenceStore;
 #[cfg(feature = "test-support")]
 pub use io::NonDurableOsIo;
-pub use io::{AtomicReplacePublication, OsIo, StoreIo, tmp_path_for};
+pub use io::{AtomicReplacePublication, OsIo, PrivateLogWriter, StoreIo, tmp_path_for};
 pub use jsonl_store::{JsonlStore, Repair};
 pub use lease::{Lease, LeaseError};
 pub use snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotPolicy, SnapshotRejection, validate};

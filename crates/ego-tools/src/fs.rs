@@ -12,6 +12,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use ego_core::permit::{CanonPath, Entry, EntryKind, Fs, FsError, PathResolver, Scan, ScanRequest};
+use ignore::Match;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tempfile::NamedTempFile;
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -172,6 +174,11 @@ impl Fs for OsFs {
             req,
             entries: Vec::new(),
             truncated: false,
+            ignores: if req.respect_ignore {
+                repository_ignores(req.root.as_path())
+            } else {
+                Vec::new()
+            },
         };
         // The root's own failure is the caller's problem — a scan rooted at a
         // file is `NotADirectory`, and there is no partial answer to give.
@@ -185,6 +192,37 @@ struct Walk<'a> {
     req: &'a ScanRequest,
     entries: Vec<Entry>,
     truncated: bool,
+    /// The `.gitignore` files in force, outermost first.
+    ignores: Vec<Gitignore>,
+}
+
+/// The `.gitignore` in `dir`, if it has one that parses.
+fn gitignore_in(dir: &Path) -> Option<Gitignore> {
+    let file = dir.join(".gitignore");
+    if !file.is_file() {
+        return None;
+    }
+    let mut builder = GitignoreBuilder::new(dir);
+    // A line that does not parse is skipped by the builder; the rest still apply.
+    builder.add(file);
+    builder.build().ok()
+}
+
+/// The ignore files above `root`, outermost first, up to the repository that
+/// holds it. Outside a repository, or when `root` is itself a repository,
+/// nothing above applies.
+fn repository_ignores(root: &Path) -> Vec<Gitignore> {
+    let Some(top) = root.ancestors().find(|dir| dir.join(".git").exists()) else {
+        return Vec::new();
+    };
+    let mut above: Vec<Gitignore> = root
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(top))
+        .filter_map(gitignore_in)
+        .collect();
+    above.reverse();
+    above
 }
 
 impl Walk<'_> {
@@ -202,6 +240,38 @@ impl Walk<'_> {
     /// failure is fatal, because there is no partial answer to give when the
     /// thing you were pointed at is not walkable at all.
     fn descend(&mut self, dir: &Path, relative: &Path, depth: usize) -> Result<(), FsError> {
+        // A repository nested below the root answers to its own rules only.
+        let outer = (self.req.respect_ignore
+            && !relative.as_os_str().is_empty()
+            && dir.join(".git").exists())
+        .then(|| std::mem::take(&mut self.ignores));
+        let own = self.req.respect_ignore.then(|| gitignore_in(dir)).flatten();
+        let scoped = own.is_some();
+        self.ignores.extend(own);
+        let walked = self.visit(dir, relative, depth);
+        if scoped {
+            self.ignores.pop();
+        }
+        if let Some(outer) = outer {
+            self.ignores = outer;
+        }
+        walked
+    }
+
+    /// True when the nearest `.gitignore` with an opinion ignores `at`.
+    fn ignored(&self, at: &Path, is_dir: bool) -> bool {
+        self.ignores
+            .iter()
+            .rev()
+            .find_map(|rules| match rules.matched(at, is_dir) {
+                Match::None => None,
+                Match::Ignore(_) => Some(true),
+                Match::Whitelist(_) => Some(false),
+            })
+            .unwrap_or(false)
+    }
+
+    fn visit(&mut self, dir: &Path, relative: &Path, depth: usize) -> Result<(), FsError> {
         // Read the names first and sort them: `read_dir` yields whatever order
         // the filesystem feels like, and a scan that truncates has to truncate
         // the same way twice or a model gets a different answer to the same
@@ -234,6 +304,9 @@ impl Walk<'_> {
                 // entry that cannot be described is not reported.
                 continue;
             };
+            if self.ignored(&at, meta.is_dir()) {
+                continue;
+            }
 
             if meta.is_symlink() {
                 self.link(child, &at);

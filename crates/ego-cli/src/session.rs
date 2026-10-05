@@ -11,7 +11,7 @@ use std::time::Duration;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::EvidenceStore;
-use ego_core::session::{ReplayContext, ReplayedContext, TargetSeed};
+use ego_core::session::{ReplayContext, ReplayedContext};
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionStore, StoreError};
 use ego_tools::store::SessionEvidenceStore;
@@ -188,7 +188,7 @@ impl Opened<'_> {
             notes.push("an orphaned manifest temporary file was removed on the way in".to_owned());
         }
         if open.repair.manifest_rebuilt {
-            notes.push("the session manifest was rebuilt from the log on the way in".to_owned());
+            notes.push("the saved session details were missing or damaged and were restored from the session log".to_owned());
         }
 
         Some(notes.join("; "))
@@ -265,27 +265,6 @@ impl<'a> ActiveSession<'a> {
 
     pub(crate) fn replayed(&self) -> Option<&ReplayedContext> {
         self.replayed.as_ref()
-    }
-
-    pub(crate) fn replay_seed(&self, seed: &TargetSeed) -> Result<ReplayedContext, String> {
-        let Opened::Durable(open) = &self.opened;
-        ReplayContext::new(&open.writer, &open.writer)
-            .replay_lineage(seed.lineage())
-            .map_err(|error| error.to_string())
-    }
-
-    pub(crate) fn replace_replayed(&mut self, replayed: ReplayedContext) {
-        self.replayed = Some(replayed);
-    }
-
-    pub fn publish_target(
-        &self,
-        seed: &ego_core::session::TargetSeed,
-    ) -> ego_core::session::TargetPublication {
-        use ego_core::session::TargetStore;
-
-        let Opened::Durable(open) = &self.opened;
-        open.writer.publish_target(seed)
     }
 
     /// Apply the target only after the store has established publication

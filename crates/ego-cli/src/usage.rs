@@ -1,6 +1,9 @@
 //! `ego usage` and the shared human rendering used by `/usage`.
 
+use chrono::{Local, TimeZone};
+use ego_core::cost::Money;
 use ego_core::run::RunTermination;
+use ego_core::state::ContextWindow;
 use ego_core::usage::{CostBreakdown, UsageLine, UsagePeriod, UsageReport, UsageReportService};
 use ego_tools::clock::SystemClock;
 
@@ -22,7 +25,7 @@ pub async fn execute(args: &UsageArgs, out: &Stdout) -> RunTermination {
                     }
                 }
             } else {
-                out.write(&render_text(&report, args.all_roles));
+                out.write(&render_text(&report, args.all_roles, None));
             }
             RunTermination::Done
         }
@@ -73,7 +76,27 @@ const COLUMNS: [&str; 7] = ["session", "model", "role", "in", "out", "cached", "
 /// because four of the five are zero in every session nobody judged, compacted,
 /// forked or hooked, and five zero rows per session is how the one row that
 /// mattered got lost.
-pub(crate) fn render_text(report: &UsageReport, all_roles: bool) -> String {
+///
+/// `context` is the active session's window, which only `/usage` has; the
+/// workspace report of `ego usage` spans sessions and passes `None`.
+pub(crate) fn render_text(
+    report: &UsageReport,
+    all_roles: bool,
+    context: Option<ContextWindow>,
+) -> String {
+    render_text_in(report, all_roles, context, &Local)
+}
+
+/// [`render_text`] with the time zone `as_of` is written in made explicit.
+fn render_text_in<Tz: TimeZone>(
+    report: &UsageReport,
+    all_roles: bool,
+    context: Option<ContextWindow>,
+    zone: &Tz,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
     let period = match report.period {
         UsagePeriod::All => "all".to_string(),
         UsagePeriod::Last { seconds } => format!("last {}s", seconds.get()),
@@ -95,12 +118,40 @@ pub(crate) fn render_text(report: &UsageReport, all_roles: bool) -> String {
     cells.push(row("workspace", "-", "total", &report.totals.total));
 
     let mut rows = vec![format!(
-        "usage as_of={} period={period}",
-        report.as_of.as_millis()
+        "usage as of {} period={period}",
+        local_stamp(zone, report.as_of.as_millis())
     )];
+    rows.extend(context.map(context_line));
     rows.extend(aligned(&cells));
     rows.push(String::new());
     rows.join("\n")
+}
+
+/// An instant as a minute-precision calendar time in `zone`.
+fn local_stamp<Tz: TimeZone>(zone: &Tz, millis: u64) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    i64::try_from(millis)
+        .ok()
+        .and_then(|millis| zone.timestamp_millis_opt(millis).single())
+        .map_or_else(
+            || "an unrepresentable time".to_string(),
+            |at| at.format("%Y-%m-%d %H:%M").to_string(),
+        )
+}
+
+/// The active session's context occupancy against its window.
+pub(crate) fn context_line(context: ContextWindow) -> String {
+    match (context.used_tokens, context.window) {
+        (Some(used), Some(window)) if window > 0 => format!(
+            "context {used} of {window} tokens ({:.1}%)",
+            used as f64 * 100.0 / window as f64
+        ),
+        (Some(used), _) => format!("context {used} tokens (window unknown)"),
+        (None, Some(window)) => format!("context unknown of {window} tokens"),
+        (None, None) => "context unknown".to_string(),
+    }
 }
 
 /// Every accounting line of one set, in the fixed report order.
@@ -185,7 +236,7 @@ fn cost_text(cost: &CostBreakdown) -> String {
     let known = cost
         .known
         .iter()
-        .map(|money| format!("{} {}", money.amount, money.currency))
+        .map(money_text)
         .collect::<Vec<_>>()
         .join(", ");
     match (known.is_empty(), cost.unknown.is_empty()) {
@@ -193,5 +244,154 @@ fn cost_text(cost: &CostBreakdown) -> String {
         (true, false) => "unknown".to_string(),
         (false, true) => known,
         (false, false) => format!("{known} +unknown"),
+    }
+}
+
+/// An amount at four decimals, rounded half up.
+///
+/// A nonzero amount that rounds to nothing reads `<0.0001`, never `0.0000`: a
+/// zero that is not one is the false precision this view exists to avoid. The
+/// exact amount stays in `--json`.
+fn money_text(money: &Money) -> String {
+    const PLACES: u32 = 4;
+    let (coefficient, scale) = (money.amount.coefficient(), money.amount.scale());
+    let hundredths = if scale <= PLACES {
+        coefficient.checked_mul(10u128.pow(PLACES - scale))
+    } else {
+        let divisor = 10u128.pow(scale - PLACES);
+        let rounded_up = coefficient % divisor * 2 >= divisor;
+        Some(coefficient / divisor + u128::from(rounded_up))
+    };
+    let Some(scaled) = hundredths else {
+        return format!("{} {}", money.amount, money.currency);
+    };
+    if scaled == 0 && coefficient != 0 {
+        return format!("<0.0001 {}", money.currency);
+    }
+    let unit = 10u128.pow(PLACES);
+    format!("{}.{:04} {}", scaled / unit, scaled % unit, money.currency)
+}
+
+#[cfg(test)]
+mod text_red {
+    use super::*;
+    use chrono::FixedOffset;
+    use ego_core::cost::{Amount, CurrencyCode, UnknownCost};
+    use ego_core::event::time::Timestamp;
+    use ego_core::state::Usage;
+    use ego_core::usage::UsageLines;
+
+    fn line(cost: CostBreakdown) -> UsageLine {
+        UsageLine {
+            usage: Usage::IDENTITY,
+            cost,
+        }
+    }
+
+    fn report(as_of: u64, total: CostBreakdown) -> UsageReport {
+        let empty = || line(none());
+        UsageReport {
+            v: 2,
+            as_of: Timestamp::from_millis(as_of),
+            period: UsagePeriod::All,
+            sessions: Vec::new(),
+            totals: UsageLines {
+                main: empty(),
+                judge: empty(),
+                compaction: empty(),
+                subagent: empty(),
+                hook: empty(),
+                total: line(total),
+            },
+        }
+    }
+
+    fn none() -> CostBreakdown {
+        CostBreakdown {
+            known: Vec::new(),
+            unknown: Vec::new(),
+        }
+    }
+
+    fn usd(coefficient: u128, scale: u32) -> CostBreakdown {
+        CostBreakdown {
+            known: vec![Money::new(
+                Amount::new(coefficient, scale).expect("amount"),
+                CurrencyCode::new("USD").expect("currency"),
+            )],
+            unknown: Vec::new(),
+        }
+    }
+
+    /// Catches: the header printing the raw epoch milliseconds, or the UTC
+    /// calendar time where the reader's own zone was wanted.
+    #[test]
+    fn the_header_shows_a_local_date_and_not_an_epoch_number() {
+        // 2026-09-29 06:13:31 UTC.
+        let as_of = 1_790_662_411_741;
+        let zone = FixedOffset::east_opt(2 * 3600).expect("offset");
+        let text = render_text_in(&report(as_of, none()), false, None, &zone);
+        let header = text.lines().next().expect("header");
+        assert_eq!(header, "usage as of 2026-09-29 08:13 period=all");
+        assert!(!text.contains(&as_of.to_string()), "{text}");
+    }
+
+    /// Catches: eight-decimal costs, and a tiny nonzero cost shown as 0.0000.
+    #[test]
+    fn cost_has_four_decimals_and_a_tiny_cost_is_not_a_false_zero() {
+        for (coefficient, scale, expected) in [
+            (156_247, 8, "0.0016 USD"),
+            (15, 1, "1.5000 USD"),
+            (2, 0, "2.0000 USD"),
+            (99_995, 7, "0.0100 USD"),
+            (1, 8, "<0.0001 USD"),
+        ] {
+            assert_eq!(
+                cost_text(&usd(coefficient, scale)),
+                expected,
+                "{coefficient}e-{scale}"
+            );
+        }
+    }
+
+    /// Catches: an unpriced model rendered as a priced amount.
+    #[test]
+    fn an_unpriced_total_reads_unknown_and_not_a_number() {
+        let unpriced = CostBreakdown {
+            known: Vec::new(),
+            unknown: vec![UnknownCost::NoPricingQuote],
+        };
+        assert_eq!(cost_text(&unpriced), "unknown");
+    }
+
+    /// Catches: `/usage` omitting the window, or computing the percent against
+    /// the wrong whole.
+    #[test]
+    fn the_context_line_has_used_tokens_window_and_percent() {
+        let context = ContextWindow {
+            used_tokens: Some(50_000),
+            window: Some(200_000),
+            ..ContextWindow::default()
+        };
+        let zone = FixedOffset::east_opt(0).expect("offset");
+        let text = render_text_in(&report(0, none()), false, Some(context), &zone);
+        assert!(
+            text.lines()
+                .any(|row| row == "context 50000 of 200000 tokens (25.0%)"),
+            "{text}"
+        );
+        assert_eq!(context_line(ContextWindow::default()), "context unknown");
+    }
+
+    /// Catches: the readable text view changing the machine form. `--json`
+    /// serialises the report as it always did; this pins its bytes.
+    #[test]
+    fn the_json_form_is_unchanged_by_the_text_view() {
+        let json =
+            serde_json::to_string(&report(1_790_662_411_741, usd(156_247, 8))).expect("serialise");
+        assert_eq!(
+            json,
+            r#"{"v":2,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[]}}}}"#
+        );
     }
 }

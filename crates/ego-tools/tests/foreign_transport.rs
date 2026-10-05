@@ -331,7 +331,9 @@ impl SocketServer {
         let captures = Arc::new(Mutex::new(Vec::new()));
         let captures_for_thread = Arc::clone(&captures);
         let (stop, stop_rx) = mpsc::channel();
+        let (ready, ready_rx) = mpsc::channel();
         let thread = std::thread::spawn(move || {
+            ready.send(()).expect("socket server readiness");
             loop {
                 match listener.accept() {
                     Ok((stream, _)) => {
@@ -350,6 +352,7 @@ impl SocketServer {
                 }
             }
         });
+        ready_rx.recv().expect("socket server started");
         Self {
             address,
             stop,
@@ -1718,9 +1721,31 @@ fn large_streamed_response_body_is_delivered_without_shared_byte_cap() {
     assert!(!captures[0].request.is_empty());
 }
 
+// First-use effect workers and TLS provider setup are fixture preparation, not
+// response phases. Under parallel nextest load they consumed 58 ms and up to
+// 80 ms respectively, before a 100 ms scenario could receive its first bytes.
+fn prepare_http_deadline_fixture() {
+    let fixture = run_ports(RecordingResolver::default(), false);
+    let target = NetworkTarget::new("prepare-deadline.example.test", 80).expect("target");
+    fixture
+        .runtime
+        .block_on(
+            fixture
+                .ports
+                .resolver_handle()
+                .resolve(target, fixture.ports.one_hop_handle().begin_call()),
+        )
+        .expect_err("fixture resolver has no answer and opens no socket");
+    let _client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("initialize the HTTP client's TLS provider before the timed call");
+}
+
+// Catches: resetting the hop deadline after headers lets the held body escape it.
 #[test]
 fn absolute_hop_timeout_covers_phased_exchange() {
-    let (first_tx, first_rx) = mpsc::channel();
+    prepare_http_deadline_fixture();
     let (release_tx, release_rx) = mpsc::channel();
     let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
@@ -1736,7 +1761,6 @@ fn absolute_hop_timeout_covers_phased_exchange() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabc")
             .expect("first response phase");
         stream.flush().expect("first response flush");
-        first_tx.send(()).expect("first response synchronization");
         let _ = release_rx.recv_timeout(Duration::from_millis(250));
         stream.write_all(b"def").expect("second response phase");
         stream.flush().expect("second response flush");
@@ -1775,13 +1799,6 @@ fn absolute_hop_timeout_covers_phased_exchange() {
             .guarded_http(call, request)
             .await
             .expect("headers before timeout");
-        tokio::task::spawn_blocking(move || {
-            first_rx
-                .recv_timeout(Duration::from_millis(100))
-                .expect("first body phase");
-        })
-        .await
-        .expect("first body synchronization task");
         let body = response.body().expect("streaming body");
         assert_eq!(
             body.next()
@@ -1852,15 +1869,22 @@ fn delayed_resolution_times_out_before_socket() {
     );
 }
 
+// Catches: reminting the deadline after DNS admits the 40 ms + 80 ms exchange.
 #[test]
 fn composed_dns_and_body_delays_share_one_absolute_call_deadline() {
-    let server = SocketServer::bind(|mut stream| {
+    prepare_http_deadline_fixture();
+    let (body_tx, body_rx) = mpsc::channel();
+    let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
         let request = read_request(&mut stream);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabc")
             .expect("first response phase");
         stream.flush().expect("first response flush");
+        // Start the body delay only after the consumer has observed abc.
+        body_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("consumer observed the first body phase");
         std::thread::sleep(Duration::from_millis(80));
         stream.write_all(b"def").expect("second response phase");
         stream.flush().expect("second response flush");
@@ -1904,6 +1928,7 @@ fn composed_dns_and_body_delays_share_one_absolute_call_deadline() {
             .expect("headers before absolute deadline");
         let body = response.body().expect("streaming body");
         assert_eq!(body.next().await, Some(Ok(b"abc".to_vec())));
+        body_tx.send(()).expect("release the delayed body phase");
         let error = body
             .next()
             .await
@@ -2086,7 +2111,6 @@ fn offline_http_refuses_before_dns_or_socket() {
         }
         assert!(resolver.calls.lock().expect("calls").is_empty());
         assert!(server.finish().is_empty(), "offline opened no socket");
-        return;
     }
     #[cfg(not(target_os = "linux"))]
     {

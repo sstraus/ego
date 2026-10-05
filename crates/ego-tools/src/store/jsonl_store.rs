@@ -7,7 +7,7 @@
 //!     events.jsonl        # the log; first line is a versioned header record
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -523,6 +523,11 @@ impl JsonlStore {
         self.session_dir(id).join("events.jsonl")
     }
 
+    /// Present once a refused session was hidden without its writer lease.
+    fn quarantine_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("quarantined")
+    }
+
     fn manifest_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("manifest.json")
     }
@@ -993,7 +998,7 @@ impl JsonlStore {
     /// repair may remove an `ExecutionObserved` event without changing the
     /// surviving last event's timestamp relative to the cached manifest.
     fn rebuild_manifest_from_log(&self, id: &SessionId, log: &[u8]) -> Result<bool, StoreError> {
-        let Some(facts) = log_manifest_facts(log)? else {
+        let Some(facts) = self.catalogue_facts(log)? else {
             return Ok(false);
         };
 
@@ -1018,9 +1023,8 @@ impl JsonlStore {
             // recovery path that loses the manifest is the one directly
             // above.
             workspace_root: projected_meta.workspace_root,
-            // Only the latest authoritative main-generation admission owns
-            // this projection. A prior cache value is not evidence and must
-            // disappear when the log no longer supplies its source.
+            // Main-generation evidence owns the model, including inherited
+            // evidence at the durable lineage cutoff before the first turn.
             model: projected_meta.model,
             // `created` comes from the log header rather than the old
             // manifest: the header is written once, at session creation, and
@@ -1054,13 +1058,25 @@ impl JsonlStore {
             return Ok(false);
         }
 
-        tracing::warn!(
-            session = %session_dir_name(id),
-            "rebuilding a session manifest from its authoritative log"
-        );
+        // `append` rewrites the manifest only at boundaries, so after any
+        // ordinary session the cached `updated` trails the last event. That
+        // is the steady state, not damage: refresh it, but do not report it
+        // as a repair. A manifest *ahead* of its log is not lag: the log
+        // lost events the manifest saw.
+        let only_updated_trails = previous.as_ref().is_some_and(|previous| {
+            let mut current = manifest.clone();
+            current.meta.updated = previous.meta.updated;
+            current == *previous && previous.meta.updated < manifest.meta.updated
+        });
+        if !only_updated_trails {
+            tracing::warn!(
+                session = %session_dir_name(id),
+                "rebuilding a session manifest from its authoritative log"
+            );
+        }
         let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
-        Ok(true)
+        Ok(!only_updated_trails)
     }
 
     /// Replace `id`'s manifest, carrying its `created`/`title` and projected
@@ -1087,7 +1103,7 @@ impl JsonlStore {
         );
         let log_facts = if (previous.is_none() && !is_new_session) || refresh_synopsis {
             match self.io.read(&self.log_path(id))? {
-                Some(bytes) => log_manifest_facts(&bytes)?,
+                Some(bytes) => self.catalogue_facts(&bytes)?,
                 None => None,
             }
         } else {
@@ -1119,7 +1135,11 @@ impl JsonlStore {
                         .rfind(|admission| admission.role() == GenerationRole::Main)
                         .map(|admission| admission.target().canonical_model().0.clone())
                 })
-                .or_else(|| log_facts.as_ref().and_then(|facts| facts.model.clone())),
+                .or_else(|| log_facts.as_ref().and_then(|facts| facts.model.clone()))
+                .map(|model| Ok(Some(model)))
+                .unwrap_or_else(|| {
+                    self.inherited_model(previous.as_ref().and_then(|m| m.meta.lineage))
+                })?,
             created: previous
                 .as_ref()
                 .map(|m| m.meta.created)
@@ -1848,28 +1868,43 @@ impl SessionStore for JsonlStore {
             // error on its contents — both are per-session failures, so
             // both are skipped and warned about the same way, rather than
             // one killing the whole call and the other not.
-            let bytes = match self.io.read(&manifest_path) {
-                Ok(Some(bytes)) => bytes,
-                Ok(None) => continue, // session directory exists, but no append has landed yet
-                Err(error) => {
-                    tracing::warn!(
-                        dir = %dir.display(),
-                        error = %error,
-                        "skipping session with an unreadable manifest"
-                    );
-                    continue;
-                }
+            let cached = match self.io.read(&manifest_path) {
+                Ok(Some(bytes)) => serde_json::from_slice::<RunManifest>(&bytes)
+                    .map_err(|error| error.to_string())
+                    .and_then(|manifest| {
+                        // A manifest naming another session is as unusable
+                        // as a corrupt one: the log decides.
+                        if dir
+                            .file_name()
+                            .is_some_and(|name| name == &*session_dir_name(&manifest.meta.id))
+                        {
+                            Ok((manifest.meta, manifest.deleted))
+                        } else {
+                            Err("the manifest names a different session".to_owned())
+                        }
+                    }),
+                Ok(None) => Err("the manifest is missing".to_owned()),
+                Err(error) => Err(error.to_string()),
             };
-            let manifest = match serde_json::from_slice::<RunManifest>(&bytes) {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    tracing::warn!(
-                        dir = %dir.display(),
-                        error = %error,
-                        "skipping session with an unreadable manifest"
-                    );
-                    continue;
-                }
+            // The manifest is a derived cache and the log is the authority,
+            // so a session whose manifest is missing, unreadable or corrupt
+            // is still listed — from its log, without editing anything on
+            // disk. A directory with no readable log either is skipped.
+            let (meta, deleted) = match cached {
+                Ok(listed) => listed,
+                Err(reason) => match self.meta_from_log_prefix(&dir) {
+                    Some(listed) => listed,
+                    None => {
+                        if self.io.exists(&dir.join("events.jsonl")).unwrap_or(false) {
+                            tracing::warn!(
+                                dir = %dir.display(),
+                                reason = %reason,
+                                "skipping session with neither a usable manifest nor a usable log"
+                            );
+                        }
+                        continue;
+                    }
+                },
             };
             // The id in the manifest has to be the id in the path, because
             // every other method here goes the other way: `read`, `append`
@@ -1889,17 +1924,22 @@ impl SessionStore for JsonlStore {
             // here.
             if dir
                 .file_name()
-                .is_none_or(|name| name != &*session_dir_name(&manifest.meta.id))
+                .is_none_or(|name| name != &*session_dir_name(&meta.id))
             {
                 tracing::warn!(
                     dir = %dir.display(),
-                    manifest_id = %session_dir_name(&manifest.meta.id),
+                    manifest_id = %session_dir_name(&meta.id),
                     "skipping session whose manifest names a different id than its directory"
                 );
                 continue;
             }
-            if !manifest.deleted {
-                metas.push(manifest.meta);
+            // A quarantined session is refused for good, so no catalogue
+            // reader may see it, whichever of manifest or log named it.
+            if self.io.exists(&self.quarantine_path(&meta.id))? {
+                continue;
+            }
+            if !deleted {
+                metas.push(meta);
             }
         }
         Ok(metas)
@@ -1907,6 +1947,94 @@ impl SessionStore for JsonlStore {
 }
 
 impl JsonlStore {
+    fn catalogue_facts(&self, log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError> {
+        let Some(mut facts) = log_manifest_facts(log)? else {
+            return Ok(None);
+        };
+        if facts.model.is_none() {
+            facts.model = self.inherited_model(facts.lineage)?;
+        }
+        Ok(Some(facts))
+    }
+
+    /// Project the last main model visible at each durable ancestry cutoff.
+    /// Target admissions take precedence; manifests never supply authority.
+    fn inherited_model(
+        &self,
+        mut lineage: Option<SessionLineage>,
+    ) -> Result<Option<String>, StoreError> {
+        let mut visited = HashSet::new();
+        while let Some(edge) = lineage {
+            let (source, cutoff) = match edge {
+                SessionLineage::Fork { source, at_seq } => (source, at_seq),
+                SessionLineage::Compaction {
+                    source, source_seq, ..
+                } => (source, source_seq),
+            };
+            if !visited.insert(source) {
+                return Err(invalid_log("model projection encountered a lineage cycle"));
+            }
+            let Some(entries) = ReplaySource::entries(self, &source)
+                .map_err(|error| invalid_log(error.to_string()))?
+            else {
+                return Ok(None);
+            };
+            lineage = None;
+            let mut model = None;
+            for entry in entries {
+                match entry {
+                    SessionEntry::Event(event) => {
+                        if event.env.seq > cutoff {
+                            break;
+                        }
+                        match event.kind {
+                            EventKind::Forked { source, at_seq } => {
+                                lineage = Some(SessionLineage::Fork { source, at_seq });
+                            }
+                            EventKind::CompactionSeeded {
+                                source,
+                                source_seq,
+                                prompt_revision,
+                                ..
+                            } => {
+                                lineage = Some(SessionLineage::Compaction {
+                                    source,
+                                    source_seq,
+                                    prompt_revision,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    SessionEntry::Evidence(EvidenceRecord::GenerationAdmission(admission))
+                        if admission.role() == GenerationRole::Main =>
+                    {
+                        model = Some(admission.target().canonical_model().0.clone());
+                    }
+                    _ => {}
+                }
+            }
+            if model.is_some() {
+                return Ok(model);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The listing facts of the session in `dir`, projected from the valid
+    /// prefix of its log. `None` when there is no readable log; a torn tail
+    /// is ignored rather than refused, because listing never edits a session.
+    fn meta_from_log_prefix(&self, dir: &std::path::Path) -> Option<(SessionMeta, bool)> {
+        let bytes = self.io.read(&dir.join("events.jsonl")).ok()??;
+        let (header, start) = decoded_header(&bytes).ok()??;
+        if header.v != CODEC_VERSION {
+            return None;
+        }
+        let (valid_len, _) = valid_prefix(&bytes, start);
+        let facts = self.catalogue_facts(&bytes[..valid_len]).ok()??;
+        Some((meta_from_log_facts(header.session, &facts), facts.deleted))
+    }
+
     fn publish_empty_session_lifecycle(
         &self,
         id: SessionId,
@@ -2066,7 +2194,9 @@ impl SessionLifecycleStore for JsonlStore {
         if valid_len != bytes.len() {
             return Err(invalid_log("session log has a corrupt or torn tail"));
         }
-        Ok(log_manifest_facts(&bytes)?.map(|facts| meta_from_log_facts(id, &facts)))
+        Ok(self
+            .catalogue_facts(&bytes)?
+            .map(|facts| meta_from_log_facts(id, &facts)))
     }
 
     fn acquire_inactive_lease(
@@ -2087,6 +2217,14 @@ impl SessionLifecycleStore for JsonlStore {
 
     fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication {
         self.publish_target(&id, seed)
+    }
+
+    fn quarantine(&self, id: SessionId) -> Result<(), StoreError> {
+        Ok(self.io.replace_atomic(&self.quarantine_path(&id), b"")?)
+    }
+
+    fn is_quarantined(&self, id: SessionId) -> Result<bool, StoreError> {
+        Ok(self.io.exists(&self.quarantine_path(&id))?)
     }
 }
 
@@ -2139,6 +2277,27 @@ impl ReplaySource for JsonlStore {
     }
 
     fn entries(&self, session: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
+        if !self.io.exists(&self.log_path(session)).map_err(|error| {
+            ReplaySourceError::Unavailable {
+                session: *session,
+                reason: error.to_string(),
+            }
+        })? {
+            return Ok(None);
+        }
+        // Share the short append lock, never the long-lived source writer lease.
+        let lock =
+            self.open_events_lock(session)
+                .map_err(|error| ReplaySourceError::Unavailable {
+                    session: *session,
+                    reason: error.to_string(),
+                })?;
+        let _guard = lock
+            .read()
+            .map_err(|error| ReplaySourceError::Unavailable {
+                session: *session,
+                reason: error.to_string(),
+            })?;
         let bytes = self.io.read(&self.log_path(session)).map_err(|error| {
             ReplaySourceError::Unavailable {
                 session: *session,
@@ -2148,75 +2307,81 @@ impl ReplaySource for JsonlStore {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        let (header, start) = decoded_header(&bytes)
-            .map_err(|error| ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: error.to_string(),
-            })?
-            .ok_or_else(|| ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: "session log has no complete header".to_string(),
-            })?;
-        if header.v != CODEC_VERSION || header.session != *session {
-            return Err(ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: "session log header has the wrong codec or identity".to_string(),
-            });
-        }
-        let (valid_len, _) = valid_prefix(&bytes, start);
-        if valid_len != bytes.len() {
-            return Err(ReplaySourceError::CorruptSession {
-                session: *session,
-                reason: "session log has a corrupt or torn tail".to_owned(),
-            });
-        }
-
-        let mut entries = Vec::new();
-        let mut expected = Seq::ZERO;
-        for line in split_lines(&bytes[start..]) {
-            let position = expected.next();
-            let record = match decode_line(line) {
-                Ok(StoreLine::Record(record)) if record.seq == position => record,
-                Ok(StoreLine::Record(record)) => {
-                    return Err(ReplaySourceError::CorruptSession {
-                        session: *session,
-                        reason: format!(
-                            "physical position {} followed {}, so the session \
-                             file is out of order",
-                            record.seq, expected
-                        ),
-                    });
-                }
-                Ok(StoreLine::Unknown(_)) => {
-                    return Err(ReplaySourceError::UnknownEntry {
-                        session: *session,
-                        position,
-                    });
-                }
-                Ok(StoreLine::Header(_)) => {
-                    return Err(ReplaySourceError::CorruptSession {
-                        session: *session,
-                        reason: "session log contains a second header".to_string(),
-                    });
-                }
-                Err(error) => {
-                    return Err(ReplaySourceError::CorruptSession {
-                        session: *session,
-                        reason: error.to_string(),
-                    });
-                }
-            };
-            let entry =
-                serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
-                    ReplaySourceError::UnknownEntry {
-                        session: *session,
-                        position: record.seq,
-                    }
-                })?;
-            entries.push(entry);
-        }
-        Ok(Some(entries))
+        decode_session_entries(session, &bytes).map(Some)
     }
+}
+
+fn decode_session_entries(
+    session: &SessionId,
+    bytes: &[u8],
+) -> Result<Vec<SessionEntry>, ReplaySourceError> {
+    let (header, start) = decoded_header(bytes)
+        .map_err(|error| ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: error.to_string(),
+        })?
+        .ok_or_else(|| ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: "session log has no complete header".to_string(),
+        })?;
+    if header.v != CODEC_VERSION || header.session != *session {
+        return Err(ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: "session log header has the wrong codec or identity".to_string(),
+        });
+    }
+    let (valid_len, _) = valid_prefix(bytes, start);
+    if valid_len != bytes.len() {
+        return Err(ReplaySourceError::CorruptSession {
+            session: *session,
+            reason: "session log has a corrupt or torn tail".to_owned(),
+        });
+    }
+
+    let mut entries = Vec::new();
+    let mut expected = Seq::ZERO;
+    for line in split_lines(&bytes[start..]) {
+        let position = expected.next();
+        let record = match decode_line(line) {
+            Ok(StoreLine::Record(record)) if record.seq == position => record,
+            Ok(StoreLine::Record(record)) => {
+                return Err(ReplaySourceError::CorruptSession {
+                    session: *session,
+                    reason: format!(
+                        "physical position {} followed {}, so the session \
+                             file is out of order",
+                        record.seq, expected
+                    ),
+                });
+            }
+            Ok(StoreLine::Unknown(_)) => {
+                return Err(ReplaySourceError::UnknownEntry {
+                    session: *session,
+                    position,
+                });
+            }
+            Ok(StoreLine::Header(_)) => {
+                return Err(ReplaySourceError::CorruptSession {
+                    session: *session,
+                    reason: "session log contains a second header".to_string(),
+                });
+            }
+            Err(error) => {
+                return Err(ReplaySourceError::CorruptSession {
+                    session: *session,
+                    reason: error.to_string(),
+                });
+            }
+        };
+        let entry = serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
+            ReplaySourceError::UnknownEntry {
+                session: *session,
+                position: record.seq,
+            }
+        })?;
+        entries.push(entry);
+    }
+    Ok(entries)
 }
 
 impl CompactionTargetPort for JsonlStore {
@@ -2307,14 +2472,11 @@ impl JsonlStore {
             ));
         }
 
-        let entries = ReplaySource::entries(self, target).map_err(|error| {
+        let entries = decode_session_entries(target, &bytes).map_err(|error| {
             invalid_log(format!(
                 "the deterministic compaction target could not be decoded: {error}"
             ))
         })?;
-        let Some(entries) = entries else {
-            return Ok(CompactionTargetInspection::Missing);
-        };
         let Some(SessionEntry::Event(first_event)) = entries.first() else {
             return Ok(CompactionTargetInspection::Occupied);
         };

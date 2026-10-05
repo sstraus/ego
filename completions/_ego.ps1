@@ -25,7 +25,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Run an agent from a prompt, headless.')
             [CompletionResult]::new('resume', 'resume', [CompletionResultType]::ParameterValue, 'Continue a session; no ID = latest in this workspace.')
-            [CompletionResult]::new('fork', 'fork', [CompletionResultType]::ParameterValue, 'Fork a session at its latest durable idle boundary.')
+            [CompletionResult]::new('fork', 'fork', [CompletionResultType]::ParameterValue, 'Fork a session at its tip or after the completed turn containing a message.')
             [CompletionResult]::new('compact', 'compact', [CompletionResultType]::ParameterValue, 'Compact a session into its deterministic successor.')
             [CompletionResult]::new('export', 'export', [CompletionResultType]::ParameterValue, 'Export a session locally or as a structurally sanitized bundle.')
             [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List sessions (this workspace; --all for every one).')
@@ -136,6 +136,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;fork' {
+            [CompletionResult]::new('--at', '--at', [CompletionResultType]::ParameterName, 'at')
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
             [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'text|json|jsonl')
@@ -335,6 +336,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         'ego;config;ls' {
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'json')
+            [CompletionResult]::new('--effective', '--effective', [CompletionResultType]::ParameterName, 'Show the effective run perimeter instead of stored values')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

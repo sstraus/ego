@@ -469,13 +469,16 @@ impl EventSink for TextSink<'_> {
             } => self.stream(text),
             // One row per call, drawn when the call finishes: a row needs the
             // outcome and the duration, and the start event has neither.
+            // `ask_question` gets none: the selector already shows the
+            // question as prompt and options, and a row would repeat the call's
+            // JSON after the answer.
             PublicEvent::ItemStarted {
                 kind: ItemKind::Tool,
                 item,
                 name: Some(name),
                 text,
                 ..
-            } if !self.quiet => {
+            } if !self.quiet && name != ego_core::question::ASK_QUESTION_TOOL => {
                 self.calls
                     .lock()
                     .expect("a poisoned lock means a writer panicked mid-line")

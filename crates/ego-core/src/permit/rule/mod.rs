@@ -92,13 +92,27 @@ pub enum Rule {
     ///
     /// It never covers a builtin. A builtin approvable by identity instead of
     /// by effect would be a way around the whole effect table.
+    ///
+    /// `name` may be [`TOOL_NAME_WILDCARD`], which covers every tool of that one
+    /// server and never another server's.
     Tool {
         server: String,
         name: String,
     },
 }
 
+/// The whole-name wildcard of `tool(<server>/*)`.
+pub const TOOL_NAME_WILDCARD: &str = "*";
+
 impl Rule {
+    /// Does this rule cover every tool of one server (`tool(<server>/*)`)?
+    ///
+    /// A layer a repository controls must not grant that: a checked-in file
+    /// would approve every tool of a server, including ones added later.
+    pub fn is_tool_wildcard(&self) -> bool {
+        matches!(self, Rule::Tool { name, .. } if name == TOOL_NAME_WILDCARD)
+    }
+
     /// The one entry point. There is no second one, in this crate or any
     /// other: a rule in frontmatter is a rule, and a second parser is how the
     /// two surfaces start disagreeing about what one string means.
@@ -155,6 +169,28 @@ impl Rule {
         }
     }
 
+    /// Allow authority excludes control paths regardless of rule provenance.
+    /// Denies use `matches` so the guard never weakens a refusal.
+    pub(crate) fn matches_allow(&self, op: &Op, root: &Path) -> bool {
+        let path = match op {
+            Op::Read { path } | Op::Write { path, .. } => Some(path.as_path()),
+            Op::List { root, .. } | Op::Search { root, .. } => Some(root.as_path()),
+            _ => None,
+        };
+        if path.is_some_and(|path| {
+            path.components().any(|part| {
+                matches!(part, std::path::Component::Normal(name)
+                    if name.to_str().is_some_and(|name|
+                        name.eq_ignore_ascii_case(".git")
+                            || name.eq_ignore_ascii_case(".ego")
+                            || name.eq_ignore_ascii_case(".claude")))
+            })
+        }) {
+            return false;
+        }
+        self.matches(op, root)
+    }
+
     /// Does this rule cover `op`?
     ///
     /// Per operation, and never per call. A call with several operations is
@@ -177,7 +213,7 @@ impl Rule {
                 endpoint.matches(target.host(), target.port())
             }
             (Rule::Tool { server, name }, Op::Opaque { tool, .. }) => {
-                server == tool.server() && name == tool.name()
+                server == tool.server() && (name == TOOL_NAME_WILDCARD || name == tool.name())
             }
             _ => false,
         }

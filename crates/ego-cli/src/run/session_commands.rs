@@ -36,7 +36,7 @@ use crate::cli::{
     CompactArgs, ExportArgs, ExportFormat, ForkArgs, Output, SessionShape, UsageError,
 };
 use crate::output::{Diagnostics, Stderr, Stdout, note};
-use crate::session::{self, Opened};
+use crate::session;
 
 /// `ego ls`: the catalogue, printed (`CLI.md` §4.6).
 ///
@@ -302,7 +302,7 @@ pub async fn fork(args: &ForkArgs, out: &Stdout) -> Ended {
 
 /// A one-shot command runs no session in this process; a source held by
 /// another process is refused by the store's lease, not by this seam.
-struct NoLiveRuns;
+pub(super) struct NoLiveRuns;
 
 impl SessionRunLifecycle for NoLiveRuns {
     fn activity(&self, _session: SessionId) -> ActivityFuture<'_> {
@@ -422,12 +422,13 @@ async fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> 
     let source =
         crate::catalogue::resolve(store.as_ref(), &root, Some(args.source)).map_err(usage)?;
     let lifecycle = SessionLifecycle::new(store, Arc::new(NoLiveRuns), Arc::new(SystemClock));
-    let created = lifecycle
-        .fork(source)
-        .await
-        .map_err(|error| RunTermination::Failed {
-            message: format!("the fork failed: {error}"),
-        })?;
+    let created = match args.at {
+        Some(message) => lifecycle.fork_at(source, message).await,
+        None => lifecycle.fork(source).await,
+    }
+    .map_err(|error| RunTermination::Failed {
+        message: format!("the fork failed: {error}"),
+    })?;
     let target = created.id;
     match &created.publication {
         LifecyclePublication::PublishedWithProjectionWarning { diagnostic }

@@ -1875,6 +1875,7 @@ mod turn {
             gate: gate.clone(),
             config: TurnConfig {
                 system,
+                identity: None,
                 token_ceiling,
                 retry: 0,
                 fallbacks: Vec::new(),
@@ -3919,6 +3920,27 @@ mod turn {
         );
     }
 
+    /// Bug regression_case: a read outside the workspace ended the whole turn with
+    /// `PermissionRequired`, so the model never saw the refusal and an AI Chat
+    /// turn died on a file its instructions referenced. The refusal is a
+    /// failed tool result and the next generation answers.
+    #[test]
+    fn a_refused_read_outside_the_workspace_does_not_end_the_turn() {
+        let fx = Fixture::new(reading("/etc/passwd")).with_read_tool();
+        fx.fs.file("/etc/passwd", "root:x:0:0");
+
+        let (reason, _, state) = run(&fx, SessionState::default(), "read /etc/passwd");
+
+        assert_eq!(reason, ExitReason::Completed);
+        let call = state
+            .items
+            .values()
+            .find(|item| item.kind == ItemKind::ToolCall)
+            .expect("the call was logged");
+        assert_eq!(call.ok, Some(false));
+        assert!(tool_result_text(call).contains("outside the workspace"));
+    }
+
     /// Everything the log recorded about permissions, in order.
     fn permission_events(fx: &Fixture) -> Vec<EventKind> {
         fx.store
@@ -4044,7 +4066,7 @@ mod turn {
         fx.fs.file("/etc/passwd", "root:x:0:0");
 
         let (reason, _, _) = run(&fx, SessionState::default(), "read /etc/passwd");
-        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert_eq!(reason, ExitReason::Completed);
 
         let recorded = permission_events(&fx);
         let [EventKind::PermissionDecided { allowed, by, .. }] = recorded.as_slice() else {
@@ -4052,6 +4074,194 @@ mod turn {
         };
         assert_eq!(*allowed, Some(false));
         assert_eq!(by.as_ref(), Some(&Authority::Boundary));
+    }
+
+    fn tool_calls_by_id(
+        state: &SessionState,
+    ) -> std::collections::HashMap<String, ego_core::state::ItemState> {
+        state
+            .items
+            .values()
+            .filter(|item| item.kind == ItemKind::ToolCall)
+            .map(|item| (item.call_id.clone().expect("a call id"), item.clone()))
+            .collect()
+    }
+
+    fn call_event(call_id: &str, name: &str, args: &str) -> AiEvent {
+        AiEvent::ToolCall {
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            args: args.to_string(),
+        }
+    }
+
+    /// Critic regression_case. Plausible bug: the refused read short-circuits the
+    /// batch, so the sibling that follows it is closed unstarted or never
+    /// answered.
+    #[test]
+    fn a_refused_read_does_not_stop_the_sibling_read_after_it() {
+        let fx = Fixture::new(vec![
+            vec![
+                call_event("outside", "read", r#"{"path":"/etc/passwd"}"#),
+                call_event("inside", "read", r#"{"path":"/ws/notes.md"}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_read_tool();
+        fx.fs.file("/etc/passwd", "root:x:0:0");
+        fx.fs.file("/ws/notes.md", "hello");
+
+        let (reason, _, state) = run(&fx, SessionState::default(), "read both");
+
+        assert_eq!(reason, ExitReason::Completed);
+        let calls = tool_calls_by_id(&state);
+        assert_eq!(calls["outside"].ok, Some(false));
+        assert_eq!(calls["inside"].ok, Some(true));
+        assert_eq!(tool_result_text(&calls["inside"]), "hello");
+    }
+
+    /// Critic regression_case. Plausible bug: the refused read's `continue` swallows
+    /// the next call's own denial, or lets the write run.
+    #[test]
+    fn a_write_that_needs_an_answer_after_a_refused_read_still_ends_the_turn() {
+        let mut fx = Fixture::new(vec![
+            vec![
+                call_event("outside", "read", r#"{"path":"/etc/passwd"}"#),
+                call_event(
+                    "write",
+                    "fake_write",
+                    r#"{"path":"/ws/out.txt","contents":"x"}"#,
+                ),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ]);
+        fx.registry = vec![
+            std::sync::Arc::new(Typed(FakeReadTool)),
+            std::sync::Arc::new(Typed(FakeWriteTool)),
+        ];
+        fx.fs.file("/etc/passwd", "root:x:0:0");
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "read then write");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+        assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        let calls = tool_calls_by_id(&state);
+        assert!(tool_result_text(&calls["outside"]).contains("outside the workspace"));
+    }
+
+    /// Critic regression_case. Plausible bug: the exception widens from "read the
+    /// boundary refused" to every `OutsideWorkspace`, so a write outside the
+    /// workspace is handed back to the model instead of ending the run.
+    #[test]
+    fn a_write_outside_the_workspace_still_ends_the_turn() {
+        let fx = Fixture::new(writing("/etc/ego-owned", "x")).with_write_tool();
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+        assert!(fx.fs.read(&CanonPath::new("/etc/ego-owned")).is_err());
+    }
+
+    /// Critic regression_case. Plausible bug: the exception widens to every refused
+    /// read, so an operator's deny rule no longer ends the run.
+    #[test]
+    fn a_deny_rule_on_a_read_inside_the_workspace_still_ends_the_turn() {
+        let fx = Fixture::new(reading("/ws/secret.txt"))
+            .with_read_tool()
+            .with_rules(&[], &["read(secret.txt)"]);
+        fx.fs.file("/ws/secret.txt", "hunter2");
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "read the secret");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+        let calls = tool_calls_by_id(&state);
+        assert!(!tool_result_text(&calls["call_1"]).contains("hunter2"));
+    }
+
+    /// Critic regression_case. Plausible bug: the exception is keyed on something a
+    /// spawn also satisfies, so a command nobody can approve is returned to
+    /// the model instead of ending the run.
+    #[test]
+    fn a_spawn_nobody_can_approve_still_ends_the_turn() {
+        let fx = Fixture::new(vec![
+            vec![
+                call_event("exec", "exec", r#"{"argv":["cat","/etc/passwd"]}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_exec_tool();
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "cat it");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+    }
+
+    /// Critic regression_case. Plausible bug: state left behind by the first refusal
+    /// (a call left started, a double `ToolCallCompleted`, a decision recorded
+    /// twice) breaks the next generation's refusal.
+    #[test]
+    fn repeated_refused_reads_each_complete_exactly_once() {
+        let fx = Fixture::new(vec![
+            vec![
+                call_event("a", "read", r#"{"path":"/etc/passwd"}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                call_event("b", "read", r#"{"path":"/etc/shadow"}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                call_event("c", "read", r#"{"path":"/root/.ssh/id_rsa"}"#),
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_read_tool();
+        for path in ["/etc/passwd", "/etc/shadow", "/root/.ssh/id_rsa"] {
+            fx.fs.file(path, "secret");
+        }
+
+        let (reason, _, state) = run(&fx, SessionState::default(), "read them");
+
+        assert_eq!(reason, ExitReason::Completed);
+        let calls = tool_calls_by_id(&state);
+        for (id, path) in [
+            ("a", "/etc/passwd"),
+            ("b", "/etc/shadow"),
+            ("c", "/root/.ssh/id_rsa"),
+        ] {
+            assert_eq!(calls[id].ok, Some(false));
+            let text = tool_result_text(&calls[id]);
+            assert!(text.contains(path), "{text}");
+            assert!(!text.contains("secret"), "{text}");
+        }
+        let completed = fx
+            .store
+            .events()
+            .into_iter()
+            .filter(|ev| matches!(ev.kind, EventKind::ToolCallCompleted { .. }))
+            .count();
+        assert_eq!(completed, 3, "one completion per call");
+        let decided = permission_events(&fx)
+            .into_iter()
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    EventKind::PermissionDecided {
+                        allowed: Some(false),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(decided, 3, "one boundary decision per refused call");
     }
 
     /// The mode raised a canonical question and the headless run had no final
@@ -4166,6 +4376,45 @@ mod turn {
         let recorded = permission_events(&fx);
         assert!(matches!(
             recorded.as_slice(),
+            [
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionDecided {
+                    allowed: Some(false),
+                    by: Some(Authority::Party),
+                    ..
+                }
+            ]
+        ));
+    }
+
+    /// Catches a refusal that carries the human's words but ends the run
+    /// anyway, so the model never reads what to do instead.
+    #[test]
+    fn a_human_refusal_with_words_answers_the_call_and_the_run_continues() {
+        let fx = Fixture::new(writing("/ws/out.txt", "declined"))
+            .with_write_tool()
+            .with_human([PermissionDecision::DenyWithInstruction {
+                instruction: "write to /ws/other.txt instead".into(),
+            }]);
+
+        let (reason, _, _) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        let events = fx.store.events();
+        let answer = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolCallCompleted { ok: false, result } => Some(format!("{result:?}")),
+                _ => None,
+            })
+            .expect("the declined call is answered as a failed tool result");
+        assert!(
+            answer.contains("declined it and said: write to /ws/other.txt instead"),
+            "{answer}"
+        );
+        assert!(matches!(
+            permission_events(&fx).as_slice(),
             [
                 EventKind::PermissionRequested { .. },
                 EventKind::PermissionDecided {
@@ -6423,6 +6672,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -6660,6 +6910,7 @@ mod turn {
                 gate: fx.gate.borrow().clone(),
                 config: TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: Vec::new(),
@@ -6950,6 +7201,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7076,6 +7328,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7137,6 +7390,7 @@ mod turn {
                         gate: gate.clone(),
                         config: TurnConfig {
                             system: None,
+                            identity: None,
                             token_ceiling: None,
                             retry: 0,
                             fallbacks: Vec::new(),
@@ -7202,6 +7456,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7291,6 +7546,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7388,6 +7644,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7464,6 +7721,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7533,6 +7791,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7613,6 +7872,7 @@ mod turn {
                         gate: gate.clone(),
                         config: TurnConfig {
                             system: None,
+                            identity: None,
                             token_ceiling: None,
                             retry: 0,
                             fallbacks: Vec::new(),
@@ -7717,6 +7977,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7832,6 +8093,7 @@ mod turn {
                     gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -7946,6 +8208,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: vec![ModelRef(fallback_slug.to_owned())],
@@ -7973,6 +8236,88 @@ mod turn {
         /// regression case: one logical generation owns an ordered, delivery-safe
         /// retry/fallback plan. Every wire journey is fresh, but all four
         /// attempts remain attributable to the same generation.
+        /// Attack on the runtime identity: rendered once from the primary, a
+        /// fallback's request would tell the model it is a model it is not.
+        #[test]
+        fn a_fallback_generation_names_the_fallback_model_in_its_identity() {
+            let unsent = vec![
+                AiEvent::Error {
+                    message: "refused before write".to_owned(),
+                    kind: ErrorKind::Transient,
+                },
+                AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                AiEvent::Stop(StopReason::Error),
+            ];
+            let answered = vec![
+                AiEvent::TextDelta {
+                    text: "fallback answer".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ];
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile_with_carryover(
+                        "ollama/primary-model",
+                        unsent,
+                        &trace,
+                        ReasoningCarryover::Portable,
+                        None,
+                    )),
+                    Ok(profile_with_carryover(
+                        "openai/fallback-model",
+                        answered,
+                        &trace,
+                        ReasoningCarryover::Portable,
+                        None,
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let (_, ok, _) = run_scripted(
+                &fx,
+                SessionState::default(),
+                "which model?",
+                source,
+                TurnConfig {
+                    system: None,
+                    identity: Some(ego_core::turn::AgentIdentity {
+                        version: "0.0.0".to_owned(),
+                        sandbox: Confinement::Workspace,
+                        offline: false,
+                        host: None,
+                    }),
+                    token_ceiling: None,
+                    retry: 0,
+                    fallbacks: vec![ModelRef("openai/fallback-model".to_owned())],
+                },
+            );
+            assert!(ok, "the fallback answered");
+
+            let identities: Vec<String> = trace
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| match &request.messages.messages()[0].content[0] {
+                    ContentBlock::Text { text } => text.clone(),
+                    other => panic!("the first message is not the identity: {other:?}"),
+                })
+                .collect();
+            assert_eq!(identities.len(), 2);
+            assert!(
+                identities[0].contains("- Model: ollama/primary-model ("),
+                "{}",
+                identities[0]
+            );
+            assert!(
+                identities[1].contains("- Model: openai/fallback-model ("),
+                "{}",
+                identities[1]
+            );
+        }
+
         #[test]
         fn retry_and_fallback_are_ordered_per_candidate_and_delivery_safe() {
             let primary = "ollama/primary-model";
@@ -8039,6 +8384,7 @@ mod turn {
                 source.clone(),
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 1,
                     fallbacks: vec![fallback.clone()],
@@ -8156,6 +8502,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 1,
                     fallbacks: vec![fallback.clone()],
@@ -8201,6 +8548,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 1,
                     fallbacks: vec![fallback.clone()],
@@ -8280,6 +8628,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: vec![ModelRef(fallback.to_owned())],
@@ -8386,6 +8735,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: vec![ModelRef("openai/too-small".to_owned())],
@@ -8451,6 +8801,7 @@ mod turn {
                     source,
                     TurnConfig {
                         system: None,
+                        identity: None,
                         token_ceiling: None,
                         retry: 0,
                         fallbacks: Vec::new(),
@@ -8526,6 +8877,7 @@ mod turn {
                 source,
                 TurnConfig {
                     system: None,
+                    identity: None,
                     token_ceiling: None,
                     retry: 0,
                     fallbacks: Vec::new(),

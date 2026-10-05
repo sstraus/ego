@@ -3,14 +3,16 @@ ego 0.1.0 · ollama/qwen3
 - AGENTS.md
 Trust project files in <workspace>? [y/N] yes
 εgo: ego 0.1.0 · ollama/qwen3
-/help commands · Option+P models
+Esc interrupts · Enter queues · Ctrl+S draft · Option+P models · /help
 hello
 a launch transcript
 εgo: 0 unsent drafts, 0 accepted inputs
+εgo: To resume: ego resume <session>
 
 # trusted: next launch
 εgo: ego 0.1.0 · ollama/qwen3
-/help commands · Option+P models
+Esc interrupts · Enter queues · Ctrl+S draft · Option+P models · /help
 hello
 a launch transcript
 εgo: 0 unsent drafts, 0 accepted inputs
+εgo: To resume: ego resume <session>

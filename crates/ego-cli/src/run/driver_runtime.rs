@@ -41,6 +41,25 @@ fn paste_chips(images: &[StagedPasteImage]) -> Vec<String> {
     images.iter().map(|image| image.label.clone()).collect()
 }
 
+/// A successor session opened inside this process needs its own run context
+/// before its first generation can be admitted.
+fn admit_successor_context(
+    admission: &EvidenceAdmissionService,
+    active: &ActiveSession<'_>,
+    run_context: &Option<RunContextEvidence>,
+) -> Result<(), RunTermination> {
+    let context = run_context
+        .as_ref()
+        .expect("the admitted run context outlives its first session")
+        .for_session(active.id());
+    admission
+        .admit_run_context(active.run_evidence(), context)
+        .map(|_| ())
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })
+}
+
 pub(super) struct DriverExecution<'host, 'store, S: EventSink> {
     pub(super) args: Args,
     pub(super) cancel: CancelToken,
@@ -102,10 +121,11 @@ pub(super) async fn drive_execution<S: EventSink>(
         currency,
         child_root,
         child_executor,
-        context: _,
+        context: run_context,
         mode: _,
         policy_selection,
         policy_source,
+        perimeter,
         invocation,
         run_id,
         resume_plan: _,
@@ -139,6 +159,12 @@ pub(super) async fn drive_execution<S: EventSink>(
 
     let mut config = TurnConfig {
         system,
+        identity: Some(AgentIdentity {
+            version: crate::build_info::VERSION.to_owned(),
+            sandbox: confinement.level(),
+            offline: confinement.offline(),
+            host: None,
+        }),
         token_ceiling: effective.ceilings.tokens,
         retry: args.retry,
         fallbacks: args.fallbacks.clone(),
@@ -815,7 +841,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     // else. Someone who pressed it to stop a turn must not
                                     // lose the session by pressing it once more.
                                     repl::Line::Interrupted => continue,
-                                    repl::Line::Ended => break 'epoch EpochTransition::Exit,
+                                    repl::Line::Ended => {
+                                        // The last turn's provider/model refusal was already shown.
+                                        // Preserve cancellation, permission, and other outcomes.
+                                        if matches!(
+                                            &last.termination,
+                                            RunTermination::Provider { .. }
+                                                | RunTermination::UsageError { .. }
+                                        ) {
+                                            last.termination = RunTermination::Done;
+                                        }
+                                        break 'epoch EpochTransition::Exit;
+                                    }
                                     repl::Line::Refused(why) => {
                                         diagnostics.note(why);
                                         continue;
@@ -1005,6 +1042,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             continue;
                                         };
                                         seat.busy();
+                                        let receipt = format!(
+                                            "Model: {}{}",
+                                            request.target().0,
+                                            if request.is_persistent() {
+                                                ""
+                                            } else {
+                                                " (this session only)"
+                                            }
+                                        );
                                         let applied = owner.apply(request).await;
                                         let publication = match &applied {
                                             Ok(publication) => publication.as_ref(),
@@ -1020,9 +1066,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     "model defaults are authoritative with a durability warning: {diagnostic}"
                                 ));
                                         }
-                                        if let Err(error) = applied {
-                                            diagnostics
-                                                .note(&format!("model switch failed: {error}"));
+                                        match applied {
+                                            Ok(_) => diagnostics.note(&receipt),
+                                            Err(error) => diagnostics
+                                                .note(&format!("model switch failed: {error}")),
                                         }
                                         if let Some(status) = status.as_ref()
                                             && status.human
@@ -1140,6 +1187,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         diagnostics.expand_last_tool();
                                         continue;
                                     }
+                                    repl::Line::HostCommand(repl::HostCommand::Action(
+                                        repl::actions::ActionId::Config,
+                                    )) => {
+                                        diagnostics.note(&perimeter.text());
+                                        continue;
+                                    }
                                     // The same snapshot `ego doctor` prints,
                                     // built by the same probes. Two renderings
                                     // of one value is the whole contract; two
@@ -1147,9 +1200,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Doctor,
                                     )) => {
-                                        diagnostics.note(&crate::doctor::observed_with_width(
+                                        diagnostics.note(&crate::doctor::observed_session(
                                             root.clone(),
                                             seat.width(),
+                                            &perimeter,
                                         ));
                                         continue;
                                     }
@@ -1233,8 +1287,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             Ok(report) => {
                                                 // `/usage` has no flags, so it
                                                 // gets the compact default.
-                                                let rendered =
-                                                    crate::usage::render_text(&report, false);
+                                                let rendered = crate::usage::render_text(
+                                                    &report,
+                                                    false,
+                                                    Some(state.context),
+                                                );
                                                 diagnostics.note(rendered.trim_end());
                                             }
                                             Err(error) => diagnostics.note(&format!(
@@ -1289,20 +1346,38 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             target: target_owner,
                                         };
                                     }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Fork,
-                                    )) => {
+                                    repl::Line::HostCommand(
+                                        command @ (repl::HostCommand::Action(
+                                            repl::actions::ActionId::Fork,
+                                        )
+                                        | repl::HostCommand::Fork(_)),
+                                    ) => {
                                         if pending_work {
-                                            diagnostics.note(
-                                    "the session cannot be forked while source work is pending",
-                                );
+                                            diagnostics.note("the session cannot switch forks while source work is pending");
                                             continue;
                                         }
-                                        let prepared = match ego_core::session::PreparedFork::new(
-                                            active.id(),
-                                            &state,
-                                            session::now(&clock),
-                                        ) {
+                                        let lifecycle =
+                                            ego_core::session_lifecycle::SessionLifecycle::new(
+                                                Arc::clone(jsonl_store),
+                                                Arc::new(super::session_commands::NoLiveRuns),
+                                                Arc::new(SystemClock),
+                                            );
+                                        let fork_at_message =
+                                            matches!(command, repl::HostCommand::Fork(_));
+                                        let prepared = match command {
+                                            repl::HostCommand::Fork(item) => {
+                                                lifecycle.prepare_fork_at(active.id(), item)
+                                            }
+                                            _ => ego_core::session::PreparedFork::new(
+                                                active.id(),
+                                                &state,
+                                                session::now(&clock),
+                                            )
+                                            .map_err(
+                                                ego_core::session_lifecycle::LifecycleError::from,
+                                            ),
+                                        };
+                                        let prepared = match prepared {
                                             Ok(prepared) => prepared,
                                             Err(error) => {
                                                 diagnostics.note(&format!(
@@ -1311,16 +1386,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 continue;
                                             }
                                         };
-                                        let replayed = match active.replay_seed(prepared.seed()) {
-                                            Ok(replayed) => replayed,
+                                        let target = SessionId::new();
+                                        let publication = match lifecycle
+                                            .publish_prepared_fork(target, &prepared)
+                                        {
+                                            Ok(publication) => publication,
                                             Err(error) => {
                                                 diagnostics.note(&format!(
-                                        "the fork source context could not be replayed: {error}"
-                                    ));
+                                                    "the fork target was not published: {error}"
+                                                ));
                                                 continue;
                                             }
                                         };
-                                        let target = SessionId::new();
                                         let target_opened = match session::open(
                                             jsonl_store.as_ref(),
                                             &target,
@@ -1328,44 +1405,30 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         ) {
                                             Ok(opened) => opened,
                                             Err(error) => {
-                                                diagnostics.note(&format!(
-                                                    "the fork target could not be opened: {error}"
-                                                ));
+                                                diagnostics.note(&format!("the published fork target {target} could not be opened: {error}"));
                                                 continue;
                                             }
                                         };
-                                        let target_state =
+                                        // Only a tip fork preserves the measured source context.
+                                        // An earlier message has a different provider baseline.
+                                        let mut target_state =
                                             SessionState::replay(prepared.seed().events().cloned());
-                                        let mut target_owner = match ActiveSession::durable(
+                                        if !fork_at_message {
+                                            target_state.context = state.context;
+                                        }
+                                        let target_owner = match ActiveSession::durable(
                                             target_opened,
                                             target_state,
                                             EVIDENCE_CAP,
                                         ) {
                                             Ok(owner) => owner,
                                             Err(error) => {
-                                                diagnostics.note(&format!(
-                                        "the fork target evidence could not be opened: {error}"
-                                    ));
+                                                diagnostics.note(&format!("the published fork target {target} could not be replayed: {error}"));
                                                 continue;
                                             }
                                         };
-                                        target_owner.replace_replayed(replayed);
-                                        let publication =
-                                            target_owner.publish_target(prepared.seed());
                                         let diagnostic =
                                             publication.diagnostic().map(str::to_string);
-                                        if matches!(
-                                            &publication,
-                                            ego_core::session::TargetPublication::NotPublished { .. }
-                                        ) {
-                                            diagnostics.note(&format!(
-                                                "the fork target was not published: {}",
-                                                diagnostic
-                                                    .as_deref()
-                                                    .unwrap_or("publication was refused")
-                                            ));
-                                            continue;
-                                        }
                                         break 'epoch EpochTransition::Fork {
                                             target: target_owner,
                                             publication,
@@ -1672,6 +1735,7 @@ pub(super) async fn drive_execution<S: EventSink>(
 
                             // Per turn, for the reason `build` documents.
                             seat.busy();
+                            let turn_started = std::time::Instant::now();
                             let turn_cancel = CancelToken::new();
                             let (ports, observation, probe_evidence) = effect_scope(
                                 &confinement,
@@ -1697,30 +1761,45 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     },
                                 ))
                                 .collect::<Vec<_>>();
-                            let images =
-                                if matches!(asked.as_ref(), Some(InteractiveTurnInput::Prompt(_)))
-                                    && (!inline.is_empty() || !specs.is_empty())
+                            let images = if matches!(
+                                asked.as_ref(),
+                                Some(InteractiveTurnInput::Prompt(_))
+                            ) && (!inline.is_empty() || !specs.is_empty())
+                            {
+                                let images = match acquire_attachments(
+                                    Attachments {
+                                        inline: &inline,
+                                        specs: &specs,
+                                    },
+                                    &source,
+                                    &ports,
+                                    &turn_cancel,
+                                    run_deadline,
+                                    &cwd,
+                                    active.evidence().blob_store(),
+                                )
+                                .await
                                 {
-                                    let images = acquire_attachments(
-                                        Attachments {
-                                            inline: &inline,
-                                            specs: &specs,
-                                        },
-                                        &source,
-                                        &ports,
-                                        &turn_cancel,
-                                        run_deadline,
-                                        &cwd,
-                                        active.evidence().blob_store(),
-                                    )
-                                    .await?;
-                                    pending_attachments.clear();
-                                    staged_images.clear();
-                                    seat.set_image_chips(Vec::new());
-                                    images
-                                } else {
-                                    Vec::new()
+                                    Ok(images) => images,
+                                    // An admission refusal of this turn's
+                                    // attachments is not a bad command line:
+                                    // the staged images stay so the user can
+                                    // remove one (Ctrl+Backspace) and resubmit.
+                                    Err(RunTermination::UsageError { message }) => {
+                                        diagnostics.note(&format!(
+                                                "{message}; the turn was not sent, remove an attachment and submit it again"
+                                            ));
+                                        continue;
+                                    }
+                                    Err(other) => return Err(other),
                                 };
+                                pending_attachments.clear();
+                                staged_images.clear();
+                                seat.set_image_chips(Vec::new());
+                                images
+                            } else {
+                                Vec::new()
+                            };
                             let loop_ = build!(
                                 active,
                                 &turn_cancel,
@@ -1847,9 +1926,24 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 continue;
                             };
                             between();
+                            if matches!(termination, RunTermination::Signalled(Signal::Int))
+                                && !cancel.is_cancelled()
+                            {
+                                diagnostics.note(&format!(
+                                    "{} after {:.1}s",
+                                    repl::INTERRUPTED_RECEIPT,
+                                    turn_started
+                                        .elapsed()
+                                        .saturating_sub(seat.modal_wait())
+                                        .as_secs_f64()
+                                ));
+                            }
 
-                            let queue_abandoned =
-                                matches!(&termination, RunTermination::Failed { .. });
+                            if let RunTermination::Failed { message } = &termination {
+                                diagnostics.note(&format!(
+                                    "{message}; fix the error and retry, or use /quit"
+                                ));
+                            }
                             last = Ended {
                                 termination,
                                 session: active.id(),
@@ -1862,9 +1956,6 @@ pub(super) async fn drive_execution<S: EventSink>(
                             // the process. A broken stdout or a SIGTERM is not a turn to
                             // return to a prompt from.
                             if cancel.is_cancelled() {
-                                break 'epoch EpochTransition::Exit;
-                            }
-                            if queue_abandoned {
                                 break 'epoch EpochTransition::Exit;
                             }
                         }
@@ -1922,6 +2013,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                             ));
                         }
                         active = target;
+                        admit_successor_context(&evidence, &active, &run_context)?;
                         epoch_start = EpochStart::New;
                     }
                     EpochTransition::Fork {
@@ -1930,6 +2022,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                         diagnostic,
                         projected,
                     } => {
+                        let parent = active.id();
                         active.replace_state(source_state);
                         if !active.apply_publication(target, &publication) {
                             return Err(RunTermination::Failed {
@@ -1939,12 +2032,20 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 ),
                             });
                         }
+                        admit_successor_context(&evidence, &active, &run_context)?;
                         if let Err(error) = session_end {
                             diagnostics.note(&format!(
                                 "the fork source session-end hook failed: {}",
                                 error.exit_reason()
                             ));
                         }
+                        diagnostics.note(&format!(
+                            "forked session {parent} into {}; this is now session {}. \
+                             To return to the source: ego resume {parent} ({})",
+                            active.id(),
+                            active.id(),
+                            crate::usage::context_line(active.state().context)
+                        ));
                         epoch_start = EpochStart::Fork {
                             diagnostic,
                             projected: projected.map(Box::new),
@@ -1958,6 +2059,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                         request,
                         parent,
                     } => {
+                        let parent_id = active.id();
+                        let parent_context = source_state.context;
                         active.replace_state(source_state);
                         if !active.apply_publication(target, &publication) {
                             return Err(RunTermination::Failed {
@@ -1965,6 +2068,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     .to_owned(),
                             });
                         }
+                        admit_successor_context(&evidence, &active, &run_context)?;
                         if let Err(error) = session_end {
                             diagnostics.note(&format!(
                                 "the compacted source session-end hook failed: {}",
@@ -2003,6 +2107,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                             registry = target_registry;
                             config.system = target_system;
                         }
+                        diagnostics.note(&format!(
+                            "compacted session {parent_id} into {}; this is now session {}. \
+                             Before: {}; after: known once the next reply is generated. \
+                             To return to the source: ego resume {parent_id}",
+                            active.id(),
+                            active.id(),
+                            crate::usage::context_line(parent_context)
+                        ));
                         epoch_start = EpochStart::Compact {
                             diagnostic,
                             request,

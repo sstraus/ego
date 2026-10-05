@@ -297,6 +297,7 @@ impl CliPrepared {
             cancel.clone(),
             self.run_deadline,
             self.admitted_sandbox_observation.as_ref(),
+            bindings.sandbox_grants(),
         )
         .await
         {
@@ -391,6 +392,12 @@ impl CliPrepared {
         );
         let config = TurnConfig {
             system: self.system,
+            identity: Some(AgentIdentity {
+                version: crate::build_info::VERSION.to_owned(),
+                sandbox: self.confinement.level(),
+                offline: self.confinement.offline(),
+                host: bindings.host(),
+            }),
             token_ceiling: self.effective.ceilings.tokens,
             retry: self.retry,
             fallbacks: self.fallbacks,
@@ -547,6 +554,7 @@ pub(super) async fn select_startup_model(
         settings.confinement.clone(),
         cancel.clone(),
         settings.run_deadline,
+        None,
     )
     .await
     .map_err(|error| match error {

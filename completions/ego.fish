@@ -27,7 +27,7 @@ end
 complete -c ego -n "__fish_ego_needs_command" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_needs_command" -f -a "run" -d 'Run an agent from a prompt, headless.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "resume" -d 'Continue a session; no ID = latest in this workspace.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "fork" -d 'Fork a session at its latest durable idle boundary.'
+complete -c ego -n "__fish_ego_needs_command" -f -a "fork" -d 'Fork a session at its tip or after the completed turn containing a message.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "compact" -d 'Compact a session into its deterministic successor.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "export" -d 'Export a session locally or as a structurally sanitized bundle.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "ls" -d 'List sessions (this workspace; --all for every one).'
@@ -123,6 +123,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l yolo -d 'Shorthand fo
 complete -c ego -n "__fish_ego_using_subcommand resume" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_using_subcommand resume" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand fork" -l at -r
 complete -c ego -n "__fish_ego_using_subcommand fork" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand fork" -s C -d 'Run as if started in DIR' -r -F
 complete -c ego -n "__fish_ego_using_subcommand fork" -l output -d 'text|json|jsonl' -r -f -a "text\t''
@@ -231,6 +232,7 @@ complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcomma
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from unset" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -l profile -r
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -l json
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -l effective -d 'Show the effective run perimeter instead of stored values'
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from edit" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand rules; and not __fish_seen_subcommand_from ls allow deny revoke remember explain" -s h -l help -d 'Print help'

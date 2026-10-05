@@ -12,7 +12,9 @@ use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use ego_core::permit::{BackendIdentity, CanonPath, ExecCaps, ProcessError, RunConfinement};
+use ego_core::permit::{
+    BackendIdentity, CanonPath, Confinement, ExecCaps, ProcessError, RunConfinement, SandboxGrant,
+};
 use tempfile::{Builder, NamedTempFile};
 
 use super::backend::LaunchPrefix;
@@ -26,6 +28,19 @@ const BACKEND_REVISION: &str = "seatbelt-private-profile-v1";
 pub(crate) struct SeatbeltBackend {
     profile: NamedTempFile,
     maximum_caps: ExecCaps,
+    base: ProfileBase,
+}
+
+/// Everything the profile text is rendered from except the human grants, kept
+/// so the same profile can be rendered again with more of them.
+#[derive(Clone)]
+struct ProfileBase {
+    level: Confinement,
+    offline: bool,
+    workspace: PathBuf,
+    private_scratch: PathBuf,
+    runtime_roots: Vec<PathBuf>,
+    exec_paths: Vec<PathBuf>,
 }
 
 impl SeatbeltBackend {
@@ -38,29 +53,59 @@ impl SeatbeltBackend {
         prerequisite()?;
         validate_private_scratch(private_scratch.as_path())?;
 
-        let runtime_roots = derived_runtime_roots
+        // Every program must be able to stat the workspace ancestor chain:
+        // resolving cwd and `mkdir -p` need it even without exec paths.
+        // Runtime roots also need ancestor metadata for Homebrew command lookup.
+        // The renderer grants exact metadata literals, never ancestor contents.
+        let mut exec_paths = derived_runtime_roots
             .iter()
-            .map(CanonPath::as_path)
+            .map(|path| path.as_path().to_path_buf())
             .collect::<Vec<_>>();
-        // The paths a program must be able to walk: its exec paths and, once a
-        // profile has any, the workspace it starts in (`realpath` of the cwd
-        // lstats every ancestor, and fails without them). Without a profile
-        // the profile text is what it always was.
-        let mut exec_paths = policy
-            .exec_paths()
-            .iter()
-            .map(CanonPath::as_path)
-            .collect::<Vec<_>>();
-        if !exec_paths.is_empty() {
-            exec_paths.push(policy.workspace().as_path());
-        }
-        let rendered = profile::render(&ProfileInput {
+        exec_paths.push(policy.workspace().as_path().to_path_buf());
+        let base = ProfileBase {
             level: policy.level(),
             offline: policy.offline(),
-            workspace: policy.workspace().as_path(),
-            private_scratch: private_scratch.as_path(),
+            workspace: policy.workspace().as_path().to_path_buf(),
+            private_scratch: private_scratch.as_path().to_path_buf(),
+            runtime_roots: derived_runtime_roots
+                .iter()
+                .map(|root| root.as_path().to_path_buf())
+                .collect(),
+            exec_paths,
+        };
+        Self::render_to_file(base, &[], policy.requirements().required())
+    }
+
+    /// The same backend with `grants` added to its profile. The scratch root
+    /// stays the one the measured backend owns, so the caller keeps that
+    /// backend alive for as long as it uses the result.
+    pub(crate) fn widened(&self, grants: &[SandboxGrant]) -> Result<Self, ProcessError> {
+        Self::render_to_file(self.base.clone(), grants, self.maximum_caps)
+    }
+
+    fn render_to_file(
+        base: ProfileBase,
+        grants: &[SandboxGrant],
+        maximum_caps: ExecCaps,
+    ) -> Result<Self, ProcessError> {
+        let runtime_roots = base
+            .runtime_roots
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let exec_paths = base
+            .exec_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let rendered = profile::render(&ProfileInput {
+            level: base.level,
+            offline: base.offline,
+            workspace: &base.workspace,
+            private_scratch: &base.private_scratch,
             runtime_roots: &runtime_roots,
             exec_paths: &exec_paths,
+            grants,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
 
@@ -83,7 +128,8 @@ impl SeatbeltBackend {
 
         Ok(Self {
             profile,
-            maximum_caps: policy.requirements().required(),
+            maximum_caps,
+            base,
         })
     }
 
@@ -193,5 +239,45 @@ pub(crate) fn derived_runtime_roots() -> Result<Vec<CanonPath>, ProcessError> {
         })
     })
     .collect::<Result<BTreeSet<_>, _>>()
-    .map(|roots| roots.into_iter().map(CanonPath::new).collect())
+    .and_then(|mut roots| {
+        // Homebrew's stable prefix contains its symlinked binaries, Cellar
+        // targets and runtime libraries. An absent installation adds no grant.
+        match fs::canonicalize("/opt/homebrew") {
+            Ok(root) => {
+                roots.insert(root);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ProcessError::Backend(format!(
+                    "cannot resolve Homebrew runtime root /opt/homebrew: {error}"
+                )));
+            }
+        }
+        // Git reads global configuration even for `git --version`. Admit
+        // only its standard config files, not the user's home directory.
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|home| home.join(".config")));
+        for path in home
+            .as_ref()
+            .map(|home| home.join(".gitconfig"))
+            .into_iter()
+            .chain(xdg.map(|xdg| xdg.join("git/config")))
+        {
+            match fs::canonicalize(&path) {
+                Ok(root) => {
+                    roots.insert(root);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ProcessError::Backend(format!(
+                        "cannot resolve Git runtime config {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        Ok(roots.into_iter().map(CanonPath::new).collect())
+    })
 }

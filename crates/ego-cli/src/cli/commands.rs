@@ -112,15 +112,18 @@ pub(super) struct UsageCommand {
     pub(super) places: Places,
 }
 
-/// `ego fork ID` — the source boundary is always its latest durable idle event.
+/// `ego fork ID [--at ITEM]` — branch after a completed turn.
 #[derive(Debug, Parser)]
 #[command(
     name = "ego fork",
-    about = "Fork a session at its latest durable idle boundary.",
+    about = "Fork a session at its tip or after the completed turn containing a message.",
     disable_help_subcommand = true
 )]
 pub(super) struct ForkCommand {
     pub(super) source: String,
+
+    #[arg(long, value_name = "ITEM_ID")]
+    pub(super) at: Option<String>,
 
     #[command(flatten)]
     pub(super) common: Common,
@@ -519,6 +522,9 @@ pub(super) enum ConfigSubcommand {
         profile: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Show the effective run perimeter instead of stored values.
+        #[arg(long)]
+        effective: bool,
     },
     /// Edit the complete user document in the selected external editor.
     Edit,

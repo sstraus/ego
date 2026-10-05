@@ -126,6 +126,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (fork)
 _arguments "${_arguments_options[@]}" : \
+'--at=[]:ITEM_ID:_default' \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
 '--output=[text|json|jsonl]:OUTPUT:(text json jsonl)' \
@@ -393,6 +394,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--profile=[]:NAME:_default' \
 '--json[]' \
+'--effective[Show the effective run perimeter instead of stored values]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -501,7 +503,7 @@ _ego_commands() {
     local commands; commands=(
 'run:Run an agent from a prompt, headless.' \
 'resume:Continue a session; no ID = latest in this workspace.' \
-'fork:Fork a session at its latest durable idle boundary.' \
+'fork:Fork a session at its tip or after the completed turn containing a message.' \
 'compact:Compact a session into its deterministic successor.' \
 'export:Export a session locally or as a structurally sanitized bundle.' \
 'ls:List sessions (this workspace; --all for every one).' \
