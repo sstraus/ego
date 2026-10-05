@@ -1806,6 +1806,114 @@ mod turn {
         )
     }
 
+    #[test]
+    fn failed_tool_diagnostic_does_not_leak_known_secret_to_model_or_log() {
+        // Catches: execution or preparation error-to-result conversion bypasses disclosure masking.
+        const SECRET: &str = "example-regression-token";
+        struct DiagnosticTool {
+            fail_prepare: bool,
+        }
+
+        impl TypedTool for DiagnosticTool {
+            type Params = ReadParams;
+
+            fn name(&self) -> &str {
+                "read"
+            }
+
+            fn description(&self) -> &str {
+                "reports a failed read diagnostic"
+            }
+
+            fn prepare_typed(
+                &self,
+                params: ReadParams,
+                ctx: &PrepareCtx<'_>,
+            ) -> Result<PreparedCall, ToolError> {
+                if self.fail_prepare {
+                    return Err(ToolError::InvalidParams(format!(
+                        "credential rejected: {SECRET}"
+                    )));
+                }
+                FakeReadTool.prepare_typed(params, ctx)
+            }
+
+            fn execute<'a, 'io>(
+                &'a self,
+                _call: PreparedCall,
+                _io: &'a dyn GuardedIo<'io>,
+            ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+            where
+                'io: 'a,
+            {
+                Box::pin(futures::future::ready(Err(ToolError::InvalidParams(
+                    format!("credential rejected: {SECRET}"),
+                ))))
+            }
+        }
+
+        for fail_prepare in [false, true] {
+            let mut fx = Fixture::new(vec![
+                vec![
+                    AiEvent::ToolCall {
+                        call_id: "diagnostic".to_owned(),
+                        name: "read".to_owned(),
+                        args: r#"{"path":"/ws/input"}"#.to_owned(),
+                    },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]);
+            fx.registry = vec![Arc::new(Typed(DiagnosticTool { fail_prepare }))];
+            fx.fs.file("/ws/input", "input");
+            let mut budget = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                )
+                .with_secret_values(ego_core::secrets::SecretValues::new([SECRET
+                    .as_bytes()
+                    .to_vec()])),
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                model_for(&fx, &fx.generator, &mut budget),
+                tools,
+            );
+            let outcome = block_on(turn.run("read the input")).expect("turn completes");
+            assert_eq!(outcome.exit_reason, ExitReason::Completed);
+            let events = fx.store.events();
+            let diagnostic = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    EventKind::ToolCallCompleted { ok: false, result } => Some(result.model_text()),
+                    _ => None,
+                })
+                .expect("failed tool result is durable");
+            let calls = fx.generator.calls();
+            assert_eq!(calls.len(), 2, "the error is fed back to the model");
+            let request = serde_json::to_string(&calls[1]).expect("serialize model request");
+            assert!(
+                !diagnostic.contains(SECRET) && !request.contains(SECRET),
+                "failed diagnostic leaked known secret (prepare={fail_prepare}): log={diagnostic}; model={request}"
+            );
+            assert!(diagnostic.contains("[REDACTED]"));
+        }
+    }
+
     /// Every `seq` in the log, in the order it was written.
     fn seqs_of(fx: &Fixture) -> Vec<Seq> {
         fx.store.events().iter().map(|ev| ev.env.seq).collect()
@@ -10059,6 +10167,8 @@ mod turn {
     mod task_tool {
         use super::*;
 
+        const TASK_SECRET: &str = "regression_case-unique";
+
         fn call(id: &str, name: &str, args: serde_json::Value) -> AiEvent {
             AiEvent::ToolCall {
                 call_id: id.into(),
@@ -10090,7 +10200,10 @@ mod turn {
                     Arc::new(NoHop),
                     Arc::new(NoDuplex),
                 )
-                .with_cancel(cancel.clone()),
+                .with_cancel(cancel.clone())
+                .with_secret_values(ego_core::secrets::SecretValues::new([TASK_SECRET
+                    .as_bytes()
+                    .to_vec()])),
                 CanonPath::new("/ws"),
             );
             let mut settings = config();
@@ -10295,10 +10408,10 @@ mod turn {
         }
 
         #[test]
-        fn task_books_child_usage_once_and_returns_only_bounded_final_text() {
-            // Catches: unmetered/double-booked child spend and child transcript in parent context.
+        fn task_books_child_usage_once_and_returns_only_masked_bounded_final_text() {
+            // Catches: unmetered/double-booked spend, child transcript leakage, and unmasked task results.
             let fx = Fixture::new(vec![]);
-            let child_text = "é".repeat(40_000);
+            let child_text = format!("{TASK_SECRET}{}", "é".repeat(40_000));
             let generator = Arc::new(FakeGenerator::new([
                 vec![
                     call("task1", "task", json!({"name":"review", "prompt":"child"})),
@@ -10324,7 +10437,13 @@ mod turn {
                 .values()
                 .find(|i| i.tool_name.as_deref() == Some("task"))
                 .unwrap();
-            assert!(task.tool_result.as_ref().unwrap().model_text().len() <= 65_536);
+            let result = task.tool_result.as_ref().unwrap().model_text();
+            assert!(!result.contains(TASK_SECRET));
+            assert!(result.contains("[REDACTED]"));
+            let parent_request = serde_json::to_string(generator.calls().last().unwrap()).unwrap();
+            assert!(!parent_request.contains(TASK_SECRET));
+            assert!(parent_request.contains("[REDACTED]"));
+            assert!(result.len() <= 65_536);
             assert!(
                 task.tool_result
                     .as_ref()

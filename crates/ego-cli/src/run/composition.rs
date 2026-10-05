@@ -195,6 +195,7 @@ pub(super) fn instructions(
 pub(super) fn tools(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    profile: Option<&str>,
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
@@ -202,6 +203,11 @@ pub(super) fn tools(
         .into_iter()
         .map(RegisteredTool::Effect)
         .collect();
+    if profile == Some("coordinator") {
+        all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(
+            ego_tools::tools::MemoryLookup,
+        ))));
+    }
     all.extend(
         ego_tools::orchestrator::tools_from_environment()
             .into_iter()
@@ -923,6 +929,11 @@ pub(super) fn prepared_materials(
         skill_capture
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
+        settings
+            .effective
+            .active_profile
+            .as_ref()
+            .map(|profile| profile.name.as_str()),
         Some(history),
         settings
             .effective

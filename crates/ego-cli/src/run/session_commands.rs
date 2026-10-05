@@ -125,22 +125,28 @@ pub(super) fn exported(args: &ExportArgs) -> Result<String, RunTermination> {
         })
         .collect::<Vec<_>>();
     match args.format {
-        ExportFormat::Json => serde_json::to_string(&events)
+        ExportFormat::Json => masked_json(&events)
             .map(|rendered| format!("{rendered}\n"))
             .map_err(local_render_error),
         ExportFormat::Jsonl => {
             let mut rendered = String::new();
             for event in events {
-                let line = serde_json::to_string(&event).map_err(local_render_error)?;
+                let line = masked_json(&event).map_err(local_render_error)?;
                 rendered.push_str(&line);
                 rendered.push('\n');
             }
             Ok(rendered)
         }
-        ExportFormat::Md => serde_json::to_string(&events)
+        ExportFormat::Md => masked_json(&events)
             .map(|rendered| format!("# ego export\n\n```json\n{rendered}\n```\n"))
             .map_err(local_render_error),
     }
+}
+
+fn masked_json(value: &impl serde::Serialize) -> Result<String, serde_json::Error> {
+    let mut value = serde_json::to_value(value)?;
+    ego_tools::secrets::from_env().mask_json(&mut value);
+    serde_json::to_string(&value)
 }
 
 /// The one canonical producer-only rendering used by both `ego export` and
@@ -149,7 +155,7 @@ fn canonical_sanitized_json(store: &JsonlStore, target: SessionId) -> Result<Str
     let bundle = Exporter::new(store)
         .sanitized(target)
         .map_err(|error| format!("the sanitized export was refused: {error}"))?;
-    serde_json::to_string(&bundle)
+    masked_json(&bundle)
         .map(|canonical| format!("{canonical}\n"))
         .map_err(|error| format!("the sanitized export could not be rendered: {error}"))
 }

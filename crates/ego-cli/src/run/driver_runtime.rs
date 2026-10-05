@@ -216,6 +216,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 $ports.one_hop_handle(),
                 $ports.duplex_handle(),
             )
+            .with_secret_values(ego_tools::secrets::from_env())
             .with_cancel($cancel.clone());
             let tools = match admitted_tools.as_ref() {
                 Some(source) => Tools::from_registry_with_source(
@@ -288,7 +289,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                 $hook_ports.resolver_handle(),
                 $hook_ports.one_hop_handle(),
                 $hook_ports.duplex_handle(),
-            );
+            )
+            .with_secret_values(ego_tools::secrets::from_env());
             let leased_journal =
                 LeasedSharedJournal::new($active.writer(), &clock, sink, Producer::Main, $state);
             let journal = leased_journal.shared();
@@ -1005,6 +1007,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         let next_registry = match tools(
                                             args.tools.as_ref(),
                                             Some(prospective.core()),
+                                            effective
+                                                .active_profile
+                                                .as_ref()
+                                                .map(|profile| profile.name.as_str()),
                                             Some(Arc::new(jsonl_store.history())),
                                             exec_environment.clone(),
                                         ) {
@@ -1692,6 +1698,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 target_skills
                                                     .as_ref()
                                                     .map(crate::skill::SkillCatalogueCapture::core),
+                                                effective
+                                                    .active_profile
+                                                    .as_ref()
+                                                    .map(|profile| profile.name.as_str()),
                                                 Some(Arc::new(jsonl_store.history())),
                                                 effective.exec.policy().map_err(|error| {
                                                     CompactionError::Internal(error.to_string())
@@ -1737,6 +1747,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 ports.one_hop_handle(),
                                                 ports.duplex_handle(),
                                             )
+                                            .with_secret_values(ego_tools::secrets::from_env())
                                             .with_cancel(compaction_cancel.clone());
                                             let compaction_tools = match admitted_tools.as_ref() {
                                                 Some(source) => Tools::from_registry_with_source(

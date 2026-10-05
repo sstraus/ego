@@ -296,7 +296,12 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
                     }
                 )
             };
-            Ok((outcome.ok, ToolResult::builtin(bounded_result(text))))
+            Ok((
+                outcome.ok,
+                child
+                    .tools
+                    .masked_result(ToolResult::builtin(bounded_result(text))),
+            ))
         })
     }
 }
@@ -343,7 +348,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                         Some(call.started),
                         EventKind::ToolCallCompleted {
                             ok: false,
-                            result: ToolResult::builtin(error),
+                            result: self.tools.masked_result(ToolResult::builtin(error)),
                         },
                     )?;
                     completed.insert(call.item);

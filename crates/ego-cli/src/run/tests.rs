@@ -1051,6 +1051,7 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
         None,
         Some(before.core()),
         None,
+        None,
         ego_core::permit::EnvPolicy::Inherited,
     )
     .expect("initial tool registry");
@@ -1072,6 +1073,7 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
         None,
         Some(prospective.core()),
         None,
+        None,
         ego_core::permit::EnvPolicy::Inherited,
     )
     .expect("prospective capture supplies model tool preflight");
@@ -1087,6 +1089,7 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
             Some(&selected),
             Some(prospective.core()),
             None,
+            None,
             ego_core::permit::EnvPolicy::Inherited
         )
         .is_err()
@@ -1097,6 +1100,7 @@ fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
     let after_registry = tools(
         None,
         Some(after.core()),
+        None,
         None,
         ego_core::permit::EnvPolicy::Inherited,
     )
@@ -1829,6 +1833,7 @@ fn a_tool_less_protocol_session_offers_no_tool_to_ask_a_seat_for() {
         tool_less.tools.as_ref(),
         None,
         None,
+        None,
         ego_core::permit::EnvPolicy::Inherited,
     )
     .expect("an empty selection");
@@ -1842,6 +1847,7 @@ fn a_tool_less_protocol_session_offers_no_tool_to_ask_a_seat_for() {
     assert!(
         !composition::tools(
             ordinary.tools.as_ref(),
+            None,
             None,
             None,
             ego_core::permit::EnvPolicy::Inherited

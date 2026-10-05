@@ -1922,7 +1922,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     Some(settlement),
                     EventKind::ToolCallCompleted {
                         ok: continuation.ok(),
-                        result: continuation.tool_result.clone(),
+                        result: self.tools.masked_result(continuation.tool_result.clone()),
                     },
                 ) {
                     return Err(self.abandon(turn, cause));
@@ -1957,7 +1957,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     Some(parent),
                     EventKind::ToolCallCompleted {
                         ok: continuation.ok(),
-                        result: continuation.tool_result.clone(),
+                        result: self.tools.masked_result(continuation.tool_result.clone()),
                     },
                 ) {
                     return Err(self.abandon(continuation.turn, cause));
@@ -2756,7 +2756,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         Some(call.started),
                         EventKind::ToolCallCompleted {
                             ok: false,
-                            result: ToolResult::builtin(refusal),
+                            result: self.tools.masked_result(ToolResult::builtin(refusal)),
                         },
                     )?;
                 }
@@ -2807,7 +2807,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     .run_tool(policy.as_ref(), &policy_snapshot, turn, &mut pending[index])
                     .await?
                 {
-                    ToolOutcome::Answered { ok, result } => {
+                    ToolOutcome::Answered { ok, mut result } => {
+                        self.tools.mask_result(&mut result);
                         let call = &pending[index];
                         self.journal.append(
                             turn,
@@ -2819,9 +2820,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     }
                     ToolOutcome::Executed {
                         ok,
-                        result,
+                        mut result,
                         selector,
                     } => {
+                        self.tools.mask_result(&mut result);
                         let call = &pending[index];
                         self.journal.append(
                             turn,
@@ -2864,7 +2866,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             Some(call.started),
                             EventKind::ToolCallCompleted {
                                 ok: false,
-                                result: ToolResult::builtin(denial.to_string()),
+                                result: self
+                                    .tools
+                                    .masked_result(ToolResult::builtin(denial.to_string())),
                             },
                         )?;
                         continue;
@@ -2893,7 +2897,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     Some(call.started),
                     EventKind::ToolCallCompleted {
                         ok: false,
-                        result: ToolResult::builtin(denial.action.clone()),
+                        result: self
+                            .tools
+                            .masked_result(ToolResult::builtin(denial.action.clone())),
                     },
                 )?;
                 return Ok(DriveOutcome::Ended(
@@ -3069,7 +3075,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 Some(call.started),
                 EventKind::ToolCallCompleted {
                     ok: false,
-                    result: ToolResult::builtin("interrupted: not run"),
+                    result: self
+                        .tools
+                        .masked_result(ToolResult::builtin("interrupted: not run")),
                 },
             )?;
         }
@@ -5208,7 +5216,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Some(settlement),
             EventKind::ToolCallCompleted {
                 ok: continuation.ok(),
-                result: continuation.tool_result,
+                result: self.tools.masked_result(continuation.tool_result),
             },
         )?;
         Ok(ToolOutcome::Recorded)
@@ -5379,7 +5387,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Controlled::Failed(cause) => return Err(cause),
         };
         match execution {
-            crate::mcp::ToolExecution::Complete(result) => {
+            crate::mcp::ToolExecution::Complete(mut result) => {
+                self.tools.mask_result(&mut result);
                 self.journal.append(
                     turn,
                     Some(tool_call),

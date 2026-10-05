@@ -279,3 +279,36 @@ fn reask_does_not_list_an_unchanged_program() {
         "unchanged program in reask: {content}"
     );
 }
+
+// Catches a grant leaking from an attested canonical root into its sibling.
+#[test]
+fn host_attestation_remembers_only_its_root_across_adapter_restarts() {
+    let tree = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let roots: Vec<_> = ["one", "two"]
+        .into_iter()
+        .map(|name| {
+            let path = tree.path().join(name);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("AGENTS.md"), "rules\n").unwrap();
+            RunRoot::new(fs::canonicalize(path).unwrap()).unwrap()
+        })
+        .collect();
+    let adapter =
+        CliSessionTrustAdmission::new(Some(home.path().to_path_buf())).with_host_profile();
+    adapter.attest_trusted(&roots[0]);
+    let restarted = CliSessionTrustAdmission::new(Some(home.path().to_path_buf()));
+    assert!(matches!(
+        restarted.status(&roots[0]),
+        SessionTrustStatus::Remembered(Trust::Trusted)
+    ));
+    assert!(matches!(
+        restarted.status(&roots[1]),
+        SessionTrustStatus::Question { .. }
+    ));
+    restarted.attest_trusted(&roots[1]);
+    assert!(matches!(
+        restarted.status(&roots[1]),
+        SessionTrustStatus::Question { .. }
+    ));
+}

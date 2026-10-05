@@ -3419,6 +3419,56 @@ fn macos_exec_paths_default_python_catches_runtime_root_widening_writes() {
     assert!(!target.exists());
 }
 
+// Catches raw inherited credentials reaching model-visible output and durable evidence.
+#[test]
+fn known_secret_env_printed_by_child_is_masked_before_evidence_and_context() {
+    const TOKEN: &str = "ego-known-credential-274-unique";
+    if std::env::var("EGO_MASKING_CHILD_CASE").as_deref() != Ok("1") {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "known_secret_env_printed_by_child_is_masked_before_evidence_and_context",
+            ])
+            .env("EGO_MASKING_CHILD_CASE", "1")
+            .env("EGO_TEST_API_TOKEN", TOKEN)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let result = block_on(run.ports.process().execute(&fixture_arg_spec(
+        "exec_contract_fixture_prints_secret_environment",
+        [],
+        None,
+        cwd(),
+    )))
+    .unwrap();
+    let visible = result.model_text();
+    assert!(visible.contains("[REDACTED]"));
+    assert!(!visible.contains(TOKEN));
+    for block in &result.content {
+        let persisted = read_evidence_pages(&run.evidence, block.evidence_reference().unwrap());
+        assert!(
+            !persisted
+                .windows(TOKEN.len())
+                .any(|bytes| bytes == TOKEN.as_bytes())
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_prints_secret_environment() {
+    let token = std::env::var("EGO_TEST_API_TOKEN").unwrap();
+    print!("{token}");
+    eprint!("{token}");
+}
+
 // Catches: the selected environment policy is lost between config resolution,
 // builtin preparation and the actual child process.
 #[test]

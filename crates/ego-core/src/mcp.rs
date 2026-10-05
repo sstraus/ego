@@ -464,6 +464,10 @@ impl ForeignResult {
     pub fn cache_scope(&self) -> Option<CacheScope> {
         self.cache_scope
     }
+    pub(crate) fn mask_secrets(&mut self, values: &crate::secrets::SecretValues) {
+        self.visible_text = values.mask(&self.visible_text);
+    }
+
     pub fn visible_text(&self) -> &str {
         &self.visible_text
     }

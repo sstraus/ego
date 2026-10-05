@@ -123,6 +123,7 @@ pub struct ToolEffectPorts<'a> {
     one_hop: std::sync::Arc<dyn OneHop>,
     duplex: std::sync::Arc<dyn DuplexSpawner>,
     cancel: Option<super::CancelToken>,
+    secrets: crate::secrets::SecretValues,
 }
 
 impl<'a> ToolEffectPorts<'a> {
@@ -142,7 +143,14 @@ impl<'a> ToolEffectPorts<'a> {
             one_hop,
             duplex,
             cancel: None,
+            secrets: crate::secrets::SecretValues::default(),
         }
+    }
+
+    /// Bind the adapter's known environment values to result publication.
+    pub fn with_secret_values(mut self, values: crate::secrets::SecretValues) -> Self {
+        self.secrets = values;
+        self
     }
 
     pub fn with_cancel(mut self, cancel: super::CancelToken) -> Self {
@@ -290,6 +298,18 @@ impl<'a> Tools<'a> {
     pub fn with_skill_resource_roots(mut self, roots: crate::skill::SkillResourceRoots) -> Self {
         self.skill_resource_roots = Some(roots);
         self
+    }
+
+    pub(crate) fn mask_result(&self, result: &mut crate::permit::ToolResult) {
+        result.mask_secrets(&self.effects.secrets);
+    }
+
+    pub(crate) fn masked_result(
+        &self,
+        mut result: crate::permit::ToolResult,
+    ) -> crate::permit::ToolResult {
+        self.mask_result(&mut result);
+        result
     }
 
     pub(crate) fn task_child(
