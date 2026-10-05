@@ -1915,6 +1915,96 @@ mod turn {
         }
     }
 
+    // Catches: task batching moves a child read ahead of an earlier parent write,
+    // making the child analyze stale workspace contents.
+    #[test]
+    fn task_child_reads_the_write_that_precedes_it_in_the_parent_batch() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "parent-write".into(),
+                    name: "fake_write".into(),
+                    args: json!({"path":"/ws/note.txt", "contents":"new contents"}).to_string(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "child-task".into(),
+                    name: "task".into(),
+                    args: json!({"name":"reviewer", "prompt":"Read note.txt"}).to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "child-read".into(),
+                    name: "read".into(),
+                    args: json!({"path":"/ws/note.txt"}).to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_rules(&["write(*)"], &[]);
+        fx.fs.file("/ws/note.txt", "old contents");
+        let registry = vec![
+            RegisteredTool::Effect(Arc::new(Typed(FakeWriteTool))),
+            RegisteredTool::Effect(Arc::new(Typed(FakeReadTool))),
+            RegisteredTool::Task,
+        ];
+        let tools = Tools::from_registry(
+            &registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        );
+        let outcome = block_on(turn.run("Update note.txt, then ask the reviewer to read it"))
+            .expect("store accepts the batch");
+        assert!(outcome.ok);
+        let calls = fx.generator.calls();
+        let child_follow_up = calls
+            .iter()
+            .find(|call| {
+                call.messages.messages().iter().flat_map(|message| &message.content).any(|block| {
+                matches!(block, ContentBlock::ToolResult {call_id, ..} if call_id == "child-read")
+            })
+            })
+            .expect("child receives its read result");
+        let output = child_follow_up
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    call_id, output, ..
+                } if call_id == "child-read" => Some(output.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            output, "new contents",
+            "child must analyze the updated workspace"
+        );
+    }
+
     #[test]
     fn a_tool_call_and_its_result_reach_the_next_request() {
         let fx = Fixture::new(vec![
