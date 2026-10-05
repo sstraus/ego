@@ -52,6 +52,9 @@ use crate::{
     PreparedMcpHttpCall,
 };
 
+#[path = "session_stdio_operation.rs"]
+mod session_stdio_operation;
+
 #[derive(Clone, Copy)]
 struct OperationLimits {
     max_sse_event_size: usize,
@@ -732,10 +735,16 @@ impl McpOperationFactory for McpHttpOperationFactory {
 }
 
 /// A fresh stdio lifecycle consuming one guarded owned duplex.
+type SessionStdioBinding = (
+    Arc<crate::McpStdioSession>,
+    Arc<tokio::sync::Mutex<crate::session_stdio::SessionChild>>,
+);
+
 pub struct McpStdioOperationFactory {
     continuations: Arc<McpContinuationOwner>,
     limits: OperationLimits,
     collapsed: Option<CollapsedSchemaAdmission>,
+    session: Option<SessionStdioBinding>,
 }
 
 impl McpStdioOperationFactory {
@@ -748,6 +757,7 @@ impl McpStdioOperationFactory {
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
             collapsed: None,
+            session: None,
         })
     }
 
@@ -761,11 +771,32 @@ impl McpStdioOperationFactory {
         Ok(Self {
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
+            session: None,
             collapsed: bootstrap.map(|bootstrap| CollapsedSchemaAdmission {
                 bootstrap,
                 admission,
             }),
         })
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn runtime_session(
+        continuations: Arc<McpContinuationOwner>,
+        max_sse_event_size: usize,
+        timeout: Duration,
+        bootstrap: Option<McpCollapsedBootstrap>,
+        admission: Arc<dyn McpToolSchemaAdmission>,
+        session: Arc<crate::McpStdioSession>,
+        child: Arc<tokio::sync::Mutex<crate::session_stdio::SessionChild>>,
+    ) -> Result<Self, McpError> {
+        let mut factory = Self::runtime(
+            continuations,
+            max_sse_event_size,
+            timeout,
+            bootstrap,
+            admission,
+        )?;
+        factory.session = Some((session, child));
+        Ok(factory)
     }
 }
 
@@ -797,6 +828,13 @@ impl McpOperationFactory for McpStdioOperationFactory {
                 return Err(execution_error("stdio MCP factory received HTTP config"));
             };
             let config = config.clone();
+            if self.session.is_some() {
+                return session_stdio_operation::execute(
+                    &config, call, io, self, admission, generation,
+                )
+                .await
+                .map_err(mcp_execution_error);
+            }
             execute_stdio(&config, call, io, self, admission, generation)
                 .await
                 .map_err(mcp_execution_error)
@@ -818,6 +856,11 @@ impl McpOperationFactory for McpStdioOperationFactory {
                 return Err(execution_error("stdio MCP factory received HTTP config"));
             };
             let config = config.clone();
+            if self.session.is_some() {
+                return session_stdio_operation::execute_hook(&config, call, io, self, scope)
+                    .await
+                    .map_err(mcp_execution_error);
+            }
             execute_stdio_hook(&config, call, io, self.limits, scope)
                 .await
                 .map_err(mcp_execution_error)

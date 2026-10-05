@@ -721,6 +721,7 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
             source: Arc::new(GeneratorSource { generator }),
             gate,
             config: TurnConfig {
+                cache: ego_core::generator::capabilities::CacheRetention::Short,
                 system: None,
                 identity: None,
                 token_ceiling: None,

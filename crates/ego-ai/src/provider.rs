@@ -30,7 +30,7 @@ use crate::wire::github_copilot_completions::GithubCopilotCompletions;
 use crate::wire::minimax_anthropic::MiniMaxAnthropic;
 use crate::wire::nous_portal::NousPortal;
 use crate::wire::openai_codex_responses::OpenAiCodexResponses;
-use crate::wire::openai_completions::OpenAiCompletions;
+use crate::wire::openai_completions::OpenRouterCompletions;
 use crate::wire::openai_responses::OpenAiResponses;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
 use crate::wire::xai_responses::XaiResponses;
@@ -476,7 +476,7 @@ static OPENAI_SUPPLIED: Supplied = Supplied::new(&OpenAiResponses);
 /// row*, not about the mapping. Sharing one static would have made moving
 /// OpenAI to Responses silently retarget every compatible gateway at an
 /// endpoint it does not serve.
-static OPENAI_COMPATIBLE_SUPPLIED: Supplied = Supplied::new(&OpenAiCompletions);
+static OPENROUTER_SUPPLIED: Supplied = Supplied::new(&OpenRouterCompletions);
 static ANTHROPIC_SUPPLIED: Supplied = Supplied::new(&AnthropicMessages);
 static GEMINI_SUPPLIED: Supplied = Supplied::new(&GeminiInteractions);
 static OPENAI_CODEX_SUBSCRIPTION: SubscriptionSupplied = SubscriptionSupplied::new(
@@ -820,7 +820,7 @@ impl ProviderRow {
             http_profile,
             extra_headers: Vec::new(),
             cost_expectation: CostExpectation::Positive,
-            resolver: &OPENAI_COMPATIBLE_SUPPLIED,
+            resolver: &OPENROUTER_SUPPLIED,
             credential: CredentialStrategy::OAuthOrEnv {
                 provider: "openrouter".to_string(),
                 var: OPENROUTER_KEY_VAR.to_string(),

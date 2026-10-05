@@ -15,7 +15,13 @@
     "sessionCapabilities": {
       "list": {},
       "delete": {},
-      "fork": {},
+      "fork": {
+        "_meta": {
+          "ego": {
+            "atMessage": true
+          }
+        }
+      },
       "resume": {},
       "close": {}
     },

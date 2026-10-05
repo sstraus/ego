@@ -34,6 +34,7 @@ mod generator {
 
     fn gen_request() -> GenRequest {
         GenRequest {
+            cache: None,
             model: "claude-opus-5".to_string(),
             messages: Conversation::new(vec![Message::text(
                 Role::User,
@@ -59,6 +60,7 @@ mod generator {
     /// checks that answer it read the history.
     fn request_carrying_reasoning() -> GenRequest {
         GenRequest {
+            cache: None,
             messages: Conversation::new(vec![
                 Message::text(Role::User, "list the files".to_string()),
                 Message {
@@ -596,6 +598,7 @@ mod generator {
             },
         };
         let req = GenRequest {
+            cache: None,
             messages: Conversation::new(vec![
                 Message::text(Role::User, "list the files".to_string()),
                 Message {
@@ -639,6 +642,7 @@ mod generator {
         let mut caps = capabilities(ReasoningCarryover::Portable);
         caps.reasoning_efforts = ReasoningEffortSupport::Unknown;
         let req = GenRequest {
+            cache: None,
             thinking: ThinkingLevel::Medium,
             ..gen_request()
         };
@@ -669,6 +673,7 @@ mod generator {
             ThinkingLevel::Max,
         ] {
             let req = GenRequest {
+                cache: None,
                 thinking: level,
                 ..gen_request()
             };
@@ -690,6 +695,7 @@ mod generator {
         let mut caps = capabilities(ReasoningCarryover::Portable);
         caps.reasoning_efforts = ReasoningEffortSupport::Only(accepted.clone());
         let req = GenRequest {
+            cache: None,
             thinking: ThinkingLevel::Max,
             ..gen_request()
         };
@@ -715,6 +721,7 @@ mod generator {
             ThinkingLevel::Medium,
         ]));
         let req = GenRequest {
+            cache: None,
             thinking: ThinkingLevel::Low,
             ..gen_request()
         };
@@ -727,6 +734,7 @@ mod generator {
         let mut caps = capabilities(ReasoningCarryover::Portable);
         caps.reasoning_efforts = ReasoningEffortSupport::Any;
         let req = GenRequest {
+            cache: None,
             thinking: ThinkingLevel::Max,
             ..gen_request()
         };
@@ -766,6 +774,7 @@ mod generator {
         target.reasoning_efforts =
             ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::Low]));
         let req = GenRequest {
+            cache: None,
             thinking: ThinkingLevel::Max,
             ..gen_request()
         };
@@ -808,6 +817,7 @@ mod generator {
         let mut target = capabilities(ReasoningCarryover::Portable);
         target.supports_parallel_tool_calls = false;
         let req = GenRequest {
+            cache: None,
             parallel_tool_calls: true,
             ..gen_request()
         };
@@ -838,6 +848,7 @@ mod generator {
         let mut target = capabilities(ReasoningCarryover::Portable);
         target.max_output_tokens = Some(100);
         let req = GenRequest {
+            cache: None,
             max_output_tokens: Some(1024),
             ..gen_request()
         };

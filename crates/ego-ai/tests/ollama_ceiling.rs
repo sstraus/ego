@@ -190,6 +190,7 @@ async fn ollama_honours_max_tokens_and_ignores_max_completion_tokens() {
 #[test]
 fn the_ceiling_the_ollama_profile_sends_is_the_one_this_daemon_reads() {
     let req = GenRequest {
+        cache: None,
         model: "gemma4:e4b-mlx".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, "Count from 1 to 40.")])
             .expect("a one-message history is valid"),

@@ -7,7 +7,7 @@
 //! permission mode and sandbox, the host that connected, and the tools admitted.
 //!
 //! Each test drives the real binary against the provider stub and reads the
-//! system text of the first request the provider received. The expected values
+//! stable identity and volatile data of the first request the provider received. The expected values
 //! come from the command line, the config and the host frame the test itself
 //! wrote, never from ego's own rendering.
 
@@ -39,7 +39,25 @@ fn first_system_text(stub: &Stub, stderr: &str) -> String {
         .into_iter()
         .next()
         .unwrap_or_else(|| panic!("no request reached the provider; stderr: {stderr}"));
-    system_text(&body)
+    let stable = system_text(&body);
+    assert!(
+        stable.contains(&format!("ego {VERSION}")),
+        "stable identity missing"
+    );
+    assert!(
+        !stable.contains("- Model:"),
+        "live model leaked into system prefix"
+    );
+    let volatile = body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .filter_map(|block| block["text"].as_str())
+        .find(|text| text.starts_with("Current context data."))
+        .expect("labelled live runtime context");
+    format!("{stable}\n{volatile}")
 }
 
 fn canonical_workspace(ego: &Ego) -> String {

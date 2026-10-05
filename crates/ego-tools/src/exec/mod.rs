@@ -302,6 +302,10 @@ impl GuardedExec {
 }
 
 impl ProcessExecutor for GuardedExec {
+    fn confinement(&self) -> Option<ego_core::permit::Confinement> {
+        Some(self.context.confinement())
+    }
+
     fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
         identity::capture(spec)
     }
@@ -485,6 +489,10 @@ impl RunEffectPorts {
     pub(crate) fn for_probe(config: ExecRunConfig, backend: Arc<dyn Backend>) -> Self {
         let capabilities = backend.maximum_demonstrable_caps();
         Self::build(config, backend, capabilities)
+    }
+
+    pub fn process_handle(&self) -> Arc<dyn ProcessExecutor> {
+        Arc::clone(&self.process) as Arc<dyn ProcessExecutor>
     }
 
     pub fn process(&self) -> &dyn ProcessExecutor {

@@ -247,7 +247,7 @@ pub(super) async fn drive_headless_turn(
         None => loop_,
     };
     let loop_ = match active.replayed() {
-        Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
+        Some(replayed) => loop_.with_replayed_context(replayed),
         None => loop_,
     };
     let loop_ = match elicitor {

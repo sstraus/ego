@@ -56,6 +56,7 @@ fn generation_started(attempt: AttemptRef) -> DomainEvent {
         kind: EventKind::GenerationStarted {
             attempt,
             role: GenerationRole::Main,
+            snapshot: None,
         },
     }
 }
@@ -232,8 +233,7 @@ fn lease_held_writer_is_the_only_evidence_store_and_physical_order_is_authoritat
             env: Envelope { seq: position, .. },
             kind: EventKind::GenerationStarted {
                 attempt: actual,
-                role: GenerationRole::Main,
-            },
+                role: GenerationRole::Main, snapshot: None, },
         }) if actual == attempt && position == seq(1)
     ));
 }

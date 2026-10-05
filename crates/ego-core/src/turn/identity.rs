@@ -33,6 +33,10 @@ pub struct HostClient {
 }
 
 impl AgentIdentity {
+    pub(crate) fn stable_text(&self) -> String {
+        format!("You are ego {}, a coding agent.", self.version)
+    }
+
     pub(crate) fn render(
         &self,
         model: &ModelRef,
@@ -47,16 +51,13 @@ impl AgentIdentity {
         };
         let network = if self.offline { "offline" } else { "online" };
         format!(
-            "You are ego {version}, a coding agent. These facts about this session are \
-             authoritative; answer questions about them from here instead of guessing or \
-             running commands.\n\
+            "Current runtime facts (ego-owned; refreshed for this generation):\n\
              - Model: {model} (reasoning effort: {thinking})\n\
              - Workspace root: {workspace}\n\
              - Posture: permission mode: {mode}; sandbox: {sandbox}; network: {network}\n\
              - Host: {host}\n\
              - Tools: {tools}\n\
              - MCP servers: {servers}",
-            version = self.version,
             thinking = thinking.as_str(),
             workspace = policy.workspace().as_path().display(),
             mode = policy.mode(),

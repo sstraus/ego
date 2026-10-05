@@ -598,9 +598,13 @@ host as its only permission seat and never reads terminal input.
 M3 added one deliberately narrow exception before ACP completeness:
 `_ego/compact`, advertised in `AgentCapabilities._meta`, invokes the same core
 compaction transition as the CLI and MCP server. It registers the deterministic
-checkpoint target for a later standard `session/prompt`, while `loadSession`
-remains false. This does not implement or claim standard ACP load, list, fork,
-resume, or delete support; those remain M5 work.
+checkpoint target for a later standard `session/prompt`. The durable M5 ACP
+adapter now advertises and serves standard load, list, tip fork, resume, delete,
+and close through `SessionLifecycle`. Message-selected forks and inherited
+message projection are extensions planned in `plans/conversation-fork.md`.
+The accepted system-only prompt snapshot and volatile host placement are
+recorded in `docs/decisions/2026-09-30-conversation-fork-cache-prefix.md`; tool
+admission remains current on every generation.
 
 ## 8. Sequencing (resolves §4.8)
 
