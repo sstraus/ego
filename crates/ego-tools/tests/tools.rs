@@ -991,7 +991,7 @@ mod edit {
 
     #[test]
     fn edit_prepares_a_read_and_a_write_of_the_file_it_names() {
-        // `docs/13-effect-tools.md` Step C, first invariant. The operation
+        // `ARCHITECTURE.md` Step C, first invariant. The operation
         // carries the substitution rather than the resulting bytes, because
         // the resulting bytes are not knowable here — and because "replace
         // this text with that text in this file" is the reviewable sentence

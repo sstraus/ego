@@ -1,7 +1,7 @@
 //! ACP v1 session config options: the host's picker for the generation
 //! controls and the run's confinement.
 //!
-//! `docs/06-acp.md` §2 selects `session/set_config_option` and its
+//! `ARCHITECTURE.md` §2 selects `session/set_config_option` and its
 //! model-category options as the projection for model and config control.
 //! The dedicated `providers/list|set|disable` methods are not served: they
 //! are gated behind the schema's `unstable_llm_providers` draft feature,

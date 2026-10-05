@@ -34,7 +34,7 @@ use crate::suspension::{ContinuationError, GuardedMcpResume};
 /// The distinction is the point: a tool that was refused and a tool that
 /// looked and found nothing are telling the model two different things, and a
 /// single "it didn't work" collapses them. See
-/// `docs/decisions/2026-08-21-reading-without-reading-everything.md` §6.
+/// `ARCHITECTURE.md` §6.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsError {
     NotFound {
@@ -156,7 +156,7 @@ pub trait GuardedIo<'s>: Send + Sync {
     /// The seam reads the files; the caller supplies only the judgement and
     /// receives only the verdicts. That is what lets `grep` work without ever
     /// holding read authority over the subtree
-    /// (`docs/decisions/2026-08-21-reading-without-reading-everything.md` §2).
+    /// (`ARCHITECTURE.md` §2).
     fn search(&self, req: &ScanRequest, matcher: &dyn LineMatcher) -> Result<Found, IoDenied>;
 
     /// Execute the exact process specification admitted by this permit.

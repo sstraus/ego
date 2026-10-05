@@ -1,7 +1,7 @@
 //! `RuleId`: what makes `ego rules revoke` possible without the original
 //! context.
 //!
-//! `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §8.
+//! `ARCHITECTURE.md` §8.
 
 use sha2::{Digest, Sha256};
 use std::fmt;

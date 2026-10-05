@@ -1,7 +1,7 @@
 //! The vocabulary a traversal is expressed in: what to walk, what it may
 //! cost, and what comes back.
 //!
-//! See `docs/decisions/2026-08-21-reading-without-reading-everything.md`.
+//! See `ARCHITECTURE.md`.
 //! `glob` and `grep` both walk a subtree, and the difference between them is
 //! not *how* they walk it but what they are allowed to learn — names, or the
 //! lines that matched. Both shapes are described here so the guarded seam can

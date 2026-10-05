@@ -1,6 +1,6 @@
 //! contract for ACP session config options (regression case, criterion 1).
 //!
-//! `docs/06-acp.md` §2 says model and config control is projected as
+//! `ARCHITECTURE.md` §2 says model and config control is projected as
 //! `session/set_config_option` over model-category options, and that a valid
 //! change is staged and applied only at a safe generation boundary. These
 //! pin the wire half of that: what a host is offered, and what ego does with

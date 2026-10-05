@@ -449,7 +449,7 @@ mod generator {
     ///
     /// This replaces `generator_fake_pending_stop_is_not_terminal`, whose
     /// subject (`StopReason::Pending`) was removed in
-    /// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`. `Deferred`
+    /// `ARCHITECTURE.md`. `Deferred`
     /// is the remaining stop reason that assembles nothing, and it is the
     /// more interesting one, because it is genuinely terminal while still
     /// producing no `DomainEvent`.

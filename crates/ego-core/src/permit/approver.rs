@@ -1,6 +1,6 @@
 //! The parties that may answer a question the rules did not settle.
 //!
-//! `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6 orders three of
+//! `ARCHITECTURE.md` §6 orders three of
 //! them: the mode at step 5, the judge at step 6, the human at step 7. One
 //! trait serves the policy parties because "may this proceed" is one question
 //! however it is answered — and the engine, not the party, decides what the

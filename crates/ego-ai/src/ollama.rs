@@ -1,7 +1,7 @@
 //! Resolving a local model by asking the daemon, instead of writing down what
 //! it probably says.
 //!
-//! See `docs/decisions/2026-08-21-what-a-model-resolves-to.md` §3 and §4.
+//! See `ARCHITECTURE.md` §3 and §4.
 //!
 //! ## Why the context window is measured and not read
 //!
@@ -397,7 +397,7 @@ async fn load(row: &ProviderRow, model: &str, http: &Arc<dyn Http>) -> Result<()
 /// **It is true again, and by a different route.** The row names
 /// [`wire::ollama`](crate::wire::ollama), a mapping of its own, which sends
 /// the ceiling in the field this daemon reads
-/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+/// (`ARCHITECTURE.md`
 /// §8). The request caps itself; `ollama_ceiling.rs`'s third recording is
 /// `ego`'s own body against a live 0.32.14 daemon, stopping at the ceiling.
 ///
@@ -470,7 +470,7 @@ fn capabilities_from(tag: &Tag, served_context: Option<u64>) -> ModelCapabilitie
         // This field was `Any` until the wire survey caught it. The earlier
         // measurement was not wrong, it was narrower than it read: it proved
         // every level is *accepted*, and accepted was taken for honoured.
-        // That is the mistranslation `docs/08-codex-critique.md` I5 calls
+        // That is the mistranslation `ARCHITECTURE.md` I5 calls
         // worse than a refusal, and `ReasoningEffortSupport`'s own preamble
         // says the parameter is not advisory. Naming the five refuses the
         // other two at `request_gaps`, before the request is built, telling

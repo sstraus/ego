@@ -5,8 +5,8 @@
 //! headers are gone from the defaults, and an operator whose vendor refuses
 //! ego's own identity supplies them through `[auth.<provider>.headers]`
 //! themselves —
-//! `docs/decisions/2026-08-22-subscription-login-is-built-in-plus-two-overrides.md`
-//! §1 and §3 as amended, and `docs/16-subscription-login.md` §7.8 for the
+//! `ARCHITECTURE.md`
+//! §1 and §3 as amended, and `ARCHITECTURE.md` §7.8 for the
 //! recipe. Prose is not a guard; this is, in the same spirit as
 //! `tests/deprecated_spellings.rs`: it fails in the pull request that
 //! reintroduces a disguise rather than in a review that might not happen.
@@ -177,7 +177,7 @@ fn no_request_a_default_row_builds_names_another_vendors_client() {
         "a default provider row is presenting somebody else's client identity.\n\
          ego ships its own identity only; a vendor that gates on its own client \
          is an operator's `[auth.<provider>.headers]` decision, not a built-in \
-         (`docs/16-subscription-login.md` §7.8).\n\n{}",
+         (`ARCHITECTURE.md` §7.8).\n\n{}",
         all.join("\n")
     );
 }
@@ -303,7 +303,7 @@ async fn a_vendor_refusing_egos_identity_is_quoted_and_answered_with_the_recipe(
         assert!(message.contains(said), "{status}: {message}");
         assert!(
             message.contains("[auth.<provider>.headers]")
-                && message.contains("docs/16-subscription-login.md"),
+                && message.contains("ARCHITECTURE.md"),
             "{status}: {message}"
         );
     }

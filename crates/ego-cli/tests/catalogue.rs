@@ -7,7 +7,7 @@
 //! *conclude* from a catalogue, and a fake lets a test state a catalogue that
 //! would take six runs to produce.
 //!
-//! `docs/decisions/2026-08-21-the-two-commands-the-header-unblocked.md`.
+//! `ARCHITECTURE.md`.
 
 use std::path::{Path, PathBuf};
 

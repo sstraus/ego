@@ -1,6 +1,6 @@
 //! The cached price table: immutable blobs, one mutable pointer, and a clock.
 //!
-//! `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §6 and its §6.1
+//! `ARCHITECTURE.md` §6 and its §6.1
 //! amendment. §6 splits the work three ways and this is the middle third:
 //! `ego-ai` fetches and decodes because it owns `Http` and the wire formats,
 //! **`ego-tools` reads and writes because it owns `StoreIo`**, and `ego-core`

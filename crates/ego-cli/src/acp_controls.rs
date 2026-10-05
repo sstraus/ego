@@ -84,7 +84,7 @@ pub struct AcpSessionControls {
     /// session starts on.
     ///
     /// A ceiling rather than a default:
-    /// `docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`.
+    /// `ARCHITECTURE.md`.
     /// The operator who spawned the process set it, and no message on this
     /// connection can move it.
     sandbox_ceiling: Confinement,

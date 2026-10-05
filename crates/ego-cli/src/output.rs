@@ -602,7 +602,7 @@ pub struct Report {
     /// non-empty — a CI gate is a presence check" — so a key that appears only
     /// on exit 3 is additive under a rule that was written down rather than
     /// under one asserted here. See
-    /// `docs/decisions/2026-08-21-an-exit-code-that-names-who-refused.md` §4.
+    /// `ARCHITECTURE.md` §4.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub denied_by: Option<Authority>,
     pub turns: usize,

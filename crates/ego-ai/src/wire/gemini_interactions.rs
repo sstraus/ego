@@ -1,6 +1,6 @@
 //! Gemini's Interactions API: a conversation is a list of steps.
 //!
-//! `docs/14-six-wire-protocols.md` §3 chose this over the legacy
+//! `ARCHITECTURE.md` §3 chose this over the legacy
 //! `models:generateContent`, and §3.8 resolved the shape ego actually needs.
 //! The three facts that make this a mapping of its own rather than a variant
 //! of another:

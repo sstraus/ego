@@ -109,7 +109,7 @@ pub fn card(served: &Served) -> AgentCard {
         icon_url: None,
         // The card declares the scheme this endpoint actually enforces, which
         // is a property of the transport it is served over and not of A2A.
-        // `docs/decisions/2026-09-07-one-inbound-endpoint-serves-every-host-protocol.md`
+        // `ARCHITECTURE.md`
         // authenticates a local endpoint by the operating system, and a card
         // demanding a bearer token there would send a caller to configure a
         // secret this listener will never read — an instruction that is simply

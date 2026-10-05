@@ -154,7 +154,7 @@ fn fields_that_have_nothing_to_say_are_omitted() {
 /// two tools, and the results answering them. OpenAI wants the calls attached
 /// to the assistant message and each result in its own `tool` message naming
 /// the id — a shape `Message` could not express at all before
-/// `docs/decisions/2026-08-21-tool-use-history.md`.
+/// `ARCHITECTURE.md`.
 #[test]
 fn a_tool_round_trip_reaches_the_wire_in_the_shape_the_schema_asks_for() {
     let mut req = golden_request();

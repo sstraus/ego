@@ -1,6 +1,6 @@
 //! The permission rule grammar.
 //!
-//! `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md`. Test
+//! `ARCHITECTURE.md`. Test
 //! names are prefixed `rule_` so `cargo test -p ego-core rule` selects them:
 //! cargo's filter matches the test path, not the file name.
 

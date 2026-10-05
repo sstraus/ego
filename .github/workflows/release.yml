@@ -1,0 +1,173 @@
+# Builds the `ego` executable for every platform, on every push to the trunk
+# and on every `v*` tag. A tag additionally publishes a GitHub Release.
+#
+# Modelled on TUICommander's `release.yml` (the `remote-daemon` matrix): one
+# matrix, one `cargo build --release --target`, no reusable-workflow layers.
+# Unlike TUICommander nothing is signed or notarized and no secret is read;
+# ego has no signing identity yet. The only credential is the job-scoped
+# GITHUB_TOKEN the release job uses to publish.
+#
+# NOT YET RUNNING. This repository has no remote (see ci.yml). Validate with
+# actionlint; the first real run is the first real proof.
+#
+# Keep RUST_VERSION in step with the toolchain the gate runs on. It is pinned
+# so a new stable cannot change what ships.
+
+name: release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+
+# A newer push to a branch makes the older build pointless. A tag run is never
+# cancelled: it publishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.98.1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Intel is omitted on purpose: TUICommander does not ship it
+          # either, and macos-latest is arm64.
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - platform: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/ego-cli/Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME does not match crates/ego-cli version $VERSION"
+            exit 1
+          fi
+
+      - name: Install cross-compilation tools (aarch64 Linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build ego
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: 'true'
+        run: cargo build --release --locked -p ego-cli --bin ego --target ${{ matrix.target }}
+
+      # One directory per target, holding the binary and the README, archived
+      # as ego-<target>.tar.gz (zip on Windows) with a matching .sha256 whose
+      # path is relative, so `sha256sum -c` works where the files are
+      # downloaded. The release job concatenates the .sha256 files.
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET='${{ matrix.target }}'
+          DIR="ego-$TARGET"
+          EXE=ego
+          if [ "$RUNNER_OS" = "Windows" ]; then EXE=ego.exe; fi
+          mkdir "$DIR"
+          cp "target/$TARGET/release/$EXE" README.md "$DIR/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ARCHIVE="$DIR.zip"
+            7z a -tzip "$ARCHIVE" "$DIR" > /dev/null
+          else
+            ARCHIVE="$DIR.tar.gz"
+            tar -czf "$ARCHIVE" "$DIR"
+          fi
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          fi
+          cat "$ARCHIVE.sha256"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ego-${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    if: github.ref_type == 'tag'
+    needs: build
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ego-*
+          merge-multiple: true
+          path: dist
+
+      - name: Build checksum file and release notes
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat dist/*.sha256 > dist/SHA256SUMS
+          # The CHANGELOG section of this version: `## [X.Y.Z]` or `## X.Y.Z`.
+          # An empty section stops the release instead of publishing blank notes.
+          awk -v v="$VERSION" '
+            /^## / { if (found) exit; if ($2 == v || $2 == "[" v "]") { found = 1 } next }
+            found
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FLAGS=""
+          case "$GITHUB_REF_NAME" in *-*) FLAGS="--prerelease" ;; esac
+          # shellcheck disable=SC2086 — FLAGS is empty or one fixed flag.
+          gh release create "$GITHUB_REF_NAME" $FLAGS \
+            --title "ego $GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS

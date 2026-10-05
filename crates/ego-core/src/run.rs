@@ -1,6 +1,6 @@
 //! Why an *invocation* ended, as opposed to why a turn did.
 //!
-//! See `docs/decisions/2026-08-21-two-levels-of-ending.md` and `CLI.md` §4.3.
+//! See `ARCHITECTURE.md` and `CLI.md` §4.3.
 //!
 //! Two levels rather than one enum, because a turn and a run are not the same
 //! thing. `max_turns` fires *between* two completed turns: recording it as
@@ -83,7 +83,7 @@ impl SessionId {
 /// `Option` is "absent or unknown", and this is neither: it is a stated fact
 /// about a run in which §6's order was exhausted. Same size, nothing to
 /// re-derive. See
-/// `docs/decisions/2026-08-21-an-exit-code-that-names-who-refused.md` §2.
+/// `ARCHITECTURE.md` §2.
 ///
 /// There is deliberately no `Authority::Nobody` arm. That type is persisted
 /// through `EventKind::PermissionDecided`, and a *decision* event whose
@@ -276,7 +276,7 @@ impl RunTermination {
     /// class of it: the invocation and the *resolved* model disagree — a
     /// `--thinking` level the model does not accept — and nothing above the
     /// turn holds the resolved [`ModelCapabilities`] to compare against. See
-    /// `docs/decisions/2026-08-21-a-request-the-model-will-not-take.md`.
+    /// `ARCHITECTURE.md`.
     ///
     /// [`ModelCapabilities`]: crate::generator::capabilities::ModelCapabilities
     ///
@@ -1473,7 +1473,7 @@ pub trait RunExecutor: Send + Sync {
     /// Returning `Ok` says the request was delivered, not that the boundary
     /// has been reached — only the log says that, and only once the turn has
     /// got there. See
-    /// `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-session.md`.
+    /// `ARCHITECTURE.md`.
     fn pause<'a>(
         &'a self,
         handle: &'a RunHandle,

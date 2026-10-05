@@ -2,7 +2,7 @@
 //!
 //! `ego-ai` owns the document codec and merge policy. This adapter owns only
 //! the paths, refresh lease, byte reads, and atomic publication described by
-//! `docs/decisions/2026-08-25-the-catalogue-is-a-snapshot-not-generation-authority.md`.
+//! `ARCHITECTURE.md`.
 
 use std::io;
 use std::path::{Path, PathBuf};

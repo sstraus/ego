@@ -1,6 +1,6 @@
 //! The two invariants of the provider seam, proved from outside it.
 //!
-//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §5
+//! `ARCHITECTURE.md` §5
 //! states three, and each has a *necessary* condition and a *sufficient* one.
 //! The necessary one — that the near side names no provider and no protocol —
 //! is a grep, and it lives in `crates/ego-core/tests/near_side.rs` because the

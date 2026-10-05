@@ -2,7 +2,7 @@
 //!
 //! `ego-core` declares the [`Clock`] port and never implements it, for the
 //! same reason it never opens a file — see
-//! `docs/decisions/2026-08-21-the-turn-loop.md` §2.
+//! `ARCHITECTURE.md` §2.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

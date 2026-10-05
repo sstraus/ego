@@ -306,7 +306,7 @@ pub(super) struct Shape {
 /// process that serves runs and not to the protocol it happens to speak:
 /// `ego a2a` is the same question and flattens the same two lines.
 ///
-/// `docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`
+/// `ARCHITECTURE.md`
 #[derive(Debug, ClapArgs)]
 pub(super) struct Ceiling {
     /// The weakest confinement a session may select: ro|workspace|off.

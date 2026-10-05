@@ -487,7 +487,7 @@ impl Confinement {
     /// Whether this confines at least as much as `ceiling` does.
     ///
     /// The only question a ceiling is ever asked
-    /// (`docs/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`).
+    /// (`ARCHITECTURE.md`).
     /// `ro` is within every ceiling; `off` is within `off` alone.
     pub const fn within(self, ceiling: Self) -> bool {
         self.strength() >= ceiling.strength()

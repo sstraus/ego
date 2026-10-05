@@ -75,7 +75,7 @@ pub const ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
 ///
 /// It sets `/v1/` and not `/v1/chat/completions`: a row carries a base and the
 /// mapping joins its own path onto it
-/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+/// (`ARCHITECTURE.md`
 /// §2). Both variables name a *server*, which is what a base is, so this is
 /// also the spelling an operator already has in them.
 fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
@@ -100,7 +100,7 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
 ///
 /// Every row, unconditionally. A row names the variable its credential lives
 /// in and never reads it
-/// (`docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §3), so a
+/// (`ARCHITECTURE.md` §3), so a
 /// machine with no `OPENAI_API_KEY` still *has* an OpenAI row — it simply
 /// cannot authenticate against it yet, which is a different sentence and a
 /// different error.
@@ -114,7 +114,7 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
 /// that subscription contract without collapsing its metering into the API
 /// key row. Gemini used to be absent for want of acceptance evidence and is
 /// now present:
-/// `docs/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`.
+/// `ARCHITECTURE.md`.
 pub(crate) fn rows(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Vec<ProviderRow>, ResolveError> {
@@ -203,7 +203,7 @@ pub(crate) fn supplied_request_profile(
 /// place a credential is read. What comes back beside the model is the
 /// resolved value itself, so the check here and the header sent later cannot
 /// disagree about whether a key exists — they are the same read
-/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+/// (`ARCHITECTURE.md`
 /// §6).
 ///
 /// Returned beside the [`ResolvedModel`] rather than inside it, and that is
@@ -821,7 +821,7 @@ mod tests {
 
     /// The API-key candidate is still not runnable.
     ///
-    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// `ARCHITECTURE.md`
     /// §9 draws the line at selectability: a provider assembled from a
     /// published document has offline evidence and no acceptance evidence, and
     /// its legacy endpoint is now vendor-deprecated. Adding that candidate to

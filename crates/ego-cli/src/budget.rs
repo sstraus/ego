@@ -14,7 +14,7 @@
 //!
 //! ## Where a ceiling comes from
 //!
-//! Not from here. `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §4:
+//! Not from here. `ARCHITECTURE.md` §4:
 //! `CLI.md:296-299` makes an administrator's `/etc/ego/config.toml` "the only
 //! source of ceilings", so `--budget` is not parsed on the side — it is
 //! written into the flags layer (`config::flags_layer`) as the `budget` key

@@ -13,3 +13,6 @@
 mutants.out/
 mutants.out.old/
 .env
+
+# Local source installation prefix from the quick start.
+/.ego-bin

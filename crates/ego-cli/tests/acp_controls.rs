@@ -549,7 +549,7 @@ fn a_new_model_with_unknown_default_does_not_reuse_the_base_resolved_effort() {
 /// The seat is the connection's, and a new connection builds a new one. That
 /// is the decision and not an omission: a durable per-session model would make
 /// resume order-dependent, which
-/// `docs/decisions/2026-08-30-skill-invocation-preserves-one-authority-epoch.md`
+/// `ARCHITECTURE.md`
 /// rejects, and the terminal seat is bound by the same rule — a session-only
 /// pick lives in memory for that session only. What survives a disconnect is
 /// the hold, which is a fact about the session, not a preference about the

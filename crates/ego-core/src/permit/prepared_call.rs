@@ -32,7 +32,7 @@ pub(crate) fn frame(digest: &mut Sha256, bytes: &[u8]) {
 ///
 /// [`Op::List`] and [`Op::Search`] exist so that a tool which walks a subtree
 /// does not have to be described as one that reads it. See
-/// `docs/decisions/2026-08-21-reading-without-reading-everything.md` §1–2:
+/// `ARCHITECTURE.md` §1–2:
 /// expressing a glob as `Read { path: root }` would hand it the authority to
 /// read every byte under `root`, which is not a rounding error in the
 /// description — it is a much larger grant, arrived at because no other
@@ -95,7 +95,7 @@ pub enum Op {
 /// edit produces are a function of the bytes already there, and the only
 /// moment that could compute them is `prepare` — which has no read authority,
 /// because it runs before a `Permit` exists. See
-/// `docs/decisions/2026-08-23-an-edit-is-two-authorities-and-a-conditional-write.md`.
+/// `ARCHITECTURE.md`.
 /// What is *not* weakened is the authority granted: both reach exactly the one
 /// path the op names.
 #[derive(Debug, Clone, PartialEq, Eq)]

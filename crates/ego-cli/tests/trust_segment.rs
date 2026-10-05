@@ -3,7 +3,7 @@
 //! A session that starts untrusted in silence — because nothing in the
 //! workspace was worth asking about, or because the answer was remembered —
 //! needs somewhere to say so. See
-//! `docs/decisions/2026-09-05-a-trust-answer-is-remembered-per-root.md`.
+//! `ARCHITECTURE.md`.
 
 use ego_cli::repl::status::{
     SeatFacts, SelectionFacts, StatusLine, StatusSegmentName, SurfaceSnapshot,
