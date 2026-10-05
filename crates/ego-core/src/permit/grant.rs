@@ -203,7 +203,7 @@ impl Permit {
 
     /// Checks the whole process specification against the one policy admitted.
     pub fn allows_spawn(&self, spec: &SpawnSpec) -> Result<(), PermitDenied> {
-        if self.scope.spawn.as_ref() == Some(spec) {
+        if self.scope.spawns.contains(spec) {
             Ok(())
         } else {
             Err(PermitDenied::Spawn { spec: spec.clone() })
@@ -1800,7 +1800,7 @@ fn scope_of(call: &PreparedCall) -> Scope {
             Op::List { root, .. } => scope.list_paths.push(root.clone()),
             Op::Search { root, .. } => scope.search_paths.push(root.clone()),
             Op::Write { path, .. } => scope.write_paths.push(path.clone()),
-            Op::Spawn { spec } => scope.spawn = Some(spec.clone()),
+            Op::Spawn { spec } => scope.spawns.push(spec.clone()),
             Op::ReadEvidence { request } => scope.evidence = Some(request.clone()),
             Op::Opaque {
                 tool,
@@ -2529,7 +2529,7 @@ mod tests {
             list_paths: vec![CanonPath::new("/ws/listable")],
             search_paths: vec![CanonPath::new("/ws/searchable")],
             endpoints: vec!["api.example.com:443".to_string()],
-            spawn: Some(allowed_spawn.clone()),
+            spawns: vec![allowed_spawn.clone()],
             ..Scope::default()
         });
 

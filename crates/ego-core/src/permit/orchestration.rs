@@ -100,6 +100,13 @@ fn command(argv: &[&str]) -> Option<RiskClass> {
         }),
         "tuic-triumvirate.sh" => Some(RiskClass::High),
         "tuic" if args.first() == Some(&"ls") => Some(RiskClass::Low),
+        "find"
+            if args.len() == 7
+                && !args[0].starts_with('-')
+                && args[1..6] == ["-maxdepth", "1", "-name", "*.md", "-newer"] =>
+        {
+            Some(RiskClass::Low)
+        }
         "tuic" if args.first() == Some(&"mcp") => {
             let params = serde_json::from_str::<Value>(args.get(2)?).ok()?;
             tuic(args.get(1)?, &params)

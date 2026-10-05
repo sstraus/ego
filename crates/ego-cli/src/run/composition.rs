@@ -197,6 +197,11 @@ pub(super) fn tools(
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = builtins().into_iter().map(RegisteredTool::Effect).collect();
+    all.extend(
+        ego_tools::orchestrator::tools_from_environment()
+            .into_iter()
+            .map(RegisteredTool::Effect),
+    );
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     if let Some(skills) = skills.filter(|catalogue| !catalogue.specs().is_empty()) {
         all.push(RegisteredTool::skill(skills));
