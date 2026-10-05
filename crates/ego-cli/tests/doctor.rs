@@ -375,7 +375,7 @@ fn jev_doctor_names_uses_and_gateway_without_reading_or_showing_auth() {
     let snapshot = doctor::snapshot(workspace.into(), Some(home), &roots);
     let text = doctor::text(&snapshot);
     assert!(text.contains("unverified-ZDR"), "{text}");
-    for use_name in ["wake=true", "destructive=true", "router=true"] {
+    for use_name in ["wake=false", "destructive=true", "router=true"] {
         assert!(text.contains(use_name), "{text}");
     }
     assert!(!text.contains("private-identity@example.test"));

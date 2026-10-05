@@ -1,4 +1,5 @@
 //! One Decisions client for router, destructive and wake questions.
+pub mod calibration;
 mod configured;
 use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method, bearer_header, public_header};
 pub use configured::ConfiguredDecisions;

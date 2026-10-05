@@ -4,17 +4,18 @@ fn load(text: &str) -> ego_core::config::JevConfig {
     let layer = ConfigLayer::parse(Source::User, text).unwrap();
     resolve(&[layer], Trust::Trusted, None).unwrap().jev
 }
-// Catches: opt-in defaults excluding LS and a use-off switch affecting its siblings.
+// Catches: an uncalibrated shipped use going live or an override affecting siblings.
 #[test]
-fn all_roots_default_on_and_overrides_change_only_the_named_use() {
+fn shipped_uses_follow_recorded_gates_and_overrides_change_only_the_named_use() {
     let config = load("[jev]");
     for usage in [JevUse::Wake, JevUse::Destructive, JevUse::Router] {
-        assert!(config.default_policy(usage).on);
+        assert_eq!(config.default_policy(usage).on, usage != JevUse::Wake);
     }
     let config = load(
         "[[jev.roots]]
 path='/canonical/LS/**'
-wake={on=false}
+wake={on=true}
+destructive={on=false}
 [[jev.roots]]
 path='/canonical/LS/repo'
 router={on=false}",
@@ -23,9 +24,9 @@ router={on=false}",
     let selected = config
         .select(std::path::Path::new("/canonical/LS/repo"), &paths)
         .unwrap();
-    assert!(!selected.policy(JevUse::Wake).on);
+    assert!(selected.policy(JevUse::Wake).on);
     assert!(!selected.policy(JevUse::Router).on);
-    assert!(selected.policy(JevUse::Destructive).on);
+    assert!(!selected.policy(JevUse::Destructive).on);
 }
 // Catches: project, local, flags, environment or agent-file redirecting judged text.
 #[test]

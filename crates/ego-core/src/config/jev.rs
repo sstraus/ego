@@ -116,13 +116,16 @@ fn index(usage: JevUse) -> usize {
 }
 impl JevConfig {
     pub fn default_policy(&self, usage: JevUse) -> JevPolicy {
+        // Calibration-only selection: docs/metrics/jev/calibration.json (2026-10-05).
         let (low, high, fail) = match usage {
-            JevUse::Wake => (0.3, 0.7, JevFail::Open),
-            JevUse::Destructive => (0.2, 0.8, JevFail::Closed),
-            JevUse::Router => (0.2, 0.8, JevFail::FixedModel),
+            JevUse::Wake => (0.0, 0.55, JevFail::Open),
+            JevUse::Destructive => (0.3, 0.55, JevFail::Closed),
+            JevUse::Router => (0.15, 0.55, JevFail::FixedModel),
         };
         JevPolicy {
-            on: true,
+            // Wake failed useful separation; the other uses passed docs/metrics/jev/held-out.json.
+            // Consumers still require the latest independent held-out gate.
+            on: usage != JevUse::Wake,
             low: Probability(low),
             high: Probability(high),
             fail,
