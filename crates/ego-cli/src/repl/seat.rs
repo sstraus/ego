@@ -927,6 +927,10 @@ impl Seat {
             ))))
             .use_bracketed_paste(true);
 
+        // Keep startup type-ahead as Enter bytes, without cooked tty echo.
+        // Reedline restores the terminal on drop, including startup refusal.
+        crossterm::terminal::enable_raw_mode()?;
+
         let painter = Arc::new(InteractivePainter::live(editor.repaint_signal()));
         {
             let mut status = status.lock().expect("surface status lock");
@@ -1749,6 +1753,11 @@ fn own_terminal(
             continue;
         }
         if !active && pending_control.is_none() {
+            // A startup modal's read_line restores cooked mode on return.
+            if crossterm::terminal::enable_raw_mode().is_err() {
+                cancel.cancel(CancelCause::Host);
+                break;
+            }
             // Before activation Reedline is not reading, so this same owner
             // drains its bounded printer queue without opening an input prompt.
             let request = crossbeam::channel::select_biased! {

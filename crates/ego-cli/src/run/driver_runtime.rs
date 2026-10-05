@@ -325,12 +325,6 @@ pub(super) async fn drive_execution<S: EventSink>(
         }};
     }
 
-    if let Some(status) = status.as_ref()
-        && status.human
-    {
-        status.seat.activate();
-    }
-
     match driver {
         Driver::Once => {
             let input = match resume {
@@ -726,6 +720,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     Some(first) => repl::Line::Submitted(first),
                                     None => {
                                         seat.idle();
+                                        if let Some(status) = status.as_ref()
+                                            && status.human
+                                        {
+                                            status.seat.activate();
+                                        }
                                         seat.read()
                                     }
                                 };
@@ -1850,6 +1849,11 @@ pub(super) async fn drive_execution<S: EventSink>(
 
                             // Per turn, for the reason `build` documents.
                             seat.busy();
+                            if let Some(status) = status.as_ref()
+                                && status.human
+                            {
+                                status.seat.activate();
+                            }
                             let turn_started = std::time::Instant::now();
                             let turn_cancel = CancelToken::new();
                             let (ports, observation, probe_evidence) = effect_scope(

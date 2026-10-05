@@ -151,11 +151,10 @@ pub fn ready_prompt_count(output: &[u8]) -> usize {
             screen.screen().contents().trim() == ">"
         })
         .count()
-        .saturating_sub(1)
 }
 
 #[cfg(windows)]
-fn ready_prompt_count(output: &[u8]) -> usize {
+pub fn ready_prompt_count(output: &[u8]) -> usize {
     const DSR_QUERY: &[u8] = b"\x1b[6n";
     const PLAIN_PROMPT: &[u8] = b"> ";
     const ANSI_PROMPT: &[u8] = b">\x1b[K";
@@ -236,6 +235,8 @@ impl ReleaseGate {
 /// What the fake daemon knows.
 #[derive(Debug, Clone)]
 pub struct Plan {
+    /// Hold discovery so a PTY can submit input before the composer opens.
+    pub discovery_gate: Option<Arc<ReleaseGate>>,
     /// The names `/api/tags` reports as installed.
     pub installed: Vec<String>,
     /// The context `/api/ps` reports as served. `None` makes the model look
@@ -260,6 +261,7 @@ pub struct Plan {
 impl Default for Plan {
     fn default() -> Self {
         Plan {
+            discovery_gate: None,
             installed: vec![MODEL.to_string()],
             context_length: Some(32_768),
             completions: vec![Reply::Sse(text("It is done."))],
@@ -515,6 +517,9 @@ fn serve(
             stream.flush()
         }
         "/api/tags" => {
+            if let Some(gate) = &plan.discovery_gate {
+                gate.wait();
+            }
             let models: Vec<serde_json::Value> = plan
                 .installed
                 .iter()
@@ -1237,10 +1242,8 @@ impl Ego {
                     eof_sent = true;
                     continue;
                 }
-                // Unix PTYs need the second plain prompt render. ConPTY emits
-                // one ANSI-cleared prompt after its cursor-position query.
-                // `ready_prompt_count` encodes those observed handshakes while
-                // exposing the same monotonically increasing count here.
+                // Submit at the first completed empty editor frame. A later
+                // empty frame still gates EOF after the script is accepted.
                 let mut writer = writer.lock().expect("pty writer lock");
                 writer
                     .write_all(input.expect("the scripted branch has input").as_bytes())
