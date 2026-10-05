@@ -191,6 +191,10 @@ struct RecordingResolver {
 }
 
 impl FrozenPolicyResolver for RecordingResolver {
+    fn max_mode(&self) -> Result<Option<Mode>, PolicyControlError> {
+        Ok(None)
+    }
+
     fn resolve_rule_transaction(
         &self,
         before: &RuleSnapshot,

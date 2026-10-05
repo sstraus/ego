@@ -56,6 +56,7 @@ pub(crate) struct LandlockBackend {
     workspace: PathBuf,
     private_scratch: PathBuf,
     runtime_roots: Vec<PathBuf>,
+    roots: Vec<ego_core::permit::ProfileRoot>,
     maximum_caps: ExecCaps,
 }
 
@@ -119,6 +120,7 @@ impl LandlockBackend {
             workspace: policy.workspace().as_path().to_path_buf(),
             private_scratch: private_scratch.as_path().to_path_buf(),
             runtime_roots,
+            roots: policy.roots().to_vec(),
             maximum_caps,
         })
     }
@@ -148,6 +150,17 @@ impl LandlockBackend {
                 .iter()
                 .map(|root| root.as_os_str().to_owned()),
         );
+        arguments.push(OsString::from(self.roots.len().to_string()));
+        for root in &self.roots {
+            arguments.push(OsString::from(
+                if root.access() == ego_core::permit::RootAccess::ReadWrite {
+                    "rw"
+                } else {
+                    "r"
+                },
+            ));
+            arguments.push(root.path().as_path().as_os_str().to_owned());
+        }
         super::backend::LaunchPrefix {
             program: Some(self.helper.as_os_str().to_owned()),
             args_before_target: arguments,
@@ -287,6 +300,23 @@ fn run_helper(mut arguments: impl Iterator<Item = OsString>) -> Result<ExitCode,
     let runtime_roots = (0..root_count)
         .map(|_| required_argument(&mut arguments, "runtime root").map(PathBuf::from))
         .collect::<Result<Vec<_>, _>>()?;
+    let count = required_argument(&mut arguments, "perimeter root count")?
+        .to_str()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count <= MAX_RUNTIME_ROOTS)
+        .ok_or_else(|| HelperError::Protocol("invalid perimeter root count".into()))?;
+    let mut roots = Vec::new();
+    for _ in 0..count {
+        let access = required_argument(&mut arguments, "perimeter access")?;
+        let writable = match access.to_str() {
+            Some("rw") => true,
+            Some("r") => false,
+            _ => return Err(HelperError::Protocol("invalid perimeter access".into())),
+        };
+        let path = PathBuf::from(required_argument(&mut arguments, "perimeter root")?);
+        validate_absolute_existing("perimeter root", &path)?;
+        roots.push((path, writable));
+    }
     let target_argv = arguments.collect::<Vec<_>>();
 
     validate_absolute_directory("workspace", &workspace)?;
@@ -300,7 +330,7 @@ fn run_helper(mut arguments: impl Iterator<Item = OsString>) -> Result<ExitCode,
         ));
     }
 
-    install_ruleset(level, &workspace, &private_scratch, &runtime_roots)?;
+    install_ruleset(level, &workspace, &private_scratch, &runtime_roots, &roots)?;
 
     let mut target = Command::new(&target_argv[0]);
     target.args(&target_argv[1..]);
@@ -352,6 +382,7 @@ fn install_ruleset(
     workspace: &Path,
     private_scratch: &Path,
     runtime_roots: &[PathBuf],
+    roots: &[(PathBuf, bool)],
 ) -> Result<(), HelperError> {
     let required = required_v3_access();
     let optional = optional_known_access();
@@ -367,12 +398,18 @@ fn install_ruleset(
 
     let mut readable_roots = runtime_roots.iter().cloned().collect::<BTreeSet<_>>();
     readable_roots.insert(workspace.to_path_buf());
+    readable_roots.extend(roots.iter().map(|(path, _)| path.clone()));
     for root in readable_roots {
         ruleset = add_read_rule(ruleset, &root)?;
     }
 
     if level == Level::Workspace {
-        for root in [workspace, private_scratch] {
+        for root in [workspace, private_scratch].into_iter().chain(
+            roots
+                .iter()
+                .filter(|(_, writable)| *writable)
+                .map(|(path, _)| path.as_path()),
+        ) {
             ruleset = add_write_rules(ruleset, root)?;
         }
     }
@@ -396,6 +433,14 @@ fn add_read_rule(ruleset: RulesetCreated, root: &Path) -> Result<RulesetCreated,
 }
 
 fn add_write_rules(ruleset: RulesetCreated, root: &Path) -> Result<RulesetCreated, HelperError> {
+    if !root.is_dir() {
+        let required = PathBeneath::new(
+            PathFd::new(root)?,
+            make_bitflags!(AccessFs::{Execute | ReadFile | WriteFile | Truncate}),
+        )
+        .set_compatibility(CompatLevel::HardRequirement);
+        return Ok(ruleset.add_rule(required)?);
+    }
     let required = PathBeneath::new(PathFd::new(root)?, required_v3_access())
         .set_compatibility(CompatLevel::HardRequirement);
     let ruleset = ruleset.add_rule(required)?;
@@ -556,6 +601,7 @@ mod tests {
             workspace: PathBuf::from("/workspace"),
             private_scratch: PathBuf::from("/scratch"),
             runtime_roots: vec![PathBuf::from("/usr")],
+            roots: Vec::new(),
             maximum_caps: ExecCaps::empty(),
         };
         let prefix = backend.launch_prefix();
@@ -570,6 +616,7 @@ mod tests {
             "/scratch",
             "1",
             "/usr",
+            "0",
         ]
         .map(OsString::from);
         assert_eq!(prefix.program, Some(OsString::from("/ego")));

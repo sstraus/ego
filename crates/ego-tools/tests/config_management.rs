@@ -364,3 +364,46 @@ fn concurrent_distinct_managed_writes_serialize_without_lost_updates() {
     assert_eq!(parsed.mode.map(|mode| mode.as_str()), Some("edits"));
     assert_eq!(parsed.bare, Some(true));
 }
+
+// Catches: concurrent roots add operations lose one edit through snapshot-then-set.
+#[test]
+fn concurrent_roots_add_preserves_both_atomic_edits() {
+    use ego_core::permit::RootAccess;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let io = Arc::new(FaultIo::default());
+    let barrier = Arc::new(Barrier::new(2));
+    let workers = ["first", "second"].map(|name| {
+        let path = path.clone();
+        let io = io.clone();
+        let barrier = barrier.clone();
+        let root = directory.path().join(name);
+        thread::spawn(move || {
+            barrier.wait();
+            adapter(&path, &io)
+                .mutate(UserConfigMutation::Root {
+                    target: UserConfigTarget::Base,
+                    path: root,
+                    access: Some(RootAccess::Read),
+                })
+                .unwrap();
+        })
+    });
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let snapshot = adapter(&path, &io)
+        .snapshot(UserConfigTarget::Base)
+        .unwrap();
+    let roots = snapshot
+        .values
+        .into_iter()
+        .find_map(|(key, value)| (key == ManagedConfigKey::Roots).then_some(value).flatten())
+        .unwrap();
+    let ManagedConfigValue::Roots(roots) = roots else {
+        panic!("roots projection missing");
+    };
+    assert_eq!(roots.len(), 2);
+    assert!(roots.iter().any(|root| root.path.ends_with("first")));
+    assert!(roots.iter().any(|root| root.path.ends_with("second")));
+}

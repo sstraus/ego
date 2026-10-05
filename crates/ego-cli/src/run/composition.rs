@@ -195,8 +195,12 @@ pub(super) fn instructions(
 pub(super) fn tools(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
-    let mut all: Vec<_> = builtins().into_iter().map(RegisteredTool::Effect).collect();
+    let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
+        .into_iter()
+        .map(RegisteredTool::Effect)
+        .collect();
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     if let Some(skills) = skills.filter(|catalogue| !catalogue.specs().is_empty()) {
         all.push(RegisteredTool::skill(skills));
@@ -344,6 +348,20 @@ impl FrozenRuleResolver {
 }
 
 impl FrozenPolicyResolver for FrozenRuleResolver {
+    fn max_mode(&self) -> Result<Option<Mode>, PolicyControlError> {
+        resolve_selected(
+            &self.layers,
+            self.trust,
+            self.selected_profile
+                .as_ref()
+                .map(|(name, source)| (name.as_str(), *source)),
+        )
+        .map(|effective| effective.max_mode)
+        .map_err(|error| PolicyControlError::Resolution {
+            diagnostic: error.to_string(),
+        })
+    }
+
     fn resolve_rule_transaction(
         &self,
         before: &RuleSnapshot,
@@ -644,6 +662,7 @@ pub(super) fn admit_windows_unconfined_start(
     let Some(confinement) = windows_unconfined::admit(
         args,
         settings.effective.sandbox,
+        settings.confinement.offline(),
         driver,
         &settings.root,
         home,
@@ -654,9 +673,14 @@ pub(super) fn admit_windows_unconfined_start(
     };
 
     settings.effective.sandbox = Some(confinement);
-    settings.confinement =
-        RunConfinement::new(confinement, args.offline, CanonPath::new(&settings.root))
-            .map_err(|error| UsageError(error.to_string()))?;
+    settings.confinement = RunConfinement::new(
+        confinement,
+        settings.confinement.offline(),
+        CanonPath::new(&settings.root),
+    )
+    .map_err(|error| UsageError(error.to_string()))?
+    .with_roots(settings.confinement.roots().to_vec())
+    .with_exec_paths(settings.confinement.exec_paths().to_vec());
     Ok(())
 }
 
@@ -722,7 +746,7 @@ pub(super) fn frozen_rooted_settings(
 pub(super) fn finish_rooted_settings(
     args: &Args,
     cwd: PathBuf,
-    effective: Effective,
+    mut effective: Effective,
     trust: Trust,
     profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
     diagnostics: &dyn Diagnostics,
@@ -756,6 +780,14 @@ pub(super) fn finish_rooted_settings(
         ));
     }
 
+    if let Some(home) = std::env::var_os("HOME") {
+        for warning in super::profile_roots::defaults(&mut effective, Path::new(&home)) {
+            diagnostics.note(&warning);
+        }
+    }
+    let roots =
+        super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
+
     let exec_paths = effective
         .exec_paths
         .iter()
@@ -773,11 +805,12 @@ pub(super) fn finish_rooted_settings(
 
     let confinement = RunConfinement::new(
         effective.sandbox.unwrap_or_default(),
-        args.offline,
+        args.offline || effective.network == ego_core::config::Network::Off,
         CanonPath::new(&root),
     )
     .map_err(|err| UsageError(err.to_string()))?
-    .with_exec_paths(exec_paths);
+    .with_exec_paths(exec_paths)
+    .with_roots(roots);
 
     Ok(Settings {
         run_deadline,
@@ -869,6 +902,11 @@ pub(super) fn prepared_materials(
         skill_capture
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
+        settings
+            .effective
+            .exec
+            .policy()
+            .map_err(|error| UsageError(error.to_string()))?,
     )?;
     let slug = args
         .model

@@ -178,6 +178,7 @@ pub const BUILT: &[&str] = &[
     "auth",
     "mcp",
     "config",
+    "roots",
     "rules",
     "mcp-server",
 ];
@@ -257,6 +258,7 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("auth", AuthCommand::command()))
         .subcommand(named("mcp", McpCommand::command()))
         .subcommand(named("config", ConfigCommand::command()))
+        .subcommand(named("roots", RootsCommand::command()))
         .subcommand(named("rules", RulesCommand::command()))
         .subcommand(named("mcp-server", McpServerCommand::command()))
 }
@@ -648,6 +650,11 @@ pub struct ConfigArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigAction {
+    Root {
+        target: UserConfigTarget,
+        path: PathBuf,
+        access: Option<ego_core::permit::RootAccess>,
+    },
     Get {
         target: UserConfigTarget,
         key: ManagedConfigKey,
@@ -1096,6 +1103,7 @@ fn overview(program: &str) -> String {
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "auth" => "Manage subscription credentials",
             "mcp" => "Manage configured MCP servers",
+            "roots" => "Manage perimeter roots",
             "config" => "Manage stored user configuration",
             "rules" => "Inspect and manage permission rules",
             other => other,
@@ -1397,6 +1405,41 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                     provider,
                     device,
                 })))
+            }
+        },
+        Some("roots") => match clap_or_answer::<RootsCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let action = match parsed.action {
+                    RootsSubcommand::Add {
+                        profile,
+                        path,
+                        access,
+                    } => ConfigAction::Root {
+                        target: config_target(profile)?,
+                        path,
+                        access: Some(match access.as_str() {
+                            "read" => ego_core::permit::RootAccess::Read,
+                            "read-write" => ego_core::permit::RootAccess::ReadWrite,
+                            _ => {
+                                return Err(UsageError(
+                                    "roots access must be read or read-write".into(),
+                                ));
+                            }
+                        }),
+                    },
+                    RootsSubcommand::Rm { profile, path } => ConfigAction::Root {
+                        target: config_target(profile)?,
+                        path,
+                        access: None,
+                    },
+                    RootsSubcommand::Ls { profile, json } => ConfigAction::Get {
+                        target: config_target(profile)?,
+                        key: ManagedConfigKey::Roots,
+                        json,
+                    },
+                };
+                Ok(Invocation::Config(Box::new(ConfigArgs { action })))
             }
         },
         Some("config") => match config_clap_or_answer(&tokens)? {

@@ -171,6 +171,10 @@ pub(super) async fn drive_execution<S: EventSink>(
         fallbacks: args.fallbacks.clone(),
     };
 
+    let exec_environment = effective
+        .exec
+        .policy()
+        .expect("admitted config has valid environment names");
     let mut refresh_prompt = false;
 
     let turns = Turns {
@@ -979,6 +983,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         let next_registry = match tools(
                                             args.tools.as_ref(),
                                             Some(prospective.core()),
+                                            exec_environment.clone(),
                                         ) {
                                             Ok(registry) => registry,
                                             Err(error) => {
@@ -1528,6 +1533,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 target_skills
                                                     .as_ref()
                                                     .map(crate::skill::SkillCatalogueCapture::core),
+                                                effective.exec.policy().map_err(|error| {
+                                                    CompactionError::Internal(error.to_string())
+                                                })?,
                                             )
                                             .map_err(|error| {
                                                 CompactionError::Internal(error.to_string())

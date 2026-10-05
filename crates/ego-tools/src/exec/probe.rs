@@ -34,6 +34,7 @@ pub(crate) async fn landlock(
     limits: ExecLimits,
     log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
+    validate_probe_scope(policy)?;
     let scratch = tempfile::tempdir().map_err(|error| {
         ProcessError::Backend(format!("cannot create process scratch: {error}"))
     })?;
@@ -88,6 +89,7 @@ pub(crate) async fn seatbelt(
     limits: ExecLimits,
     log: &ProbeLog,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
+    validate_probe_scope(policy)?;
     let scratch = private_scratch()?;
     let scratch_path = canonical_scratch(&scratch)?;
     // Configured exec paths are read and exec roots like the Apple runtime: one
@@ -1173,7 +1175,7 @@ async fn attempt(
         backend,
     );
     let fs = crate::fs::OsFs;
-    let registry: Vec<Arc<dyn Tool>> = vec![Arc::new(Typed(crate::tools::ExecTool))];
+    let registry: Vec<Arc<dyn Tool>> = vec![Arc::new(Typed(crate::tools::ExecTool::default()))];
     let tools = Tools::new(
         &registry,
         ToolEffectPorts::new(
@@ -1206,6 +1208,25 @@ async fn attempt(
         .await
         .map(|_| ())
         .map_err(|error| probe_outcome(&error))
+}
+
+/// Negative production probes must stay outside every granted perimeter root.
+fn validate_probe_scope(policy: &RunConfinement) -> Result<(), ProcessError> {
+    if policy.level() == ego_core::permit::Confinement::Off {
+        return Ok(());
+    }
+    let tmp = fs::canonicalize(std::env::temp_dir())
+        .map_err(|error| ProcessError::Backend(format!("cannot resolve probe TMPDIR: {error}")))?;
+    for root in policy.roots() {
+        if tmp.starts_with(root.path().as_path()) {
+            return Err(ProcessError::Backend(format!(
+                "perimeter-probe-temp-overlap: TMPDIR {} is inside granted root {}; the negative filesystem probe cannot be proven",
+                tmp.display(),
+                root.path()
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

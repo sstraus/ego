@@ -50,7 +50,7 @@ advertised as working.
 
 Available entry points are `ego [PROMPT]`, `ego run`, `ego resume`, `ego ls`,
 `ego fork`, `ego compact`, `ego export`, `ego usage`, `ego models`, `ego mcp`,
-`ego config`, `ego rules`, `ego hooks`, `ego doctor`, `ego mcp-server`,
+`ego config`, `ego roots`, `ego rules`, `ego hooks`, `ego doctor`, `ego mcp-server`,
 `ego acp`, and `ego a2a`, plus `ego auth` for subscription credentials.
 `ego a2a --listen ENDPOINT` serves Agent2Agent so another agent can discover
 and delegate to εgo; a socket path is authenticated by the operating system,

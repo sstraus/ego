@@ -26,11 +26,21 @@ pub fn observe(
     let selected = profile
         .map(|name| (name, Source::Flags))
         .or_else(|| env_profile.as_deref().map(|name| (name, Source::Env)));
-    let effective = resolve_selected(&layers, Trust::Untrusted, selected)
+    let mut effective = resolve_selected(&layers, Trust::Untrusted, selected)
         .map_err(|error| UsageError(error.to_string()))?;
-    let roots = crate::run::profile_roots::admit(&effective)
-        .map_err(|_| UsageError("the profile roots could not be admitted".into()))?;
-    let confinement = RunConfinement::new(effective.sandbox.unwrap_or_default(), false, workspace)
-        .map_err(|error| UsageError(error.to_string()))?;
-    Ok(Perimeter::session(&confinement, &effective, &roots))
+    let warnings = std::env::var_os("HOME").map_or_else(Vec::new, |home| {
+        crate::run::profile_roots::defaults(&mut effective, Path::new(&home))
+    });
+    let roots = crate::run::profile_roots::admit(&effective, &workspace).map_err(|error| {
+        UsageError(format!(
+            "warning: configured perimeter roots could not be admitted: {error}"
+        ))
+    })?;
+    let confinement = RunConfinement::new(
+        effective.sandbox.unwrap_or_default(),
+        effective.network == ego_core::config::Network::Off,
+        workspace,
+    )
+    .map_err(|error| UsageError(error.to_string()))?;
+    Ok(Perimeter::session(&confinement, &effective, &roots).with_warnings(warnings))
 }
