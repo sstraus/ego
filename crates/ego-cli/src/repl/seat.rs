@@ -388,6 +388,7 @@ struct SurfaceStatus {
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
+    session_picker_open: bool,
     /// Keys the picker has been sent and not yet applied. The editor parses a
     /// whole burst of input before running its first command and drops the
     /// rest, so typed keys wait here instead of riding on that command.
@@ -441,6 +442,7 @@ impl Default for SurfaceStatus {
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             model_picker: None,
+            session_picker_open: false,
             picker_keys: Vec::new(),
             model_selection: None,
             question_selector: None,
@@ -770,6 +772,10 @@ impl SurfaceOutput {
 }
 
 enum Control {
+    SessionPicker {
+        sessions: Vec<ego_core::store::session_store::SessionMeta>,
+        reply: Sender<Option<SessionId>>,
+    },
     InsertPasteText {
         text: String,
     },
@@ -1602,6 +1608,13 @@ impl crate::run::InteractiveSeat for Seat {
         self.request(|reply| Control::ConfirmCompaction { source, reply }, false)
     }
 
+    fn pick_session(
+        &self,
+        sessions: Vec<ego_core::store::session_store::SessionMeta>,
+    ) -> Option<SessionId> {
+        self.request(|reply| Control::SessionPicker { sessions, reply }, None)
+    }
+
     fn activate_session(&self, target: SessionId) -> bool {
         self.request(|reply| Control::ActivateSession { target, reply }, false)
     }
@@ -1873,3 +1886,5 @@ use question::{PermissionWord, parse_permission};
 
 #[cfg(test)]
 mod tests;
+
+mod session_picker;

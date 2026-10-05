@@ -150,6 +150,13 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn confirm_compaction(&self, _source: SessionId) -> bool {
         false
     }
+    /// Select an existing session through the terminal owner.
+    fn pick_session(
+        &self,
+        _sessions: Vec<ego_core::store::session_store::SessionMeta>,
+    ) -> Option<SessionId> {
+        None
+    }
     /// Switch the terminal and its draft namespace after publication.
     fn activate_session(&self, _target: SessionId) -> bool {
         false

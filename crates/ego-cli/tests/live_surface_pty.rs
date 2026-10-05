@@ -13,6 +13,166 @@ use support::{
     Ego, Plan, ReleaseGate, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
 };
 
+// Catches: /sessions remains a UTC table, loses search bursts, or activates the wrong writer.
+#[test]
+fn sessions_picker_filters_titles_and_resumes_selected_context_in_local_time() {
+    sessions_picker_contract(true);
+}
+
+// Catches: a workspace with no other sessions opens a blank or uncloseable picker.
+#[test]
+fn sessions_picker_empty_workspace_has_an_explicit_cancelable_state() {
+    sessions_picker_contract(false);
+}
+
+fn sessions_picker_contract(populated: bool) {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# session picker fixture\n");
+    let mut expected_stamp = String::new();
+    if populated {
+        let seeded = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+            ])
+            .arg("remember selected context 239")
+            .run();
+        assert_eq!(seeded.code, Some(0), "{}", seeded.stderr);
+        let named = places
+            .ego(&stub)
+            .without_fixture_thinking()
+            .subcommand("resume")
+            .args([support::FIXTURE_SESSION_ID, "--name", "set=Orchid project"])
+            .run();
+        assert_eq!(named.code, Some(0), "{}", named.stderr);
+        let other_id = "0192a600-0000-7000-8000-000000000239";
+        let other = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                other_id,
+                "--sandbox",
+                "off",
+            ])
+            .arg("unrelated context 239")
+            .run();
+        assert_eq!(other.code, Some(0), "{}", other.stderr);
+        let other = places
+            .ego(&stub)
+            .without_fixture_thinking()
+            .subcommand("resume")
+            .args([other_id, "--name", "set=Zebra project"])
+            .run();
+        assert_eq!(other.code, Some(0), "{}", other.stderr);
+        let listing = places
+            .ego(&stub)
+            .subcommand("ls")
+            .args(["--output", "json"])
+            .run()
+            .report();
+        let millis = listing["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == support::FIXTURE_SESSION_ID)
+            .unwrap()["updated"]
+            .as_u64()
+            .unwrap();
+        let utc = chrono::DateTime::from_timestamp_millis(i64::try_from(millis).unwrap()).unwrap();
+        expected_stamp = (utc - chrono::Duration::hours(10))
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+    }
+    let ego = places
+        .ego(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TZ", "Pacific/Honolulu");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    let start = output.len();
+    input.write_all(b"/sessions\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Select session");
+    if populated {
+        until_normalized(&reader, &mut output, start, &expected_stamp);
+        until_normalized(&reader, &mut output, start, "Orchid project");
+        let filtered = output.len();
+        input.write_all(b"orchid").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, filtered, "filter: orchid");
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            filtered,
+            &format!("resumed session {}", support::FIXTURE_SESSION_ID),
+        );
+        drain_until_quiet(&reader, &mut output);
+        let answer = output.len();
+        input.write_all(b"recall selected context\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, answer, "REGRESSION-MARKER");
+        assert!(
+            stub.generations()
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("remember selected context 239"),
+            "selected session history missing"
+        );
+    } else {
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "No other sessions in this workspace",
+        );
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+    }
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "{}", normalized(&output));
+}
+
 // Catches: the replacement session has no evidence authority for its next turn.
 #[test]
 fn successor_fork_accepts_next_turn_and_resumes() {
@@ -4723,6 +4883,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
 
     for (command, prompt) in [
         ("model", "Select model"),
+        ("sessions", "Select session"),
         ("thinking", "Select reasoning for"),
         ("mode", "Choose execution mode"),
         ("permissions", "Choose permission operation"),
@@ -4746,7 +4907,6 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
 
     for (command, expected) in [
         ("mcp", Some("mcp:")),
-        ("sessions", Some("UPDATED")),
         ("fork", None),
         // The inherited model permits a checkpoint request; its empty reply must fail.
         ("compact", Some("compaction failed")),

@@ -1644,3 +1644,13 @@ Only supplied rows come from this file, and they are rebuilt on every
 invocation rather than cached at all; the cache holds only *discovered* rows,
 from providers that enumerate themselves.
 
+### Interactive session picker
+
+On a human terminal, `/sessions` opens the current workspace's saved sessions,
+newest first, excluding the active session. Rows show title, model, and updated
+local time. Type to filter title or model, use Up/Down to select, Enter to resume,
+and Esc to cancel. The next prompt uses the selected session's durable context;
+the current model selection stays in effect. Sessions with unfinished work need
+`ego resume ID`, which owns recovery. Pending source work prevents switching.
+With sequential stdin, `/sessions` keeps the table. `ego ls` and machine output
+keep their existing format.

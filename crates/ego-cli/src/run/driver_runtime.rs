@@ -1241,19 +1241,74 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Sessions,
                                     )) => {
-                                        match crate::catalogue::listing(
+                                        if !seat.has_human() {
+                                            match crate::catalogue::listing(jsonl_store.as_ref(), &root, false) {
+                                                Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
+                                                Err(error) => diagnostics.note(&format!("the session catalogue could not be read: {error}")),
+                                            }
+                                            continue;
+                                        }
+                                        if pending_work {
+                                            diagnostics.note("a session cannot be selected while source work is pending");
+                                            continue;
+                                        }
+                                        let metas = match crate::catalogue::listing(
                                             jsonl_store.as_ref(),
                                             &root,
                                             false,
                                         ) {
-                                            Ok(metas) => diagnostics.note(
-                                                &crate::catalogue::table(&metas, false).join("\n"),
-                                            ),
-                                            Err(error) => diagnostics.note(&format!(
-                                                "the session catalogue could not be read: {error}"
-                                            )),
+                                            Ok(metas) => metas
+                                                .into_iter()
+                                                .filter(|meta| meta.id != active.id())
+                                                .collect(),
+                                            Err(error) => {
+                                                diagnostics.note(&format!("the session catalogue could not be read: {error}"));
+                                                continue;
+                                            }
+                                        };
+                                        let Some(target) = seat.pick_session(metas) else {
+                                            continue;
+                                        };
+                                        let opened = match session::open(
+                                            jsonl_store.as_ref(),
+                                            &target,
+                                            &clock,
+                                        ) {
+                                            Ok(opened) => opened,
+                                            Err(error) => {
+                                                diagnostics.note(&format!("the selected session could not be opened: {error}"));
+                                                continue;
+                                            }
+                                        };
+                                        let target_state = opened.state.clone();
+                                        // Interrupted work requires the full `ego resume` recovery path.
+                                        if target_state.turns.values().any(|turn| !turn.completed)
+                                            || !target_state.unacknowledged_prompts().is_empty()
+                                            || target_state.pending_question().is_some()
+                                            || !target_state.live_attempts.is_empty()
+                                        {
+                                            diagnostics.note(&format!("session {target} has unfinished work; use ego resume {target}"));
+                                            continue;
                                         }
-                                        continue;
+                                        let target_owner = match ActiveSession::durable(
+                                            opened,
+                                            target_state,
+                                            EVIDENCE_CAP,
+                                        ) {
+                                            Ok(owner) => owner,
+                                            Err(error) => {
+                                                diagnostics.note(&format!("the selected session could not be replayed: {error}"));
+                                                continue;
+                                            }
+                                        };
+                                        if !seat.activate_session(target) {
+                                            diagnostics.note("the terminal could not activate the selected session");
+                                            continue;
+                                        }
+                                        diagnostics.note(&format!("resumed session {target}"));
+                                        break 'epoch EpochTransition::New {
+                                            target: target_owner,
+                                        };
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Usage,
