@@ -13,6 +13,184 @@ use support::{
     Ego, Plan, ReleaseGate, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
 };
 
+// Catches: resume shows an empty transcript, duplicate deltas, or drops compact tool rows.
+#[test]
+fn resume_replays_recent_turns_before_input_without_repeating_deltas() {
+    resume_replay_contract(3, false);
+}
+
+// Catches: replay is unbounded or one known unrenderable message prevents the composer.
+#[test]
+fn resume_replay_bounds_turns_and_survives_a_known_unrenderable_message() {
+    resume_replay_contract(12, true);
+}
+
+fn resume_replay_contract(turns: usize, unrenderable: bool) {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+    use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::permit::ToolResult;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.file("AGENTS.md", "# transcript replay fixture\n");
+    let root = std::fs::canonicalize(ego.workspace_path()).unwrap();
+    let store = JsonlStore::new(
+        ego.home_path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    );
+    let id: SessionId = support::FIXTURE_SESSION_ID.parse().unwrap();
+    store
+        .publish_empty_session(id, &root, Timestamp::from_millis(1))
+        .unwrap();
+    let mut seq = Seq::ZERO;
+    let mut millis = 1;
+    for n in 0..turns {
+        let turn = TurnId::new();
+        let user = ItemId::new();
+        let call = ItemId::new();
+        let assistant = ItemId::new();
+        let mut append = |item, kind| {
+            let at = seq.next();
+            millis += 10;
+            store
+                .append(
+                    &id,
+                    &DomainEvent {
+                        env: Envelope {
+                            seq: at,
+                            id: EventId::new(),
+                            turn,
+                            item,
+                            parent: None,
+                            ts: Timestamp::from_millis(millis),
+                            producer: Producer::Main,
+                        },
+                        kind,
+                    },
+                )
+                .unwrap();
+        };
+        append(
+            Some(user),
+            EventKind::UserPrompt {
+                text: format!("REPLAY-USER-{n:02}"),
+                images: Vec::new(),
+                queued_prompt: None,
+            },
+        );
+        append(
+            Some(call),
+            EventKind::ToolCallStarted {
+                name: "read".to_owned(),
+                args: format!("{{\"path\":\"replay-{n:02}.txt\"}}"),
+                call_id: Some(format!("read-{n}")),
+            },
+        );
+        append(
+            Some(call),
+            EventKind::ToolCallCompleted {
+                ok: true,
+                result: ToolResult::builtin("saved content"),
+            },
+        );
+        append(
+            Some(assistant),
+            EventKind::AssistantDelta {
+                text: format!("REPLAY-ANSWER-{n:02}"),
+            },
+        );
+        append(
+            Some(assistant),
+            EventKind::AssistantMessage {
+                text: format!("REPLAY-ANSWER-{n:02}"),
+            },
+        );
+        if unrenderable && n + 1 == turns {
+            append(
+                None,
+                EventKind::AssistantMessage {
+                    text: "NOT-RENDERABLE".to_owned(),
+                },
+            );
+        }
+        append(
+            None,
+            EventKind::TurnCompleted {
+                ok: true,
+                exit_reason: ExitReason::Completed,
+            },
+        );
+    }
+    let ego = ego
+        .subcommand("resume")
+        .arg(support::FIXTURE_SESSION_ID)
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        &format!("REPLAY-ANSWER-{:02}", turns - 1),
+    );
+    drain_until_quiet(&reader, &mut output);
+    let shown = normalized(&output[start..]);
+    for n in turns.saturating_sub(10)..turns {
+        assert!(shown.contains(&format!("REPLAY-USER-{n:02}")), "{shown}");
+        assert_eq!(
+            shown.matches(&format!("REPLAY-ANSWER-{n:02}")).count(),
+            1,
+            "{shown}"
+        );
+        assert!(shown.contains(&format!("replay-{n:02}.txt")), "{shown}");
+    }
+    if turns > 10 {
+        assert!(shown.contains("2 earlier turns omitted"), "{shown}");
+        assert!(!shown.contains("REPLAY-USER-00"), "{shown}");
+    }
+    if unrenderable {
+        assert_eq!(
+            shown.matches("[transcript item unavailable]").count(),
+            1,
+            "{shown}"
+        );
+    }
+    assert!(
+        rendered_prompt_count(&output[start..]) > 0,
+        "composer missing: {shown}"
+    );
+    assert!(
+        stub.generations().is_empty(),
+        "display replay generated a response"
+    );
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    assert!(status.success(), "{shown}");
+}
+
 // Catches: /sessions remains a UTC table, loses search bursts, or activates the wrong writer.
 #[test]
 fn sessions_picker_filters_titles_and_resumes_selected_context_in_local_time() {

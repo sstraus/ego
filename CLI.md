@@ -1654,3 +1654,10 @@ the current model selection stays in effect. Sessions with unfinished work need
 `ego resume ID`, which owns recovery. Pending source work prevents switching.
 With sequential stdin, `/sessions` keeps the table. `ego ls` and machine output
 keep their existing format.
+
+On human-terminal resume, the transcript replays the most recent 10 user turns
+before the composer, using canonical final answers and the live compact tool
+renderer. A line reports how many earlier turns were omitted. Display replay
+adds no events or usage. Known transcript items that cannot be rendered show
+`[transcript item unavailable]`; unknown durable records keep the store's
+existing recovery refusal.

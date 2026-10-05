@@ -424,6 +424,23 @@ pub(super) async fn drive_execution<S: EventSink>(
             Ok(ended)
         }
         Driver::Interactive { seat, between } => {
+            if seat.has_human()
+                && matches!(&args.session, crate::cli::SessionChoice::Resume(_))
+                && let Some(output) = text_output
+            {
+                let environment = crate::render::caps::Environment::read();
+                let capabilities = crate::render::Capabilities::of(
+                    &crate::render::caps::Terminal::from_process(args.no_color, &environment),
+                );
+                if let Err(error) = crate::render::replay::replay(
+                    active.writer(),
+                    active.id(),
+                    output,
+                    capabilities,
+                ) {
+                    diagnostics.note(&format!("the transcript could not be replayed: {error}"));
+                }
+            }
             let interactive_metadata =
                 SessionMetadata::new(Arc::clone(jsonl_store), Arc::new(clock));
             type CompactionRuntime = (
