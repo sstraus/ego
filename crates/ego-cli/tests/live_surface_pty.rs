@@ -5971,11 +5971,6 @@ fn tool_turn_with_completions(
             },
         ])
         .env("TERM", "xterm-256color");
-    let ego = if children_gate.is_some() {
-        ego.args(["--offline"])
-    } else {
-        ego
-    };
     ego.file("AGENTS.md", "# tool row fixture\n");
     for (name, contents) in files {
         ego.file(name, contents);
@@ -6044,7 +6039,7 @@ fn tool_turn_with_completions(
         };
         let parent_system = live_context(&generations[0]);
         assert!(
-            parent_system.contains("sandbox: workspace; network: offline"),
+            parent_system.contains("sandbox: workspace; network: online"),
             "{parent_system}"
         );
         for child in &generations[1..3] {

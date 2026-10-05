@@ -10017,6 +10017,12 @@ mod turn {
                 settings,
             );
             runtime.policy_source = fx.policy_source.clone();
+            runtime.config.identity = Some(ego_core::turn::AgentIdentity {
+                version: "test".into(),
+                sandbox: Confinement::Workspace,
+                offline: true,
+                host: None,
+            });
             let mut loop_ = CoreTurnLoop::new(
                 session(
                     SessionState::default(),
@@ -10068,6 +10074,82 @@ mod turn {
                     .values()
                     .all(|i| i.tool_name.as_deref() != Some("fake_write")),
                 "child transcript leaked into parent"
+            );
+        }
+
+        struct NetworkAttempt;
+        impl TypedTool for NetworkAttempt {
+            type Params = ReadParams;
+            fn name(&self) -> &str {
+                "network_attempt"
+            }
+            fn description(&self) -> &str {
+                "attempt a network effect"
+            }
+            fn prepare_typed(
+                &self,
+                params: ReadParams,
+                _: &PrepareCtx<'_>,
+            ) -> Result<PreparedCall, ToolError> {
+                Ok(PreparedCall::new(
+                    self.name().into(),
+                    Op::ProtocolConnect {
+                        target: ego_core::permit::NetworkTarget::parse(&params.path)
+                            .map_err(|error| ToolError::InvalidParams(error.to_string()))?,
+                    },
+                ))
+            }
+            fn execute<'a, 'io>(
+                &'a self,
+                _: PreparedCall,
+                _: &'a dyn GuardedIo<'io>,
+            ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+            where
+                'io: 'a,
+            {
+                panic!("offline parent's denied network effect reached execution")
+            }
+        }
+
+        #[test]
+        fn task_child_keeps_offline_posture_and_cannot_drop_parent_network_denial() {
+            // Catches: offline child advertising online posture or losing the parent network ceiling.
+            let mut fx = Fixture::new(vec![]).with_rules(&[], &["net(*)"]);
+            fx.registry.push(Arc::new(Typed(NetworkAttempt)));
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"offline", "prompt":"try network"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "net1",
+                        "network_attempt",
+                        json!({"path":"api.example.test:443"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            let requests = generator.calls();
+            for request in &requests[..2] {
+                assert!(request.messages.messages().iter().flat_map(|message| &message.content).any(|block| {
+                    matches!(block, ContentBlock::Text { text } if text.contains("sandbox: workspace; network: offline"))
+                }), "parent and child must both receive the authoritative offline context");
+            }
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .find(|item| item.tool_name.as_deref() == Some("task"))
+                    .unwrap()
+                    .ok,
+                Some(false)
             );
         }
 
