@@ -164,7 +164,6 @@ const UNAVAILABLE: &[Unavailable] = &[Unavailable {
 /// defect moved one link along the chain — two surfaces agreeing perfectly
 /// about something that has stopped being true.
 pub const BUILT: &[&str] = &[
-    "orchestrator",
     "run",
     "resume",
     "fork",
@@ -183,6 +182,7 @@ pub const BUILT: &[&str] = &[
     "roots",
     "rules",
     "mcp-server",
+    "orchestrator",
 ];
 
 /// A command `CLI.md` §2 documents that this build does not implement, and the
