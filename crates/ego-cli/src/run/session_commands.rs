@@ -121,7 +121,9 @@ pub(super) fn exported(args: &ExportArgs) -> Result<String, RunTermination> {
         .into_iter()
         .filter_map(|entry| match entry {
             SessionEntry::Event(event) => project_public(&event),
-            SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
+            SessionEntry::RunTransaction(_)
+            | SessionEntry::Evidence(_)
+            | SessionEntry::NoticeDelivered(_) => None,
         })
         .collect::<Vec<_>>();
     match args.format {

@@ -27,6 +27,15 @@ pub enum SessionEntry {
     Event(DomainEvent),
     RunTransaction(RunTransaction),
     Evidence(EvidenceRecord),
+    NoticeDelivered(NoticeDelivery),
+}
+
+/// ACP transport acceptance outside conversation turns; this is not a host render receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeDelivery {
+    pub card_id: String,
+    pub source_path: Option<PathBuf>,
+    pub delivered_at: Timestamp,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -35,6 +44,7 @@ enum SessionEntryWire {
     Event { event: DomainEvent },
     RunTransaction { run_transaction: RunTransaction },
     Evidence { evidence: EvidenceRecord },
+    NoticeDelivered { notice: NoticeDelivery },
 }
 
 impl Serialize for SessionEntry {
@@ -51,6 +61,9 @@ impl Serialize for SessionEntry {
             },
             Self::Evidence(evidence) => SessionEntryWire::Evidence {
                 evidence: evidence.clone(),
+            },
+            Self::NoticeDelivered(notice) => SessionEntryWire::NoticeDelivered {
+                notice: notice.clone(),
             },
         }
         .serialize(serializer)
@@ -73,6 +86,7 @@ impl<'de> Deserialize<'de> for SessionEntry {
                 }
                 Self::Evidence(evidence)
             }
+            SessionEntryWire::NoticeDelivered { notice } => Self::NoticeDelivered(notice),
         })
     }
 }

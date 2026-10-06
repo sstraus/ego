@@ -33,3 +33,10 @@ Sources: [domain contract](../../crates/ego-core/src/orchestrator.rs),
 [OS adapter](../../crates/ego-tools/src/orchestrator.rs),
 [active operations](../../crates/ego-tools/src/orchestrator_active.rs), and
 [retained operational note](../internals/orchestration/active-operations.md).
+
+`ego orchestrator brief [--root PATH]` provides the same deterministic child and
+unread-path inspection without a model turn. ACP cards append `notice_delivered`
+facts to the existing session stream after transport enqueue, fsyncing before the
+pump acknowledges its batch. Those facts are independent of conversation turns;
+transport acceptance does not establish host rendering. Measurement and live
+comparison tooling: [observation README](../../ARCHITECTURE.md).

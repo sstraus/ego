@@ -65,7 +65,9 @@ impl RecordingSessionStore {
                     .iter()
                     .filter_map(|entry| match entry {
                         SessionEntry::RunTransaction(transaction) => Some(transaction.clone()),
-                        SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+                        SessionEntry::Event(_)
+                        | SessionEntry::Evidence(_)
+                        | SessionEntry::NoticeDelivered(_) => None,
                     })
                     .collect()
             })
@@ -153,7 +155,9 @@ impl SessionStore for RecordingSessionStore {
         let current = entries.get(session).and_then(|entries| {
             entries.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
-                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::Event(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
         });
         if expected_revision != current {

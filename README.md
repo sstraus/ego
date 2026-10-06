@@ -58,7 +58,7 @@ model, supply its API key or complete subscription login first; see
 The command set is `ego run`, `ego resume`, `ego fork`, `ego compact`,
 `ego export`, `ego ls`, `ego usage`, `ego models`, `ego hooks`, `ego doctor`,
 `ego acp`, `ego a2a`, `ego auth`, `ego mcp`, `ego config`, `ego roots`,
-`ego rules`, and `ego mcp-server`.
+`ego rules`, `ego orchestrator`, and `ego mcp-server`.
 
 A pipeline uses an explicit model and never prompts for permission or trust:
 

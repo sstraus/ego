@@ -191,18 +191,10 @@ impl TypedTool for TuicReadTool {
                         .collect::<Vec<_>>()
                         .join("\n")
                 }),
-                ReadKind::Brief => adapter.brief(&filter).await.map(|brief| {
-                    format!(
-                        "Children:\n{}\nUnread results:\n{}",
-                        brief
-                            .children
-                            .iter()
-                            .map(ChildLine::text)
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        brief.unread_results.join("\n")
-                    )
-                }),
+                ReadKind::Brief => adapter
+                    .brief(&filter)
+                    .await
+                    .map(|brief| render_brief(&brief)),
             }
             .map_err(ToolError::InvalidParams)?;
             Ok(ToolResult::builtin(text))
@@ -259,18 +251,35 @@ impl Orchestrator for TuicOrchestrator<'_, '_> {
                         .exec(spec)
                         .await
                         .map_err(|error| error.to_string())?,
-                )?
-                .lines()
-                .map(bounded_line)
-                .collect(),
-                None => Vec::new(),
+                )?,
+                None => String::new(),
             };
-            Ok(Brief {
-                children,
-                unread_results,
-            })
+            Ok(project_brief(children, &unread_results))
         })
     }
+}
+
+/// Shared read-only CLI/tool projection; paths are bounded exactly like child rows.
+pub fn project_brief(children: Vec<ChildLine>, unread: &str) -> Brief {
+    let mut unread_results: Vec<_> = unread.lines().map(bounded_line).collect();
+    unread_results.sort();
+    Brief {
+        children,
+        unread_results,
+    }
+}
+
+pub fn render_brief(brief: &Brief) -> String {
+    format!(
+        "Children:\n{}\nUnread results:\n{}",
+        brief
+            .children
+            .iter()
+            .map(ChildLine::text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        brief.unread_results.join("\n")
+    )
 }
 
 pub(super) fn stdout(result: &ToolResult) -> Result<String, String> {

@@ -228,7 +228,9 @@ impl SessionStore for RecordingSessionStore {
             }
             match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
-                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::Event(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             }
         });
         if current != expected_revision {

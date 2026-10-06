@@ -44,6 +44,7 @@ use crate::agent_file::{self, AgentFile};
 /// What the process was asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
+    Orchestrator(Box<OrchestratorArgs>),
     /// `ego config get|set|unset|ls|edit` — typed user configuration management.
     Config(Box<ConfigArgs>),
     /// `ego rules ls|allow|deny|revoke|remember|explain`.
@@ -163,6 +164,7 @@ const UNAVAILABLE: &[Unavailable] = &[Unavailable {
 /// defect moved one link along the chain — two surfaces agreeing perfectly
 /// about something that has stopped being true.
 pub const BUILT: &[&str] = &[
+    "orchestrator",
     "run",
     "resume",
     "fork",
@@ -261,6 +263,27 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("roots", RootsCommand::command()))
         .subcommand(named("rules", RulesCommand::command()))
         .subcommand(named("mcp-server", McpServerCommand::command()))
+        .subcommand(named("orchestrator", OrchestratorCommand::command()))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct OrchestratorArgs {
+    pub root: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+struct OrchestratorCommand {
+    #[command(subcommand)]
+    action: OrchestratorAction,
+}
+
+#[derive(Subcommand)]
+enum OrchestratorAction {
+    /// Inspect tracked children and unread results without model generation or inbox reads.
+    Brief {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 }
 
 /// The flag name in `token`, if it is one. `--budget=2.5$` is `--budget`.
@@ -1101,6 +1124,7 @@ fn overview(program: &str) -> String {
             "a2a" => "Serve Agent2Agent discovery information",
             "doctor" => "Print a read-only redacted health snapshot",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
+            "orchestrator" => "Inspect native orchestration without model generation",
             "auth" => "Manage subscription credentials",
             "mcp" => "Manage configured MCP servers",
             "roots" => "Manage perimeter roots",
@@ -1206,6 +1230,16 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
     }
 
     match subcommand.as_deref() {
+        Some("orchestrator") => match clap_or_answer::<OrchestratorCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => match parsed.action {
+                OrchestratorAction::Brief { root } => {
+                    Ok(Invocation::Orchestrator(Box::new(OrchestratorArgs {
+                        root,
+                    })))
+                }
+            },
+        },
         None => match clap_or_answer::<RunCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Interactive(Box::new(into_args(parsed)?))),

@@ -40,7 +40,9 @@ fn read_all(store: &JsonlStore, id: &SessionId) -> Vec<DomainEvent> {
             SessionEntry::RunTransaction(_) => {
                 panic!("compaction target contained a run transaction")
             }
-            SessionEntry::Evidence(_) => panic!("compaction target contained evidence"),
+            SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => {
+                panic!("compaction target contained evidence")
+            }
         },
     )
     .collect()

@@ -64,7 +64,7 @@ pub struct SeededReplay {
 }
 
 pub struct DurableAcpFixture {
-    store: Arc<Store>,
+    pub store: Arc<Store>,
     ids: Arc<TestIds>,
     effects: Arc<EffectCounts>,
     executor: Arc<Executor>,
@@ -284,6 +284,17 @@ impl DurableAcpFixture {
         trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
         notices: AcpNotices,
     ) -> agent_client_protocol::AgentProtocolRouter {
+        let notice_store = Arc::clone(&self.store);
+        notices.set_delivery_recorder(Arc::new(move |session, notice| {
+            notice_store
+                .entries
+                .lock()
+                .map_err(|error| error.to_string())?
+                .entry(session)
+                .or_default()
+                .push(SessionEntry::NoticeDelivered(notice));
+            Ok(())
+        }));
         let clock = Arc::new(TestClock);
         let controller = Arc::new(RunController::new(
             Arc::clone(&self.store),
@@ -787,7 +798,9 @@ impl Store {
             .rev()
             .find_map(|entry| match entry {
                 SessionEntry::Event(event) => Some(event.env.seq),
-                SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::RunTransaction(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
             .unwrap_or(Seq::ZERO)
     }
@@ -841,7 +854,7 @@ impl SessionStore for Store {
             entries.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
                 SessionEntry::Event(_) => None,
-                SessionEntry::Evidence(_) => None,
+                SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => None,
             })
         });
         if expected_revision != actual {
