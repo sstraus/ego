@@ -1543,7 +1543,18 @@ and origin layer, sandbox selection and backend, capability evidence, and
 network mode. The interactive command projects the session's existing
 confinement and admitted roots; it does not reload configuration. Headless
 inspection uses the current directory and untrusted configuration resolution.
-Capabilities remain `not_checked` because inspection does not execute probes.
+Session inspection reuses the current backend observation and committed probe
+transcript from the shared behavioral suite; it executes no additional probes.
+In effective-perimeter JSON, `capabilities` is an array of measured guarantees:
+`read_scoped`, `write_denied`, `write_scoped`, and `no_ip_network`. An empty array
+means the probes completed without establishing a guarantee. `backend` names
+the observed backend, including `bwrap` when selected on Linux. `probe_evidence`
+is the existing session transcript reference (`<sha256>:<bytes>`).
+Without a completed observation and probe transcript, `capabilities` is the
+string `not_checked`, and `capabilities_reason` explains why. Measured views omit
+`capabilities_reason`; unmeasured views omit `probe_evidence`. Headless
+`config ls --effective --json` and doctor have no session measurement and remain
+`not_checked`. A mechanism name or configured sandbox is not proof of enforcement.
 Profile roots reach both permission policy and exec confinement; sandbox `ro` still denies all writes.
 Doctor may name admitted roots in this block only; all other diagnostics keep
 the existing path redaction policy.

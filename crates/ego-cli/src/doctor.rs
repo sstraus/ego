@@ -81,7 +81,7 @@ fn snapshot_with_perimeter(
         workspace: workspace.clone(),
         home: credentials.home.clone(),
     };
-    let sandbox = Sandbox;
+    let sandbox = Sandbox { perimeter };
     let catalogue = Catalogue;
     let mcp = Mcp;
     let skills = Skills { workspace };
@@ -105,7 +105,11 @@ fn snapshot_with_perimeter(
             // The typed constructor does not alter any probe's visible roots.
             HealthItem::new(
                 HealthItemId::probe("sandbox.perimeter"),
-                HealthStatus::NotChecked,
+                if perimeter.measured_capabilities().is_some() {
+                    HealthStatus::Ok
+                } else {
+                    HealthStatus::NotChecked
+                },
                 HealthDetail::perimeter(perimeter),
                 HealthDetail::fixed("the admitted perimeter"),
             )
@@ -430,18 +434,33 @@ impl HealthProbe for SessionStore {
     }
 }
 
-struct Sandbox;
+struct Sandbox<'a> {
+    perimeter: Option<&'a crate::perimeter::Perimeter>,
+}
 
-impl HealthProbe for Sandbox {
+impl HealthProbe for Sandbox<'_> {
     fn section(&self) -> HealthSection {
         HealthSection::Sandbox
     }
 
-    fn observe(&self, _roots: &VisibleRoots) -> Result<Vec<HealthItem>, RedactionRefusal> {
+    fn observe(&self, roots: &VisibleRoots) -> Result<Vec<HealthItem>, RedactionRefusal> {
+        if let Some(capabilities) = self.perimeter.and_then(|view| view.measured_capabilities()) {
+            return Ok(vec![HealthItem::new(
+                HealthItemId::probe("sandbox.capabilities"),
+                if capabilities == ego_core::permit::ExecCaps::empty() {
+                    HealthStatus::Warning
+                } else {
+                    HealthStatus::Ok
+                },
+                HealthDetail::sanitized("sandbox.capabilities", capabilities.to_string(), roots)?,
+                HealthDetail::fixed("the existing execution backend measurement"),
+            )]);
+        }
         // Not an omission and not laziness. What a backend can actually do is
         // *measured* — the probe spawns real children against scratch and
         // out-of-workspace fixtures and watches which mutations the kernel
-        // refuses. There is no cached verdict to read, and executing processes
+        // refuses. A headless inspection has no session verdict to read, and
+        // executing processes
         // is exactly what doctor promised not to do. Reporting a guess from
         // the presence of `sandbox-exec` or a Landlock ABI number would be
         // worse than this: it would look like evidence.
