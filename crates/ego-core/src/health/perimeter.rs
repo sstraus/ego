@@ -1,7 +1,8 @@
 //! The operator-visible projection of admitted run authority.
 
 use crate::config::{Effective, Source};
-use crate::permit::{ProfileRoot, RootAccess, RunConfinement};
+use crate::permit::{ExecCaps, ExecObservation, ProfileRoot, RootAccess, RunConfinement};
+use crate::store::evidence::EvidenceRef;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -12,10 +13,21 @@ pub struct Perimeter {
     roots: Vec<PerimeterRoot>,
     sandbox: String,
     sandbox_source: String,
-    backend: &'static str,
-    capabilities: &'static str,
+    backend: String,
+    capabilities: CapabilityEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe_evidence: Option<EvidenceRef>,
     network: &'static str,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+enum CapabilityEvidence {
+    Measured(ExecCaps),
+    NotChecked(&'static str),
 }
 
 /// One canonical root admitted by the profile's permission policy.
@@ -63,13 +75,47 @@ impl Perimeter {
                 "landlock"
             } else {
                 "unsupported"
-            },
-            capabilities: "not_checked",
+            }
+            .into(),
+            capabilities: CapabilityEvidence::NotChecked("not_checked"),
+            capabilities_reason: Some(
+                "no completed backend measurement is available; inspection does not run probes",
+            ),
+            probe_evidence: None,
             network: if confinement.offline() {
                 "offline"
             } else {
                 "online"
             },
+        }
+    }
+
+    /// Project the same policy's existing observation and committed probe evidence.
+    ///
+    /// An observation without a probe transcript (for example the null backend)
+    /// is not a behavioral measurement. This operation executes no probes.
+    pub fn with_execution_observation(
+        mut self,
+        observation: &ExecObservation,
+        probe_evidence: Option<&EvidenceRef>,
+    ) -> Self {
+        self.backend = observation.backend().name().to_owned();
+        self.capabilities = match probe_evidence {
+            Some(_) => CapabilityEvidence::Measured(observation.capabilities()),
+            None => CapabilityEvidence::NotChecked("not_checked"),
+        };
+        self.capabilities_reason = probe_evidence
+            .is_none()
+            .then_some("the selected backend ran no capability probes");
+        self.probe_evidence = probe_evidence.cloned();
+        self
+    }
+
+    /// Completed behavioral guarantees, including an empty measured set.
+    pub fn measured_capabilities(&self) -> Option<ExecCaps> {
+        match self.capabilities {
+            CapabilityEvidence::Measured(capabilities) => Some(capabilities),
+            CapabilityEvidence::NotChecked(_) => None,
         }
     }
 
@@ -106,9 +152,16 @@ impl Perimeter {
         lines.extend([
             format!("  sandbox\t{}\t{}", self.sandbox, self.sandbox_source),
             format!("  backend\t{}", self.backend),
-            format!("  capabilities\t{}", self.capabilities),
+            format!(
+                "  capabilities\t{}",
+                self.measured_capabilities()
+                    .map_or_else(|| "not_checked".into(), |caps| caps.to_string())
+            ),
             format!("  network\t{}\tinvocation", self.network),
         ]);
+        if let Some(reason) = self.capabilities_reason {
+            lines.push(format!("  capabilities_reason\t{reason}"));
+        }
         lines.extend(
             self.warnings
                 .iter()

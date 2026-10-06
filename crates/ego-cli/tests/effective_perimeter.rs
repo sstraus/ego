@@ -55,6 +55,12 @@ fn effective_perimeter_is_shared_without_widening_doctor_redaction() {
     );
     let json = run(&["config", "ls", "--effective", "--json"]);
     let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["capabilities"], "not_checked");
+    assert_eq!(
+        value["capabilities_reason"],
+        "no completed backend measurement is available; inspection does not run probes"
+    );
+    assert!(value.get("probe_evidence").is_none());
     assert_eq!(value["sandbox"], "ro");
     assert_eq!(value["roots"][0]["source"], "user");
     let visible = ego_cli::doctor::visible_roots(&workspace, Some(&home));
@@ -207,4 +213,82 @@ fn overlapping_roots_refuse_read_nesting_and_warn_on_workspace_overlap() {
         nested.canonicalize().unwrap().to_str().unwrap()
     );
     assert_eq!(value["roots"][1]["access"], "read-write");
+}
+
+// Catches: session inspection hides a real measurement or substitutes the mechanism's promised caps.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn session_perimeter_projects_existing_probe_evidence_without_remeasuring() {
+    use ego_core::config::{Trust, resolve};
+    use ego_core::event::id::SessionId;
+    use ego_core::permit::{CanonPath, Confinement, ExecCaps, ExecObservation, RunConfinement};
+    use ego_core::turn::CancelToken;
+    use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts};
+    use ego_tools::http::SystemResolver;
+    use ego_tools::store::SessionEvidenceStore;
+    use std::sync::Arc;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let workspace = scratch.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let confinement =
+        RunConfinement::new(Confinement::Ro, false, CanonPath::new(&workspace)).unwrap();
+    let effective = resolve(&[], Trust::Untrusted, None).unwrap();
+    let evidence =
+        SessionEvidenceStore::open(scratch.path(), SessionId::new(), 1024 * 1024).unwrap();
+    let config = ExecRunConfig::new(
+        confinement.clone(),
+        evidence,
+        CancelToken::new(),
+        ExecLimits::default(),
+        HttpCallTimeout::default(),
+        None,
+        Arc::new(SystemResolver::new()),
+    );
+    let (observation, transcript) = RunEffectPorts::observe(&config).await.unwrap();
+    let transcript =
+        transcript.expect("the real paired suite must retain its measurement transcript");
+    let perimeter = ego_cli::perimeter::Perimeter::session(&confinement, &effective, &[])
+        .with_execution_observation(&observation, Some(&transcript));
+    let value = serde_json::to_value(&perimeter).unwrap();
+    assert_eq!(
+        value["capabilities"],
+        serde_json::to_value(observation.capabilities()).unwrap()
+    );
+    assert_eq!(value["backend"], observation.backend().name());
+    assert_eq!(
+        value["probe_evidence"],
+        serde_json::to_value(&transcript).unwrap()
+    );
+    assert!(value.get("capabilities_reason").is_none());
+    assert!(!perimeter.text().contains("not_checked"));
+    let doctor = ego_cli::doctor::observed_session(workspace.clone(), 1000, &perimeter);
+    assert!(
+        doctor.contains("the existing execution backend measurement"),
+        "{doctor}"
+    );
+    assert!(!doctor.contains("which doctor does not do"), "{doctor}");
+
+    // Exercise an empty domain observation at the projection boundary. This
+    // does not claim that the host's OS produced an empty measurement.
+    let empty = ExecObservation::new(
+        observation.backend().clone(),
+        ExecCaps::empty(),
+        observation.policy_digest().clone(),
+    );
+    let empty_view = perimeter.with_execution_observation(&empty, Some(&transcript));
+    let value = serde_json::to_value(&empty_view).unwrap();
+    assert_eq!(value["capabilities"], serde_json::json!([]));
+    assert!(empty_view.text().contains("no confinement guarantee"));
+    assert!(!empty_view.text().contains("not_checked"));
+
+    let unmeasured = empty_view.with_execution_observation(&observation, None);
+    let value = serde_json::to_value(unmeasured).unwrap();
+    assert_eq!(value["capabilities"], "not_checked");
+    assert_eq!(
+        value["capabilities_reason"],
+        "the selected backend ran no capability probes"
+    );
+    assert!(value.get("probe_evidence").is_none());
 }
