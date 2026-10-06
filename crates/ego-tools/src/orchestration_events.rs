@@ -25,6 +25,8 @@ pub struct InboxMessage {
     pub content: String,
     pub timestamp: u64,
     pub from_name: String,
+    #[serde(default)]
+    pub from_tuic_session: Option<String>,
 }
 
 /// A local lease prevents two observers from advancing the same root's cursor.
@@ -59,6 +61,7 @@ impl ObservationPump {
             // Dedicated identity, never copied from the launching coordinator.
             cursor.observer = SessionId::new().to_string();
         }
+        cursor.interrupt_resumes(millis(SystemTime::now()));
         let pump = Self {
             cursor,
             cursor_path,
@@ -71,6 +74,34 @@ impl ObservationPump {
         Ok(pump)
     }
 
+    pub fn interrupted(&self) -> &[(String, Card)] {
+        &self.cursor.interrupted
+    }
+    pub fn acknowledge_interrupted(&mut self, id: &str) -> io::Result<()> {
+        self.cursor.interrupted.retain(|(_, card)| card.id != id);
+        self.persist()
+    }
+    pub fn reserve_resume(
+        &mut self,
+        card: &Card,
+        session: &str,
+        receipt: &ego_core::orchestrator::SpawnReceipt,
+    ) -> io::Result<bool> {
+        let mut next = self.cursor.clone();
+        if !next.reserve_resume(card, session, receipt) {
+            return Ok(false);
+        }
+        OsIo.replace_atomic_private(
+            &self.cursor_path,
+            &serde_json::to_vec(&next).map_err(io::Error::other)?,
+        )?;
+        self.cursor = next;
+        Ok(true)
+    }
+    pub fn finish_resume(&mut self, id: &str) -> io::Result<()> {
+        self.cursor.finish_resume(id);
+        self.persist()
+    }
     pub fn observer(&self) -> &str {
         &self.cursor.observer
     }
@@ -88,6 +119,30 @@ impl ObservationPump {
         )
     }
 
+    pub fn acknowledge_card(&mut self, id: &str) -> io::Result<()> {
+        self.cursor.acknowledge_card(id);
+        self.persist()
+    }
+    pub fn resume_failure(
+        &mut self,
+        session: String,
+        id: String,
+        message: String,
+        at_ms: u64,
+    ) -> io::Result<()> {
+        self.cursor.interrupted.push((
+            session,
+            Card {
+                id: format!("failed-{id}"),
+                text: format!("BLOCKED: result resume failed: {message}; it is not replayed"),
+                result: None,
+                at_ms,
+                peer: None,
+                sender: None,
+            },
+        ));
+        self.persist()
+    }
     pub fn acknowledge(&mut self) -> io::Result<()> {
         let mut next = self.cursor.clone();
         next.acknowledge();
@@ -253,6 +308,7 @@ impl ObservationPump {
                     at_ms: message.timestamp,
                     result: None,
                     peer: Some(message.from_name),
+                    sender: message.from_tuic_session,
                 },
                 now_ms,
             );
@@ -309,6 +365,15 @@ impl ObservationPump {
                 .max_by_key(|r| r.name.len())
                 .map(|r| r.name.clone())
                 .or(tracked_peer(&self.children, &path)?);
+            let sender = self
+                .supervised
+                .iter()
+                .filter(|r| {
+                    peer.as_deref() == Some(r.name.as_str()) && millis(modified) > r.spawned_at_ms
+                })
+                .max_by_key(|r| r.spawned_at_ms)
+                .map(|r| r.session_id.clone())
+                .or(tracked_sender(&self.children, &path)?);
             if text.trim().starts_with("RESULT") {
                 // A RESULT settles only a spawn it postdates; a reused name keeps older files.
                 for receipt in self.supervised.iter().filter(|r| {
@@ -327,6 +392,7 @@ impl ObservationPump {
                     at_ms: millis(modified),
                     result: Some(path),
                     peer,
+                    sender,
                 },
                 now_ms,
             );
@@ -372,6 +438,7 @@ impl ObservationPump {
                 at_ms: now_ms,
                 result: None,
                 peer: None,
+                sender: None,
             },
             now_ms,
         );
@@ -397,6 +464,22 @@ fn tracked_peer(children: &Path, result: &Path) -> io::Result<Option<String>> {
         .filter(|name| filename.starts_with(&format!("{name}-")))
         .max_by_key(|name| name.len())
         .map(str::to_owned))
+}
+
+fn tracked_sender(children: &Path, result: &Path) -> io::Result<Option<String>> {
+    let filename = result.file_name().unwrap_or_default().to_string_lossy();
+    Ok(read_tracking(children)?
+        .lines()
+        .filter_map(|row| {
+            let mut fields = row.split('\t');
+            let id = fields.next()?;
+            let name = fields.next()?;
+            filename
+                .starts_with(&format!("{name}-"))
+                .then_some((name.len(), id.to_owned()))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, id)| id))
 }
 
 pub fn millis(time: SystemTime) -> u64 {

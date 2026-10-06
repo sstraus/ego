@@ -239,3 +239,94 @@ fn an_existing_result_file_prevents_resend_when_the_recorded_child_is_idle() {
             .is_empty()
     );
 }
+
+// Catches: one resume issues more than two corrections, or rebuilding the tool resets the journal budget.
+#[test]
+fn resume_rework_budget_refuses_third_request_and_survives_rebinding() {
+    use ego_tools::orchestrator_active::tool_with_rework_limits;
+    let home = tempfile::tempdir().unwrap();
+    let ctx = PrepareCtx {
+        cwd: CanonPath::new(std::fs::canonicalize(home.path()).unwrap()),
+        resolver: &OsFs,
+    };
+    let request =
+        json!({"operation":"say", "session_id":"child", "message":"Fix the recorded failure"});
+    let active = tool_with_rework_limits(
+        Mode::Active,
+        home.path(),
+        Some("parent".into()),
+        [("child".into(), 0)].into(),
+    );
+    assert!(active.prepare(request.clone(), &ctx).is_ok());
+    assert!(active.prepare(request.clone(), &ctx).is_ok());
+    assert!(
+        active
+            .prepare(request.clone(), &ctx)
+            .unwrap_err()
+            .to_string()
+            .contains("two rework")
+    );
+    let rebound = tool_with_rework_limits(
+        Mode::Active,
+        home.path(),
+        Some("parent".into()),
+        [("child".into(), 2)].into(),
+    );
+    assert!(rebound.prepare(request, &ctx).is_err());
+}
+
+// Catches: reopened native-tool journal loses prior corrections or charges another child's thread.
+#[test]
+fn resume_rework_limits_come_from_owned_spawn_and_say_journal_events() {
+    use ego_tools::orchestrator_active::rework_limits;
+    let dir = tempfile::tempdir().unwrap();
+    let store = JsonlStore::new(dir.path().join("sessions"), dir.path(), Box::new(OsIo));
+    let session = SessionId::new();
+    let item = ItemId::new();
+    let mut seq = Seq::ZERO;
+    let turn = TurnId::new();
+    let mut append = |kind| {
+        seq = seq.next();
+        store
+            .append(
+                &session,
+                &DomainEvent {
+                    env: Envelope {
+                        seq,
+                        id: EventId::new(),
+                        turn,
+                        item: Some(item),
+                        parent: None,
+                        ts: Timestamp::from_millis(1_000),
+                        producer: Producer::Main,
+                    },
+                    kind,
+                },
+            )
+            .unwrap();
+    };
+    append(EventKind::ToolCallStarted { name: "orchestrator_active".into(), args: json!({"operation":"spawn","role":"sol","name":"owned-child","cwd":"/owned/worktree","brief":"Task"}).to_string(), call_id: None });
+    append(EventKind::ToolCallCompleted {
+        ok: true,
+        result: ToolResult::builtin(
+            json!({"orchestration_spawn":receipt("owned-child")}).to_string(),
+        ),
+    });
+    for target in ["owned-child", "other-child", "owned-child"] {
+        append(EventKind::ToolCallStarted {
+            name: "orchestrator_active".into(),
+            args: json!({"operation":"say","session_id":target,"message":"Fix"}).to_string(),
+            call_id: None,
+        });
+    }
+    drop(store);
+    let reopened = JsonlStore::new(dir.path().join("sessions"), dir.path(), Box::new(OsIo));
+    let entries = block_on(reopened.read(&session).unwrap().collect::<Vec<_>>())
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rework_limits(&entries).unwrap(),
+        [("owned-child".into(), 2)].into()
+    );
+}

@@ -281,6 +281,35 @@ impl CliPrepared {
                 }
             }
         }
+        if self
+            .registry
+            .iter()
+            .any(|tool| tool.descriptor().name == "orchestrator_active")
+        {
+            use futures::StreamExt;
+            let entries = SessionStore::read(self.store.as_ref(), &self.session_id)
+                .map_err(|e| RunExecutorError::new(e.to_string()))?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| RunExecutorError::new(e.to_string()))?;
+            let limits = ego_tools::orchestrator_active::rework_limits(&entries)
+                .map_err(RunExecutorError::new)?;
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| RunExecutorError::new("orchestration requires HOME"))?;
+            let tool = ego_tools::orchestrator_active::tool_with_rework_limits(
+                ego_core::orchestrator::Mode::Active,
+                std::path::Path::new(&home),
+                std::env::var("TUIC_SESSION").ok(),
+                limits,
+            );
+            for entry in &mut self.registry {
+                if entry.descriptor().name == "orchestrator_active" {
+                    *entry = RegisteredTool::Effect(Arc::clone(&tool));
+                }
+            }
+        }
         let run_id = self.run_id;
         let artifacts = self.artifacts.clone();
         let child_root = RunRoot::new(self.root.clone())
