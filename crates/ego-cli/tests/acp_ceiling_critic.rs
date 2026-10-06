@@ -46,12 +46,20 @@ fn reopen_before_first_prompt(method: &str) {
     );
     assert!(loaded.get("error").is_none(), "{method}: {loaded}");
     let widened = reopened.request(
-        "session/set_mode",
-        serde_json::json!({"sessionId": session, "modeId": "yolo"}),
+        "session/set_config_option",
+        serde_json::json!({"sessionId": session, "configId": "mode", "value": "yolo"}),
     );
     assert!(
         widened.get("error").is_some(),
         "{method} dropped the ceiling before the first prompt: {widened}"
+    );
+    let allowed = reopened.request(
+        "session/set_config_option",
+        serde_json::json!({"sessionId": session, "configId": "mode", "value": "default"}),
+    );
+    assert!(
+        allowed["result"].is_object(),
+        "controls unavailable: {allowed}"
     );
     reopened.finish();
 }
