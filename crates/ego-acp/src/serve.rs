@@ -471,6 +471,29 @@ pub type SessionConfinementFuture =
 /// backend and commits evidence. Observation lookup reads the immutable
 /// snapshot installed before this session's options were published.
 pub trait SessionConfinementAdmission: Send + Sync {
+    /// Resolve optional host profiles before the session starts any effects.
+    fn configure_profiles(
+        &self,
+        _session: SessionId,
+        _root: &RunRoot,
+        _profile: Option<&str>,
+        _ceiling: Option<&str>,
+    ) -> Result<serde_json::Value, ControlError> {
+        Err(ControlError::Refused {
+            control: "profile",
+            why: "session profiles are not supported".into(),
+        })
+    }
+
+    /// Carry admitted profile authority through the durable run boundary.
+    fn profile_selections(
+        &self,
+        _session: SessionId,
+        selections: RunSelections,
+    ) -> Result<RunSelections, ControlError> {
+        Ok(selections)
+    }
+
     fn initialize(&self, session: SessionId, root: RunRoot) -> SessionConfinementFuture;
 
     fn observation(
@@ -1830,7 +1853,38 @@ fn selected_confinement(
     let observation = admission
         .observation(session, sandbox)
         .map_err(|error| control_error(&error))?;
-    Ok(selections.with_sandbox_observation(sandbox, observation))
+    admission
+        .profile_selections(
+            session,
+            selections.with_sandbox_observation(sandbox, observation),
+        )
+        .map_err(|error| control_error(&error))
+}
+
+/// Parse our optional extension strictly: malformed ceilings never become absent.
+fn session_profiles(
+    meta: Option<&v1::Meta>,
+) -> Result<Option<(Option<String>, Option<String>)>, Error> {
+    let Some(ego) = meta.and_then(|meta| meta.get("ego")) else {
+        return Ok(None);
+    };
+    if !ego.is_object() {
+        return Err(Error::invalid_params().data("_meta.ego must be an object"));
+    }
+    let parse = |key: &str| -> Result<Option<String>, Error> {
+        match ego.get(key) {
+            None => Ok(None),
+            Some(serde_json::Value::String(name)) => ego_core::config::ProfileName::parse(name)
+                .map(|_| Some(name.clone()))
+                .map_err(|error| Error::invalid_params().data(error.to_string())),
+            Some(_) => {
+                Err(Error::invalid_params().data(format!("_meta.ego.{key} must be a profile name")))
+            }
+        }
+    };
+    let profile = parse("profile")?;
+    let ceiling = parse("ceilingProfile")?;
+    Ok((profile.is_some() || ceiling.is_some()).then_some((profile, ceiling)))
 }
 
 /// A session request whose MCP selection arrived whole.
@@ -2627,6 +2681,17 @@ where
                     let start_request = RequestId::from_uuid(ids.next_uuid());
                     let session = RequestId::session_id(start_request);
                     let id = v1::SessionId::new(session.to_string());
+                    let profile_meta = match session_profiles(request.meta.as_ref()) {
+                        Ok(Some((profile, ceiling))) => match confinement.as_ref() {
+                            Some(admission) => match admission.configure_profiles(session, &root, profile.as_deref(), ceiling.as_deref()) {
+                                Ok(meta) => Some(serde_json::Map::from_iter([("ego".to_owned(), meta)])),
+                                Err(error) => return responder.respond_with_error(control_error(&error)),
+                            },
+                            None => return responder.respond_with_error(Error::invalid_params().data("session profiles are not supported")),
+                        },
+                        Ok(None) => None,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
                     // Hidden before it exists so no list or load can see it
                     // between creation and admission.
                     let hidden = unadmitted.hold(session);
@@ -2718,6 +2783,7 @@ where
                     // the first prompt awaits the same admission.
                     responder.respond(
                         v1::NewSessionResponse::new(id.clone())
+                            .meta(profile_meta)
                             .config_options(
                                 pending_measurement
                                     .is_none()

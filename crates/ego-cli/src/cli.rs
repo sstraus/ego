@@ -773,6 +773,8 @@ pub struct Args {
     pub set: Vec<String>,
     pub profile: Option<String>,
     pub(crate) profile_source: Option<ego_core::config::Source>,
+    /// ACP host ceiling, independent of the selected repository profile.
+    pub(crate) ceiling_profile: Option<String>,
     pub quiet: bool,
     pub no_color: bool,
 }
@@ -1801,6 +1803,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         directory: flags.common.places.directory,
         set: flags.set,
         profile_source: shape.profile_source,
+        ceiling_profile: None,
         profile: shape.profile,
         quiet: flags.quiet,
         no_color: flags.no_color,

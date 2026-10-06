@@ -79,6 +79,8 @@ impl ResolvedMcpConfig {
 /// and the trust gate have been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
+    /// Fields reduced by an explicitly selected host profile ceiling.
+    pub profile_warnings: Vec<String>,
     pub cache: crate::generator::capabilities::CacheRetention,
     pub model: Option<ModelRef>,
     pub thinking: Option<ThinkingLevel>,
@@ -264,7 +266,7 @@ pub fn resolve(
     trust: Trust,
     active_profile: Option<&str>,
 ) -> Result<Effective, ConfigError> {
-    resolve_inner(layers, trust, active_profile, None)
+    resolve_inner(layers, trust, active_profile, None, None)
 }
 
 /// Resolve one process-captured profile selection without rereading its
@@ -279,6 +281,24 @@ pub fn resolve_selected(
         trust,
         active_profile.map(|(name, _)| name),
         active_profile.map(|(_, source)| source),
+        None,
+    )
+}
+
+/// Resolve a selected profile under an optional host-owned profile ceiling.
+/// The host clamp precedes the administrator checks; system refusals remain unchanged.
+pub fn resolve_with_profile_ceiling(
+    layers: &[Sourced<ConfigLayer>],
+    trust: Trust,
+    active_profile: Option<(&str, Source)>,
+    ceiling: Option<&Effective>,
+) -> Result<Effective, ConfigError> {
+    resolve_inner(
+        layers,
+        trust,
+        active_profile.map(|(name, _)| name),
+        active_profile.map(|(_, source)| source),
+        ceiling,
     )
 }
 
@@ -287,6 +307,7 @@ fn resolve_inner(
     trust: Trust,
     active_profile: Option<&str>,
     selected_by: Option<Source>,
+    profile_ceiling: Option<&Effective>,
 ) -> Result<Effective, ConfigError> {
     let mut ordered: Vec<&Sourced<ConfigLayer>> = layers.iter().collect();
     ordered.sort_by_key(|l| l.source.rank());
@@ -633,6 +654,26 @@ fn resolve_inner(
     }
     let clamped = ceilings.clamp(&system_ceiling);
 
+    let mut profile_warnings = Vec::new();
+    if let Some(ceiling) = profile_ceiling {
+        let maximum = ceiling.mode.unwrap_or(Mode::Default);
+        let selected = mode.unwrap_or(Mode::Default);
+        if !selected.within(maximum) {
+            profile_warnings.push(format!(
+                "mode {selected} exceeds profile ceiling {maximum}; using {maximum}"
+            ));
+            mode = Some(maximum);
+        }
+        let maximum = ceiling.sandbox.unwrap_or_default();
+        let selected = sandbox.unwrap_or_default();
+        if !selected.within(maximum) {
+            profile_warnings.push(format!(
+                "sandbox {selected} exceeds profile ceiling {maximum}; using {maximum}"
+            ));
+            sandbox = Some(maximum);
+        }
+    }
+
     let mut max_mode: Option<Mode> = None;
     let mut root_ceilings = root_restrictions;
     for sourced in eligible
@@ -678,7 +719,15 @@ fn resolve_inner(
         }
     }
 
+    if let Some(ceiling) = profile_ceiling {
+        let maximum = ceiling.mode.unwrap_or(Mode::Default);
+        if max_mode.is_none_or(|system| maximum.within(system)) {
+            max_mode = Some(maximum);
+        }
+    }
+
     Ok(Effective {
+        profile_warnings,
         cache,
         model,
         thinking,

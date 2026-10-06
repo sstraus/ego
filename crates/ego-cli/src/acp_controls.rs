@@ -65,11 +65,20 @@ impl ConfinementMeasurements {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ProfileSeat {
+    effective: Effective,
+    profile: Option<String>,
+    ceiling_profile: Option<String>,
+    sandbox_ceiling: Confinement,
+}
+
 /// Everything one connection knows and may change for one session.
 #[derive(Debug, Clone, Default)]
 struct SessionSeat {
     chosen: Chosen,
     confinement: Option<ConfinementMeasurements>,
+    profile: Option<ProfileSeat>,
 }
 
 /// One ACP connection's generation controls.
@@ -141,6 +150,69 @@ impl AcpSessionControls {
             catalogue,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Pin profile policy before measurement or any prompt can start.
+    pub(crate) fn seed_profile(
+        &self,
+        session: SessionId,
+        effective: Effective,
+        profile: Option<String>,
+        ceiling_profile: Option<String>,
+    ) -> Result<(), ControlError> {
+        let mut sessions = self.lock_sessions()?;
+        let seat = sessions.entry(session).or_default();
+        if seat.confinement.is_some() || seat.profile.is_some() {
+            return Err(ControlError::Refused {
+                control: "profile",
+                why: "session policy is already pinned".into(),
+            });
+        }
+        let selected = effective.sandbox.unwrap_or_default();
+        let sandbox_ceiling = if selected.within(self.sandbox_ceiling) {
+            selected
+        } else {
+            self.sandbox_ceiling
+        };
+        seat.profile = Some(ProfileSeat {
+            effective,
+            profile,
+            ceiling_profile,
+            sandbox_ceiling,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn profile_selections(
+        &self,
+        session: SessionId,
+        mut selections: ego_core::run::RunSelections,
+    ) -> Result<ego_core::run::RunSelections, ControlError> {
+        let sessions = self.lock_sessions()?;
+        if let Some(profile) = sessions
+            .get(&session)
+            .and_then(|seat| seat.profile.as_ref())
+        {
+            if let Some(name) = &profile.profile {
+                selections = selections.with_profile_name(name);
+            }
+            if let Some(name) = &profile.ceiling_profile {
+                selections = selections.with_ceiling_profile(name);
+            }
+        }
+        Ok(selections)
+    }
+
+    fn session_ceiling(&self, seat: &SessionSeat) -> Confinement {
+        seat.profile
+            .as_ref()
+            .map_or(self.sandbox_ceiling, |profile| profile.sandbox_ceiling)
+    }
+
+    fn session_max_mode(&self, seat: &SessionSeat) -> Option<Mode> {
+        seat.profile
+            .as_ref()
+            .map_or(self.max_mode, |profile| profile.effective.max_mode)
     }
 
     fn lock_sessions(
@@ -220,14 +292,12 @@ impl AcpSessionControls {
         session: SessionId,
         confinement: Confinement,
     ) -> Result<ExecObservation, ControlError> {
-        if !confinement.within(self.sandbox_ceiling) {
+        let sessions = self.lock_sessions()?;
+        let seat = sessions.get(&session).ok_or_else(Self::uninitialized)?;
+        if !confinement.within(self.session_ceiling(seat)) {
             return Err(self.ceiling_refusal());
         }
-        let sessions = self.lock_sessions()?;
-        let measurements = sessions
-            .get(&session)
-            .and_then(|seat| seat.confinement.as_ref())
-            .ok_or_else(Self::uninitialized)?;
+        let measurements = seat.confinement.as_ref().ok_or_else(Self::uninitialized)?;
         if let Some(observation) = measurements.observation(confinement) {
             return Ok(observation.clone());
         }
@@ -334,12 +404,21 @@ impl AcpSessionControls {
     fn compose(&self, seat: &SessionSeat) -> Result<SessionControlState, ControlError> {
         let measured = seat.confinement.as_ref().ok_or_else(Self::uninitialized)?;
         let chosen = &seat.chosen;
-        let model = chosen.model.clone().or_else(|| self.model.clone());
-        let explicit_effort = chosen.effort.or(self.effort);
+        let profile = seat.profile.as_ref().map(|profile| &profile.effective);
+        let model = chosen.model.clone().or_else(|| {
+            profile.map_or_else(|| self.model.clone(), |effective| effective.model.clone())
+        });
+        let explicit_effort = chosen
+            .effort
+            .or_else(|| profile.map_or(self.effort, |effective| effective.thinking));
         let effort = model
             .as_ref()
             .and_then(|model| explicit_effort.or_else(|| self.resolved_effort(model, None)));
-        let mode = chosen.mode.unwrap_or(self.mode);
+        let mode = chosen.mode.unwrap_or_else(|| {
+            profile.map_or(self.mode, |effective| {
+                effective.mode.unwrap_or(Mode::Default)
+            })
+        });
         Ok(SessionControlState {
             model: ControlSelect {
                 available: self.models(model.as_ref()),
@@ -352,13 +431,20 @@ impl AcpSessionControls {
                 chosen: chosen.effort,
             },
             mode: ControlSelect {
-                available: self.modes(),
+                available: self
+                    .modes(profile.map_or(self.judge, |effective| effective.judge.is_some()))
+                    .into_iter()
+                    .filter(|mode| {
+                        self.session_max_mode(seat)
+                            .is_none_or(|maximum| mode.within(maximum))
+                    })
+                    .collect(),
                 current: Some(mode),
                 chosen: chosen.mode,
             },
             sandbox: ControlSelect {
-                available: self.sandboxes(measured),
-                current: Some(chosen.sandbox.unwrap_or(self.sandbox_ceiling)),
+                available: self.sandboxes(measured, self.session_ceiling(seat)),
+                current: Some(chosen.sandbox.unwrap_or(self.session_ceiling(seat))),
                 chosen: chosen.sandbox,
             },
         })
@@ -370,21 +456,25 @@ impl AcpSessionControls {
     /// so the next prompt can refuse it with its typed measurement. It is not
     /// silently replaced by a different sandbox merely to keep the current
     /// value inside the picker offer.
-    fn sandboxes(&self, measured: &ConfinementMeasurements) -> Vec<Confinement> {
+    fn sandboxes(
+        &self,
+        measured: &ConfinementMeasurements,
+        ceiling: Confinement,
+    ) -> Vec<Confinement> {
         measured
             .supported
             .iter()
             .map(|(confinement, _)| *confinement)
-            .filter(|confinement| confinement.within(self.sandbox_ceiling))
+            .filter(|confinement| confinement.within(ceiling))
             .collect()
     }
 
     /// Auto is offered only where it can work: it delegates to a judge model,
     /// and without one the run refuses at startup rather than mid-turn.
-    fn modes(&self) -> Vec<Mode> {
+    fn modes(&self, judge: bool) -> Vec<Mode> {
         HOST_MODES
             .into_iter()
-            .filter(|mode| self.judge || *mode != Mode::Auto)
+            .filter(|mode| judge || *mode != Mode::Auto)
             .collect()
     }
 }
@@ -404,6 +494,13 @@ impl SessionControls for AcpSessionControls {
         let mut sessions = self.lock_sessions()?;
         let seat = sessions.get_mut(&session).ok_or_else(Self::uninitialized)?;
         let measured = seat.confinement.as_ref().ok_or_else(Self::uninitialized)?;
+        let max_mode = self.session_max_mode(seat);
+        let sandbox_ceiling = self.session_ceiling(seat);
+        let profile = seat.profile.as_ref().map(|profile| &profile.effective);
+        let default_model =
+            profile.map_or(self.model.as_ref(), |effective| effective.model.as_ref());
+        let default_effort = profile.map_or(self.effort, |effective| effective.thinking);
+        let judge = profile.map_or(self.judge, |effective| effective.judge.is_some());
         let chosen = &mut seat.chosen;
         match change {
             SessionControlChange::Model(model) => {
@@ -411,7 +508,7 @@ impl SessionControls for AcpSessionControls {
                 // is the only thing that knows the catalogue, and a model
                 // change can leave the effort behind on a model that does not
                 // accept it.
-                let explicit_effort = chosen.effort.or(self.effort);
+                let explicit_effort = chosen.effort.or(default_effort);
                 if explicit_effort.is_some()
                     && self.resolved_effort(&model, explicit_effort).is_none()
                 {
@@ -425,7 +522,7 @@ impl SessionControls for AcpSessionControls {
                 chosen.model = Some(model);
             }
             SessionControlChange::Effort(effort) => {
-                let model = chosen.model.as_ref().or(self.model.as_ref());
+                let model = chosen.model.as_ref().or(default_model);
                 if model
                     .and_then(|model| self.resolved_effort(model, Some(effort)))
                     .is_none()
@@ -438,15 +535,15 @@ impl SessionControls for AcpSessionControls {
                 chosen.effort = Some(effort);
             }
             SessionControlChange::Mode(mode) => {
-                if let Some(maximum) = self.max_mode
+                if let Some(maximum) = max_mode
                     && !mode.within(maximum)
                 {
                     return Err(ControlError::Refused {
                         control: "mode",
-                        why: format!("mode {mode} exceeds system max_mode {maximum}"),
+                        why: format!("mode {mode} exceeds session max_mode {maximum}"),
                     });
                 }
-                if !self.modes().contains(&mode) {
+                if !self.modes(judge).contains(&mode) {
                     return Err(ControlError::Refused {
                         control: "mode",
                         why: match mode {
@@ -464,7 +561,7 @@ impl SessionControls for AcpSessionControls {
                 // value that this connection may not reach, and telling the
                 // host to "pick from the list" would suggest the list is
                 // merely incomplete rather than deliberately capped.
-                if !confinement.within(self.sandbox_ceiling) {
+                if !confinement.within(sandbox_ceiling) {
                     return Err(self.ceiling_refusal());
                 }
                 if let Some(missing) = measured.refusal(confinement) {

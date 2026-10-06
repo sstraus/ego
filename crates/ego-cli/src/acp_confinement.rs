@@ -45,6 +45,7 @@ pub struct CliSessionConfinementAdmission {
     store: Arc<JsonlStore>,
     controls: Arc<AcpSessionControls>,
     ceiling: Confinement,
+    shape: crate::cli::SessionShape,
     cancel: CancelToken,
     reporter: Arc<Reporter>,
     initializations: Arc<Mutex<HashMap<SessionId, Initialization>>>,
@@ -77,10 +78,16 @@ impl CliSessionConfinementAdmission {
             store,
             controls,
             ceiling,
+            shape: crate::cli::SessionShape::default(),
             cancel,
             reporter,
             initializations: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) fn with_shape(mut self, shape: crate::cli::SessionShape) -> Self {
+        self.shape = shape;
+        self
     }
 
     fn root_refusal(pinned: &RunRoot, requested: &RunRoot) -> ControlError {
@@ -96,6 +103,62 @@ impl CliSessionConfinementAdmission {
 }
 
 impl SessionConfinementAdmission for CliSessionConfinementAdmission {
+    fn configure_profiles(
+        &self,
+        session: SessionId,
+        root: &RunRoot,
+        profile: Option<&str>,
+        ceiling: Option<&str>,
+    ) -> Result<serde_json::Value, ControlError> {
+        let mut shape = self.shape.clone();
+        if let Some(profile) = profile {
+            shape.profile = Some(profile.to_owned());
+            shape.profile_source = Some(ego_core::config::Source::Flags);
+        }
+        let profile = shape.profile.clone();
+        let mut args = crate::run::protocol_args(None, shape);
+        args.ceiling_profile = ceiling.map(str::to_owned);
+        let resolve = || {
+            let layers =
+                crate::config::layers(root.as_path(), &args, ego_core::config::Trust::Untrusted)?;
+            crate::config::resolve_session_profile(
+                &layers,
+                ego_core::config::Trust::Untrusted,
+                profile
+                    .as_deref()
+                    .map(|name| (name, ego_core::config::Source::Flags)),
+                ceiling,
+                root.as_path(),
+            )
+        };
+        let effective =
+            resolve().map_err(|error: crate::cli::UsageError| ControlError::Refused {
+                control: "profile",
+                why: error.to_string(),
+            })?;
+        let selected = effective.sandbox.unwrap_or_default();
+        let sandbox = if selected.within(self.ceiling) {
+            selected
+        } else {
+            self.ceiling
+        };
+        let result = serde_json::json!({"profile": profile, "ceilingProfile": ceiling,
+            "effective": {"mode": effective.mode.unwrap_or(ego_core::config::Mode::Default),
+                "sandbox": sandbox, "roots": effective.roots, "execPaths": effective.exec_paths},
+            "warnings": effective.profile_warnings});
+        self.controls
+            .seed_profile(session, effective, profile, ceiling.map(str::to_owned))?;
+        Ok(result)
+    }
+
+    fn profile_selections(
+        &self,
+        session: SessionId,
+        selections: ego_core::run::RunSelections,
+    ) -> Result<ego_core::run::RunSelections, ControlError> {
+        self.controls.profile_selections(session, selections)
+    }
+
     fn initialize(&self, session: SessionId, root: RunRoot) -> SessionConfinementFuture {
         let mut initializations = match self.initializations.lock() {
             Ok(initializations) => initializations,
