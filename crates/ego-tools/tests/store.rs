@@ -32,6 +32,51 @@ use tempfile::tempdir;
 mod store {
     use super::*;
 
+    #[test]
+    fn notice_delivery_survives_reopen_without_becoming_a_conversation_turn() {
+        let dir = tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let session = SessionId::new();
+        let notice = ego_core::store::session_store::NoticeDelivery {
+            card_id: "orchestration-result".to_owned(),
+            source_path: Some("/workspace/results/worker.md".into()),
+            delivered_at: Timestamp::from_millis(61001),
+        };
+        assert!(matches!(
+            store.record_notice(&session, notice.clone()),
+            Err(StoreError::NotFound)
+        ));
+        store
+            .append(
+                &session,
+                &ev(
+                    Seq::ZERO,
+                    TurnId::new(),
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        store.record_notice(&session, notice.clone()).unwrap();
+        drop(store);
+        let reopened = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let entries = block_on(reopened.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[1].as_ref().unwrap(),
+            &SessionEntry::NoticeDelivered(notice)
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, Ok(SessionEntry::Event(_))))
+                .count(),
+            1
+        );
+    }
+
     const ALIVE: &dyn Fn(u32) -> bool = &|_| true;
 
     fn evidence_lease() -> LeaseInputs<'static> {
@@ -743,7 +788,7 @@ mod store {
                     SessionEntry::RunTransaction(_) => {
                         panic!("event-only session contained a run transaction")
                     }
-                    SessionEntry::Evidence(_) => {
+                    SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => {
                         panic!("event-only session contained evidence")
                     }
                 },

@@ -69,7 +69,15 @@ use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt 
 #[derive(Clone, Default)]
 pub struct AcpNotices {
     connections: Arc<Mutex<HashMap<v1::SessionId, NoticeConnection>>>,
+    recorder: Arc<Mutex<Option<Arc<NoticeRecorder>>>>,
 }
+
+type NoticeRecorder = dyn Fn(
+        ego_core::event::id::SessionId,
+        ego_core::store::session_store::NoticeDelivery,
+    ) -> Result<(), String>
+    + Send
+    + Sync;
 
 struct NoticeConnection {
     owner: Arc<()>,
@@ -78,6 +86,10 @@ struct NoticeConnection {
 }
 
 impl AcpNotices {
+    /// Bind the session journal owned by the host's composition root.
+    pub fn set_delivery_recorder(&self, recorder: Arc<NoticeRecorder>) {
+        *self.recorder.lock().expect("notice recorder lock poisoned") = Some(recorder);
+    }
     fn register(&self, session: v1::SessionId, connection: ConnectionTo<Client>) {
         let owner = Arc::new(());
         let notices = self.clone();
@@ -155,6 +167,18 @@ impl AcpNotices {
             }
             return Err(Error::from(ErrorCode::ResourceNotFound));
         }
+        let recorder = self
+            .recorder
+            .lock()
+            .expect("notice recorder lock poisoned")
+            .clone()
+            .ok_or_else(|| {
+                Error::internal_error().data("notice delivery journal is not configured")
+            })?;
+        let session_id = session
+            .to_string()
+            .parse()
+            .map_err(|_| Error::invalid_params().data("invalid notice session id"))?;
         let sent = registered
             .connection
             .send_notification(v1::SessionNotification::new(
@@ -166,7 +190,30 @@ impl AcpNotices {
         {
             removed.closed_watcher.abort();
         }
-        sent
+        sent?;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Error::internal_error().data(error.to_string()))?;
+        let delivered_at = ego_core::event::time::Timestamp::from_millis(
+            u64::try_from(at.as_millis())
+                .map_err(|error| Error::internal_error().data(error.to_string()))?,
+        );
+        recorder(
+            session_id,
+            ego_core::store::session_store::NoticeDelivery {
+                card_id: notice.id.clone(),
+                source_path: match &notice.action {
+                    crate::project::NoticeAction::OpenResult { path } => Some(path.clone()),
+                    _ => None,
+                },
+                delivered_at,
+            },
+        )
+        .map_err(|error| {
+            Error::internal_error().data(format!(
+                "notice was queued but delivery journal failed: {error}"
+            ))
+        })
     }
 }
 

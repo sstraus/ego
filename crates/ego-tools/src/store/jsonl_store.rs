@@ -441,6 +441,9 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                     _ => {}
                 }
             }
+            SessionEntry::NoticeDelivered(notice) => {
+                last_ts = Some(notice.delivered_at);
+            }
             SessionEntry::RunTransaction(transaction) => {
                 last_ts = Some(transaction.observed_at());
             }
@@ -594,7 +597,7 @@ impl JsonlStore {
             let transaction = match entry {
                 SessionEntry::RunTransaction(transaction) => transaction,
                 SessionEntry::Event(_) => continue,
-                SessionEntry::Evidence(_) => continue,
+                SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => continue,
             };
             let expected = revision
                 .map(RunRevision::next)
@@ -895,7 +898,9 @@ impl JsonlStore {
                 .filter_map(|result| async move {
                     match result.ok()? {
                         SessionEntry::Event(event) => Some(event),
-                        SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
+                        SessionEntry::RunTransaction(_)
+                        | SessionEntry::Evidence(_)
+                        | SessionEntry::NoticeDelivered(_) => None,
                     }
                 })
                 .collect()
@@ -1952,6 +1957,28 @@ impl SessionStore for JsonlStore {
 }
 
 impl JsonlStore {
+    /// Persist ACP transport acceptance under the same short append lock as turns.
+    /// No synthetic conversation turn or second evidence file is created.
+    pub fn record_notice(
+        &self,
+        session: &SessionId,
+        notice: ego_core::store::session_store::NoticeDelivery,
+    ) -> Result<(), StoreError> {
+        self.with_events_lock(session, || {
+            let log = self.log_path(session);
+            if !self.io.exists(&log)? {
+                return Err(StoreError::NotFound);
+            }
+            let position = self.next_physical_position(&log, session)?;
+            let line = encode_record(position, &SessionEntry::NoticeDelivered(notice))?;
+            self.io.append_line(&log, &line)?;
+            self.io.fsync(&log)?;
+            Ok(())
+        })
+    }
+}
+
+impl JsonlStore {
     fn catalogue_facts(&self, log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError> {
         let Some(mut facts) = log_manifest_facts(log)? else {
             return Ok(None);
@@ -2240,7 +2267,9 @@ impl ReplaySource for JsonlStore {
         };
         let mut events = entries.into_iter().filter_map(|entry| match entry {
             SessionEntry::Event(event) => Some(event),
-            SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
+            SessionEntry::RunTransaction(_)
+            | SessionEntry::Evidence(_)
+            | SessionEntry::NoticeDelivered(_) => None,
         });
         let Some(first_event) = events.next() else {
             return Ok(None);

@@ -112,7 +112,7 @@ impl SessionStore for SessionStoreFixture {
             items.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(tx) => Some(tx.revision()),
                 SessionEntry::Event(_) => None,
-                SessionEntry::Evidence(_) => None,
+                SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => None,
             })
         });
         if current != expected_revision {

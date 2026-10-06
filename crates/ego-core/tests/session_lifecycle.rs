@@ -154,7 +154,8 @@ impl EvidenceLogSource for FakeStore {
                 SessionEntry::Evidence(evidence) if id == _session => Some(evidence.clone()),
                 SessionEntry::Event(_)
                 | SessionEntry::RunTransaction(_)
-                | SessionEntry::Evidence(_) => None,
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
             .collect())
     }

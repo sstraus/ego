@@ -28,7 +28,9 @@ pub(crate) fn replay(
         .into_iter()
         .filter_map(|entry| match entry {
             SessionEntry::Event(event) => Some(event),
-            SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
+            SessionEntry::RunTransaction(_)
+            | SessionEntry::Evidence(_)
+            | SessionEntry::NoticeDelivered(_) => None,
         })
         .collect();
     render(&events, output, capabilities);

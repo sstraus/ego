@@ -180,7 +180,9 @@ mod regression_case {
             let mut entries = self.entries.lock().expect("origin store entries");
             let current = entries.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
-                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::Event(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             });
             if expected_revision != current {
                 return Ok(RunAppend::Conflict {
@@ -703,7 +705,9 @@ mod regression_case {
             .into_iter()
             .find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction),
-                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::Event(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
             .expect("admission transaction");
         assert_eq!(transaction.origin(), &origin);

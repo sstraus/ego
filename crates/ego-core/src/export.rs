@@ -86,6 +86,13 @@ pub enum ExportRecord {
         pruned_receipts: Vec<TurnLease>,
         command: ExportRunCommand,
     },
+    NoticeDelivered {
+        session: SessionId,
+        position: Seq,
+        card_id: String,
+        delivered_at: Timestamp,
+        source_path_present: bool,
+    },
     RunContextEvidence {
         evidence_v: u32,
         session: SessionId,
@@ -568,6 +575,15 @@ impl<'a> Exporter<'a> {
                         observed_at: transaction.observed_at(),
                         pruned_receipts: transaction.pruned_receipts().to_vec(),
                         command,
+                    });
+                }
+                SessionEntry::NoticeDelivered(notice) => {
+                    records.push(ExportRecord::NoticeDelivered {
+                        session,
+                        position,
+                        card_id: notice.card_id,
+                        delivered_at: notice.delivered_at,
+                        source_path_present: notice.source_path.is_some(),
                     });
                 }
                 SessionEntry::Evidence(record) => {

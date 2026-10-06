@@ -1150,6 +1150,12 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     let trust_port: Arc<dyn SessionTrustAdmission> = Arc::new(trust);
 
     let notices = ego_acp::serve::AcpNotices::default();
+    let notice_store = Arc::clone(&store);
+    notices.set_delivery_recorder(Arc::new(move |session, notice| {
+        notice_store
+            .record_notice(&session, notice)
+            .map_err(|error| error.to_string())
+    }));
     let _observer = match crate::orchestration_observer::start(
         coordinator,
         orchestration_mode,
