@@ -1265,6 +1265,7 @@ pub struct RunExecutionBindings {
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     controls: Option<Arc<dyn crate::control::SessionControls>>,
     host: Option<crate::turn::HostClient>,
+    interactive_control: Option<Arc<Mutex<Option<crate::turn::InteractiveControl>>>>,
 }
 
 impl RunExecutionBindings {
@@ -1284,7 +1285,23 @@ impl RunExecutionBindings {
             sandbox_grants: None,
             controls: None,
             host: None,
+            interactive_control: None,
         }
+    }
+
+    /// Transfer the sole turn coordinator's receiver to this execution.
+    pub fn with_interactive_control(mut self, control: crate::turn::InteractiveControl) -> Self {
+        self.interactive_control = Some(Arc::new(Mutex::new(Some(control))));
+        self
+    }
+
+    pub fn take_interactive_control(&self) -> Option<crate::turn::InteractiveControl> {
+        self.interactive_control.as_ref().and_then(|control| {
+            control
+                .lock()
+                .expect("turn control binding lock poisoned")
+                .take()
+        })
     }
 
     /// Attach the client that initialized this execution's connection, so the

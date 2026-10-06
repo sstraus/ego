@@ -361,6 +361,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                     sink,
                     cancel: &cancel,
                     pause: &pause,
+                    control: None,
                 },
                 HeadlessGeneration {
                     source: Arc::clone(&source),

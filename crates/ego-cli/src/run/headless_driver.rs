@@ -8,6 +8,7 @@ pub(super) struct HeadlessSession<'run, 'store> {
     pub(super) clock: &'run SystemClock,
     pub(super) sink: &'run dyn EventSink,
     pub(super) cancel: &'run CancelToken,
+    pub(super) control: Option<ego_core::turn::InteractiveControl>,
     pub(super) pause: &'run PauseToken,
 }
 
@@ -65,6 +66,7 @@ pub(super) async fn drive_headless_turn(
         sink,
         cancel,
         pause,
+        mut control,
     } = session;
     let HeadlessGeneration {
         source,
@@ -257,7 +259,7 @@ pub(super) async fn drive_headless_turn(
         None => loop_,
     };
     let loop_ = super::composition::with_permission_analysis(loop_, hook_trust);
-    let mut loop_ = if judge_available {
+    let loop_ = if judge_available {
         loop_.with_judge(JudgeContext {
             confinement: confinement.clone(),
             exec_caps: execution_capabilities,
@@ -266,6 +268,10 @@ pub(super) async fn drive_headless_turn(
         loop_
     }
     .with_execution_observation(observation, probe_evidence);
+    let mut loop_ = match control.as_mut() {
+        Some(control) => loop_.with_interactive_control(control),
+        None => loop_,
+    };
     let (termination, result) = match input {
         HeadlessInput::Prompt(prompt) => {
             turns

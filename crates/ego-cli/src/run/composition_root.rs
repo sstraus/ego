@@ -438,6 +438,7 @@ impl CliPrepared {
                 sink: sink.as_ref(),
                 cancel,
                 pause,
+                control: bindings.take_interactive_control(),
             },
             HeadlessGeneration {
                 source,

@@ -691,6 +691,10 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
     // literal gated on one flag would have made the two stand or fall
     // together and one of the two claims would always be a lie.
     let mut ego = serde_json::Map::new();
+    ego.insert(
+        "steer".to_owned(),
+        serde_json::json!({"version": 1, "method": "_ego/steer", "contentTypes": ["text"]}),
+    );
     if compaction {
         ego.insert(
             "compact".to_owned(),
@@ -773,6 +777,37 @@ impl From<CompactionReceipt> for AcpCompactResponse {
     }
 }
 
+/// Submit text to the currently running turn's durable FIFO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AcpSteerRequest {
+    v: u32,
+    session_id: String,
+    prompt: Vec<v1::ContentBlock>,
+}
+
+impl JsonRpcMessage for AcpSteerRequest {
+    fn matches_method(method: &str) -> bool {
+        method == "_ego/steer"
+    }
+    fn method(&self) -> &str {
+        "_ego/steer"
+    }
+    fn to_untyped_message(&self) -> Result<UntypedMessage, Error> {
+        UntypedMessage::new(self.method(), self)
+    }
+    fn parse_message(method: &str, params: &impl Serialize) -> Result<Self, Error> {
+        if !Self::matches_method(method) {
+            return Err(Error::method_not_found());
+        }
+        agent_client_protocol::util::json_cast_params(params)
+    }
+}
+
+impl JsonRpcRequest for AcpSteerRequest {
+    type Response = serde_json::Value;
+}
+
 /// One `_ego/pause` or `_ego/resume`.
 ///
 /// One type for both because they carry the same three fields and differ
@@ -836,6 +871,7 @@ struct Registered {
     answered: VecDeque<AnsweredCommand>,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
     busy: bool,
+    steering: Option<ego_core::turn::InteractiveIngress>,
     withdrawal: Option<Withdrawal>,
     active_cancel: Option<CancelKey>,
     cancel_requested: bool,
@@ -963,6 +999,7 @@ impl Sessions {
                 answered: VecDeque::new(),
                 run,
                 busy: false,
+                steering: None,
                 withdrawal: None,
                 active_cancel: None,
                 cancel_requested: false,
@@ -1157,6 +1194,7 @@ impl Sessions {
             session.withdrawal = None;
             session.active_cancel = None;
             session.busy = false;
+            session.steering = None;
             session.cancel_requested = false;
             return cancel_requested;
         }
@@ -1173,6 +1211,35 @@ impl Sessions {
             session.withdrawal = None;
             session.active_cancel = None;
             session.busy = false;
+            session.steering = None;
+        }
+    }
+
+    fn steering(
+        &self,
+        id: &v1::SessionId,
+    ) -> Result<Option<ego_core::turn::InteractiveIngress>, Error> {
+        let registrations = self.lock();
+        let session = registrations
+            .sessions
+            .get(id)
+            .ok_or_else(|| refused_params("unknown steering sessionId"))?;
+        Ok(session.steering.clone())
+    }
+
+    fn install_steering(
+        &self,
+        id: &v1::SessionId,
+        generation: RegistrationGeneration,
+        ingress: ego_core::turn::InteractiveIngress,
+    ) {
+        if let Some(session) = self
+            .lock()
+            .sessions
+            .get_mut(id)
+            .filter(|session| session.generation == generation && session.busy)
+        {
+            session.steering = Some(ingress);
         }
     }
 
@@ -3475,6 +3542,9 @@ where
                         correlation.mcp.as_ref(),
                         Arc::clone(&correlation.session_approval),
                     );
+                    let (ingress, control) = ego_core::turn::interactive_control();
+                    sessions.install_steering(&id, correlation.generation, ingress);
+                    let bindings = bindings.with_interactive_control(control);
                     // Everything below runs off the event loop. `selected_trust`
                     // awaits the host, and an ACP handler that awaits a client
                     // round-trip stops the connection from processing messages
@@ -3731,6 +3801,49 @@ where
                         }
                     })?;
                     Ok(())
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let sessions = sessions.clone();
+                move |request: AcpSteerRequest, responder: Responder<serde_json::Value>, cx: ConnectionTo<Client>| {
+                    let sessions = sessions.clone();
+                    async move {
+                        if request.v != 1 {
+                            return responder.respond_with_error(refused_params("unsupported _ego/steer version"));
+                        }
+                        let id = v1::SessionId::new(request.session_id.clone());
+                        if let Err(error) = parse_session(&id) { return responder.respond_with_error(error); }
+                        let mut parts = Vec::new();
+                        for block in request.prompt {
+                            match block {
+                                v1::ContentBlock::Text(text) => parts.push(text.text),
+                                _ => return responder.respond(serde_json::json!({"v":1,"state":"rejected","reason":"steering supports text blocks only"})),
+                            }
+                        }
+                        let text = parts.join("\n");
+                        if text.trim().is_empty() {
+                            return responder.respond(serde_json::json!({"v":1,"state":"rejected","reason":"steering text is empty"}));
+                        }
+                        let ingress = match sessions.steering(&id) {
+                            Ok(Some(ingress)) => ingress,
+                            Ok(None) => return responder.respond(serde_json::json!({"v":1,"state":"not-busy"})),
+                            Err(error) => return responder.respond_with_error(error),
+                        };
+                        // Durable admission awaits the running coordinator. Keep the
+                        // connection free to process permissions and cancellation.
+                        cx.spawn(async move {
+                            let response = match ingress.submit(text).await {
+                                Ok(_) => serde_json::json!({"v":1,"state":"accepted"}),
+                                Err(ego_core::turn::ControlError::Closed) => serde_json::json!({"v":1,"state":"not-busy"}),
+                                Err(error) => serde_json::json!({"v":1,"state":"rejected","reason":error.to_string()}),
+                            };
+                            responder.respond(response)
+                        })?;
+                        Ok(())
+                    }
                 }
             },
             on_receive_request!(),
