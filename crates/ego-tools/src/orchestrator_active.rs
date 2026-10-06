@@ -134,12 +134,13 @@ impl TypedTool for ActiveTool {
             } => {
                 nonempty(session_id)?;
                 nonempty(message)?;
-                if let Some(limits) = &self.rework
-                    && let Some(count) = limits
-                        .lock()
-                        .expect("rework budget poisoned")
-                        .get_mut(session_id)
-                {
+                if let Some(limits) = &self.rework {
+                    let mut limits = limits.lock().expect("rework budget poisoned");
+                    let count = limits.get_mut(session_id).ok_or_else(|| {
+                        ToolError::InvalidParams(
+                            "rework requires an exact owned spawn receipt session_id".into(),
+                        )
+                    })?;
                     if *count >= 2 {
                         return Err(ToolError::InvalidParams("this thread has exhausted its two rework requests; give maintainer the consolidated outcome".into()));
                     }

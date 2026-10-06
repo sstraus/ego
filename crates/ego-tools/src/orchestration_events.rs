@@ -365,19 +365,26 @@ impl ObservationPump {
                 .max_by_key(|r| r.name.len())
                 .map(|r| r.name.clone())
                 .or(tracked_peer(&self.children, &path)?);
-            let sender = self
+            let candidate_sender = self
                 .supervised
                 .iter()
                 .filter(|r| {
                     peer.as_deref() == Some(r.name.as_str()) && millis(modified) > r.spawned_at_ms
                 })
                 .max_by_key(|r| r.spawned_at_ms)
-                .map(|r| r.session_id.clone())
-                .or(tracked_sender(&self.children, &path)?);
+                .map(|r| r.session_id.clone());
+            let tracked_sender = tracked_sender(&self.children, &path)?;
+            // A reused peer name cannot override the tracked child's identity.
+            let (peer, sender) = match (candidate_sender, tracked_sender) {
+                (Some(candidate), Some(tracked)) if candidate != tracked => (None, Some(tracked)),
+                (candidate, tracked) => (peer, candidate.or(tracked)),
+            };
             if text.trim().starts_with("RESULT") {
                 // A RESULT settles only a spawn it postdates; a reused name keeps older files.
                 for receipt in self.supervised.iter().filter(|r| {
-                    peer.as_deref() == Some(r.name.as_str()) && millis(modified) > r.spawned_at_ms
+                    sender.as_deref() == Some(r.session_id.as_str())
+                        && peer.as_deref() == Some(r.name.as_str())
+                        && millis(modified) > r.spawned_at_ms
                 }) {
                     self.cursor.settle_spawn(&receipt.session_id);
                 }
