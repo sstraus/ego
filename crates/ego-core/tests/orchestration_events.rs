@@ -8,6 +8,7 @@ fn event(text: &str, at_ms: u64) -> Observation {
         at_ms,
         result: None,
         peer: None,
+        sender: None,
     }
 }
 
@@ -83,6 +84,7 @@ fn idle_stall_survives_restart_but_result_and_active_work_clear_the_alarm() {
     cursor.observe(
         Observation {
             peer: Some("child".into()),
+            sender: None,
             ..event("RESULT child complete", 301 + STALL_MS)
         },
         301 + STALL_MS,

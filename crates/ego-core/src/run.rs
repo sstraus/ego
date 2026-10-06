@@ -574,6 +574,9 @@ pub struct RunSelections {
     )]
     budget: Option<Budget>,
     profile: Option<String>,
+    /// Optional ACP host profile ceiling, retained with durable caller selections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ceiling_profile: Option<String>,
     /// The confinement the caller picked, if they picked one.
     ///
     /// Here rather than in the per-generation seat because confinement is
@@ -629,6 +632,7 @@ impl RunSelections {
             mode,
             budget,
             profile,
+            ceiling_profile: None,
             sandbox: None,
             sandbox_observation: None,
             trust: None,
@@ -665,6 +669,7 @@ impl RunSelections {
             mode: None,
             budget: None,
             profile: None,
+            ceiling_profile: None,
             sandbox: None,
             sandbox_observation: None,
             trust: None,
@@ -720,6 +725,16 @@ impl RunSelections {
         let mut pinned = self.clone();
         pinned.profile = Some(profile.into());
         pinned
+    }
+
+    /// Pin the independent host ceiling alongside the selected profile.
+    pub fn with_ceiling_profile(mut self, profile: impl Into<String>) -> Self {
+        self.ceiling_profile = Some(profile.into());
+        self
+    }
+
+    pub fn ceiling_profile(&self) -> Option<&str> {
+        self.ceiling_profile.as_deref()
     }
 
     fn with_model(&self, model: ModelRef) -> Self {
@@ -1265,6 +1280,7 @@ pub struct RunExecutionBindings {
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     controls: Option<Arc<dyn crate::control::SessionControls>>,
     host: Option<crate::turn::HostClient>,
+    interactive_control: Option<Arc<Mutex<Option<crate::turn::InteractiveControl>>>>,
 }
 
 impl RunExecutionBindings {
@@ -1284,7 +1300,23 @@ impl RunExecutionBindings {
             sandbox_grants: None,
             controls: None,
             host: None,
+            interactive_control: None,
         }
+    }
+
+    /// Transfer the sole turn coordinator's receiver to this execution.
+    pub fn with_interactive_control(mut self, control: crate::turn::InteractiveControl) -> Self {
+        self.interactive_control = Some(Arc::new(Mutex::new(Some(control))));
+        self
+    }
+
+    pub fn take_interactive_control(&self) -> Option<crate::turn::InteractiveControl> {
+        self.interactive_control.as_ref().and_then(|control| {
+            control
+                .lock()
+                .expect("turn control binding lock poisoned")
+                .take()
+        })
     }
 
     /// Attach the client that initialized this execution's connection, so the

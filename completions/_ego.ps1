@@ -41,6 +41,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('roots', 'roots', [CompletionResultType]::ParameterValue, 'roots')
             [CompletionResult]::new('rules', 'rules', [CompletionResultType]::ParameterValue, 'Inspect and manage persistent permission rules.')
             [CompletionResult]::new('mcp-server', 'mcp-server', [CompletionResultType]::ParameterValue, 'Serve scoped ego runs over MCP on stdio.')
+            [CompletionResult]::new('orchestrator', 'orchestrator', [CompletionResultType]::ParameterValue, 'orchestrator')
             break
         }
         'ego;run' {
@@ -433,6 +434,18 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--max-concurrent-runs', '--max-concurrent-runs', [CompletionResultType]::ParameterName, 'max-concurrent-runs')
             [CompletionResult]::new('--retained-requests', '--retained-requests', [CompletionResultType]::ParameterName, 'retained-requests')
             [CompletionResult]::new('--max-resource-bytes', '--max-resource-bytes', [CompletionResultType]::ParameterName, 'max-resource-bytes')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;orchestrator' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('brief', 'brief', [CompletionResultType]::ParameterValue, 'Inspect tracked children and unread results without model generation or inbox reads')
+            break
+        }
+        'ego;orchestrator;brief' {
+            [CompletionResult]::new('--root', '--root', [CompletionResultType]::ParameterName, 'root')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

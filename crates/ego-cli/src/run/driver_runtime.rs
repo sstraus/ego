@@ -125,7 +125,7 @@ pub(super) async fn drive_execution<S: EventSink>(
         mode: _,
         policy_selection,
         policy_source,
-        perimeter,
+        mut perimeter,
         invocation,
         run_id,
         resume_plan: _,
@@ -361,6 +361,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                     sink,
                     cancel: &cancel,
                     pause: &pause,
+                    control: None,
                 },
                 HeadlessGeneration {
                     source: Arc::clone(&source),
@@ -517,9 +518,11 @@ pub(super) async fn drive_execution<S: EventSink>(
             // replaceable ActiveSession is mutated or replaced.
             'sessions: loop {
                 let (transition, source_state, session_end) = {
-                    let (session_hook_ports, _, _) =
+                    let (session_hook_ports, observation, probe_evidence) =
                         effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
                             .await?;
+                    perimeter =
+                        perimeter.with_execution_observation(&observation, probe_evidence.as_ref());
                     let recovered_epoch_policy = match resumed.as_ref() {
                         Some(RuntimeResume::Foreign { policy, .. }) => Some(Arc::clone(policy)),
                         Some(RuntimeResume::Model(_)) | None => None,
@@ -1973,6 +1976,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 run_deadline,
                             )
                             .await?;
+                            perimeter = perimeter
+                                .with_execution_observation(&observation, probe_evidence.as_ref());
                             let ports = Arc::new(ports.with_session_processes(&session_hook_ports));
                             let inline = staged_images
                                 .iter()

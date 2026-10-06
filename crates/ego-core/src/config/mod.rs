@@ -33,7 +33,7 @@ pub use mutation::{
 };
 pub use resolve::{
     ActiveProfileProvenance, Effective, McpConfigProvenance, Posture, ResolvedMcpConfig,
-    ResolvedMcpEntry, resolve, resolve_selected,
+    ResolvedMcpEntry, resolve, resolve_selected, resolve_with_profile_ceiling,
 };
 pub use ruleset::{OriginSet, Ruleset, SourcedRule};
 pub use source::{Source, Sourced, Trust};

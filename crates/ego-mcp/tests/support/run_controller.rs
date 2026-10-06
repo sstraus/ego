@@ -88,6 +88,7 @@ impl SessionStore for SessionStoreFixture {
             .expect("entries")
             .keys()
             .map(|id| SessionMeta {
+                profiles: Default::default(),
                 id: *id,
                 workspace_root: PathBuf::from("/workspace"),
                 model: None,
@@ -112,7 +113,7 @@ impl SessionStore for SessionStoreFixture {
             items.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(tx) => Some(tx.revision()),
                 SessionEntry::Event(_) => None,
-                SessionEntry::Evidence(_) => None,
+                SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => None,
             })
         });
         if current != expected_revision {

@@ -283,7 +283,9 @@ impl SessionStore for FakeSessionStore {
         let mut entries = self.entries.lock().unwrap();
         let current = entries.iter().rev().find_map(|entry| match entry {
             SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
-            SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+            SessionEntry::Event(_)
+            | SessionEntry::Evidence(_)
+            | SessionEntry::NoticeDelivered(_) => None,
         });
         if expected_revision != current {
             return Ok(current.map_or(

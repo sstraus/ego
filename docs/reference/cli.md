@@ -273,3 +273,9 @@ Serve scoped ego runs over MCP on stdio.
 - `--retained-requests <RETAINED_REQUESTS>` — (undocumented)
 - `--session-dir <SESSION_DIR>` — Override the store location
 
+## `ego orchestrator`
+
+- `orchestrator brief` — Inspect tracked children and unread results without model generation or inbox reads
+
+- `-h, --help` — Print help
+

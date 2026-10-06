@@ -757,12 +757,14 @@ pub(super) fn rooted_settings(
     let trust = trust_for(&root);
     let layers = config::layers(&root, args, trust)?;
     let selected_profile = config::profile(args);
-    let effective = resolve_selected(
+    let effective = config::resolve_session_profile(
         &layers,
         trust,
         selected_profile
             .as_ref()
             .map(config::SelectedProfile::as_resolver_input),
+        args.ceiling_profile.as_deref(),
+        &cwd,
     )
     .map_err(|err| UsageError(err.to_string()))?;
     // Checked here, where the posture and the trust it was resolved from are
@@ -787,8 +789,10 @@ pub(super) fn frozen_rooted_settings(
     // answer to a question already answered, and the consumers that read the
     // posture rather than the resolved layers — the hook catalogue is the one
     // that matters — acted on it.
-    let layers = frozen.layers(args)?;
-    let effective = frozen.resolve_layers(&layers, args)?;
+    let mut rooted_args = args.clone();
+    rooted_args.directory = Some(cwd.clone());
+    let layers = frozen.layers(&rooted_args)?;
+    let effective = frozen.resolve_layers(&layers, &rooted_args)?;
     finish_rooted_settings(
         args,
         cwd,

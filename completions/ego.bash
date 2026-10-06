@@ -55,6 +55,9 @@ _ego() {
             ego,models)
                 cmd="ego__subcmd__models"
                 ;;
+            ego,orchestrator)
+                cmd="ego__subcmd__orchestrator"
+                ;;
             ego,resume)
                 cmd="ego__subcmd__resume"
                 ;;
@@ -112,6 +115,9 @@ _ego() {
             ego__subcmd__mcp,rm)
                 cmd="ego__subcmd__mcp__subcmd__rm"
                 ;;
+            ego__subcmd__orchestrator,brief)
+                cmd="ego__subcmd__orchestrator__subcmd__brief"
+                ;;
             ego__subcmd__roots,add)
                 cmd="ego__subcmd__roots__subcmd__add"
                 ;;
@@ -146,7 +152,7 @@ _ego() {
 
     case "${cmd}" in
         ego)
-            opts="-h --help run resume fork compact export ls usage models hooks doctor acp a2a auth mcp config roots rules mcp-server"
+            opts="-h --help run resume fork compact export ls usage models hooks doctor acp a2a auth mcp config roots rules mcp-server orchestrator"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -711,6 +717,38 @@ _ego() {
             fi
             case "${prev}" in
                 --provider)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__orchestrator)
+            opts="-h --help brief"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__orchestrator__subcmd__brief)
+            opts="-h --root --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

@@ -45,6 +45,7 @@ pub mod model_picker;
 pub mod models;
 pub(crate) mod onboarding;
 pub(crate) mod orchestration_observer;
+pub mod orchestrator;
 pub mod output;
 pub mod perimeter;
 pub mod prompt;

@@ -231,6 +231,29 @@ async fn notice_published_between_prompts_reaches_the_session_as_an_acp_update()
         .publish(&session_id, &card)
         .expect_err("a closed host must not be told a later notice was delivered");
     assert_eq!(closed.code, ErrorCode::ResourceNotFound);
+    // Catches: accepted cards have no durable timestamps, or failed sends are recorded as delivery.
+    use ego_core::store::session_store::{SessionEntry, SessionStore};
+    use futures::StreamExt;
+    let entries = fixture
+        .store
+        .read(&session.parse().unwrap())
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let deliveries = entries
+        .into_iter()
+        .filter_map(|entry| match entry.unwrap() {
+            SessionEntry::NoticeDelivered(notice) => Some(notice),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].card_id, "result-42");
+    assert_eq!(
+        deliveries[0].source_path.as_deref(),
+        Some(std::path::Path::new("/workspace/results/worker.md"))
+    );
+    assert!(deliveries[0].delivered_at.as_millis() > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1878,6 +1901,123 @@ async fn critic_nested_fork_keeps_each_cutoff_and_local_ids_after_ancestor_delet
     assert_eq!(
         before["result"]["sessions"], after["result"]["sessions"],
         "refused forks published sessions"
+    );
+    connection.finish().await;
+}
+
+#[tokio::test]
+async fn journal_failure_does_not_report_success_after_the_notice_was_queued() {
+    let notices = AcpNotices::default();
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router_with_notices(notices.clone()));
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    notices.set_delivery_recorder(std::sync::Arc::new(|_, _| Err("disk full".to_owned())));
+    let error = notices
+        .publish(
+            &session.into(),
+            &AcpNotice {
+                id: "recording-failure".to_owned(),
+                text: "RESULT".to_owned(),
+                action: NoticeAction::OpenResult {
+                    path: "/results/worker.md".into(),
+                },
+            },
+        )
+        .expect_err("cursor must not acknowledge an unrecorded delivery");
+    assert_eq!(error.code, ErrorCode::InternalError);
+    assert!(
+        error
+            .data
+            .unwrap()
+            .to_string()
+            .contains("delivery journal failed")
+    );
+    assert_eq!(connection.announced().await.len(), 1);
+    connection.finish().await;
+}
+
+// Catches: an idle result resume bypasses ACP admission, updates another seat, or silently retries failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn result_resume_reuses_the_idle_acp_turn_and_reports_admission_failure() {
+    let notices = AcpNotices::default();
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router_with_notices(notices.clone()));
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    assert!(
+        notices
+            .resume(&"unknown".into(), "report".into(), "Verify".into())
+            .is_err()
+    );
+    let resumed = notices
+        .resume(
+            &session.clone().into(),
+            "report".into(),
+            "Verify actual evidence".into(),
+        )
+        .unwrap();
+    assert_eq!(
+        regression_case_phase("resume completion", resumed).await.unwrap(),
+        Ok(())
+    );
+    assert_eq!(fixture.executor_effect_counts().1, 1);
+    fixture.fail_next_submit("evidence verification failed");
+    let failed = notices
+        .resume(&session.into(), "report-two".into(), "Verify".into())
+        .unwrap();
+    assert!(
+        regression_case_phase("resume failure", failed)
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(fixture.executor_effect_counts().1, 2);
+    connection.finish().await;
+}
+
+// Catches: reports received during a turn run concurrently or create several pending turns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn result_resume_busy_turn_queues_one_consolidated_pending_turn() {
+    let notices = AcpNotices::default();
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router_with_notices(notices.clone()));
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    fixture.block_next_turn();
+    let prompt = connection
+        .send_request(
+            "session/prompt",
+            serde_json::json!({"sessionId":session, "prompt":[{"type":"text","text":"start"}]}),
+        )
+        .await;
+    regression_case_phase("original turn began", fixture.turn_began()).await;
+    let first = notices
+        .resume(
+            &session.clone().into(),
+            "first".into(),
+            "RESULT first".into(),
+        )
+        .unwrap();
+    let second = notices
+        .resume(&session.into(), "second".into(), "BLOCKED second".into())
+        .unwrap();
+    assert_eq!(
+        fixture.executor_effect_counts().1,
+        1,
+        "resume cannot overlap the original turn"
+    );
+    fixture.release_turn();
+    assert!(connection.response(prompt).await.0["result"].is_object());
+    assert_eq!(regression_case_phase("first report", first).await.unwrap(), Ok(()));
+    assert_eq!(
+        regression_case_phase("second report", second).await.unwrap(),
+        Ok(())
+    );
+    assert_eq!(
+        fixture.executor_effect_counts().1,
+        2,
+        "one pending consolidated turn"
     );
     connection.finish().await;
 }

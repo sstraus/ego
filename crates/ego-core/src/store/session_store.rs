@@ -27,6 +27,15 @@ pub enum SessionEntry {
     Event(DomainEvent),
     RunTransaction(RunTransaction),
     Evidence(EvidenceRecord),
+    NoticeDelivered(NoticeDelivery),
+}
+
+/// ACP transport acceptance outside conversation turns; this is not a host render receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeDelivery {
+    pub card_id: String,
+    pub source_path: Option<PathBuf>,
+    pub delivered_at: Timestamp,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -35,6 +44,7 @@ enum SessionEntryWire {
     Event { event: DomainEvent },
     RunTransaction { run_transaction: RunTransaction },
     Evidence { evidence: EvidenceRecord },
+    NoticeDelivered { notice: NoticeDelivery },
 }
 
 impl Serialize for SessionEntry {
@@ -51,6 +61,9 @@ impl Serialize for SessionEntry {
             },
             Self::Evidence(evidence) => SessionEntryWire::Evidence {
                 evidence: evidence.clone(),
+            },
+            Self::NoticeDelivered(notice) => SessionEntryWire::NoticeDelivered {
+                notice: notice.clone(),
             },
         }
         .serialize(serializer)
@@ -73,7 +86,21 @@ impl<'de> Deserialize<'de> for SessionEntry {
                 }
                 Self::Evidence(evidence)
             }
+            SessionEntryWire::NoticeDelivered { notice } => Self::NoticeDelivered(notice),
         })
+    }
+}
+
+/// Profile names that bind authority at session creation, before any run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProfiles {
+    pub profile: Option<String>,
+    pub ceiling_profile: Option<String>,
+}
+
+impl SessionProfiles {
+    pub fn is_empty(&self) -> bool {
+        self.profile.is_none() && self.ceiling_profile.is_none()
     }
 }
 
@@ -103,6 +130,8 @@ impl<'de> Deserialize<'de> for SessionEntry {
 /// entry timestamps and the header authored at session birth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
+    #[serde(default, skip_serializing_if = "SessionProfiles::is_empty")]
+    pub profiles: SessionProfiles,
     pub id: SessionId,
     pub workspace_root: PathBuf,
     pub model: Option<String>,

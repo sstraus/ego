@@ -52,6 +52,7 @@ fn retired_v8_log_is_refused_without_mutating_bytes() {
         .expect("create session directory");
 
     let mut bytes = encode_header(&Header {
+        profiles: Default::default(),
         v: 8,
         session: id,
         created: Timestamp::from_millis(4_000),

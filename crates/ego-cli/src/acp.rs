@@ -1127,14 +1127,16 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             Arc::new(crate::acp_sandbox_grants::FileSandboxGrants::new(home))
                 as Arc<dyn ego_acp::sandbox::SandboxGrantStore>
         });
-    let confinement_port: Arc<dyn SessionConfinementAdmission> =
-        Arc::new(CliSessionConfinementAdmission::with_reporter(
+    let confinement_port: Arc<dyn SessionConfinementAdmission> = Arc::new(
+        CliSessionConfinementAdmission::with_reporter(
             Arc::clone(&store),
             controls,
             ceiling,
             mcp_cancel.clone(),
             Arc::clone(&reporter),
-        ));
+        )
+        .with_shape(args.shape.clone()),
+    );
 
     // One lister for the whole connection: it holds no session state, and
     // the answer it helps ask is carried by the run selection rather than by
@@ -1150,6 +1152,12 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     let trust_port: Arc<dyn SessionTrustAdmission> = Arc::new(trust);
 
     let notices = ego_acp::serve::AcpNotices::default();
+    let notice_store = Arc::clone(&store);
+    notices.set_delivery_recorder(Arc::new(move |session, notice| {
+        notice_store
+            .record_notice(&session, notice)
+            .map_err(|error| error.to_string())
+    }));
     let _observer = match crate::orchestration_observer::start(
         coordinator,
         orchestration_mode,

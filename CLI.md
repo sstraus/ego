@@ -85,6 +85,7 @@ ego a2a --listen ENDPOINT [--allow-public-bind] [--sandbox LEVEL]
                               credential in EGO_A2A_TOKEN. An address reachable
                               from outside this machine is refused by name
                               unless the operator asks for it
+ego orchestrator brief [--root PATH]  read-only TUIC children and unread results
 ego doctor [--json]           read-only redacted health snapshot
 ```
 
@@ -155,6 +156,7 @@ omitted when empty: two states, identical bytes.
 | `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status`/`compact` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
 | `ego models` | **yes** | prints the shared current-model catalogue as deterministic text or versioned JSON; `--provider` filters both model and source rows, and `--refresh` updates authoritative discovered slices without promoting cached display facts into generation authority |
+| `ego orchestrator` | **yes** | `brief [--root PATH]` inspects tracked TUIC children and unread results; requires TUIC_SOCKET; no generation or inbox reads |
 | `ego hooks` | **yes** | `ls [--json]` reads the same immutable admitted hook catalogue used by execution; it neither reloads nor edits hook policy |
 | `ego config` | **yes** | `get`, `set`, `unset`, `ls`, and whole-document `edit` use one strict atomic user-config transaction; stored profiles are explicit targets and management ignores ambient `EGO_PROFILE` |
 | `ego rules` | **yes** | `ls`, `allow`, `deny`, `revoke`, `remember`, and `explain` share the canonical rule grammar, atomic user store, and effective policy service; management ignores ambient `EGO_PROFILE` and never executes the explained call |
@@ -1543,7 +1545,18 @@ and origin layer, sandbox selection and backend, capability evidence, and
 network mode. The interactive command projects the session's existing
 confinement and admitted roots; it does not reload configuration. Headless
 inspection uses the current directory and untrusted configuration resolution.
-Capabilities remain `not_checked` because inspection does not execute probes.
+Session inspection reuses the current backend observation and committed probe
+transcript from the shared behavioral suite; it executes no additional probes.
+In effective-perimeter JSON, `capabilities` is an array of measured guarantees:
+`read_scoped`, `write_denied`, `write_scoped`, and `no_ip_network`. An empty array
+means the probes completed without establishing a guarantee. `backend` names
+the observed backend, including `bwrap` when selected on Linux. `probe_evidence`
+is the existing session transcript reference (`<sha256>:<bytes>`).
+Without a completed observation and probe transcript, `capabilities` is the
+string `not_checked`, and `capabilities_reason` explains why. Measured views omit
+`capabilities_reason`; unmeasured views omit `probe_evidence`. Headless
+`config ls --effective --json` and doctor have no session measurement and remain
+`not_checked`. A mechanism name or configured sandbox is not proof of enforcement.
 Profile roots reach both permission policy and exec confinement; sandbox `ro` still denies all writes.
 Doctor may name admitted roots in this block only; all other diagnostics keep
 the existing path redaction policy.
@@ -1819,3 +1832,20 @@ Production capability probes need a temporary path outside every granted root.
 If TMPDIR lies within a granted root, sandbox startup refuses with
 `perimeter-probe-temp-overlap` rather than weakening verification or silently
 falling back. In particular, a tree run needs TMPDIR outside `~/Gits`.
+
+### Deterministic orchestration inspection
+
+`ego orchestrator brief [--root PATH]` reads the native TUIC session list,
+tracked children and result files newer than the watcher stamp. It shares the
+bounded child and unread-path projection with `orchestrator_brief`. It does not
+resolve a model, consume inbox mail, prune tracking or change the watcher stamp.
+The root optionally restricts the child subtree. A missing socket, failed host
+read or malformed response is an explicit command failure.
+
+ACP out-of-turn cards append a typed `notice_delivered` record to the existing
+session stream after the transport accepts the notification. It carries the
+card ID, optional source path and timestamp, and is fsynced before the pump can
+acknowledge its pending batch. This is transport enqueue evidence, not a host
+render acknowledgement. A journal failure returns an error; replay can enqueue
+the same stable card ID again. These facts create no conversation turns and
+sanitized exports retain IDs/timestamps but omit source paths.

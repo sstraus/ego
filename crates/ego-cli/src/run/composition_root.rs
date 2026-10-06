@@ -151,6 +151,7 @@ impl CliPrepared {
             args.profile = Some(profile.to_owned());
             args.profile_source = Some(ego_core::config::Source::Flags);
         }
+        args.ceiling_profile = request.selections.ceiling_profile().map(str::to_owned);
         if args.profile.as_deref() == Some("ci") {
             return Err(RunTermination::UsageError {
                 message: "profile ci available only through ego run or ego resume".to_owned(),
@@ -278,6 +279,35 @@ impl CliPrepared {
                 // session out of running at all.
                 Err(error) => {
                     tracing::warn!(%error, "the operator seat could not be read");
+                }
+            }
+        }
+        if self
+            .registry
+            .iter()
+            .any(|tool| tool.descriptor().name == "orchestrator_active")
+        {
+            use futures::StreamExt;
+            let entries = SessionStore::read(self.store.as_ref(), &self.session_id)
+                .map_err(|e| RunExecutorError::new(e.to_string()))?
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| RunExecutorError::new(e.to_string()))?;
+            let limits = ego_tools::orchestrator_active::rework_limits(&entries)
+                .map_err(RunExecutorError::new)?;
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| RunExecutorError::new("orchestration requires HOME"))?;
+            let tool = ego_tools::orchestrator_active::tool_with_rework_limits(
+                ego_core::orchestrator::Mode::Active,
+                std::path::Path::new(&home),
+                std::env::var("TUIC_SESSION").ok(),
+                limits,
+            );
+            for entry in &mut self.registry {
+                if entry.descriptor().name == "orchestrator_active" {
+                    *entry = RegisteredTool::Effect(Arc::clone(&tool));
                 }
             }
         }
@@ -438,6 +468,7 @@ impl CliPrepared {
                 sink: sink.as_ref(),
                 cancel,
                 pause,
+                control: bindings.take_interactive_control(),
             },
             HeadlessGeneration {
                 source,

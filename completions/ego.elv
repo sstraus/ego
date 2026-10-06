@@ -38,6 +38,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand roots 'roots'
             cand rules 'Inspect and manage persistent permission rules.'
             cand mcp-server 'Serve scoped ego runs over MCP on stdio.'
+            cand orchestrator 'orchestrator'
         }
         &'ego;run'= {
             cand -f 'Read the instruction and its invocation configuration from an agent file'
@@ -389,6 +390,16 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --max-concurrent-runs 'max-concurrent-runs'
             cand --retained-requests 'retained-requests'
             cand --max-resource-bytes 'max-resource-bytes'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;orchestrator'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+            cand brief 'Inspect tracked children and unread results without model generation or inbox reads'
+        }
+        &'ego;orchestrator;brief'= {
+            cand --root 'root'
             cand -h 'Print help'
             cand --help 'Print help'
         }

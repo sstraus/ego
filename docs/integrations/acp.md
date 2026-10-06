@@ -54,3 +54,52 @@ Sources: [ACP composition](../../crates/ego-cli/src/acp.rs),
 [permission adapter](../../crates/ego-cli/src/acp_permission.rs),
 [host-boundary decision](../internals/decisions/2026-09-11-tuicommander-backend-api-is-the-host-boundary.md),
 and [host proof tests](../../crates/ego-cli/tests/regression_case.rs).
+
+## Session profile ceiling
+
+A host can select a session profile in `session/new` and bound it by its machine
+profile. Names resolve through the existing ego config layers; this does not
+import `.tuic.json`. The host passes the names from that file and its machine
+selection:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace/repo","mcpServers":[],"_meta":{"ego":{"profile":"repo","ceilingProfile":"machine"}}}}
+```
+
+`profile` overrides the launch profile for this session. `ceilingProfile` is
+optional and resolves from machine layers (system, user, environment), even if
+the workspace is trusted. A repository cannot redefine the ceiling profile.
+Omitting both fields preserves the existing launch behavior. Omitting only the
+ceiling selects the requested profile without adding a host restriction.
+Malformed names and unknown profiles refuse creation.
+
+The effective mode and sandbox retain the narrower value. Extra roots are
+compared after canonicalization using the system root-ceiling rule: roots
+outside the machine perimeter are dropped; write access above a read-only
+bound becomes read-only. Additional executable read roots are also bounded.
+The workspace remains admitted. Administrator ceilings in `/etc/ego/config.toml`
+still apply above the host clamp and retain their existing refusal semantics.
+
+A successful result includes `_meta.ego` with the selected names, effective
+values and warnings. For a repository profile with `mode="yolo"`, `sandbox="off"`
+and an extra root outside a workspace-only machine profile:
+
+```json
+{"sessionId":"<uuid>","_meta":{"ego":{"profile":"repo","ceilingProfile":"machine","effective":{"mode":"default","sandbox":"workspace","roots":[],"execPaths":[]},"warnings":["mode yolo exceeds profile ceiling default; using default","sandbox off exceeds profile ceiling workspace; using workspace","root /outside exceeds profile ceiling; dropped"]}}}
+```
+
+Warnings are strings in request-field order (mode, sandbox, roots, executable
+roots); an unchanged request has an empty array. Creation succeeds after a host
+clamp. Later controls cannot exceed the admitted ceiling, and prompt preparation
+carries both profile names in durable run selections. Deferred confinement
+measurement still publishes the standard `config_option_update` after creation.
+
+Creation writes the profile names into the durable session log header, before
+the first prompt. The manifest projects these names from that header.
+`session/load` and `session/resume` restore this creation authority and durable
+run selections before measuring confinement or admitting MCP servers. Forks and
+compacted successors inherit the same names through durable session lineage,
+including successors with no run records yet. A missing or invalid ceiling
+refuses reopening; it never becomes an absent ceiling. Reattaching to a live
+profile seat also refuses changed profile policy instead of replacing its
+pinned authority.

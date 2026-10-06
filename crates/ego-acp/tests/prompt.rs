@@ -641,6 +641,7 @@ impl SessionStore for PromptStore {
             .expect("prompt entries")
             .keys()
             .map(|id| SessionMeta {
+                profiles: Default::default(),
                 id: *id,
                 workspace_root: PathBuf::from("/tmp"),
                 model: None,
@@ -664,7 +665,9 @@ impl SessionStore for PromptStore {
         let actual = entries.get(session).and_then(|entries| {
             entries.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
-                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::Event(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
         });
         if expected_revision != actual {
@@ -691,7 +694,9 @@ impl PromptStore {
             .flatten()
             .filter_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.clone()),
-                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::Event(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
             .collect()
     }

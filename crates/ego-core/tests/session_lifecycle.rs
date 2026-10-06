@@ -154,7 +154,8 @@ impl EvidenceLogSource for FakeStore {
                 SessionEntry::Evidence(evidence) if id == _session => Some(evidence.clone()),
                 SessionEntry::Event(_)
                 | SessionEntry::RunTransaction(_)
-                | SessionEntry::Evidence(_) => None,
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
             .collect())
     }
@@ -209,13 +210,15 @@ impl LeasedLifecycleAppend for FakeLease {
 impl InactiveSessionLease for FakeLease {}
 
 impl SessionLifecycleStore for FakeStore {
-    fn publish_empty_session(
+    fn publish_session(
         &self,
         id: SessionId,
         root: &std::path::Path,
         created: Timestamp,
+        profiles: ego_core::store::session_store::SessionProfiles,
     ) -> Result<LifecyclePublication, StoreError> {
         self.0.lock().unwrap().metadata.push(SessionMeta {
+            profiles,
             id,
             workspace_root: root.to_path_buf(),
             model: None,
@@ -271,6 +274,7 @@ impl SessionLifecycleStore for FakeStore {
             .cloned()
         {
             state.metadata.push(SessionMeta {
+                profiles: Default::default(),
                 id,
                 workspace_root: meta.workspace_root,
                 model: meta.model,
@@ -480,6 +484,7 @@ fn generation_evidence(session: SessionId, context_window: u64) -> EvidenceRecor
 
 fn metadata(id: SessionId, root: &Path, created: u64) -> SessionMeta {
     SessionMeta {
+        profiles: Default::default(),
         id,
         workspace_root: root.to_path_buf(),
         model: None,

@@ -36,6 +36,11 @@
           "version": 1,
           "pause": "_ego/pause",
           "resume": "_ego/resume"
+        },
+        "steer": {
+          "version": 1,
+          "method": "_ego/steer",
+          "contentTypes": ["text"]
         }
       }
     }

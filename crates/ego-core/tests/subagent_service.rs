@@ -744,7 +744,9 @@ impl Store {
             .flat_map(|entries| entries.iter())
             .filter_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.clone()),
-                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::Event(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
             .collect()
     }
@@ -785,7 +787,9 @@ impl SessionStore for Store {
         let current = entries.get(session).and_then(|values| {
             values.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
-                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::Event(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
         });
         if current != expected_revision {

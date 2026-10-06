@@ -109,12 +109,12 @@ mod session_commands;
 mod turns;
 mod windows_unconfined;
 
-pub(crate) use executor::protocol_effective;
 use executor::{
     ChildAuthorityCeiling, DeferredCompactionPreparation, compaction_termination,
-    complete_run_context, protocol_args, public_result_artifact, run_executor_error, settlement,
+    complete_run_context, public_result_artifact, run_executor_error, settlement,
 };
 pub use executor::{CliCompactionCommand, CliRunExecutor};
+pub(crate) use executor::{protocol_args, protocol_effective};
 pub use session_commands::{compact, export, fork, ls};
 use session_commands::{exported, finalize_ci_bundle, finalize_ci_error};
 use turns::{

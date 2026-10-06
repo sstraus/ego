@@ -54,7 +54,7 @@ use ego_core::session_lifecycle::{
     SessionLifecycleStore, SessionLineageInfo, SessionPage,
 };
 use ego_core::sink::EventSink;
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionMeta, SessionProfiles, SessionStore, StoreError};
 use ego_core::turn::{AdmittedToolSource, HostClient};
 use ego_listen::{Bound, ConnectionGate, GuardedAccepted, Peer, serve_connections};
 use futures::channel::oneshot;
@@ -65,20 +65,81 @@ use hyper_util::service::TowerToHyperService;
 use serde::{Deserialize, Serialize};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
+#[path = "prompt_turn.rs"]
+mod prompt_turn;
+#[path = "resume.rs"]
+mod resume;
+use resume::{PromptHandler, PromptReply, ResumeQueue};
+
 /// The live ACP delivery boundary for notices produced outside a model turn.
 #[derive(Clone, Default)]
 pub struct AcpNotices {
     connections: Arc<Mutex<HashMap<v1::SessionId, NoticeConnection>>>,
+    recorder: Arc<Mutex<Option<Arc<NoticeRecorder>>>>,
 }
+
+type NoticeRecorder = dyn Fn(
+        ego_core::event::id::SessionId,
+        ego_core::store::session_store::NoticeDelivery,
+    ) -> Result<(), String>
+    + Send
+    + Sync;
 
 struct NoticeConnection {
     owner: Arc<()>,
     connection: ConnectionTo<Client>,
     closed_watcher: tokio::task::AbortHandle,
+    resume: ResumeQueue,
+    resume_worker: tokio::task::AbortHandle,
+}
+
+impl Drop for NoticeConnection {
+    fn drop(&mut self) {
+        self.closed_watcher.abort();
+        self.resume_worker.abort();
+    }
 }
 
 impl AcpNotices {
-    fn register(&self, session: v1::SessionId, connection: ConnectionTo<Client>) {
+    /// Bind the session journal owned by the host's composition root.
+    pub fn set_delivery_recorder(&self, recorder: Arc<NoticeRecorder>) {
+        *self.recorder.lock().expect("notice recorder lock poisoned") = Some(recorder);
+    }
+    pub fn connected(&self, session: &v1::SessionId) -> bool {
+        self.connections
+            .lock()
+            .expect("ACP notice connection lock poisoned")
+            .get(session)
+            .is_some_and(|seat| !seat.connection.is_incoming_closed())
+    }
+
+    /// Caller reserves durability before enqueueing. A disconnected seat refuses work.
+    pub fn resume(
+        &self,
+        session: &v1::SessionId,
+        id: String,
+        prompt: String,
+    ) -> Result<oneshot::Receiver<Result<(), String>>, Error> {
+        let connections = self
+            .connections
+            .lock()
+            .expect("ACP notice connection lock poisoned");
+        let seat = connections
+            .get(session)
+            .filter(|seat| !seat.connection.is_incoming_closed())
+            .ok_or_else(|| Error::from(ErrorCode::ResourceNotFound))?;
+        Ok(seat.resume.push(id, prompt))
+    }
+
+    fn register(
+        &self,
+        session: v1::SessionId,
+        connection: ConnectionTo<Client>,
+        sessions: Sessions,
+        handler: PromptHandler,
+    ) {
+        let (resume, resume_worker) =
+            ResumeQueue::start(session.clone(), connection.clone(), sessions, handler);
         let owner = Arc::new(());
         let notices = self.clone();
         let watched_session = session.clone();
@@ -99,6 +160,8 @@ impl AcpNotices {
                     owner: Arc::clone(&owner),
                     connection: connection.clone(),
                     closed_watcher,
+                    resume,
+                    resume_worker,
                 },
             );
         if let Some(previous) = previous {
@@ -155,6 +218,18 @@ impl AcpNotices {
             }
             return Err(Error::from(ErrorCode::ResourceNotFound));
         }
+        let recorder = self
+            .recorder
+            .lock()
+            .expect("notice recorder lock poisoned")
+            .clone()
+            .ok_or_else(|| {
+                Error::internal_error().data("notice delivery journal is not configured")
+            })?;
+        let session_id = session
+            .to_string()
+            .parse()
+            .map_err(|_| Error::invalid_params().data("invalid notice session id"))?;
         let sent = registered
             .connection
             .send_notification(v1::SessionNotification::new(
@@ -166,7 +241,30 @@ impl AcpNotices {
         {
             removed.closed_watcher.abort();
         }
-        sent
+        sent?;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Error::internal_error().data(error.to_string()))?;
+        let delivered_at = ego_core::event::time::Timestamp::from_millis(
+            u64::try_from(at.as_millis())
+                .map_err(|error| Error::internal_error().data(error.to_string()))?,
+        );
+        recorder(
+            session_id,
+            ego_core::store::session_store::NoticeDelivery {
+                card_id: notice.id.clone(),
+                source_path: match &notice.action {
+                    crate::project::NoticeAction::OpenResult { path } => Some(path.clone()),
+                    _ => None,
+                },
+                delivered_at,
+            },
+        )
+        .map_err(|error| {
+            Error::internal_error().data(format!(
+                "notice was queued but delivery journal failed: {error}"
+            ))
+        })
     }
 }
 
@@ -471,6 +569,29 @@ pub type SessionConfinementFuture =
 /// backend and commits evidence. Observation lookup reads the immutable
 /// snapshot installed before this session's options were published.
 pub trait SessionConfinementAdmission: Send + Sync {
+    /// Resolve optional host profiles before the session starts any effects.
+    fn configure_profiles(
+        &self,
+        _session: SessionId,
+        _root: &RunRoot,
+        _profile: Option<&str>,
+        _ceiling: Option<&str>,
+    ) -> Result<serde_json::Value, ControlError> {
+        Err(ControlError::Refused {
+            control: "profile",
+            why: "session profiles are not supported".into(),
+        })
+    }
+
+    /// Carry admitted profile authority through the durable run boundary.
+    fn profile_selections(
+        &self,
+        _session: SessionId,
+        selections: RunSelections,
+    ) -> Result<RunSelections, ControlError> {
+        Ok(selections)
+    }
+
     fn initialize(&self, session: SessionId, root: RunRoot) -> SessionConfinementFuture;
 
     fn observation(
@@ -691,6 +812,10 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
     // literal gated on one flag would have made the two stand or fall
     // together and one of the two claims would always be a lie.
     let mut ego = serde_json::Map::new();
+    ego.insert(
+        "steer".to_owned(),
+        serde_json::json!({"version": 1, "method": "_ego/steer", "contentTypes": ["text"]}),
+    );
     if compaction {
         ego.insert(
             "compact".to_owned(),
@@ -773,6 +898,37 @@ impl From<CompactionReceipt> for AcpCompactResponse {
     }
 }
 
+/// Submit text to the currently running turn's durable FIFO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AcpSteerRequest {
+    v: u32,
+    session_id: String,
+    prompt: Vec<v1::ContentBlock>,
+}
+
+impl JsonRpcMessage for AcpSteerRequest {
+    fn matches_method(method: &str) -> bool {
+        method == "_ego/steer"
+    }
+    fn method(&self) -> &str {
+        "_ego/steer"
+    }
+    fn to_untyped_message(&self) -> Result<UntypedMessage, Error> {
+        UntypedMessage::new(self.method(), self)
+    }
+    fn parse_message(method: &str, params: &impl Serialize) -> Result<Self, Error> {
+        if !Self::matches_method(method) {
+            return Err(Error::method_not_found());
+        }
+        agent_client_protocol::util::json_cast_params(params)
+    }
+}
+
+impl JsonRpcRequest for AcpSteerRequest {
+    type Response = serde_json::Value;
+}
+
 /// One `_ego/pause` or `_ego/resume`.
 ///
 /// One type for both because they carry the same three fields and differ
@@ -836,6 +992,7 @@ struct Registered {
     answered: VecDeque<AnsweredCommand>,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
     busy: bool,
+    steering: Option<ego_core::turn::InteractiveIngress>,
     withdrawal: Option<Withdrawal>,
     active_cancel: Option<CancelKey>,
     cancel_requested: bool,
@@ -925,15 +1082,18 @@ impl SessionRegistrations {
 }
 
 #[derive(Clone)]
-struct Sessions(Arc<Mutex<SessionRegistrations>>);
+struct Sessions(Arc<Mutex<SessionRegistrations>>, Arc<tokio::sync::Notify>);
 
 impl Sessions {
     fn new(remembered: NonZeroUsize) -> Self {
-        Self(Arc::new(Mutex::new(SessionRegistrations {
-            next_generation: 0,
-            sessions: HashMap::new(),
-            remembered,
-        })))
+        Self(
+            Arc::new(Mutex::new(SessionRegistrations {
+                next_generation: 0,
+                sessions: HashMap::new(),
+                remembered,
+            })),
+            Arc::default(),
+        )
     }
 
     fn open(
@@ -963,6 +1123,7 @@ impl Sessions {
                 answered: VecDeque::new(),
                 run,
                 busy: false,
+                steering: None,
                 withdrawal: None,
                 active_cancel: None,
                 cancel_requested: false,
@@ -1012,6 +1173,36 @@ impl Sessions {
             .map_err(|error| control_error(&error))
     }
 
+    async fn wait_idle(&self, id: &v1::SessionId) {
+        loop {
+            let idle = self.1.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
+            if !self.is_busy(id) {
+                return;
+            }
+            idle.await;
+        }
+    }
+    async fn begin_prompt(
+        &self,
+        id: &v1::SessionId,
+        ids: &dyn IdSource,
+        command: &str,
+        digest: &str,
+        resume: bool,
+    ) -> BeginPrompt {
+        loop {
+            if resume {
+                self.wait_idle(id).await;
+            }
+            let begun = self.begin(id, ids, command, digest);
+            if resume && matches!(begun, BeginPrompt::Busy) {
+                continue;
+            }
+            return begun;
+        }
+    }
     fn begin(
         &self,
         id: &v1::SessionId,
@@ -1157,6 +1348,8 @@ impl Sessions {
             session.withdrawal = None;
             session.active_cancel = None;
             session.busy = false;
+            session.steering = None;
+            self.1.notify_waiters();
             session.cancel_requested = false;
             return cancel_requested;
         }
@@ -1173,6 +1366,36 @@ impl Sessions {
             session.withdrawal = None;
             session.active_cancel = None;
             session.busy = false;
+            session.steering = None;
+            self.1.notify_waiters();
+        }
+    }
+
+    fn steering(
+        &self,
+        id: &v1::SessionId,
+    ) -> Result<Option<ego_core::turn::InteractiveIngress>, Error> {
+        let registrations = self.lock();
+        let session = registrations
+            .sessions
+            .get(id)
+            .ok_or_else(|| refused_params("unknown steering sessionId"))?;
+        Ok(session.steering.clone())
+    }
+
+    fn install_steering(
+        &self,
+        id: &v1::SessionId,
+        generation: RegistrationGeneration,
+        ingress: ego_core::turn::InteractiveIngress,
+    ) {
+        if let Some(session) = self
+            .lock()
+            .sessions
+            .get_mut(id)
+            .filter(|session| session.generation == generation && session.busy)
+        {
+            session.steering = Some(ingress);
         }
     }
 
@@ -1184,10 +1407,13 @@ impl Sessions {
     }
 
     fn close(&self, id: &v1::SessionId) -> Option<Arc<dyn SessionMcpAdmission>> {
-        self.lock()
+        let removed = self
+            .lock()
             .sessions
             .remove(id)
-            .and_then(|session| session.mcp)
+            .and_then(|session| session.mcp);
+        self.1.notify_waiters();
+        removed
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, SessionRegistrations> {
@@ -1644,8 +1870,12 @@ type LifecycleFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, LifecycleErr
 /// capability handlers without coupling the legacy router constructor to a
 /// concrete outer store. It contains no ACP DTOs and owns no durable policy.
 trait LifecycleOperations: Send + Sync {
-    fn create_with_id(&self, id: SessionId, root: std::path::PathBuf)
-    -> Result<(), LifecycleError>;
+    fn create_with_id(
+        &self,
+        id: SessionId,
+        root: std::path::PathBuf,
+        profiles: SessionProfiles,
+    ) -> Result<(), LifecycleError>;
     fn list(
         &self,
         cursor: Option<&SessionCursor>,
@@ -1653,6 +1883,7 @@ trait LifecycleOperations: Send + Sync {
     ) -> Result<SessionPage, LifecycleError>;
     fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError>;
     fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError>;
+    fn profiles(&self, id: SessionId) -> Result<SessionProfiles, LifecycleError>;
     fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError>;
     fn lineage_info(&self, id: SessionId) -> Result<Option<SessionLineageInfo>, LifecycleError>;
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment>;
@@ -1688,8 +1919,9 @@ where
         &self,
         id: SessionId,
         root: std::path::PathBuf,
+        profiles: SessionProfiles,
     ) -> Result<(), LifecycleError> {
-        SessionLifecycle::create_with_id(self, id, root).map(|_| ())
+        SessionLifecycle::create_with_profiles(self, id, root, profiles).map(|_| ())
     }
 
     fn list(
@@ -1706,6 +1938,10 @@ where
 
     fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
         SessionLifecycle::meta(self, id)
+    }
+
+    fn profiles(&self, id: SessionId) -> Result<SessionProfiles, LifecycleError> {
+        SessionLifecycle::profiles(self, id)
     }
 
     fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError> {
@@ -1797,6 +2033,74 @@ async fn initialize_confinement(
         .map_err(|error| control_error(&error))
 }
 
+/// Recover creation authority and run selections, following durable ancestry
+/// for successors that have not started their own run yet.
+async fn restore_session_profiles<S, E, C, I>(
+    controller: &RunController<S, E, C, I>,
+    lifecycle: &dyn LifecycleOperations,
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
+    source: SessionId,
+    target: SessionId,
+    root: &RunRoot,
+) -> Result<(), Error>
+where
+    S: SessionStore,
+    E: RunExecutor,
+    C: Clock,
+    I: IdSource,
+{
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    let mut current = source;
+    let mut visited = std::collections::HashSet::new();
+    let mut selected = RunSelections::empty();
+    loop {
+        if !visited.insert(current) {
+            return Err(Error::internal_error().data("cyclic session profile lineage"));
+        }
+        let profiles = lifecycle
+            .profiles(current)
+            .map_err(|error| lifecycle_error(&error))?;
+        let mut selections = match controller.status_by_session(current).await {
+            Ok(snapshot) => snapshot.selections().clone(),
+            Err(RunError::Store(StoreError::NotFound)) => admission
+                .profile_selections(current, RunSelections::empty())
+                .map_err(|error| control_error(&error))?,
+            Err(error) => return Err(Error::internal_error().data(error.to_string())),
+        };
+        if let Some(profile) = profiles.profile {
+            selections = selections.with_profile_name(profile);
+        }
+        if let Some(ceiling) = profiles.ceiling_profile {
+            selections = selections.with_ceiling_profile(ceiling);
+        }
+        if selected.profile().is_none() {
+            selected = selections.clone();
+        }
+        if let Some(ceiling) = selections.ceiling_profile() {
+            selected = selected.with_ceiling_profile(ceiling);
+            break;
+        }
+        let Some(lineage) = lifecycle
+            .lineage_info(current)
+            .map_err(|error| lifecycle_error(&error))?
+        else {
+            break;
+        };
+        current = match lineage.lineage {
+            ego_core::session::SessionLineage::Fork { source, .. }
+            | ego_core::session::SessionLineage::Compaction { source, .. } => source,
+        };
+    }
+    if selected.profile().is_some() || selected.ceiling_profile().is_some() {
+        admission
+            .configure_profiles(target, root, selected.profile(), selected.ceiling_profile())
+            .map_err(|error| control_error(&error))?;
+    }
+    Ok(())
+}
+
 /// The confinement this session's seat holds, as a run selection.
 ///
 /// Read on the prompt that *starts* the run and nowhere else. Unlike model,
@@ -1830,7 +2134,41 @@ fn selected_confinement(
     let observation = admission
         .observation(session, sandbox)
         .map_err(|error| control_error(&error))?;
-    Ok(selections.with_sandbox_observation(sandbox, observation))
+    admission
+        .profile_selections(
+            session,
+            selections.with_sandbox_observation(sandbox, observation),
+        )
+        .map_err(|error| control_error(&error))
+}
+
+/// Parse our optional extension strictly: malformed ceilings never become absent.
+fn session_profiles(meta: Option<&v1::Meta>) -> Result<Option<SessionProfiles>, Error> {
+    let Some(ego) = meta.and_then(|meta| meta.get("ego")) else {
+        return Ok(None);
+    };
+    if !ego.is_object() {
+        return Err(Error::invalid_params().data("_meta.ego must be an object"));
+    }
+    let parse = |key: &str| -> Result<Option<String>, Error> {
+        match ego.get(key) {
+            None => Ok(None),
+            Some(serde_json::Value::String(name)) => ego_core::config::ProfileName::parse(name)
+                .map(|_| Some(name.clone()))
+                .map_err(|error| Error::invalid_params().data(error.to_string())),
+            Some(_) => {
+                Err(Error::invalid_params().data(format!("_meta.ego.{key} must be a profile name")))
+            }
+        }
+    };
+    let profile = parse("profile")?;
+    let ceiling = parse("ceilingProfile")?;
+    Ok(
+        (profile.is_some() || ceiling.is_some()).then_some(SessionProfiles {
+            profile,
+            ceiling_profile: ceiling,
+        }),
+    )
 }
 
 /// A session request whose MCP selection arrived whole.
@@ -2541,6 +2879,19 @@ where
     let client_capabilities = Arc::new(Mutex::new(ClientInit::default()));
     let advertises_compaction = compaction.is_some();
     let advertises_lifecycle = lifecycle.is_some();
+    let prompt_handler = prompt_turn::prompt_handler(
+        sessions.clone(),
+        unadmitted.clone(),
+        Arc::clone(&controller),
+        Arc::clone(&spawner),
+        Arc::clone(&ids),
+        Arc::clone(&bindings_builder),
+        Arc::clone(&client_capabilities),
+        controls.clone(),
+        confinement.clone(),
+        trust.clone(),
+        lifecycle.clone(),
+    );
     Agent
         .builder()
         .name("ego")
@@ -2594,6 +2945,7 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
+                let prompt_handler = Arc::clone(&prompt_handler);
                 let trust = trust.clone();
                 async move |McpChecked(request): McpChecked<v1::NewSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let sessions = sessions.clone();
@@ -2605,6 +2957,7 @@ where
                     let controls = controls.clone();
                     let confinement = confinement.clone();
                     let notices = notices.clone();
+                let prompt_handler = Arc::clone(&prompt_handler);
                     let trust = trust.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
@@ -2627,12 +2980,27 @@ where
                     let start_request = RequestId::from_uuid(ids.next_uuid());
                     let session = RequestId::session_id(start_request);
                     let id = v1::SessionId::new(session.to_string());
+                    let profiles = match session_profiles(request.meta.as_ref()) {
+                        Ok(profiles) => profiles,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    let creation_profiles = profiles.clone().unwrap_or_default();
+                    let profile_meta = match profiles {
+                        Some(SessionProfiles { profile, ceiling_profile }) => match confinement.as_ref() {
+                            Some(admission) => match admission.configure_profiles(session, &root, profile.as_deref(), ceiling_profile.as_deref()) {
+                                Ok(meta) => Some(serde_json::Map::from_iter([("ego".to_owned(), meta)])),
+                                Err(error) => return responder.respond_with_error(control_error(&error)),
+                            },
+                            None => return responder.respond_with_error(Error::invalid_params().data("session profiles are not supported")),
+                        },
+                        None => None,
+                    };
                     // Hidden before it exists so no list or load can see it
                     // between creation and admission.
                     let hidden = unadmitted.hold(session);
                     if let Some(lifecycle) = &lifecycle
                         && let Err(error) =
-                            lifecycle.create_with_id(session, root.as_path().to_path_buf())
+                            lifecycle.create_with_id(session, root.as_path().to_path_buf(), creation_profiles)
                     {
                         return responder.respond_with_error(lifecycle_error(&error));
                     }
@@ -2718,6 +3086,7 @@ where
                     // the first prompt awaits the same admission.
                     responder.respond(
                         v1::NewSessionResponse::new(id.clone())
+                            .meta(profile_meta)
                             .config_options(
                                 pending_measurement
                                     .is_none()
@@ -2725,7 +3094,7 @@ where
                                     .flatten(),
                             ),
                     )?;
-                    notices.register(id.clone(), cx.clone());
+                    notices.register(id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
                     if let Some(meta) = announcement {
                         emit_info(&cx, &id, &meta, lifecycle.as_deref())?;
                     }
@@ -2822,6 +3191,7 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
+                let prompt_handler = Arc::clone(&prompt_handler);
                 async move |McpChecked(request): McpChecked<v1::LoadSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
@@ -2836,6 +3206,7 @@ where
                     let controls = controls.clone();
                     let confinement = confinement.clone();
                     let notices = notices.clone();
+                let prompt_handler = Arc::clone(&prompt_handler);
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
@@ -2870,6 +3241,9 @@ where
                         Ok(hold) => hold,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
+                    if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), id, id, &root).await {
+                        return responder.respond_with_error(error);
+                    }
                     if let Err(error) =
                         initialize_confinement(confinement.as_ref(), id, &root).await
                     {
@@ -2952,7 +3326,7 @@ where
                             .config_options(config_options(controls.as_ref(), id))
                             .meta(session_meta(hold, attachment.meta.summary.as_deref(), lifecycle.lineage_info(id).map_err(|error| lifecycle_error(&error))?)),
                     )?;
-                    notices.register(request.session_id.clone(), cx.clone());
+                    notices.register(request.session_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
                     emit_attachment(&cx, &request.session_id, &attachment, Some(lifecycle.as_ref()))
                     })
                 }
@@ -2974,6 +3348,7 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
+                let prompt_handler = Arc::clone(&prompt_handler);
                 async move |McpChecked(request): McpChecked<v1::ResumeSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
@@ -2988,6 +3363,7 @@ where
                     let controls = controls.clone();
                     let confinement = confinement.clone();
                     let notices = notices.clone();
+                let prompt_handler = Arc::clone(&prompt_handler);
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
@@ -3018,6 +3394,9 @@ where
                         Ok(attachment) => attachment,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
+                    if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), id, id, &root).await {
+                        return responder.respond_with_error(error);
+                    }
                     if let Err(error) =
                         initialize_confinement(confinement.as_ref(), id, &root).await
                     {
@@ -3094,7 +3473,7 @@ where
                         v1::ResumeSessionResponse::new()
                             .config_options(config_options(controls.as_ref(), id)),
                     )?;
-                    notices.register(request.session_id.clone(), cx.clone());
+                    notices.register(request.session_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
                     emit_attachment(&cx, &request.session_id, &attachment, Some(lifecycle.as_ref()))
                     })
                 }
@@ -3104,6 +3483,7 @@ where
         .on_receive_request(
             {
                 let lifecycle = lifecycle.clone();
+                let controller = Arc::clone(&controller);
                 let sessions = sessions.clone();
                 let unadmitted = unadmitted.clone();
                 let roots = Arc::clone(&roots);
@@ -3112,8 +3492,10 @@ where
                 let controls = controls.clone();
                 let confinement = confinement.clone();
                 let notices = notices.clone();
+                let prompt_handler = Arc::clone(&prompt_handler);
                 async move |McpChecked(request): McpChecked<v1::ForkSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
+                    let controller = Arc::clone(&controller);
                     let sessions = sessions.clone();
                     let unadmitted = unadmitted.clone();
                     let roots = Arc::clone(&roots);
@@ -3122,6 +3504,7 @@ where
                     let controls = controls.clone();
                     let confinement = confinement.clone();
                     let notices = notices.clone();
+                let prompt_handler = Arc::clone(&prompt_handler);
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
                     if !request.additional_directories.is_empty() {
@@ -3179,6 +3562,10 @@ where
                     // The child's processes start under the child's measured
                     // confinement, so the child exists first. An MCP refusal
                     // takes it back rather than leaving an unexplained fork.
+                    if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, child, &root).await {
+                        let error = hidden.discard(Some(lifecycle.as_ref()), error).await;
+                        return responder.respond_with_error(error);
+                    }
                     let admitted = match initialize_confinement(confinement.as_ref(), child, &root).await {
                         Ok(()) => admit_session_mcp(
                             mcp_admitter.as_ref(),
@@ -3220,7 +3607,7 @@ where
                         v1::ForkSessionResponse::new(child_id.clone())
                             .config_options(config_options(controls.as_ref(), child)),
                     )?;
-                    notices.register(child_id.clone(), cx.clone());
+                    notices.register(child_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
                     emit_info(&cx, &child_id, &attachment.meta, Some(lifecycle.as_ref()))
                     })
                 }
@@ -3356,381 +3743,52 @@ where
         )
         .on_receive_request(
             {
-                let sessions = sessions.clone();
-                let unadmitted = unadmitted.clone();
-                let controller = Arc::clone(&controller);
-                let spawner = Arc::clone(&spawner);
-                let ids = Arc::clone(&ids);
-                let bindings_builder = Arc::clone(&bindings_builder);
-                let client_capabilities = Arc::clone(&client_capabilities);
-                let controls = controls.clone();
-                let confinement = confinement.clone();
-                let trust = trust.clone();
-                let lifecycle = lifecycle.clone();
+                let handler = Arc::clone(&prompt_handler);
                 async move |request: v1::PromptRequest, responder, cx: ConnectionTo<Client>| {
-                    let id = request.session_id.clone();
-                    let durable_session = match parse_session(&id) {
-                        Ok(id) => id,
-                        Err(error) => return responder.respond_with_error(error),
-                    };
-                    if let Err(error) = unadmitted.refuse(durable_session) {
-                        return responder.respond_with_error(error);
-                    }
-                    // Read the durable run even if a failed load left no local
-                    // attachment. Retrying an uncertain effect cannot recover it.
-                    match controller.status_by_session(durable_session).await {
-                        Ok(snapshot) if snapshot.status() == RunStatus::Uncertain => {
-                            let recovery = format!(
-                                "run {} has an uncertain effect; close this session with `session/close` and start a new chat with `session/new`",
-                                snapshot.run_id(),
-                            );
-                            let message = match snapshot.settlement() {
-                                Some(settlement) => failure_message(&recovery, settlement),
-                                None => recovery,
-                            };
-                            return responder.respond_with_error(Error::new(
-                                ErrorCode::InternalError.into(),
-                                message,
-                            ));
-                        }
-                        Ok(_) | Err(RunError::Store(StoreError::NotFound)) => {}
-                        Err(error) => {
-                            return responder.respond_with_error(
-                                Error::internal_error().data(error.to_string()),
-                            );
-                        }
-                    }
-                    // Serialized, so a numeric `41` and a string `"41"` stay
-                    // two different requests exactly as JSON-RPC says they are.
-                    let command = serde_json::to_string(responder.id())
-                        .expect("a JSON-RPC request id is serializable");
-                    // Derived, not copied: this value is written into the
-                    // durable run transaction, so serializing the request into
-                    // it would persist the prompt a second time -- and, once a
-                    // block can carry image bytes, would write those bytes into
-                    // the event stream that
-                    // `docs/decisions/2026-08-29-images-are-session-blobs-
-                    // before-they-are-wire-parts.md` keeps them out of.
-                    let digest = match RequestDigest::of(&request) {
-                        Ok(digest) => digest,
-                        Err(error) => {
-                            return responder
-                                .respond_with_error(Error::invalid_params().data(error.to_string()));
-                        }
-                    };
-                    let correlation =
-                        match sessions.begin(&id, ids.as_ref(), &command, digest.as_str()) {
-                        BeginPrompt::Ready(correlation) => correlation,
-                        BeginPrompt::Busy => {
-                            return responder.respond_with_error(Error::invalid_request().data(
-                                format!(
-                                    "session {id} already has a turn running, and this agent runs one turn per session: wait for the prompt in flight to answer before sending the next"
-                                ),
-                            ));
-                        }
-                        BeginPrompt::Unknown => {
-                            return responder.respond_with_error(Error::invalid_params().data(
-                                format!(
-                                    "there is no open session {id}: create one with `session/new` first"
-                                ),
-                            ));
-                        }
-                    };
-                    if let Some(lifecycle) = &lifecycle {
-                        match lifecycle.hold(durable_session) {
-                            Ok(HoldState::Paused) => {
-                                sessions.refuse(&id, correlation.generation);
-                                return responder.respond_with_error(Error::new(
-                                    SESSION_HELD,
-                                    "the session is held; continue it with `_ego/resume`",
-                                ));
-                            }
-                            Ok(_) => {}
-                            Err(error) => {
-                                sessions.refuse(&id, correlation.generation);
-                                return responder.respond_with_error(lifecycle_error(&error));
-                            }
-                        }
-                    }
-                    let prompt = match prompt_content(&request.prompt) {
-                        Ok(prompt) => prompt,
-                        Err(refusal) => {
-                            sessions.refuse(&id, correlation.generation);
-                            return responder.respond_with_error(
-                                Error::invalid_params().data(refusal),
-                            );
-                        }
-                    };
-                    let client = client_capabilities
-                        .lock()
-                        .expect("initialize capability lock poisoned")
-                        .clone();
-                    let capabilities = client.capabilities;
-                    let bindings = session_bindings(
-                        bindings_builder.as_ref(),
-                        cx.clone(),
-                        id.clone(),
-                        &client,
-                        &correlation.root,
-                        correlation.mcp.as_ref(),
-                        Arc::clone(&correlation.session_approval),
-                    );
-                    // Everything below runs off the event loop. `selected_trust`
-                    // awaits the host, and an ACP handler that awaits a client
-                    // round-trip stops the connection from processing messages
-                    // -- including the very answer it is waiting for. `spawn`
-                    // is the SDK's documented way out, and the permission seat
-                    // already reaches the host through it.
-                    let controller = Arc::clone(&controller);
-                    let spawner = Arc::clone(&spawner);
+                    handler(request, PromptReply::Wire(responder), cx).await
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let sessions = sessions.clone();
+                move |request: AcpSteerRequest, responder: Responder<serde_json::Value>, cx: ConnectionTo<Client>| {
                     let sessions = sessions.clone();
-                    let trust = trust.clone();
-                    let lifecycle = lifecycle.clone();
-                    let controls = controls.clone();
-                    let confinement = confinement.clone();
-                    let connection = cx.clone();
-                    let generation = correlation.generation;
-                    cx.spawn(async move {
-                        let PromptCorrelation {
-                            root,
-                            request_id,
-                            run,
-                            mut withdrawn,
-                            ..
-                        } = correlation;
-                        let outcome = match run {
-                            None => {
-                                // Closing or cancelling a session is effective
-                                // even while its first confinement probe is
-                                // still pending. The connection's background
-                                // task may finish the probe for later sessions.
-                                let initialized = if confinement.is_some() {
-                                    let measurement = std::pin::pin!(initialize_confinement(
-                                        confinement.as_ref(),
-                                        durable_session,
-                                        &root,
-                                    ));
-                                    match futures::future::select(&mut withdrawn, measurement).await
-                                    {
-                                        Either::Left(_) => {
-                                            sessions.refuse(&id, generation);
-                                            return responder.respond(v1::PromptResponse::new(
-                                                v1::StopReason::Cancelled,
-                                            ));
-                                        }
-                                        Either::Right((result, _)) => result,
-                                    }
-                                } else {
-                                    // With no probe to wait for, cancellation must reach the
-                                    // admitted run instead of withdrawing the prompt early.
-                                    Ok(())
-                                };
-                                if let Err(error) = initialized {
-                                    sessions.refuse(&id, generation);
-                                    return responder.respond_with_error(error);
-                                }
-                                let selections = match selected_confinement(
-                                    controls.as_ref(),
-                                    confinement.as_ref(),
-                                    durable_session,
-                                ) {
-                                    Ok(selections) => selections,
-                                    Err(error) => {
-                                        sessions.refuse(&id, generation);
-                                        return responder.respond_with_error(error);
-                                    }
-                                };
-                                // Between the confinement pick and the start:
-                                // preparation derives the config layers, the
-                                // instruction file, the project MCP servers,
-                                // the skills and the hooks from this answer,
-                                // and none of them can be re-decided once a
-                                // run exists.
-                                //
-                                // Raced against a withdrawal, and the
-                                // withdrawal is polled first: a host that took
-                                // its prompt back while the question was open
-                                // gets no run at all. That is not the same act
-                                // as refusing the question, which answers it
-                                // and runs bare.
-                                let selections = match trust_question(
-                                    trust.as_ref(),
-                                    capabilities,
-                                    &root,
-                                ) {
-                                    // Nothing is asked, so nothing is waited
-                                    // on, and this prompt reaches admission
-                                    // exactly as a prompt on a router without
-                                    // a trust port does -- including where a
-                                    // `session/cancel` lands on it.
-                                    TrustChoice::None => selections,
-                                    TrustChoice::Remembered(decision) => selections.with_trust(decision),
-                                    TrustChoice::Question(request, fingerprint) => {
-                                        let answered = {
-                                            let question = std::pin::pin!(selected_trust(
-                                                request,
-                                                AcpQuestionAdapter::live(
-                                                    id.clone(),
-                                                    capabilities,
-                                                    connection.clone(),
-                                                ),
-                                                selections,
-                                                trust.as_ref().expect("question needs trust admission").as_ref(),
-                                                &root,
-                                                &fingerprint,
-                                            ));
-                                            match futures::future::select(withdrawn, question)
-                                                .await
-                                            {
-                                                Either::Left(_) => None,
-                                                Either::Right((selections, _)) => Some(selections),
-                                            }
-                                        };
-                                        let Some(selections) = answered else {
-                                            sessions.refuse(&id, generation);
-                                            return responder.respond(v1::PromptResponse::new(
-                                                v1::StopReason::Cancelled,
-                                            ));
-                                        };
-                                        selections
-                                    }
-                                };
-                                controller
-                                    .start(
-                                        StartRequest::new(
-                                            durable_session,
-                                            root,
-                                            request_id,
-                                            digest,
-                                            selections,
-                                            prompt,
-                                        ),
-                                        bindings,
-                                    )
-                                    .await
+                    async move {
+                        if request.v != 1 {
+                            return responder.respond_with_error(refused_params("unsupported _ego/steer version"));
+                        }
+                        let id = v1::SessionId::new(request.session_id.clone());
+                        if let Err(error) = parse_session(&id) { return responder.respond_with_error(error); }
+                        let mut parts = Vec::new();
+                        for block in request.prompt {
+                            match block {
+                                v1::ContentBlock::Text(text) => parts.push(text.text),
+                                _ => return responder.respond(serde_json::json!({"v":1,"state":"rejected","reason":"steering supports text blocks only"})),
                             }
-                            Some((run_id, revision)) => {
-                                controller
-                                    .continue_run(
-                                        ContinueRequest::new(
-                                            run_id,
-                                            request_id,
-                                            digest,
-                                            revision,
-                                            prompt,
-                                        ),
-                                        bindings,
-                                    )
-                                    .await
-                            }
+                        }
+                        let text = parts.join("\n");
+                        if text.trim().is_empty() {
+                            return responder.respond(serde_json::json!({"v":1,"state":"rejected","reason":"steering text is empty"}));
+                        }
+                        let ingress = match sessions.steering(&id) {
+                            Ok(Some(ingress)) => ingress,
+                            Ok(None) => return responder.respond(serde_json::json!({"v":1,"state":"not-busy"})),
+                            Err(error) => return responder.respond_with_error(error),
                         };
-                        let (subscription, execution, withdrawn) = match outcome {
-                            Ok(RunCommandOutcome::Admitted(admission)) => {
-                                let subscription = admission.subscription();
-                                let key = admission.cancel_key().clone();
-                                // A cancellation that arrived while this
-                                // admission was being written had no key to
-                                // name, so it left a flag instead, and this is
-                                // the one read that cannot miss it. The
-                                // admission itself is never raced --
-                                // abandoning a half-written transaction would
-                                // leave a run nobody manages.
-                                let withdrawn = sessions
-                                    .install_admission(
-                                        &id,
-                                        generation,
-                                        admission.run_id(),
-                                        admission.revision(),
-                                        key.clone(),
-                                    )
-                                    .then_some(key);
-                                (subscription, Some(admission.into_execution()), withdrawn)
-                            }
-                            Ok(RunCommandOutcome::Replayed(observation)) => {
-                                (observation.subscription(), None, None)
-                            }
-                            Err(error) => {
-                                sessions.refuse(&id, generation);
-                                return responder.respond_with_error(
-                                    Error::internal_error().data(error.to_string()),
-                                );
-                            }
-                        };
-                        // The execution settles the admitted revision before
-                        // it returns, so the awaited subscription can only
-                        // report *that* the turn failed. The diagnostic that
-                        // names *why* travels beside it and is answered to the
-                        // same request.
-                        let (diagnostic_tx, diagnostic_rx) = oneshot::channel();
-                        match execution {
-                            Some(execution) => {
-                                let controller = Arc::clone(&controller);
-                                spawner.spawn(Box::pin(async move {
-                                    let outcome = controller.execute(execution).await;
-                                    if let Err(error) = &outcome {
-                                        tracing::warn!(%error, "admitted ACP execution failed");
-                                    }
-                                    let _ = diagnostic_tx
-                                        .send(outcome.err().map(|error| error.to_string()));
-                                }));
-                            }
-                            // A replay explains nothing new, so the sender is
-                            // dropped rather than held: a receiver still
-                            // waiting on a message nobody will send would
-                            // never answer the request at all.
-                            None => drop(diagnostic_tx),
-                        }
-                        // After the execution is under way, and deliberately:
-                        // the run was admitted, so it cancels the way every
-                        // other admitted run does -- asked to stop at its next
-                        // boundary. Applying it ahead of the execution would
-                        // instead leave an admitted run that never started,
-                        // which is a third state neither the controller nor a
-                        // host has a word for.
-                        if let Some(key) = withdrawn
-                            && let Err(error) = controller.cancel_admitted(&key).await
-                        {
-                            tracing::warn!(
-                                %error,
-                                "an ACP cancellation received during admission could not be applied"
-                            );
-                        }
-                        let snapshot = subscription.await;
-                        let cancel_requested = sessions.finish(&id, generation, &snapshot);
-                        if let Some(lifecycle) = &lifecycle {
-                            match lifecycle.meta(durable_session) {
-                                Ok(meta) if meta.summary.is_some() => {
-                                    if let Err(error) = emit_info(&connection, &id, &meta, Some(lifecycle.as_ref())) {
-                                        tracing::warn!(%error, "ACP session info update could not be delivered");
-                                    }
-                                }
-                                Ok(_) => {}
-                                Err(error) => tracing::warn!(%error, "ACP session metadata could not be read after prompt"),
-                            }
-                        }
-                        if cancel_requested && matches!(snapshot.settlement(), Some(RunSettlement::PermissionRequired { .. })) {
-                            return responder.respond(v1::PromptResponse::new(v1::StopReason::Cancelled));
-                        }
-                        match prompt_result(&snapshot) {
-                            Ok(stop_reason) => {
-                                responder.respond(v1::PromptResponse::new(stop_reason))
-                            }
-                            Err(message) => {
-                                let diagnostic = diagnostic_rx.await.ok().flatten();
-                                let code = if matches!(snapshot.settlement(), Some(RunSettlement::Paused)) {
-                                    SESSION_HELD
-                                } else {
-                                    i32::from(ErrorCode::InternalError)
-                                };
-                                let error = Error::new(code, message);
-                                responder.respond_with_error(match diagnostic {
-                                    Some(diagnostic) => error.data(diagnostic),
-                                    None => error,
-                                })
-                            }
-                        }
-                    })?;
-                    Ok(())
+                        // Durable admission awaits the running coordinator. Keep the
+                        // connection free to process permissions and cancellation.
+                        cx.spawn(async move {
+                            let response = match ingress.submit(text).await {
+                                Ok(_) => serde_json::json!({"v":1,"state":"accepted"}),
+                                Err(ego_core::turn::ControlError::Closed) => serde_json::json!({"v":1,"state":"not-busy"}),
+                                Err(error) => serde_json::json!({"v":1,"state":"rejected","reason":error.to_string()}),
+                            };
+                            responder.respond(response)
+                        })?;
+                        Ok(())
+                    }
                 }
             },
             on_receive_request!(),
@@ -3738,11 +3796,17 @@ where
         .on_receive_request(
             {
                 let compaction = compaction.clone();
+                let controller = Arc::clone(&controller);
+                let lifecycle = lifecycle.clone();
+                let confinement = confinement.clone();
                 let unadmitted = unadmitted.clone();
                 move |request: AcpCompactRequest,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let compaction = compaction.clone();
+                    let controller = Arc::clone(&controller);
+                    let lifecycle = lifecycle.clone();
+                    let confinement = confinement.clone();
                     let unadmitted = unadmitted.clone();
                     async move {
                     let Some(compaction) = compaction else {
@@ -3772,16 +3836,33 @@ where
                     if let Err(error) = unadmitted.refuse(source) {
                         return responder.respond_with_error(error);
                     }
+                    let profile_root = if let Some(lifecycle) = &lifecycle {
+                        let meta = match lifecycle.meta(source) {
+                            Ok(meta) => meta,
+                            Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                        };
+                        let root = match RunRoot::new(meta.workspace_root) {
+                            Ok(root) => root,
+                            Err(error) => return responder.respond_with_error(Error::internal_error().data(error.to_string())),
+                        };
+                        if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, source, &root).await {
+                            return responder.respond_with_error(error);
+                        }
+                        Some(root)
+                    } else { None };
                     match compaction
                         .compact(CompactionTransitionRequest { request_id, source })
                         .await
                     {
-                        Ok(receipt) => match serde_json::to_value(AcpCompactResponse::from(receipt))
-                        {
-                            Ok(response) => responder.respond(response),
-                            Err(error) => responder.respond_with_error(
-                                Error::internal_error().data(error.to_string()),
-                            ),
+                        Ok(receipt) => {
+                            if let (Some(lifecycle), Some(root)) = (&lifecycle, &profile_root)
+                                && let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, receipt.target, root).await {
+                                return responder.respond_with_error(error);
+                            }
+                            match serde_json::to_value(AcpCompactResponse::from(receipt)) {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(Error::internal_error().data(error.to_string())),
+                            }
                         },
                         Err(error) => responder.respond_with_error(
                             Error::internal_error().data(error.to_string()),

@@ -298,6 +298,33 @@ fn fresh_adapter_rebuilds_catalogue_from_header_only_durable_state() {
     assert_eq!(restarted.list().unwrap()[0].id, id);
 }
 
+// Catches: a missing manifest drops the creation ceiling during catalogue recovery.
+#[test]
+fn profile_ceiling_creation_authority_survives_missing_manifest() {
+    let dir = tempdir().unwrap();
+    let first = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+    let id = SessionId::new();
+    let profiles = ego_core::store::session_store::SessionProfiles {
+        profile: Some("repo".to_owned()),
+        ceiling_profile: Some("machine".to_owned()),
+    };
+    first
+        .publish_session(
+            id,
+            Path::new("/workspace"),
+            Timestamp::from_millis(1),
+            profiles.clone(),
+        )
+        .unwrap();
+    std::fs::remove_file(dir.path().join(id.to_string()).join("manifest.json")).unwrap();
+    let restarted = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+    assert_eq!(
+        restarted.lifecycle_meta(id).unwrap().unwrap().profiles,
+        profiles
+    );
+    assert_eq!(restarted.list().unwrap()[0].profiles, profiles);
+}
+
 /// Catches a quarantine kept in memory or needing the writer lease: it must
 /// survive a new adapter over the same directory and be set while another
 /// writer holds the session.

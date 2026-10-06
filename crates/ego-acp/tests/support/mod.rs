@@ -64,7 +64,7 @@ pub struct SeededReplay {
 }
 
 pub struct DurableAcpFixture {
-    store: Arc<Store>,
+    pub store: Arc<Store>,
     ids: Arc<TestIds>,
     effects: Arc<EffectCounts>,
     executor: Arc<Executor>,
@@ -284,6 +284,17 @@ impl DurableAcpFixture {
         trust: Option<Arc<dyn ego_acp::serve::SessionTrustAdmission>>,
         notices: AcpNotices,
     ) -> agent_client_protocol::AgentProtocolRouter {
+        let notice_store = Arc::clone(&self.store);
+        notices.set_delivery_recorder(Arc::new(move |session, notice| {
+            notice_store
+                .entries
+                .lock()
+                .map_err(|error| error.to_string())?
+                .entry(session)
+                .or_default()
+                .push(SessionEntry::NoticeDelivered(notice));
+            Ok(())
+        }));
         let clock = Arc::new(TestClock);
         let controller = Arc::new(RunController::new(
             Arc::clone(&self.store),
@@ -787,7 +798,9 @@ impl Store {
             .rev()
             .find_map(|entry| match entry {
                 SessionEntry::Event(event) => Some(event.env.seq),
-                SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
+                SessionEntry::RunTransaction(_)
+                | SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_) => None,
             })
             .unwrap_or(Seq::ZERO)
     }
@@ -841,7 +854,7 @@ impl SessionStore for Store {
             entries.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
                 SessionEntry::Event(_) => None,
-                SessionEntry::Evidence(_) => None,
+                SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => None,
             })
         });
         if expected_revision != actual {
@@ -967,11 +980,12 @@ impl Drop for SupportLease {
 impl InactiveSessionLease for SupportLease {}
 
 impl SessionLifecycleStore for Store {
-    fn publish_empty_session(
+    fn publish_session(
         &self,
         id: SessionId,
         root: &Path,
         created: Timestamp,
+        profiles: ego_core::store::session_store::SessionProfiles,
     ) -> Result<LifecyclePublication, StoreError> {
         self.effects.lifecycle.fetch_add(1, Ordering::SeqCst);
         self.entries
@@ -981,6 +995,7 @@ impl SessionLifecycleStore for Store {
         self.metadata.lock().expect("support metadata").insert(
             id,
             SessionMeta {
+                profiles,
                 id,
                 workspace_root: root.to_path_buf(),
                 model: None,
@@ -1075,6 +1090,7 @@ impl SessionLifecycleStore for Store {
         self.metadata.lock().expect("support metadata").insert(
             id,
             SessionMeta {
+                profiles: Default::default(),
                 id,
                 workspace_root: source_meta.workspace_root,
                 model: source_meta.model,

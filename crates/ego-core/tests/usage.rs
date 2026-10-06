@@ -346,6 +346,7 @@ mod report_service {
 
     fn meta(id: SessionId, model: Option<&str>, updated: u64) -> SessionMeta {
         SessionMeta {
+            profiles: Default::default(),
             id,
             workspace_root: PathBuf::from("/workspace"),
             model: model.map(str::to_owned),
