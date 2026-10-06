@@ -1940,9 +1940,7 @@ fn selected_confinement(
 }
 
 /// Parse our optional extension strictly: malformed ceilings never become absent.
-fn session_profiles(
-    meta: Option<&v1::Meta>,
-) -> Result<Option<(Option<String>, Option<String>)>, Error> {
+fn session_profiles(meta: Option<&v1::Meta>) -> Result<Option<SessionProfiles>, Error> {
     let Some(ego) = meta.and_then(|meta| meta.get("ego")) else {
         return Ok(None);
     };
@@ -1962,7 +1960,12 @@ fn session_profiles(
     };
     let profile = parse("profile")?;
     let ceiling = parse("ceilingProfile")?;
-    Ok((profile.is_some() || ceiling.is_some()).then_some((profile, ceiling)))
+    Ok(
+        (profile.is_some() || ceiling.is_some()).then_some(SessionProfiles {
+            profile,
+            ceiling_profile: ceiling,
+        }),
+    )
 }
 
 /// A session request whose MCP selection arrived whole.
@@ -2763,12 +2766,10 @@ where
                         Ok(profiles) => profiles,
                         Err(error) => return responder.respond_with_error(error),
                     };
-                    let creation_profiles = profiles.as_ref().map(|(profile, ceiling)| SessionProfiles {
-                        profile: profile.clone(), ceiling_profile: ceiling.clone(),
-                    }).unwrap_or_default();
+                    let creation_profiles = profiles.clone().unwrap_or_default();
                     let profile_meta = match profiles {
-                        Some((profile, ceiling)) => match confinement.as_ref() {
-                            Some(admission) => match admission.configure_profiles(session, &root, profile.as_deref(), ceiling.as_deref()) {
+                        Some(SessionProfiles { profile, ceiling_profile }) => match confinement.as_ref() {
+                            Some(admission) => match admission.configure_profiles(session, &root, profile.as_deref(), ceiling_profile.as_deref()) {
                                 Ok(meta) => Some(serde_json::Map::from_iter([("ego".to_owned(), meta)])),
                                 Err(error) => return responder.respond_with_error(control_error(&error)),
                             },
