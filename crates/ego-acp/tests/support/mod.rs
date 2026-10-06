@@ -967,11 +967,12 @@ impl Drop for SupportLease {
 impl InactiveSessionLease for SupportLease {}
 
 impl SessionLifecycleStore for Store {
-    fn publish_empty_session(
+    fn publish_session(
         &self,
         id: SessionId,
         root: &Path,
         created: Timestamp,
+        profiles: ego_core::store::session_store::SessionProfiles,
     ) -> Result<LifecyclePublication, StoreError> {
         self.effects.lifecycle.fetch_add(1, Ordering::SeqCst);
         self.entries
@@ -981,6 +982,7 @@ impl SessionLifecycleStore for Store {
         self.metadata.lock().expect("support metadata").insert(
             id,
             SessionMeta {
+                profiles,
                 id,
                 workspace_root: root.to_path_buf(),
                 model: None,
@@ -1075,6 +1077,7 @@ impl SessionLifecycleStore for Store {
         self.metadata.lock().expect("support metadata").insert(
             id,
             SessionMeta {
+                profiles: Default::default(),
                 id,
                 workspace_root: source_meta.workspace_root,
                 model: source_meta.model,

@@ -23,7 +23,9 @@ use crate::session::{
     walk_lineage,
 };
 use crate::state::{HoldReceipts, PauseState, SessionState};
-use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use crate::store::session_store::{
+    SessionEntry, SessionMeta, SessionProfiles, SessionStore, StoreError,
+};
 use crate::turn::{Journal, SharedJournal, SharedJournalError};
 
 /// Publication at a lifecycle boundary. Visibility, not a later cache write,
@@ -70,6 +72,16 @@ pub trait SessionLifecycleStore:
         id: SessionId,
         root: &Path,
         created: Timestamp,
+    ) -> Result<LifecyclePublication, StoreError> {
+        self.publish_session(id, root, created, SessionProfiles::default())
+    }
+
+    fn publish_session(
+        &self,
+        id: SessionId,
+        root: &Path,
+        created: Timestamp,
+        profiles: SessionProfiles,
     ) -> Result<LifecyclePublication, StoreError>;
 
     fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError>;
@@ -822,6 +834,11 @@ where
         self.metadata.meta(id)
     }
 
+    /// Creation authority remains readable for deleted ancestors of successors.
+    pub fn profiles(&self, id: SessionId) -> Result<SessionProfiles, LifecycleError> {
+        Ok(self.metadata.raw_meta(id)?.profiles)
+    }
+
     /// Read the current durable goal for an attached consumer.
     pub fn goal(&self, id: SessionId) -> Result<Option<GoalRecord>, LifecycleError> {
         self.metadata.goal(id)
@@ -897,10 +914,20 @@ where
         id: SessionId,
         root: PathBuf,
     ) -> Result<CreatedSession, LifecycleError> {
+        self.create_with_profiles(id, root, SessionProfiles::default())
+    }
+
+    /// Publish the session and its creation authority in one durable record.
+    pub fn create_with_profiles(
+        &self,
+        id: SessionId,
+        root: PathBuf,
+        profiles: SessionProfiles,
+    ) -> Result<CreatedSession, LifecycleError> {
         let publication =
             self.metadata
                 .store
-                .publish_empty_session(id, &root, self.metadata.clock.now())?;
+                .publish_session(id, &root, self.metadata.clock.now(), profiles)?;
         if let LifecyclePublication::NotPublished { diagnostic } = &publication {
             return Err(LifecycleError::NotPublished(diagnostic.clone()));
         }

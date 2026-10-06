@@ -94,8 +94,10 @@ clamp. Later controls cannot exceed the admitted ceiling, and prompt preparation
 carries both profile names in durable run selections. Deferred confinement
 measurement still publishes the standard `config_option_update` after creation.
 
-`session/load` and `session/resume` restore the profile names from durable run
-selections before measuring confinement or admitting MCP servers. Forks and
+Creation writes the profile names into the durable session log header, before
+the first prompt. The manifest projects these names from that header.
+`session/load` and `session/resume` restore this creation authority and durable
+run selections before measuring confinement or admitting MCP servers. Forks and
 compacted successors inherit the same names through durable session lineage,
 including successors with no run records yet. A missing or invalid ceiling
 refuses reopening; it never becomes an absent ceiling. Reattaching to a live

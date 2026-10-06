@@ -77,6 +77,19 @@ impl<'de> Deserialize<'de> for SessionEntry {
     }
 }
 
+/// Profile names that bind authority at session creation, before any run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProfiles {
+    pub profile: Option<String>,
+    pub ceiling_profile: Option<String>,
+}
+
+impl SessionProfiles {
+    pub fn is_empty(&self) -> bool {
+        self.profile.is_none() && self.ceiling_profile.is_none()
+    }
+}
+
 /// The catalogue entry for one session (`ARCHITECTURE.md` §5's
 /// `manifest.json` fields: `id, workspace_root, model, created, updated,
 /// title, lineage`).
@@ -103,6 +116,8 @@ impl<'de> Deserialize<'de> for SessionEntry {
 /// entry timestamps and the header authored at session birth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
+    #[serde(default, skip_serializing_if = "SessionProfiles::is_empty")]
+    pub profiles: SessionProfiles,
     pub id: SessionId,
     pub workspace_root: PathBuf,
     pub model: Option<String>,

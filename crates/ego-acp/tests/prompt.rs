@@ -641,6 +641,7 @@ impl SessionStore for PromptStore {
             .expect("prompt entries")
             .keys()
             .map(|id| SessionMeta {
+                profiles: Default::default(),
                 id: *id,
                 workspace_root: PathBuf::from("/tmp"),
                 model: None,

@@ -51,6 +51,7 @@ fn catalogue_versions_the_listing_envelope_and_serialises_tagged_lineage_rows() 
     let id = SessionId::new();
     let at_seq: Seq = serde_json::from_value(json!(7_u64)).unwrap();
     let meta = SessionMeta {
+        profiles: Default::default(),
         id,
         workspace_root: "/workspace".into(),
         model: None,
@@ -62,6 +63,7 @@ fn catalogue_versions_the_listing_envelope_and_serialises_tagged_lineage_rows() 
         lineage: Some(SessionLineage::Fork { source: id, at_seq }),
     };
     let compacted = SessionMeta {
+        profiles: Default::default(),
         id: SessionId::new(),
         workspace_root: "/workspace".into(),
         model: None,

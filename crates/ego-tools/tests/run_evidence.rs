@@ -150,6 +150,7 @@ fn write_evidence_log(root: &Path, session: SessionId, entries: &[serde_json::Va
     let log = log_path(root, &session);
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     let mut image = encode_header(&Header {
+        profiles: Default::default(),
         v: CODEC_VERSION,
         session,
         created: Timestamp::from_millis(1),
@@ -247,6 +248,7 @@ fn rooted_command_and_generation_evidence_precede_one_matching_start() {
     let log = log_path(root.path(), &session);
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     let mut initial = encode_header(&Header {
+        profiles: Default::default(),
         v: CODEC_VERSION,
         session,
         created: Timestamp::from_millis(1),
@@ -391,6 +393,7 @@ fn schema_v1_run_context_is_checksum_valid_but_rejected_without_rewriting_source
 
     let log = log_path(root.path(), &session);
     let mut image = encode_header(&Header {
+        profiles: Default::default(),
         v: CODEC_VERSION,
         session,
         created: Timestamp::from_millis(1),
@@ -615,6 +618,7 @@ fn retired_v10_log_is_refused_before_evidence_rebuild_and_unchanged() {
     let log = log_path(root.path(), &session);
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     let mut legacy = encode_header(&Header {
+        profiles: Default::default(),
         v: 10,
         session,
         created: Timestamp::from_millis(1),

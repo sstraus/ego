@@ -101,6 +101,7 @@ fn id(last: u8) -> SessionId {
 
 fn meta(last: u8, workspace: &str, updated: u64) -> SessionMeta {
     SessionMeta {
+        profiles: Default::default(),
         id: id(last),
         workspace_root: PathBuf::from(workspace),
         model: None,

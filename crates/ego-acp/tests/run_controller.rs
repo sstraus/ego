@@ -244,6 +244,7 @@ impl SessionStore for AcpStore {
             .expect("ACP session entries")
             .keys()
             .map(|id| SessionMeta {
+                profiles: Default::default(),
                 id: *id,
                 workspace_root: fixture_cwd("/workspace"),
                 model: None,

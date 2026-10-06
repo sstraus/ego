@@ -78,6 +78,12 @@ pub struct Header {
     /// **Required, deliberately.** An `Option` would admit a v5 log that
     /// cannot answer the one question this field exists for.
     pub workspace_root: PathBuf,
+    /// Immutable creation authority, independent of run admission.
+    #[serde(
+        default,
+        skip_serializing_if = "super::session_store::SessionProfiles::is_empty"
+    )]
+    pub profiles: super::session_store::SessionProfiles,
 }
 
 impl Header {
@@ -94,6 +100,7 @@ impl Header {
             session,
             created,
             workspace_root,
+            profiles: Default::default(),
         }
     }
 }
