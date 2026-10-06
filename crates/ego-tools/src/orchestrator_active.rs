@@ -1,7 +1,8 @@
 //! Native active operations share the existing guarded process boundary.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ego_core::orchestrator::{
     ActiveRequest, Brief, ChildLine, Filter, Mode, Orchestrator, SpawnReceipt,
@@ -18,13 +19,52 @@ pub fn tool(mode: Mode, home: &Path, parent: Option<String>) -> Arc<dyn Tool> {
         mode,
         home: home.into(),
         parent,
+        rework: None,
     }))
+}
+
+/// Bind same-thread correction budgets reconstructed from this session's journal.
+pub fn tool_with_rework_limits(
+    mode: Mode,
+    home: &Path,
+    parent: Option<String>,
+    limits: BTreeMap<String, u8>,
+) -> Arc<dyn Tool> {
+    Arc::new(Typed(ActiveTool {
+        mode,
+        home: home.into(),
+        parent,
+        rework: Some(Mutex::new(limits)),
+    }))
+}
+
+pub fn rework_limits(
+    entries: &[ego_core::store::session_store::SessionEntry],
+) -> Result<BTreeMap<String, u8>, String> {
+    use ego_core::event::domain::EventKind;
+    use ego_core::store::session_store::SessionEntry;
+    let mut limits: BTreeMap<_, _> = super::orchestration_events::spawn_receipts(entries)?
+        .into_iter()
+        .map(|r| (r.session_id, 0u8))
+        .collect();
+    for entry in entries {
+        if let SessionEntry::Event(event) = entry
+            && let EventKind::ToolCallStarted { name, args, .. } = &event.kind
+            && name == "orchestrator_active"
+            && let Ok(ActiveRequest::Say { session_id, .. }) = serde_json::from_str(args)
+            && let Some(count) = limits.get_mut(&session_id)
+        {
+            *count = count.saturating_add(1);
+        }
+    }
+    Ok(limits)
 }
 
 struct ActiveTool {
     mode: Mode,
     home: PathBuf,
     parent: Option<String>,
+    rework: Option<Mutex<BTreeMap<String, u8>>>,
 }
 
 impl TypedTool for ActiveTool {
@@ -34,7 +74,7 @@ impl TypedTool for ActiveTool {
         "orchestrator_active"
     }
     fn description(&self) -> &str {
-        "Spawn or consult managed peers, say a message, create a worktree, or land a branch. Land always requires a human card. Spawn results are recorded in this session."
+        "Spawn or consult managed peers, say a message, create a worktree, or land a branch. Land always requires a human card. Spawn results are recorded in this session. End your turn after launching; RESULT/BLOCKED resumes this conversation automatically. Do not poll. At most two native correction requests per owned child thread."
     }
 
     fn prepare_typed(
@@ -94,6 +134,18 @@ impl TypedTool for ActiveTool {
             } => {
                 nonempty(session_id)?;
                 nonempty(message)?;
+                if let Some(limits) = &self.rework {
+                    let mut limits = limits.lock().expect("rework budget poisoned");
+                    let count = limits.get_mut(session_id).ok_or_else(|| {
+                        ToolError::InvalidParams(
+                            "rework requires an exact owned spawn receipt session_id".into(),
+                        )
+                    })?;
+                    if *count >= 2 {
+                        return Err(ToolError::InvalidParams("this thread has exhausted its two rework requests; give maintainer the consolidated outcome".into()));
+                    }
+                    *count += 1;
+                }
                 (
                     vec![
                         "tuic".into(),

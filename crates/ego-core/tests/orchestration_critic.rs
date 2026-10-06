@@ -6,6 +6,7 @@ fn result(peer: &str, at_ms: u64) -> Observation {
         at_ms,
         result: None,
         peer: Some(peer.into()),
+        sender: None,
     }
 }
 
@@ -27,12 +28,14 @@ fn delayed_event_keeps_arrival_order_within_card_batch() {
         at_ms: 5_000,
         result: None,
         peer: Some("worker-a".into()),
+        sender: None,
     };
     let second = Observation {
         text: "BLOCKED: delayed second arrival".into(),
         at_ms: 1_000,
         result: None,
         peer: Some("worker-b".into()),
+        sender: None,
     };
     assert_eq!(cursor.observe(first, 10_000), Salience::Card);
     assert_eq!(cursor.observe(second, 10_001), Salience::Card);
