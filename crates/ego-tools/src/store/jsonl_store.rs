@@ -39,7 +39,9 @@ use ego_core::store::blob::{BlobError, BlobStore};
 use ego_core::store::codec::{
     CODEC_VERSION, CodecError, Header, StoreLine, decode_line, encode_header, encode_record,
 };
-use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{
+    SessionEntry, SessionMeta, SessionProfiles, SessionStore, StoreError,
+};
 use fd_lock::RwLock;
 use futures::stream::{self, BoxStream};
 
@@ -84,6 +86,7 @@ impl RunManifest {
 }
 
 struct LogManifestFacts {
+    profiles: SessionProfiles,
     created: Timestamp,
     workspace_root: PathBuf,
     last_ts: Option<Timestamp>,
@@ -100,6 +103,7 @@ struct LogManifestFacts {
 
 fn meta_from_log_facts(id: SessionId, facts: &LogManifestFacts) -> SessionMeta {
     SessionMeta {
+        profiles: facts.profiles.clone(),
         id,
         workspace_root: facts.workspace_root.clone(),
         model: facts.model.clone(),
@@ -387,8 +391,8 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
     let Some(header_line) = lines.next() else {
         return Ok(None);
     };
-    let (created, workspace_root) = match decode_line(header_line) {
-        Ok(StoreLine::Header(header)) => (header.created, header.workspace_root),
+    let (created, workspace_root, profiles) = match decode_line(header_line) {
+        Ok(StoreLine::Header(header)) => (header.created, header.workspace_root, header.profiles),
         _ => return Ok(None),
     };
     let mut last_ts = None;
@@ -461,6 +465,7 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
     let evidence = ManifestEvidence::from_records(&evidence_records)
         .map_err(|error| invalid_log(error.to_string()))?;
     Ok(Some(LogManifestFacts {
+        profiles,
         created,
         workspace_root,
         last_ts,
@@ -1024,6 +1029,7 @@ impl JsonlStore {
 
         let projected_meta = meta_from_log_facts(*id, &facts);
         let meta = SessionMeta {
+            profiles: projected_meta.profiles,
             id: projected_meta.id,
             // From the log header, for exactly the reason `created` is —
             // and this is the whole point of the field being there. Carrying
@@ -1129,6 +1135,11 @@ impl JsonlStore {
                 .ok_or(StoreError::MissingHeader)?
         };
         let meta = SessionMeta {
+            profiles: previous
+                .as_ref()
+                .map(|manifest| manifest.meta.profiles.clone())
+                .or_else(|| log_facts.as_ref().map(|facts| facts.profiles.clone()))
+                .unwrap_or_default(),
             id: *id,
             // Only an ordinary event-first session takes the constructor's
             // workspace. Once a header exists, preserve its projection: a
@@ -1503,6 +1514,7 @@ impl JsonlStore {
             Some(manifest) => manifest,
             None if is_new_session => RunManifest {
                 meta: SessionMeta {
+                    profiles: Default::default(),
                     id: *id,
                     workspace_root: self.workspace.clone(),
                     model: None,
@@ -2072,6 +2084,7 @@ impl JsonlStore {
         id: SessionId,
         root: &std::path::Path,
         created: Timestamp,
+        profiles: SessionProfiles,
     ) -> Result<LifecyclePublication, StoreError> {
         self.with_events_lock(&id, || {
             let log_path = self.log_path(&id);
@@ -2080,7 +2093,9 @@ impl JsonlStore {
                     diagnostic: "the session already has an event log".to_owned(),
                 });
             }
-            let mut image = encode_header(&Header::new(id, created, root.to_path_buf()));
+            let mut header = Header::new(id, created, root.to_path_buf());
+            header.profiles = profiles;
+            let mut image = encode_header(&header);
             image.push(b'\n');
             let publication = self.io.replace_atomic_publication(&log_path, &image)?;
             let manifest_diagnostic =
@@ -2199,13 +2214,14 @@ impl JsonlStore {
 }
 
 impl SessionLifecycleStore for JsonlStore {
-    fn publish_empty_session(
+    fn publish_session(
         &self,
         id: SessionId,
         root: &std::path::Path,
         created: Timestamp,
+        profiles: SessionProfiles,
     ) -> Result<LifecyclePublication, StoreError> {
-        self.publish_empty_session_lifecycle(id, root, created)
+        self.publish_empty_session_lifecycle(id, root, created, profiles)
     }
 
     fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {

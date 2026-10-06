@@ -1127,14 +1127,16 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             Arc::new(crate::acp_sandbox_grants::FileSandboxGrants::new(home))
                 as Arc<dyn ego_acp::sandbox::SandboxGrantStore>
         });
-    let confinement_port: Arc<dyn SessionConfinementAdmission> =
-        Arc::new(CliSessionConfinementAdmission::with_reporter(
+    let confinement_port: Arc<dyn SessionConfinementAdmission> = Arc::new(
+        CliSessionConfinementAdmission::with_reporter(
             Arc::clone(&store),
             controls,
             ceiling,
             mcp_cancel.clone(),
             Arc::clone(&reporter),
-        ));
+        )
+        .with_shape(args.shape.clone()),
+    );
 
     // One lister for the whole connection: it holds no session state, and
     // the answer it helps ask is carried by the run selection rather than by

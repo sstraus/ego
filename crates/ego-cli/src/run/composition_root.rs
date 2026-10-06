@@ -151,6 +151,7 @@ impl CliPrepared {
             args.profile = Some(profile.to_owned());
             args.profile_source = Some(ego_core::config::Source::Flags);
         }
+        args.ceiling_profile = request.selections.ceiling_profile().map(str::to_owned);
         if args.profile.as_deref() == Some("ci") {
             return Err(RunTermination::UsageError {
                 message: "profile ci available only through ego run or ego resume".to_owned(),

@@ -54,7 +54,7 @@ use ego_core::session_lifecycle::{
     SessionLifecycleStore, SessionLineageInfo, SessionPage,
 };
 use ego_core::sink::EventSink;
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionMeta, SessionProfiles, SessionStore, StoreError};
 use ego_core::turn::{AdmittedToolSource, HostClient};
 use ego_listen::{Bound, ConnectionGate, GuardedAccepted, Peer, serve_connections};
 use futures::channel::oneshot;
@@ -569,6 +569,29 @@ pub type SessionConfinementFuture =
 /// backend and commits evidence. Observation lookup reads the immutable
 /// snapshot installed before this session's options were published.
 pub trait SessionConfinementAdmission: Send + Sync {
+    /// Resolve optional host profiles before the session starts any effects.
+    fn configure_profiles(
+        &self,
+        _session: SessionId,
+        _root: &RunRoot,
+        _profile: Option<&str>,
+        _ceiling: Option<&str>,
+    ) -> Result<serde_json::Value, ControlError> {
+        Err(ControlError::Refused {
+            control: "profile",
+            why: "session profiles are not supported".into(),
+        })
+    }
+
+    /// Carry admitted profile authority through the durable run boundary.
+    fn profile_selections(
+        &self,
+        _session: SessionId,
+        selections: RunSelections,
+    ) -> Result<RunSelections, ControlError> {
+        Ok(selections)
+    }
+
     fn initialize(&self, session: SessionId, root: RunRoot) -> SessionConfinementFuture;
 
     fn observation(
@@ -1847,8 +1870,12 @@ type LifecycleFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, LifecycleErr
 /// capability handlers without coupling the legacy router constructor to a
 /// concrete outer store. It contains no ACP DTOs and owns no durable policy.
 trait LifecycleOperations: Send + Sync {
-    fn create_with_id(&self, id: SessionId, root: std::path::PathBuf)
-    -> Result<(), LifecycleError>;
+    fn create_with_id(
+        &self,
+        id: SessionId,
+        root: std::path::PathBuf,
+        profiles: SessionProfiles,
+    ) -> Result<(), LifecycleError>;
     fn list(
         &self,
         cursor: Option<&SessionCursor>,
@@ -1856,6 +1883,7 @@ trait LifecycleOperations: Send + Sync {
     ) -> Result<SessionPage, LifecycleError>;
     fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError>;
     fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError>;
+    fn profiles(&self, id: SessionId) -> Result<SessionProfiles, LifecycleError>;
     fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError>;
     fn lineage_info(&self, id: SessionId) -> Result<Option<SessionLineageInfo>, LifecycleError>;
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment>;
@@ -1891,8 +1919,9 @@ where
         &self,
         id: SessionId,
         root: std::path::PathBuf,
+        profiles: SessionProfiles,
     ) -> Result<(), LifecycleError> {
-        SessionLifecycle::create_with_id(self, id, root).map(|_| ())
+        SessionLifecycle::create_with_profiles(self, id, root, profiles).map(|_| ())
     }
 
     fn list(
@@ -1909,6 +1938,10 @@ where
 
     fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
         SessionLifecycle::meta(self, id)
+    }
+
+    fn profiles(&self, id: SessionId) -> Result<SessionProfiles, LifecycleError> {
+        SessionLifecycle::profiles(self, id)
     }
 
     fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError> {
@@ -2000,6 +2033,74 @@ async fn initialize_confinement(
         .map_err(|error| control_error(&error))
 }
 
+/// Recover creation authority and run selections, following durable ancestry
+/// for successors that have not started their own run yet.
+async fn restore_session_profiles<S, E, C, I>(
+    controller: &RunController<S, E, C, I>,
+    lifecycle: &dyn LifecycleOperations,
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
+    source: SessionId,
+    target: SessionId,
+    root: &RunRoot,
+) -> Result<(), Error>
+where
+    S: SessionStore,
+    E: RunExecutor,
+    C: Clock,
+    I: IdSource,
+{
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    let mut current = source;
+    let mut visited = std::collections::HashSet::new();
+    let mut selected = RunSelections::empty();
+    loop {
+        if !visited.insert(current) {
+            return Err(Error::internal_error().data("cyclic session profile lineage"));
+        }
+        let profiles = lifecycle
+            .profiles(current)
+            .map_err(|error| lifecycle_error(&error))?;
+        let mut selections = match controller.status_by_session(current).await {
+            Ok(snapshot) => snapshot.selections().clone(),
+            Err(RunError::Store(StoreError::NotFound)) => admission
+                .profile_selections(current, RunSelections::empty())
+                .map_err(|error| control_error(&error))?,
+            Err(error) => return Err(Error::internal_error().data(error.to_string())),
+        };
+        if let Some(profile) = profiles.profile {
+            selections = selections.with_profile_name(profile);
+        }
+        if let Some(ceiling) = profiles.ceiling_profile {
+            selections = selections.with_ceiling_profile(ceiling);
+        }
+        if selected.profile().is_none() {
+            selected = selections.clone();
+        }
+        if let Some(ceiling) = selections.ceiling_profile() {
+            selected = selected.with_ceiling_profile(ceiling);
+            break;
+        }
+        let Some(lineage) = lifecycle
+            .lineage_info(current)
+            .map_err(|error| lifecycle_error(&error))?
+        else {
+            break;
+        };
+        current = match lineage.lineage {
+            ego_core::session::SessionLineage::Fork { source, .. }
+            | ego_core::session::SessionLineage::Compaction { source, .. } => source,
+        };
+    }
+    if selected.profile().is_some() || selected.ceiling_profile().is_some() {
+        admission
+            .configure_profiles(target, root, selected.profile(), selected.ceiling_profile())
+            .map_err(|error| control_error(&error))?;
+    }
+    Ok(())
+}
+
 /// The confinement this session's seat holds, as a run selection.
 ///
 /// Read on the prompt that *starts* the run and nowhere else. Unlike model,
@@ -2033,7 +2134,38 @@ fn selected_confinement(
     let observation = admission
         .observation(session, sandbox)
         .map_err(|error| control_error(&error))?;
-    Ok(selections.with_sandbox_observation(sandbox, observation))
+    admission
+        .profile_selections(
+            session,
+            selections.with_sandbox_observation(sandbox, observation),
+        )
+        .map_err(|error| control_error(&error))
+}
+
+/// Parse our optional extension strictly: malformed ceilings never become absent.
+fn session_profiles(
+    meta: Option<&v1::Meta>,
+) -> Result<Option<(Option<String>, Option<String>)>, Error> {
+    let Some(ego) = meta.and_then(|meta| meta.get("ego")) else {
+        return Ok(None);
+    };
+    if !ego.is_object() {
+        return Err(Error::invalid_params().data("_meta.ego must be an object"));
+    }
+    let parse = |key: &str| -> Result<Option<String>, Error> {
+        match ego.get(key) {
+            None => Ok(None),
+            Some(serde_json::Value::String(name)) => ego_core::config::ProfileName::parse(name)
+                .map(|_| Some(name.clone()))
+                .map_err(|error| Error::invalid_params().data(error.to_string())),
+            Some(_) => {
+                Err(Error::invalid_params().data(format!("_meta.ego.{key} must be a profile name")))
+            }
+        }
+    };
+    let profile = parse("profile")?;
+    let ceiling = parse("ceilingProfile")?;
+    Ok((profile.is_some() || ceiling.is_some()).then_some((profile, ceiling)))
 }
 
 /// A session request whose MCP selection arrived whole.
@@ -2845,12 +2977,29 @@ where
                     let start_request = RequestId::from_uuid(ids.next_uuid());
                     let session = RequestId::session_id(start_request);
                     let id = v1::SessionId::new(session.to_string());
+                    let profiles = match session_profiles(request.meta.as_ref()) {
+                        Ok(profiles) => profiles,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    let creation_profiles = profiles.as_ref().map(|(profile, ceiling)| SessionProfiles {
+                        profile: profile.clone(), ceiling_profile: ceiling.clone(),
+                    }).unwrap_or_default();
+                    let profile_meta = match profiles {
+                        Some((profile, ceiling)) => match confinement.as_ref() {
+                            Some(admission) => match admission.configure_profiles(session, &root, profile.as_deref(), ceiling.as_deref()) {
+                                Ok(meta) => Some(serde_json::Map::from_iter([("ego".to_owned(), meta)])),
+                                Err(error) => return responder.respond_with_error(control_error(&error)),
+                            },
+                            None => return responder.respond_with_error(Error::invalid_params().data("session profiles are not supported")),
+                        },
+                        None => None,
+                    };
                     // Hidden before it exists so no list or load can see it
                     // between creation and admission.
                     let hidden = unadmitted.hold(session);
                     if let Some(lifecycle) = &lifecycle
                         && let Err(error) =
-                            lifecycle.create_with_id(session, root.as_path().to_path_buf())
+                            lifecycle.create_with_id(session, root.as_path().to_path_buf(), creation_profiles)
                     {
                         return responder.respond_with_error(lifecycle_error(&error));
                     }
@@ -2936,6 +3085,7 @@ where
                     // the first prompt awaits the same admission.
                     responder.respond(
                         v1::NewSessionResponse::new(id.clone())
+                            .meta(profile_meta)
                             .config_options(
                                 pending_measurement
                                     .is_none()
@@ -3090,6 +3240,9 @@ where
                         Ok(hold) => hold,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
+                    if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), id, id, &root).await {
+                        return responder.respond_with_error(error);
+                    }
                     if let Err(error) =
                         initialize_confinement(confinement.as_ref(), id, &root).await
                     {
@@ -3240,6 +3393,9 @@ where
                         Ok(attachment) => attachment,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
+                    if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), id, id, &root).await {
+                        return responder.respond_with_error(error);
+                    }
                     if let Err(error) =
                         initialize_confinement(confinement.as_ref(), id, &root).await
                     {
@@ -3326,6 +3482,7 @@ where
         .on_receive_request(
             {
                 let lifecycle = lifecycle.clone();
+                let controller = Arc::clone(&controller);
                 let sessions = sessions.clone();
                 let unadmitted = unadmitted.clone();
                 let roots = Arc::clone(&roots);
@@ -3337,6 +3494,7 @@ where
                 let prompt_handler = Arc::clone(&prompt_handler);
                 async move |McpChecked(request): McpChecked<v1::ForkSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
+                    let controller = Arc::clone(&controller);
                     let sessions = sessions.clone();
                     let unadmitted = unadmitted.clone();
                     let roots = Arc::clone(&roots);
@@ -3403,6 +3561,10 @@ where
                     // The child's processes start under the child's measured
                     // confinement, so the child exists first. An MCP refusal
                     // takes it back rather than leaving an unexplained fork.
+                    if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, child, &root).await {
+                        let error = hidden.discard(Some(lifecycle.as_ref()), error).await;
+                        return responder.respond_with_error(error);
+                    }
                     let admitted = match initialize_confinement(confinement.as_ref(), child, &root).await {
                         Ok(()) => admit_session_mcp(
                             mcp_admitter.as_ref(),
@@ -3633,11 +3795,17 @@ where
         .on_receive_request(
             {
                 let compaction = compaction.clone();
+                let controller = Arc::clone(&controller);
+                let lifecycle = lifecycle.clone();
+                let confinement = confinement.clone();
                 let unadmitted = unadmitted.clone();
                 move |request: AcpCompactRequest,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let compaction = compaction.clone();
+                    let controller = Arc::clone(&controller);
+                    let lifecycle = lifecycle.clone();
+                    let confinement = confinement.clone();
                     let unadmitted = unadmitted.clone();
                     async move {
                     let Some(compaction) = compaction else {
@@ -3667,16 +3835,33 @@ where
                     if let Err(error) = unadmitted.refuse(source) {
                         return responder.respond_with_error(error);
                     }
+                    let profile_root = if let Some(lifecycle) = &lifecycle {
+                        let meta = match lifecycle.meta(source) {
+                            Ok(meta) => meta,
+                            Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                        };
+                        let root = match RunRoot::new(meta.workspace_root) {
+                            Ok(root) => root,
+                            Err(error) => return responder.respond_with_error(Error::internal_error().data(error.to_string())),
+                        };
+                        if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, source, &root).await {
+                            return responder.respond_with_error(error);
+                        }
+                        Some(root)
+                    } else { None };
                     match compaction
                         .compact(CompactionTransitionRequest { request_id, source })
                         .await
                     {
-                        Ok(receipt) => match serde_json::to_value(AcpCompactResponse::from(receipt))
-                        {
-                            Ok(response) => responder.respond(response),
-                            Err(error) => responder.respond_with_error(
-                                Error::internal_error().data(error.to_string()),
-                            ),
+                        Ok(receipt) => {
+                            if let (Some(lifecycle), Some(root)) = (&lifecycle, &profile_root)
+                                && let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, receipt.target, root).await {
+                                return responder.respond_with_error(error);
+                            }
+                            match serde_json::to_value(AcpCompactResponse::from(receipt)) {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(Error::internal_error().data(error.to_string())),
+                            }
                         },
                         Err(error) => responder.respond_with_error(
                             Error::internal_error().data(error.to_string()),

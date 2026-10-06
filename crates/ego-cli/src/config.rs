@@ -862,16 +862,160 @@ impl FrozenRunConfig {
     ) -> Result<Effective, UsageError> {
         let request_profile = profile(args);
         let selected_profile = request_profile.as_ref().or(self.profile.as_ref());
-        resolve_selected(
+        resolve_session_profile(
             layers,
             self.trust,
             selected_profile.map(SelectedProfile::as_resolver_input),
+            args.ceiling_profile.as_deref(),
+            args.directory.as_deref().unwrap_or(Path::new(".")),
         )
         .map_err(|error| UsageError(error.to_string()))
     }
 
     pub(crate) fn profile(&self) -> Option<&str> {
         self.profile.as_ref().map(SelectedProfile::name)
+    }
+}
+
+/// Resolve host profile restrictions before system policy and canonical root admission.
+pub(crate) fn resolve_session_profile(
+    layers: &[Sourced<ConfigLayer>],
+    trust: Trust,
+    selected: Option<(&str, Source)>,
+    ceiling_name: Option<&str>,
+    workspace: &Path,
+) -> Result<Effective, UsageError> {
+    let Some(name) = ceiling_name else {
+        return resolve_selected(layers, trust, selected)
+            .map_err(|error| UsageError(error.to_string()));
+    };
+    // A host ceiling is machine authority: repository and request overrides
+    // cannot redefine it, even when the session trusts its workspace.
+    let machine_layers: Vec<_> = layers
+        .iter()
+        .filter(|layer| matches!(layer.source, Source::System | Source::User | Source::Env))
+        .cloned()
+        .collect();
+    let mut ceiling = resolve_selected(
+        &machine_layers,
+        Trust::Untrusted,
+        Some((name, Source::Flags)),
+    )
+    .map_err(|error| UsageError(error.to_string()))?;
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| UsageError("profile ceilings require HOME".into()))?;
+    crate::run::profile_roots::defaults(&mut ceiling, Path::new(&home));
+    let mut effective =
+        ego_core::config::resolve_with_profile_ceiling(layers, trust, selected, Some(&ceiling))
+            .map_err(|error| UsageError(error.to_string()))?;
+    crate::run::profile_roots::defaults(&mut effective, Path::new(&home));
+    crate::run::profile_roots::clamp(&mut effective, &ceiling, workspace).map_err(UsageError)?;
+    Ok(effective)
+}
+
+#[cfg(test)]
+mod profile_ceiling_tests {
+    use super::*;
+
+    // Catches read-write reach escaping a read ceiling, exec roots escaping it,
+    // and trusted project configuration redefining the machine profile.
+    #[test]
+    fn acp_profile_ceiling_restricts_canonical_access_and_ignores_repository_ceiling_overrides() {
+        let workspace = tempfile::tempdir().unwrap();
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let layers = vec![
+            ConfigLayer::parse(
+                Source::User,
+                &format!(
+                    r#"
+[profile.machine]
+mode="default"
+sandbox="workspace"
+roots=[{{path="{}",access="read"}}]
+[profile.repo]
+mode="yolo"
+sandbox="off"
+roots=[{{path="{}",access="read-write"}}]
+exec_paths=["{}","{}"]
+"#,
+                    allowed.path().display(),
+                    allowed.path().display(),
+                    allowed.path().display(),
+                    outside.path().display()
+                ),
+            )
+            .unwrap(),
+            ConfigLayer::parse(
+                Source::Project,
+                "[profile.machine]\nmode='yolo'\nsandbox='off'",
+            )
+            .unwrap(),
+        ];
+        let effective = resolve_session_profile(
+            &layers,
+            Trust::Trusted,
+            Some(("repo", Source::Flags)),
+            Some("machine"),
+            workspace.path(),
+        )
+        .unwrap();
+        assert_eq!(effective.mode, Some(ego_core::config::Mode::Default));
+        assert_eq!(
+            effective.sandbox,
+            Some(ego_core::permit::Confinement::Workspace)
+        );
+        assert_eq!(effective.roots.len(), 1);
+        assert_eq!(
+            effective.roots[0].access,
+            ego_core::permit::RootAccess::Read
+        );
+        assert_eq!(effective.exec_paths, vec![allowed.path().to_path_buf()]);
+        assert_eq!(effective.profile_warnings.len(), 4);
+        crate::run::profile_roots::admit(
+            &effective,
+            &ego_core::permit::CanonPath::new(workspace.path()),
+        )
+        .unwrap();
+    }
+
+    // Catches a symlink spelling inside a ceiling granting an outside canonical target.
+    #[cfg(unix)]
+    #[test]
+    fn acp_profile_ceiling_drops_symlink_escape_and_does_not_restore_default_roots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = allowed.path().join("escape");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let layers = vec![
+            ConfigLayer::parse(
+                Source::User,
+                &format!(
+                    r#"
+[profile.machine]
+roots=[{{path="{}",access="read-write"}}]
+[profile.repo]
+roots=[{{path="{}",access="read-write"}}]
+"#,
+                    allowed.path().display(),
+                    link.display()
+                ),
+            )
+            .unwrap(),
+        ];
+        let mut effective = resolve_session_profile(
+            &layers,
+            Trust::Untrusted,
+            Some(("repo", Source::Flags)),
+            Some("machine"),
+            workspace.path(),
+        )
+        .unwrap();
+        assert!(effective.roots.is_empty());
+        assert_eq!(effective.profile_warnings.len(), 1);
+        crate::run::profile_roots::defaults(&mut effective, allowed.path());
+        assert!(effective.roots.is_empty());
     }
 }
 

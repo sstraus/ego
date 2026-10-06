@@ -309,7 +309,7 @@ pub(crate) fn protocol_effective(
 /// Everything a protocol cannot have is fixed here; `shape` is the part the
 /// launch line owns, so a host that named nothing gets exactly the session it
 /// got before these flags existed ([`SessionShape::default`]).
-pub(super) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -> Args {
+pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -> Args {
     Args {
         prompt: None,
         agent_file: None,
@@ -344,6 +344,7 @@ pub(super) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         set: Vec::new(),
         profile: shape.profile,
         profile_source: shape.profile_source,
+        ceiling_profile: None,
         quiet: false,
         no_color: false,
     }

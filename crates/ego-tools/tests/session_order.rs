@@ -166,6 +166,7 @@ fn retired_v10_log_is_refused_without_mutating_bytes() {
     let path = log_path(dir.path(), &id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut bytes = encode_header(&Header {
+        profiles: Default::default(),
         v: 10,
         session: id,
         created: Timestamp::from_millis(1),
@@ -196,6 +197,7 @@ fn v8_log_with_valid_unknown_record_is_refused_without_mutation() {
     let path = log_path(dir.path(), &id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut bytes = encode_header(&Header {
+        profiles: Default::default(),
         v: 8,
         session: id,
         created: Timestamp::from_millis(1),

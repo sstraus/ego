@@ -109,6 +109,7 @@ impl SessionStore for RecordingSessionStore {
             .expect("session entries")
             .keys()
             .map(|id| SessionMeta {
+                profiles: Default::default(),
                 id: *id,
                 workspace_root: PathBuf::from("/workspace"),
                 model: None,
