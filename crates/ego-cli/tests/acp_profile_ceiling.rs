@@ -172,3 +172,151 @@ fn acp_profile_ceiling_rejects_bad_names_and_preserves_absent_ceiling() {
     );
     host.finish();
 }
+
+fn lifecycle_config(places: &Places) {
+    std::fs::write(places.home_path().join("config.toml"),
+        "model='ollama/qwen3'\nthinking='off'\n[profile.machine]\nmode='default'\nsandbox='off'\nroots=[]\n[profile.wide]\nmode='yolo'\nsandbox='off'\nroots=[]\n").unwrap();
+}
+
+fn lifecycle_host(places: &Places, stub: &Stub) -> AcpHost {
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), Some(stub))
+            .subcommand("acp")
+            .args(["--profile", "wide", "--sandbox", "off"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    host
+}
+
+fn durable_ceiling_session(places: &Places, stub: &Stub) -> String {
+    lifecycle_config(places);
+    let mut host = lifecycle_host(places, stub);
+    let opened = host.request(
+        "session/new",
+        serde_json::json!({"cwd": places.workspace_path(), "mcpServers": [],
+        "_meta": {"ego": {"profile": "wide", "ceilingProfile": "machine", "trust": "trusted"}}}),
+    );
+    let session = opened["result"]["sessionId"].as_str().unwrap().to_owned();
+    let result = host.request(
+        "session/prompt",
+        serde_json::json!({"sessionId": session, "prompt": [{"type":"text", "text":"Hello"}]}),
+    );
+    assert!(result["result"].is_object(), "{result}");
+    host.finish();
+    session
+}
+
+fn assert_yolo_refused(host: &mut AcpHost, session: &str) {
+    let refused = host.request(
+        "session/set_config_option",
+        serde_json::json!({"sessionId": session, "configId": "mode", "value": "yolo"}),
+    );
+    assert!(
+        refused["error"].is_object(),
+        "reopened ceiling escaped: {refused}"
+    );
+    // A refusal due to absent/uninitialized controls would give false confidence.
+    let allowed = host.request(
+        "session/set_config_option",
+        serde_json::json!({"sessionId": session, "configId": "mode", "value": "default"}),
+    );
+    assert!(
+        allowed["result"].is_object(),
+        "restored controls unavailable: {allowed}"
+    );
+}
+
+// Catches load/resume seeding the launch profile instead of persisted ceiling authority.
+#[test]
+fn acp_profile_ceiling_survives_load_and_resume_on_fresh_connections() {
+    for method in ["session/load", "session/resume"] {
+        let places = Places::new();
+        let stub = Stub::start(Plan {
+            completions: vec![Reply::Sse(text("source complete"))],
+            ..Plan::default()
+        });
+        let session = durable_ceiling_session(&places, &stub);
+        let mut host = lifecycle_host(&places, &stub);
+        let opened = host.request(method, serde_json::json!({"sessionId": session, "cwd": places.workspace_path(), "mcpServers": []}));
+        assert!(opened["result"].is_object(), "{method}: {opened}");
+        assert_yolo_refused(&mut host, &session);
+        host.finish();
+    }
+}
+
+// Catches fork/compact successor policy reverting to an unclamped profile,
+// including a successor reopened before it has any run records of its own.
+#[test]
+fn acp_profile_ceiling_survives_fork_and_compaction_successors() {
+    for method in ["session/fork", "_ego/compact"] {
+        let places = Places::new();
+        let checkpoint = "# Objective\nContinue safely.\n# Binding constraints and preferences\nPreserve profile authority.\n# Completed work and evidence\nSource completed.\n# Work in progress\nReopen successor.\n# Decisions and rationale\nKeep ceiling.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nContinue.\n# Critical references\nSource session.";
+        let stub = Stub::start(Plan {
+            context_length: Some(32_768),
+            completions: vec![
+                Reply::Sse(text("source complete")),
+                Reply::Sse(text(checkpoint)),
+            ],
+            ..Plan::default()
+        });
+        let session = durable_ceiling_session(&places, &stub);
+        let mut host = lifecycle_host(&places, &stub);
+        let params = if method == "session/fork" {
+            serde_json::json!({"sessionId": session, "cwd": places.workspace_path(), "mcpServers": []})
+        } else {
+            serde_json::json!({"v": 1, "sessionId": session, "requestId": "0198c7f4-9c1f-7a2b-8c3d-4e5f60718294"})
+        };
+        let forked = host.request(method, params);
+        let field = if method == "session/fork" {
+            "sessionId"
+        } else {
+            "targetSessionId"
+        };
+        let child = forked["result"][field]
+            .as_str()
+            .unwrap_or_else(|| panic!("{method}: {forked}"))
+            .to_owned();
+        if method == "session/fork" {
+            assert_yolo_refused(&mut host, &child);
+        }
+        host.finish();
+        let mut host = lifecycle_host(&places, &stub);
+        let opened = host.request("session/load", serde_json::json!({"sessionId": child, "cwd": places.workspace_path(), "mcpServers": []}));
+        assert!(opened["result"].is_object(), "{method} successor: {opened}");
+        assert_yolo_refused(&mut host, &child);
+        host.finish();
+    }
+}
+
+// Catches a missing persisted ceiling silently becoming an absent ceiling on reopen.
+#[test]
+fn acp_profile_ceiling_missing_on_reopen_refuses_instead_of_widening() {
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("source complete"))],
+        ..Plan::default()
+    });
+    let session = durable_ceiling_session(&places, &stub);
+    std::fs::write(places.home_path().join("config.toml"), "model='ollama/qwen3'\nthinking='off'\n[profile.wide]\nmode='yolo'\nsandbox='off'\nroots=[]\n").unwrap();
+    let mut host = lifecycle_host(&places, &stub);
+    for method in [
+        "session/load",
+        "session/resume",
+        "session/fork",
+        "_ego/compact",
+    ] {
+        let params = if method == "_ego/compact" {
+            serde_json::json!({"v":1,"sessionId":session,"requestId":"0198c7f4-9c1f-7a2b-8c3d-4e5f60718294"})
+        } else {
+            serde_json::json!({"sessionId":session,"cwd":places.workspace_path(),"mcpServers":[]})
+        };
+        let refused = host.request(method, params);
+        assert!(refused["error"].is_object(), "{method}: {refused}");
+        assert!(
+            refused["error"].to_string().contains("machine"),
+            "unrelated refusal: {refused}"
+        );
+    }
+    host.finish();
+}

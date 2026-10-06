@@ -1820,6 +1820,65 @@ async fn initialize_confinement(
         .map_err(|error| control_error(&error))
 }
 
+/// Recover the profile authority from the run stream, following durable ancestry
+/// for successors that have not started their own run yet.
+async fn restore_session_profiles<S, E, C, I>(
+    controller: &RunController<S, E, C, I>,
+    lifecycle: &dyn LifecycleOperations,
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
+    source: SessionId,
+    target: SessionId,
+    root: &RunRoot,
+) -> Result<(), Error>
+where
+    S: SessionStore,
+    E: RunExecutor,
+    C: Clock,
+    I: IdSource,
+{
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    let mut current = source;
+    let mut visited = std::collections::HashSet::new();
+    let mut selected = RunSelections::empty();
+    loop {
+        if !visited.insert(current) {
+            return Err(Error::internal_error().data("cyclic session profile lineage"));
+        }
+        let selections = match controller.status_by_session(current).await {
+            Ok(snapshot) => snapshot.selections().clone(),
+            Err(RunError::Store(StoreError::NotFound)) => admission
+                .profile_selections(current, RunSelections::empty())
+                .map_err(|error| control_error(&error))?,
+            Err(error) => return Err(Error::internal_error().data(error.to_string())),
+        };
+        if selected.profile().is_none() {
+            selected = selections.clone();
+        }
+        if let Some(ceiling) = selections.ceiling_profile() {
+            selected = selected.with_ceiling_profile(ceiling);
+            break;
+        }
+        let Some(lineage) = lifecycle
+            .lineage_info(current)
+            .map_err(|error| lifecycle_error(&error))?
+        else {
+            break;
+        };
+        current = match lineage.lineage {
+            ego_core::session::SessionLineage::Fork { source, .. }
+            | ego_core::session::SessionLineage::Compaction { source, .. } => source,
+        };
+    }
+    if selected.profile().is_some() || selected.ceiling_profile().is_some() {
+        admission
+            .configure_profiles(target, root, selected.profile(), selected.ceiling_profile())
+            .map_err(|error| control_error(&error))?;
+    }
+    Ok(())
+}
+
 /// The confinement this session's seat holds, as a run selection.
 ///
 /// Read on the prompt that *starts* the run and nowhere else. Unlike model,
@@ -2936,6 +2995,9 @@ where
                         Ok(hold) => hold,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
+                    if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), id, id, &root).await {
+                        return responder.respond_with_error(error);
+                    }
                     if let Err(error) =
                         initialize_confinement(confinement.as_ref(), id, &root).await
                     {
@@ -3084,6 +3146,9 @@ where
                         Ok(attachment) => attachment,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
                     };
+                    if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), id, id, &root).await {
+                        return responder.respond_with_error(error);
+                    }
                     if let Err(error) =
                         initialize_confinement(confinement.as_ref(), id, &root).await
                     {
@@ -3170,6 +3235,7 @@ where
         .on_receive_request(
             {
                 let lifecycle = lifecycle.clone();
+                let controller = Arc::clone(&controller);
                 let sessions = sessions.clone();
                 let unadmitted = unadmitted.clone();
                 let roots = Arc::clone(&roots);
@@ -3180,6 +3246,7 @@ where
                 let notices = notices.clone();
                 async move |McpChecked(request): McpChecked<v1::ForkSessionRequest>, responder, cx: ConnectionTo<Client>| {
                     let lifecycle = lifecycle.clone();
+                    let controller = Arc::clone(&controller);
                     let sessions = sessions.clone();
                     let unadmitted = unadmitted.clone();
                     let roots = Arc::clone(&roots);
@@ -3245,6 +3312,10 @@ where
                     // The child's processes start under the child's measured
                     // confinement, so the child exists first. An MCP refusal
                     // takes it back rather than leaving an unexplained fork.
+                    if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, child, &root).await {
+                        let error = hidden.discard(Some(lifecycle.as_ref()), error).await;
+                        return responder.respond_with_error(error);
+                    }
                     let admitted = match initialize_confinement(confinement.as_ref(), child, &root).await {
                         Ok(()) => admit_session_mcp(
                             mcp_admitter.as_ref(),
@@ -3804,11 +3875,17 @@ where
         .on_receive_request(
             {
                 let compaction = compaction.clone();
+                let controller = Arc::clone(&controller);
+                let lifecycle = lifecycle.clone();
+                let confinement = confinement.clone();
                 let unadmitted = unadmitted.clone();
                 move |request: AcpCompactRequest,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let compaction = compaction.clone();
+                    let controller = Arc::clone(&controller);
+                    let lifecycle = lifecycle.clone();
+                    let confinement = confinement.clone();
                     let unadmitted = unadmitted.clone();
                     async move {
                     let Some(compaction) = compaction else {
@@ -3838,16 +3915,33 @@ where
                     if let Err(error) = unadmitted.refuse(source) {
                         return responder.respond_with_error(error);
                     }
+                    let profile_root = if let Some(lifecycle) = &lifecycle {
+                        let meta = match lifecycle.meta(source) {
+                            Ok(meta) => meta,
+                            Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
+                        };
+                        let root = match RunRoot::new(meta.workspace_root) {
+                            Ok(root) => root,
+                            Err(error) => return responder.respond_with_error(Error::internal_error().data(error.to_string())),
+                        };
+                        if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, source, &root).await {
+                            return responder.respond_with_error(error);
+                        }
+                        Some(root)
+                    } else { None };
                     match compaction
                         .compact(CompactionTransitionRequest { request_id, source })
                         .await
                     {
-                        Ok(receipt) => match serde_json::to_value(AcpCompactResponse::from(receipt))
-                        {
-                            Ok(response) => responder.respond(response),
-                            Err(error) => responder.respond_with_error(
-                                Error::internal_error().data(error.to_string()),
-                            ),
+                        Ok(receipt) => {
+                            if let (Some(lifecycle), Some(root)) = (&lifecycle, &profile_root)
+                                && let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, receipt.target, root).await {
+                                return responder.respond_with_error(error);
+                            }
+                            match serde_json::to_value(AcpCompactResponse::from(receipt)) {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(Error::internal_error().data(error.to_string())),
+                            }
                         },
                         Err(error) => responder.respond_with_error(
                             Error::internal_error().data(error.to_string()),

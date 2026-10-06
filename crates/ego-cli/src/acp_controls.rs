@@ -162,6 +162,20 @@ impl AcpSessionControls {
     ) -> Result<(), ControlError> {
         let mut sessions = self.lock_sessions()?;
         let seat = sessions.entry(session).or_default();
+        if let Some(pinned) = &seat.profile {
+            return if pinned.profile == profile
+                && pinned.ceiling_profile == ceiling_profile
+                && pinned.effective == effective
+            {
+                Ok(())
+            } else {
+                Err(ControlError::Refused {
+                    control: "profile",
+                    why: "session profile policy changed after admission; start a new session"
+                        .into(),
+                })
+            };
+        }
         if seat.confinement.is_some() || seat.profile.is_some() {
             return Err(ControlError::Refused {
                 control: "profile",

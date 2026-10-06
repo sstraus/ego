@@ -93,3 +93,11 @@ roots); an unchanged request has an empty array. Creation succeeds after a host
 clamp. Later controls cannot exceed the admitted ceiling, and prompt preparation
 carries both profile names in durable run selections. Deferred confinement
 measurement still publishes the standard `config_option_update` after creation.
+
+`session/load` and `session/resume` restore the profile names from durable run
+selections before measuring confinement or admitting MCP servers. Forks and
+compacted successors inherit the same names through durable session lineage,
+including successors with no run records yet. A missing or invalid ceiling
+refuses reopening; it never becomes an absent ceiling. Reattaching to a live
+profile seat also refuses changed profile policy instead of replacing its
+pinned authority.
