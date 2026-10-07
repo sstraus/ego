@@ -13,6 +13,16 @@ use crate::permit::Op;
 use crate::permit::rule::Rule;
 use std::path::Path;
 
+const CREDENTIAL_READ_RULES: &[&str] = &[
+    "read(/**/.env*)",
+    "read(/**/.ssh/**)",
+    "read(/**/.aws/**)",
+    "read(/**/.netrc)",
+    "read(/**/Keychains/**)",
+    "read(/**/*.keychain)",
+    "read(/**/*.keychain-db)",
+];
+
 /// Which layers carry a rule.
 ///
 /// A **set**, because "the user config denies this" is true or false and
@@ -190,19 +200,24 @@ pub struct Ruleset {
 }
 
 impl Ruleset {
+    /// Whether a canonical path is covered by built-in credential protection.
+    pub(crate) fn is_credential_path(path: &crate::permit::CanonPath) -> bool {
+        static RULES: std::sync::OnceLock<Vec<Rule>> = std::sync::OnceLock::new();
+        let rules = RULES.get_or_init(|| {
+            CREDENTIAL_READ_RULES
+                .iter()
+                .map(|raw| Rule::load(raw).expect("valid built-in credential rule"))
+                .collect()
+        });
+        let op = Op::Read { path: path.clone() };
+        rules.iter().any(|rule| rule.matches(&op, Path::new("/")))
+    }
+
     /// Install credential read defaults without replacing operator rules.
     pub fn with_credential_defaults(mut self) -> Self {
         // Absolute patterns also cover roots outside the workspace. These are
         // ordinary read rules, not filesystem or subprocess confinement.
-        for raw in [
-            "read(/**/.env*)",
-            "read(/**/.ssh/**)",
-            "read(/**/.aws/**)",
-            "read(/**/.netrc)",
-            "read(/**/Keychains/**)",
-            "read(/**/*.keychain)",
-            "read(/**/*.keychain-db)",
-        ] {
+        for raw in CREDENTIAL_READ_RULES {
             Self::merge(
                 &mut self.deny,
                 Rule::load(raw).expect("valid built-in credential rule"),

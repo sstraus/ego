@@ -63,6 +63,14 @@ higher or lower layer supplies a value.
 
 `permissions` is a whole-block override, not a merge of individual lists.
 System denies and built-in credential-read protection survive replacement.
+An explicit user read rule can lift the built-in credential deny. Guarded read
+and grep then expose only assignment key names for `.env*` and AWS INI
+`credentials`/`config` files. Comments, sections, and values are omitted; grep
+matches the projected keys. Other protected formats and malformed assignments
+fail closed (read refuses, grep skips). Exec refuses protected paths declared
+in argv, including resolved symlink targets, for foreground and background
+calls. This check does not analyze dynamic program code or sanitize arbitrary
+process output.
 Extra roots use canonical paths; conflicting nested read-only/read-write roots
 are refused. See [permissions](../guides/permissions.md).
 
