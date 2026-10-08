@@ -382,6 +382,12 @@ impl CliPrepared {
             }
             // Nothing was generated yet, so the failure's effect is known.
             Err(termination @ RunTermination::Provider { .. }) => return settlement(termination),
+            // A host cancellation can reach the repeated preflight before a
+            // provider request exists. Its effect is known; treating it as an
+            // executor error would leave a cancelled continuation uncertain.
+            Err(termination @ (RunTermination::TimedOut | RunTermination::Signalled(_))) => {
+                return settlement(termination);
+            }
             Err(error) => return Err(run_executor_error(error)),
         };
         drop(proof_directory);
