@@ -263,6 +263,72 @@ fn pausing_a_streaming_stdio_turn_settles_with_the_held_code() {
     host.finish();
 }
 
+/// regression case: the live host run cancelled a streaming turn and its next
+/// prompt failed. Catches: a cancelled streaming generation leaving the
+/// session unable to run, or the next request carrying the half-finished turn
+/// in a shape the provider rejects.
+#[test]
+fn cancelling_a_streaming_stdio_turn_leaves_the_session_able_to_run_the_next_prompt() {
+    let places = Places::new();
+    let Reply::Paced { head, tail, .. } = paced("before cancel", std::time::Duration::ZERO) else {
+        unreachable!("paced produces a split reply");
+    };
+    let gate = ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::GatedPaced {
+                head,
+                tail,
+                gate: gate.clone(),
+            },
+            Reply::Sse(text("recovered")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    host.initialize();
+    let session = host.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
+    let prompt_id = host.send_request("session/prompt", prompt(&session));
+    loop {
+        let frame = host.read_frame();
+        if frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+            break;
+        }
+    }
+    host.write_frame(serde_json::json!({
+        "jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session},
+    }));
+    // The notification has no reply to wait for; give the agent time to
+    // observe it while the generation is still held open.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    gate.release();
+    let cancelled = loop {
+        let frame = host.read_frame();
+        if frame["id"] == prompt_id {
+            break frame;
+        }
+    };
+    assert_eq!(
+        cancelled["result"]["stopReason"], "cancelled",
+        "{cancelled}"
+    );
+
+    let next_id = host.send_request("session/prompt", prompt(&session));
+    let next = loop {
+        let frame = host.read_frame();
+        if frame["id"] == next_id {
+            break frame;
+        }
+    };
+    assert_eq!(next["result"]["stopReason"], "end_turn", "{next}");
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "the second prompt reached the provider"
+    );
+    host.finish();
+}
+
 /// regression case, end to end through the packaged binary — catches: a
 /// transient provider failure retried silently or not at all, a provider
 /// failure settling uncertain and refusing every later prompt with "already
