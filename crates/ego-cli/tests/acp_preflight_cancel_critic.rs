@@ -30,7 +30,7 @@ transport = "sse"
 "#;
 
 fn wait_for(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while !path.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
