@@ -971,6 +971,52 @@ async fn an_unmapped_status_is_unclassified_rather_than_assumed_retryable() {
     );
 }
 
+/// regression case. OpenRouter wraps an upstream failure as a generic
+/// "Provider returned error" and puts the upstream's name and body in
+/// `error.metadata`. Dropping them left a live 400 impossible to attribute.
+#[tokio::test]
+async fn an_openrouter_wrapped_400_names_the_upstream_and_a_bounded_excerpt() {
+    let body = r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"detail\":\"unsupported parameter\"} token sk-or-v1-abc123 extra","provider_name":"Darkbloom"}}}"#;
+    let events: Vec<AiEvent> = decode(responding(400, body), None).collect().await;
+    let (message, kind) = events
+        .iter()
+        .find_map(|event| match event {
+            AiEvent::Error { message, kind } => Some((message.clone(), *kind)),
+            _ => None,
+        })
+        .expect("an error event");
+    assert_eq!(kind, ErrorKind::Invalid);
+    assert!(message.starts_with("the provider returned HTTP 400: Provider returned error"));
+    assert!(message.contains("Darkbloom"), "{message}");
+    assert!(message.contains("unsupported parameter"), "{message}");
+    assert!(!message.contains("sk-or-v1-abc123"), "{message}");
+    let cause = events
+        .iter()
+        .find_map(|event| match event {
+            AiEvent::ProviderFailure { cause, .. } => Some(cause.clone()),
+            _ => None,
+        })
+        .expect("a provider failure");
+    assert!(cause.contains("Darkbloom"), "{cause}");
+    assert!(!cause.contains("unsupported parameter"), "{cause}");
+
+    let long = "x".repeat(5000);
+    let body = format!(
+        r#"{{"error":{{"message":"Provider returned error","metadata":{{"raw":"{long}","provider_name":"P"}}}}}}"#
+    );
+    let events: Vec<AiEvent> = decode(responding(400, Box::leak(body.into_boxed_str())), None)
+        .collect()
+        .await;
+    let message = events
+        .iter()
+        .find_map(|event| match event {
+            AiEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("an error event");
+    assert!(message.len() < 400, "{}", message.len());
+}
+
 /// A stream that ended without saying why, after a status that proved the
 /// request was accepted. Neither the request nor the account is what went
 /// wrong and the same bytes may well complete next time, so it is
