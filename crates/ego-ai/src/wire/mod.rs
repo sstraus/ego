@@ -478,6 +478,16 @@ struct ErrorEnvelope {
 #[derive(Debug, Deserialize)]
 struct ErrorBody {
     message: String,
+    /// OpenRouter wraps an upstream failure as a generic message and names the
+    /// upstream here so a 400 can be attributed without exposing its raw body.
+    #[serde(default)]
+    metadata: Option<ErrorMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorMetadata {
+    #[serde(default)]
+    provider_name: Option<String>,
 }
 
 /// What a `401` or `403` is told to consider, once ego stopped impersonating.
@@ -520,11 +530,25 @@ pub(crate) async fn read_error_body(
     // envelope's typed message, never a body that parsed as no envelope.
     let (said, cause) = match serde_json::from_str::<ErrorEnvelope>(&text) {
         Ok(envelope) => {
-            let said = format!(
+            let base = format!(
                 "the provider returned HTTP {status}: {}",
                 envelope.error.message
             );
-            (said.clone(), said)
+            let name = envelope
+                .error
+                .metadata
+                .and_then(|metadata| metadata.provider_name)
+                .map(|name| {
+                    name.chars()
+                        .filter(|c| !c.is_control())
+                        .take(64)
+                        .collect::<String>()
+                });
+            let cause = match &name {
+                Some(name) => format!("{base} (upstream {name})"),
+                None => base.clone(),
+            };
+            (cause.clone(), cause)
         }
         Err(_) if text.trim().is_empty() => {
             let said = format!("the provider returned HTTP {status} with an empty body");

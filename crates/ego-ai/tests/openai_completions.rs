@@ -971,6 +971,63 @@ async fn an_unmapped_status_is_unclassified_rather_than_assumed_retryable() {
     );
 }
 
+/// regression case. OpenRouter wraps an upstream failure as a generic
+/// "Provider returned error" and puts the upstream's name and body in
+/// `error.metadata`. Keep the name for attribution and omit the raw body,
+/// which may contain credentials.
+#[tokio::test]
+async fn an_openrouter_wrapped_400_names_the_upstream_without_exposing_raw_details() {
+    let body = r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"detail\":\"unsupported parameter\"} token sk-or-v1-abc123 Authorization: Bearer synthetic-bearer-token extra","provider_name":"Darkbloom"}}}"#;
+    let events: Vec<AiEvent> = decode(responding(400, body), None).collect().await;
+    let (message, kind) = events
+        .iter()
+        .find_map(|event| match event {
+            AiEvent::Error { message, kind } => Some((message.clone(), *kind)),
+            _ => None,
+        })
+        .expect("an error event");
+    assert_eq!(kind, ErrorKind::Invalid);
+    assert!(message.starts_with("the provider returned HTTP 400: Provider returned error"));
+    assert!(message.contains("Darkbloom"), "{message}");
+    assert!(!message.contains("unsupported parameter"), "{message}");
+    assert!(!message.contains("sk-or-v1-abc123"), "{message}");
+    assert!(!message.contains("Bearer"), "{message}");
+    assert!(!message.contains("synthetic-bearer-token"), "{message}");
+    let cause = events
+        .iter()
+        .find_map(|event| match event {
+            AiEvent::ProviderFailure { cause, .. } => Some(cause.clone()),
+            _ => None,
+        })
+        .expect("a provider failure");
+    assert!(cause.contains("Darkbloom"), "{cause}");
+    assert!(!cause.contains("unsupported parameter"), "{cause}");
+    assert!(!cause.contains("sk-or-v1-abc123"), "{cause}");
+    assert!(!cause.contains("synthetic-bearer-token"), "{cause}");
+
+    let long = "x".repeat(5000);
+    let body = format!(
+        r#"{{"error":{{"message":"Provider returned error","metadata":{{"raw":"{long}","provider_name":"{long}"}}}}}}"#
+    );
+    let events: Vec<AiEvent> = decode(responding(400, Box::leak(body.into_boxed_str())), None)
+        .collect()
+        .await;
+    let message = events
+        .iter()
+        .find_map(|event| match event {
+            AiEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("an error event");
+    assert_eq!(
+        message,
+        format!(
+            "the provider returned HTTP 400: Provider returned error (upstream {})",
+            "x".repeat(64)
+        )
+    );
+}
+
 /// A stream that ended without saying why, after a status that proved the
 /// request was accepted. Neither the request nor the account is what went
 /// wrong and the same bytes may well complete next time, so it is
