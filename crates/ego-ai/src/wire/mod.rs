@@ -479,7 +479,7 @@ struct ErrorEnvelope {
 struct ErrorBody {
     message: String,
     /// OpenRouter wraps an upstream failure as a generic message and names the
-    /// upstream and its body here; without them a 400 cannot be attributed.
+    /// upstream here so a 400 can be attributed without exposing its raw body.
     #[serde(default)]
     metadata: Option<ErrorMetadata>,
 }
@@ -488,43 +488,6 @@ struct ErrorBody {
 struct ErrorMetadata {
     #[serde(default)]
     provider_name: Option<String>,
-    #[serde(default)]
-    raw: Option<serde_json::Value>,
-}
-
-/// How much of an upstream's own body an operator message carries.
-const MAX_UPSTREAM_EXCERPT: usize = 200;
-
-/// The upstream's name for the host-safe cause, with a bounded excerpt of its
-/// body for the operator message. Names and bodies are the upstream's own, not
-/// ego's: control characters become spaces and anything shaped like a bearer
-/// secret is masked before the excerpt is cut.
-fn upstream_detail(metadata: &ErrorMetadata) -> (Option<String>, Option<String>) {
-    let name = metadata
-        .provider_name
-        .as_deref()
-        .map(|name| name.chars().filter(|c| !c.is_control()).take(64).collect());
-    let excerpt = metadata.raw.as_ref().map(|raw| {
-        let text = match raw {
-            serde_json::Value::String(text) => text.clone(),
-            other => other.to_string(),
-        };
-        text.split_whitespace()
-            .map(|word| {
-                if word.contains("sk-") || word.to_ascii_lowercase().starts_with("bearer") {
-                    "<redacted>"
-                } else {
-                    word
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(MAX_UPSTREAM_EXCERPT)
-            .collect()
-    });
-    (name, excerpt)
 }
 
 /// What a `401` or `403` is told to consider, once ego stopped impersonating.
@@ -571,21 +534,21 @@ pub(crate) async fn read_error_body(
                 "the provider returned HTTP {status}: {}",
                 envelope.error.message
             );
-            let (name, excerpt) = envelope
+            let name = envelope
                 .error
                 .metadata
-                .as_ref()
-                .map_or((None, None), upstream_detail);
+                .and_then(|metadata| metadata.provider_name)
+                .map(|name| {
+                    name.chars()
+                        .filter(|c| !c.is_control())
+                        .take(64)
+                        .collect::<String>()
+                });
             let cause = match &name {
                 Some(name) => format!("{base} (upstream {name})"),
                 None => base.clone(),
             };
-            let said = match (&name, excerpt) {
-                (Some(name), Some(excerpt)) => format!("{base} (upstream {name}: {excerpt})"),
-                (None, Some(excerpt)) => format!("{base} (upstream: {excerpt})"),
-                _ => cause.clone(),
-            };
-            (said, cause)
+            (cause.clone(), cause)
         }
         Err(_) if text.trim().is_empty() => {
             let said = format!("the provider returned HTTP {status} with an empty body");
