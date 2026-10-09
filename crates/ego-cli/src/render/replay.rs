@@ -30,7 +30,8 @@ pub(crate) fn replay(
             SessionEntry::Event(event) => Some(event),
             SessionEntry::RunTransaction(_)
             | SessionEntry::Evidence(_)
-            | SessionEntry::NoticeDelivered(_) => None,
+            | SessionEntry::NoticeDelivered(_)
+            | SessionEntry::ModelSelected(_) => None,
         })
         .collect();
     render(&events, output, capabilities);

@@ -81,11 +81,11 @@ mod faults {
                     SessionEntry::RunTransaction(_) => Err(StoreError::Io(std::io::Error::other(
                         "event-only fixture contained a run transaction",
                     ))),
-                    SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => {
-                        Err(StoreError::Io(std::io::Error::other(
-                            "event-only fixture contained evidence",
-                        )))
-                    }
+                    SessionEntry::Evidence(_)
+                    | SessionEntry::NoticeDelivered(_)
+                    | SessionEntry::ModelSelected(_) => Err(StoreError::Io(std::io::Error::other(
+                        "event-only fixture contained evidence",
+                    ))),
                 })
                 .collect()
         }
@@ -196,11 +196,11 @@ mod faults {
                 SessionEntry::RunTransaction(_) => Err(StoreError::Io(std::io::Error::other(
                     "event-only fixture contained a run transaction",
                 ))),
-                SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => {
-                    Err(StoreError::Io(std::io::Error::other(
-                        "event-only fixture contained evidence",
-                    )))
-                }
+                SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_)
+                | SessionEntry::ModelSelected(_) => Err(StoreError::Io(std::io::Error::other(
+                    "event-only fixture contained evidence",
+                ))),
             })
             .collect()
     }

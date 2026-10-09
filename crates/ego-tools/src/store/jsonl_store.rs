@@ -445,6 +445,7 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                     _ => {}
                 }
             }
+            SessionEntry::ModelSelected(_) => {}
             SessionEntry::NoticeDelivered(notice) => {
                 last_ts = Some(notice.delivered_at);
             }
@@ -602,7 +603,9 @@ impl JsonlStore {
             let transaction = match entry {
                 SessionEntry::RunTransaction(transaction) => transaction,
                 SessionEntry::Event(_) => continue,
-                SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => continue,
+                SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_)
+                | SessionEntry::ModelSelected(_) => continue,
             };
             let expected = revision
                 .map(RunRevision::next)
@@ -905,7 +908,8 @@ impl JsonlStore {
                         SessionEntry::Event(event) => Some(event),
                         SessionEntry::RunTransaction(_)
                         | SessionEntry::Evidence(_)
-                        | SessionEntry::NoticeDelivered(_) => None,
+                        | SessionEntry::NoticeDelivered(_)
+                        | SessionEntry::ModelSelected(_) => None,
                     }
                 })
                 .collect()
@@ -1969,6 +1973,42 @@ impl SessionStore for JsonlStore {
 }
 
 impl JsonlStore {
+    /// Read the last explicit model choice from the authoritative session stream.
+    pub fn selected_model(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<ego_core::config::ModelRef>, StoreError> {
+        use futures::StreamExt;
+        let entries =
+            futures::executor::block_on(SessionStore::read(self, session)?.collect::<Vec<_>>());
+        let mut selected = None;
+        for entry in entries {
+            if let SessionEntry::ModelSelected(model) = entry? {
+                selected = Some(model);
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Publish an operator's model choice before acknowledging it to the host.
+    pub fn record_model_selection(
+        &self,
+        session: &SessionId,
+        model: ego_core::config::ModelRef,
+    ) -> Result<(), StoreError> {
+        self.with_events_lock(session, || {
+            let log = self.log_path(session);
+            if !self.io.exists(&log)? {
+                return Err(StoreError::NotFound);
+            }
+            let position = self.next_physical_position(&log, session)?;
+            let line = encode_record(position, &SessionEntry::ModelSelected(model))?;
+            self.io.append_line(&log, &line)?;
+            self.io.fsync(&log)?;
+            Ok(())
+        })
+    }
+
     /// Persist ACP transport acceptance under the same short append lock as turns.
     /// No synthetic conversation turn or second evidence file is created.
     pub fn record_notice(
@@ -2285,7 +2325,8 @@ impl ReplaySource for JsonlStore {
             SessionEntry::Event(event) => Some(event),
             SessionEntry::RunTransaction(_)
             | SessionEntry::Evidence(_)
-            | SessionEntry::NoticeDelivered(_) => None,
+            | SessionEntry::NoticeDelivered(_)
+            | SessionEntry::ModelSelected(_) => None,
         });
         let Some(first_event) = events.next() else {
             return Ok(None);

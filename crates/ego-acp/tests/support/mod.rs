@@ -800,7 +800,8 @@ impl Store {
                 SessionEntry::Event(event) => Some(event.env.seq),
                 SessionEntry::RunTransaction(_)
                 | SessionEntry::Evidence(_)
-                | SessionEntry::NoticeDelivered(_) => None,
+                | SessionEntry::NoticeDelivered(_)
+                | SessionEntry::ModelSelected(_) => None,
             })
             .unwrap_or(Seq::ZERO)
     }
@@ -854,7 +855,9 @@ impl SessionStore for Store {
             entries.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
                 SessionEntry::Event(_) => None,
-                SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => None,
+                SessionEntry::Evidence(_)
+                | SessionEntry::NoticeDelivered(_)
+                | SessionEntry::ModelSelected(_) => None,
             })
         });
         if expected_revision != actual {

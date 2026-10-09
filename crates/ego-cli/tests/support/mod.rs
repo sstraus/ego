@@ -554,9 +554,13 @@ fn serve(
                 gate.wait();
             }
             let models: Vec<serde_json::Value> = plan
-                .context_length
-                .map(|context| serde_json::json!({ "name": MODEL, "context_length": context }))
-                .into_iter()
+                .installed
+                .iter()
+                .filter_map(|name| {
+                    plan.context_length.map(
+                        |context| serde_json::json!({ "name": name, "context_length": context }),
+                    )
+                })
                 .collect();
             json(&mut stream, &serde_json::json!({ "models": models }))
         }

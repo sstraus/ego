@@ -1066,7 +1066,10 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                     None => UserConfigTarget::Base,
                 };
                 (
-                    Arc::new(AcpSessionControls::new(&effective, ceiling, catalogue)),
+                    Arc::new(
+                        AcpSessionControls::new(&effective, ceiling, catalogue)
+                            .with_store(Arc::clone(&store)),
+                    ),
                     ceiling,
                     rule_target,
                     effective

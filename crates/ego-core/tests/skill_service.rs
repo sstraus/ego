@@ -230,7 +230,8 @@ impl SessionStore for RecordingSessionStore {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
                 SessionEntry::Event(_)
                 | SessionEntry::Evidence(_)
-                | SessionEntry::NoticeDelivered(_) => None,
+                | SessionEntry::NoticeDelivered(_)
+                | SessionEntry::ModelSelected(_) => None,
             }
         });
         if current != expected_revision {

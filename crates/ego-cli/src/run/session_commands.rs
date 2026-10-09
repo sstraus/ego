@@ -123,7 +123,8 @@ pub(super) fn exported(args: &ExportArgs) -> Result<String, RunTermination> {
             SessionEntry::Event(event) => project_public(&event),
             SessionEntry::RunTransaction(_)
             | SessionEntry::Evidence(_)
-            | SessionEntry::NoticeDelivered(_) => None,
+            | SessionEntry::NoticeDelivered(_)
+            | SessionEntry::ModelSelected(_) => None,
         })
         .collect::<Vec<_>>();
     match args.format {

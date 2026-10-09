@@ -681,3 +681,23 @@ fn no_sanitizer_drops_a_field_without_naming_it() {
         );
     }
 }
+
+// Catches: export dropping an explicit model choice from an otherwise complete session stream.
+#[test]
+fn exporter_preserves_the_session_model_choice_at_its_physical_position() {
+    let (mut fixture, target, _) = fixture();
+    let entries = fixture.entries.get_mut(&target).unwrap().as_mut().unwrap();
+    entries.push(SessionEntry::ModelSelected(ModelRef("ollama/qwen3".into())));
+    let position = entries.len();
+    let bundle = Exporter::new(&fixture).sanitized(target).unwrap();
+    let value = serde_json::to_value(bundle).unwrap();
+    let choice = value["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["kind"] == "model_selected")
+        .unwrap();
+    assert_eq!(choice["session"], target.to_string());
+    assert_eq!(choice["position"], position);
+    assert_eq!(choice["model"], "ollama/qwen3");
+}
