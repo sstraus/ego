@@ -5239,6 +5239,27 @@ mod turn {
         assert!(fx.store.kinds().contains(&"attempt_settled".to_string()));
     }
 
+    #[test]
+    fn rejected_provider_tool_name_fails_even_when_provider_stops_for_tool_use() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Error {
+                message: "provider returned undeclared tool name history.search".to_string(),
+                kind: ErrorKind::Unclassified,
+            },
+            AiEvent::Stop(StopReason::Error),
+            AiEvent::Stop(StopReason::ToolUse),
+        ]])
+        .with_read_tool();
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "read");
+
+        assert_eq!(reason, ExitReason::Provider);
+        assert!(!ok);
+        assert_eq!(state.errors.len(), 1);
+        assert!(fx.store.kinds().contains(&"attempt_settled".to_string()));
+        assert!(!fx.store.kinds().contains(&"tool_call_started".to_string()));
+    }
+
     /// Two calls in one generation claiming the same provider id.
     ///
     /// See the tool-use-history ADR §6. Nothing rejected this before: the

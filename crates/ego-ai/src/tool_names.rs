@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ego_core::generator::port::AiEvent;
-use ego_core::generator::types::{ContentBlock, Conversation, GenRequest};
+use ego_core::generator::types::{ContentBlock, Conversation, ErrorKind, GenRequest, StopReason};
 use sha2::{Digest, Sha256};
 
 const PREFIX: &str = "__ego_";
@@ -82,13 +82,22 @@ impl ToolNames {
         encoded
     }
 
-    pub(crate) fn restore(&self, mut event: AiEvent) -> AiEvent {
-        if let AiEvent::ToolCall { name, .. } = &mut event
-            && let Some(original) = self.originals.get(name.as_str())
-        {
+    pub(crate) fn restore(&self, mut event: AiEvent) -> Vec<AiEvent> {
+        if let AiEvent::ToolCall { name, .. } = &mut event {
+            let Some(original) = self.originals.get(name.as_str()) else {
+                // End the generation as well: a later provider ToolUse stop
+                // must not turn this rejected call into a successful attempt.
+                return vec![
+                    AiEvent::Error {
+                        message: format!("provider returned undeclared tool name {name:?}"),
+                        kind: ErrorKind::Unclassified,
+                    },
+                    AiEvent::Stop(StopReason::Error),
+                ];
+            };
             name.clone_from(original);
         }
-        event
+        vec![event]
     }
 }
 

@@ -37,7 +37,7 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
+    ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel,
 };
 use ego_core::permit::{HttpHeader, HttpScheme, OneHopResponse, TransportError, TransportFailure};
@@ -974,19 +974,34 @@ async fn provider_tool_names_encode_retired_history_and_keep_valid_names() {
 async fn unknown_provider_names_cannot_bypass_aliases_and_select_catalogue_tools() {
     // A provider can repeat a familiar original name instead of the declaration
     // alias. That must not become a callable catalogue identity by pass-through.
-    for original in ["history.search", "__ego_custom"] {
+    for original in ["history.search", "__ego_custom", "undeclared"] {
         let transcript = include_str!("goldens/chat_completions/stream/tool_calls.sse")
             .replace("read_file", original);
         let http = StubHttp::responding(200, &transcript);
         let mut req = request();
         req.tools = vec![ego_core::generator::types::ToolDescriptor {
-            name: original.to_owned(),
+            name: if original == "undeclared" {
+                "read_file"
+            } else {
+                original
+            }
+            .to_owned(),
             description: "Read saved history".to_owned(),
             parameters: serde_json::json!({"type": "object"}),
         }];
         let mut gate = BudgetGate::new(usd("10"));
         let attempt = attempt_for(&mut gate, &req);
         let events: Vec<_> = generator(http).generate(req, attempt).collect().await;
+        assert!(events.iter().any(|event| matches!(event,
+            AiEvent::Error { message, kind: ErrorKind::Unclassified }
+                if message.contains(original))));
+        assert_eq!(
+            events.iter().find_map(|event| match event {
+                AiEvent::Stop(reason) => Some(*reason),
+                _ => None,
+            }),
+            Some(StopReason::Error)
+        );
         assert!(
             !events
                 .iter()

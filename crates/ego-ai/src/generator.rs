@@ -232,7 +232,7 @@ impl Generator for WireGenerator {
         let wire = self.wire;
         let inner = stream::once(async move { profile.execute(http.as_ref(), request).await })
             .flat_map(move |response| wire.decode(response, cost.clone()))
-            .map(move |event| names.restore(event))
+            .flat_map(move |event| stream::iter(names.restore(event)))
             .boxed();
         AttemptStream::new(attempt, inner)
     }
