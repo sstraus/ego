@@ -14,4 +14,5 @@ pub mod ollama;
 pub mod pricing;
 pub mod provider;
 pub mod resolver;
+mod tool_names;
 pub mod wire;

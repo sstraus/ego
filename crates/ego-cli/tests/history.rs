@@ -17,12 +17,12 @@ fn history_tools_search_and_open_conversation_from_another_root() {
         completions: vec![
             Reply::Sse(tool_call(
                 "search",
-                "history.search",
+                "__ego_63bedf8acff0198465745adb1cc6ac86280c80864e92de652724ac7f73",
                 r#"{"query":"acp trust"}"#,
             )),
             Reply::Sse(tool_call(
                 "open",
-                "history.open",
+                "__ego_499a3ed2db8204841d4cae8578f638ac459d83325d9d2723233e010bf9",
                 &format!(r#"{{"session":"{id}"}}"#),
             )),
             Reply::Sse(text("History was available.")),

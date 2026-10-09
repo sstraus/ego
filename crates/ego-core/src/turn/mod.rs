@@ -2832,6 +2832,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             // has nothing to answer. Generating again on that evidence loops
             // forever against a provider that keeps saying it.
             if reason != StopReason::ToolUse || pending.is_empty() {
+                // No sibling was dispatched. Record that certainty so a
+                // resumed request cannot mistake it for a torn execution.
+                self.close_unstarted_siblings(turn, &pending)?;
                 let exit = match reason {
                     StopReason::Stop | StopReason::ToolUse => ExitReason::Completed,
                     StopReason::Length => ExitReason::Budget,

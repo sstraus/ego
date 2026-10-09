@@ -2324,6 +2324,71 @@ mod turn {
         )));
     }
 
+    // Catches: a rejected alias leaves valid sibling writes looking possibly
+    // executed on resubmit, although the failed generation dispatched nothing.
+    #[test]
+    fn rejected_alias_does_not_replay_unexecuted_sibling_writes_as_uncertain() {
+        for rejected_first in [false, true] {
+            let valid = AiEvent::ToolCall {
+                call_id: "valid-write".into(),
+                name: "fake_write".into(),
+                args: json!({"path":"/ws/note.txt", "contents":"changed"}).to_string(),
+            };
+            let mut response = vec![
+                AiEvent::Error {
+                    message: "provider returned undeclared tool name history.search".into(),
+                    kind: ErrorKind::Unclassified,
+                },
+                AiEvent::Stop(StopReason::Error),
+            ];
+            if rejected_first {
+                response.push(valid);
+            } else {
+                response.insert(0, valid);
+            }
+            response.push(AiEvent::Stop(StopReason::ToolUse));
+            let fx = Fixture::new(vec![response, vec![AiEvent::Stop(StopReason::Stop)]])
+                .with_write_tool();
+            fx.fs.file("/ws/note.txt", "original");
+
+            let (reason, _, state) = run(&fx, SessionState::default(), "change note");
+            assert_eq!(reason, ExitReason::Provider);
+            assert_eq!(
+                fx.generator.calls().len(),
+                1,
+                "do not retry a rejected alias"
+            );
+            assert_eq!(
+                fx.fs.read(&CanonPath::new("/ws/note.txt")).unwrap(),
+                b"original"
+            );
+
+            let (reason, _, _) = run(&fx, state, "try again");
+            assert_eq!(reason, ExitReason::Completed);
+            let calls = fx.generator.calls();
+            let replayed_result = calls[1]
+                .messages
+                .messages()
+                .iter()
+                .flat_map(|message| &message.content)
+                .find_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        call_id,
+                        output,
+                        is_error,
+                    } if call_id == "valid-write" => Some((output, is_error)),
+                    _ => None,
+                })
+                .expect("the valid sibling is answered on resubmit");
+            assert!(*replayed_result.1);
+            assert!(
+                replayed_result.0.contains("not run"),
+                "a known unexecuted write must not be replayed as uncertain: {}",
+                replayed_result.0
+            );
+        }
+    }
+
     #[test]
     fn a_queued_prompt_forces_a_follow_up_after_a_no_tool_final() {
         let (ingress, mut control) = ego_core::turn::interactive_control();
@@ -5237,6 +5302,27 @@ mod turn {
         assert!(!ok);
         assert_eq!(state.errors, vec!["the provider fell over".to_string()]);
         assert!(fx.store.kinds().contains(&"attempt_settled".to_string()));
+    }
+
+    #[test]
+    fn rejected_provider_tool_name_fails_even_when_provider_stops_for_tool_use() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Error {
+                message: "provider returned undeclared tool name history.search".to_string(),
+                kind: ErrorKind::Unclassified,
+            },
+            AiEvent::Stop(StopReason::Error),
+            AiEvent::Stop(StopReason::ToolUse),
+        ]])
+        .with_read_tool();
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "read");
+
+        assert_eq!(reason, ExitReason::Provider);
+        assert!(!ok);
+        assert_eq!(state.errors.len(), 1);
+        assert!(fx.store.kinds().contains(&"attempt_settled".to_string()));
+        assert!(!fx.store.kinds().contains(&"tool_call_started".to_string()));
     }
 
     /// Two calls in one generation claiming the same provider id.
