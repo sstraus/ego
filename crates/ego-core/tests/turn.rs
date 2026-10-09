@@ -8982,6 +8982,46 @@ mod turn {
             );
         }
 
+        /// regression case — catches: an Invalid reply's raw journal body bypasses
+        /// the provider's host-safe cause and reaches CLI stderr / ACP.
+        #[test]
+        fn usage_http_error_does_not_publish_the_unparsed_body_to_hosts() {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(ScriptedGenerationSource::new([Ok(profile(
+                "openai/main",
+                false,
+                vec![
+                    AiEvent::Error {
+                        message: "the provider returned HTTP 400: proxy debug Authorization: Bearer private-token /private/request.log".to_owned(),
+                        kind: ErrorKind::Invalid,
+                    },
+                    AiEvent::ProviderFailure {
+                        cause: "the provider returned HTTP 400".to_owned(),
+                        retry_after: None,
+                    },
+                    AiEvent::Stop(StopReason::Error),
+                ],
+                &trace,
+                Some(1_024),
+            ))]));
+            let fx = Fixture::new(vec![]);
+            let outcome = run_retrying(
+                &fx,
+                source,
+                0,
+                Arc::new(RecordedPause::default()),
+                CancelToken::new(),
+            );
+            assert_eq!(outcome.exit_reason, ExitReason::Usage);
+            assert_eq!(
+                RunTermination::after_outcome(&outcome),
+                Some(RunTermination::UsageError {
+                    message: "the provider returned HTTP 400".to_owned(),
+                }),
+                "raw provider body must stay in the journal, not the host termination"
+            );
+        }
+
         const OVERLOADED: &str = "Our servers are currently overloaded. Please try again later.";
 
         /// The live failure's shape: an answered stream whose only content is
