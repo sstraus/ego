@@ -155,7 +155,8 @@ impl EvidenceLogSource for FakeStore {
                 SessionEntry::Event(_)
                 | SessionEntry::RunTransaction(_)
                 | SessionEntry::Evidence(_)
-                | SessionEntry::NoticeDelivered(_) => None,
+                | SessionEntry::NoticeDelivered(_)
+                | SessionEntry::ModelSelected(_) => None,
             })
             .collect())
     }

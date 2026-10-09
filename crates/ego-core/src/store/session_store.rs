@@ -28,6 +28,8 @@ pub enum SessionEntry {
     RunTransaction(RunTransaction),
     Evidence(EvidenceRecord),
     NoticeDelivered(NoticeDelivery),
+    /// An explicit operator choice, independent of the model that last generated.
+    ModelSelected(crate::config::ModelRef),
 }
 
 /// ACP transport acceptance outside conversation turns; this is not a host render receipt.
@@ -45,6 +47,7 @@ enum SessionEntryWire {
     RunTransaction { run_transaction: RunTransaction },
     Evidence { evidence: EvidenceRecord },
     NoticeDelivered { notice: NoticeDelivery },
+    ModelSelected { model: crate::config::ModelRef },
 }
 
 impl Serialize for SessionEntry {
@@ -61,6 +64,9 @@ impl Serialize for SessionEntry {
             },
             Self::Evidence(evidence) => SessionEntryWire::Evidence {
                 evidence: evidence.clone(),
+            },
+            Self::ModelSelected(model) => SessionEntryWire::ModelSelected {
+                model: model.clone(),
             },
             Self::NoticeDelivered(notice) => SessionEntryWire::NoticeDelivered {
                 notice: notice.clone(),
@@ -87,6 +93,7 @@ impl<'de> Deserialize<'de> for SessionEntry {
                 Self::Evidence(evidence)
             }
             SessionEntryWire::NoticeDelivered { notice } => Self::NoticeDelivered(notice),
+            SessionEntryWire::ModelSelected { model } => Self::ModelSelected(model),
         })
     }
 }

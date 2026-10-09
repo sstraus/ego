@@ -86,6 +86,11 @@ pub enum ExportRecord {
         pruned_receipts: Vec<TurnLease>,
         command: ExportRunCommand,
     },
+    ModelSelected {
+        session: SessionId,
+        position: Seq,
+        model: ModelRef,
+    },
     NoticeDelivered {
         session: SessionId,
         position: Seq,
@@ -575,6 +580,13 @@ impl<'a> Exporter<'a> {
                         observed_at: transaction.observed_at(),
                         pruned_receipts: transaction.pruned_receipts().to_vec(),
                         command,
+                    });
+                }
+                SessionEntry::ModelSelected(model) => {
+                    records.push(ExportRecord::ModelSelected {
+                        session,
+                        position,
+                        model,
                     });
                 }
                 SessionEntry::NoticeDelivered(notice) => {

@@ -77,6 +77,68 @@ mod store {
         );
     }
 
+    // Catches: a picker acknowledgement without durable state, or a choice consuming event sequence numbers.
+    #[test]
+    fn model_selection_survives_reopen_without_becoming_a_conversation_turn() {
+        use ego_core::config::ModelRef;
+        let dir = tempdir().unwrap();
+        let fsyncs = Arc::new(AtomicUsize::new(0));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(CountingIo {
+                inner: OsIo,
+                fsyncs: Arc::clone(&fsyncs),
+            }),
+        );
+        let session = SessionId::new();
+        assert!(matches!(
+            store.record_model_selection(&session, ModelRef("ollama/first".into())),
+            Err(StoreError::NotFound)
+        ));
+        store
+            .append(
+                &session,
+                &ev(
+                    Seq::ZERO,
+                    TurnId::new(),
+                    EventKind::AssistantMessage {
+                        text: "hello".into(),
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(store.selected_model(&session).unwrap(), None);
+        let before = fsyncs.load(Ordering::SeqCst);
+        store
+            .record_model_selection(&session, ModelRef("ollama/first".into()))
+            .unwrap();
+        store
+            .record_model_selection(&session, ModelRef("ollama/second".into()))
+            .unwrap();
+        assert_eq!(fsyncs.load(Ordering::SeqCst), before + 2);
+        drop(store);
+        let reopened = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        assert_eq!(
+            reopened.selected_model(&session).unwrap(),
+            Some(ModelRef("ollama/second".into()))
+        );
+        let entries = block_on(reopened.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, Ok(SessionEntry::Event(_))))
+                .count(),
+            1
+        );
+        assert_eq!(
+            reopened.list().unwrap().len(),
+            1,
+            "selection record broke catalogue projection"
+        );
+    }
+
     const ALIVE: &dyn Fn(u32) -> bool = &|_| true;
 
     fn evidence_lease() -> LeaseInputs<'static> {
@@ -788,7 +850,9 @@ mod store {
                     SessionEntry::RunTransaction(_) => {
                         panic!("event-only session contained a run transaction")
                     }
-                    SessionEntry::Evidence(_) | SessionEntry::NoticeDelivered(_) => {
+                    SessionEntry::Evidence(_)
+                    | SessionEntry::NoticeDelivered(_)
+                    | SessionEntry::ModelSelected(_) => {
                         panic!("event-only session contained evidence")
                     }
                 },

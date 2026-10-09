@@ -543,21 +543,8 @@ fn a_new_model_with_unknown_default_does_not_reuse_the_base_resolved_effort() {
     assert_eq!(after.effort.chosen, None);
 }
 
-/// A reconnecting host is offered configuration again, not the last
-/// connection's pick.
-///
-/// The seat is the connection's, and a new connection builds a new one. That
-/// is the decision and not an omission: a durable per-session model would make
-/// resume order-dependent, which
-/// `ARCHITECTURE.md`
-/// rejects, and the terminal seat is bound by the same rule — a session-only
-/// pick lives in memory for that session only. What survives a disconnect is
-/// the hold, which is a fact about the session, not a preference about the
-/// next generation.
-///
-/// So the reconnected host must be told `chosen: None` rather than inherit a
-/// choice it cannot see the provenance of. Reporting the earlier pick as
-/// `chosen` would claim this host picked it.
+/// Mode remains a connection choice; reconnect resolves its configured default.
+/// Model choices have separate durable journal coverage in `acp_model_load.rs`.
 #[test]
 fn a_reconnecting_seat_offers_configuration_and_not_the_previous_pick() {
     let session = SessionId::new();

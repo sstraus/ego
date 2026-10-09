@@ -10,7 +10,7 @@
 //! initializer pins before this seat is exposed.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ego_ai::catalogue::{ModelAvailability, ModelCatalogueSnapshot};
 use ego_core::config::{Effective, Mode, ModelRef};
@@ -82,8 +82,8 @@ struct SessionSeat {
 }
 
 /// One ACP connection's generation controls.
-#[derive(Debug)]
 pub struct AcpSessionControls {
+    store: Option<Arc<ego_tools::store::JsonlStore>>,
     model: Option<ModelRef>,
     effort: Option<ThinkingLevel>,
     mode: Mode,
@@ -99,6 +99,18 @@ pub struct AcpSessionControls {
     sandbox_ceiling: Confinement,
     catalogue: Option<ModelCatalogueSnapshot>,
     sessions: Mutex<HashMap<SessionId, SessionSeat>>,
+}
+
+impl std::fmt::Debug for AcpSessionControls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcpSessionControls")
+            .field("model", &self.model)
+            .field("effort", &self.effort)
+            .field("mode", &self.mode)
+            .field("sandbox_ceiling", &self.sandbox_ceiling)
+            .field("sessions", &self.sessions)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AcpSessionControls {
@@ -141,6 +153,7 @@ impl AcpSessionControls {
         catalogue: Option<ModelCatalogueSnapshot>,
     ) -> Self {
         Self {
+            store: None,
             model,
             effort,
             mode,
@@ -150,6 +163,12 @@ impl AcpSessionControls {
             catalogue,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Keep explicit model choices in the session journal across ACP connections.
+    pub(crate) fn with_store(mut self, store: Arc<ego_tools::store::JsonlStore>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// Pin profile policy before measurement or any prompt can start.
@@ -289,6 +308,13 @@ impl AcpSessionControls {
                 })
                 .collect(),
         };
+        let selected_model = self
+            .store
+            .as_ref()
+            .map(|store| store.selected_model(&session))
+            .transpose()
+            .map_err(|error| ControlError::Internal(error.to_string()))?
+            .flatten();
         let mut sessions = self.lock_sessions()?;
         let seat = sessions.entry(session).or_default();
         if seat.confinement.is_some() {
@@ -296,6 +322,7 @@ impl AcpSessionControls {
                 "the ACP confinement measurements for this session are already pinned".to_owned(),
             ));
         }
+        seat.chosen.model = selected_model.or_else(|| seat.chosen.model.clone());
         seat.confinement = Some(measurements);
         Ok(())
     }
@@ -532,6 +559,11 @@ impl SessionControls for AcpSessionControls {
                             "`{model}` does not accept the explicit reasoning effort in force"
                         ),
                     });
+                }
+                if let Some(store) = &self.store {
+                    store
+                        .record_model_selection(&session, model.clone())
+                        .map_err(|error| ControlError::Internal(error.to_string()))?;
                 }
                 chosen.model = Some(model);
             }
