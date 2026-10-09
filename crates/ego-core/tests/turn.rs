@@ -1951,6 +1951,22 @@ mod turn {
             tools,
         );
         let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
+        // Catches: a recovered error is reused as a terminal usage failure.
+        if outcome.exit_reason == ExitReason::Usage {
+            assert_eq!(
+                RunTermination::after_outcome(&outcome),
+                Some(RunTermination::UsageError {
+                    message: turn
+                        .state()
+                        .errors
+                        .last()
+                        .expect("usage records its cause")
+                        .clone(),
+                })
+            );
+        } else {
+            assert!(outcome.usage_error.is_none());
+        }
         (
             outcome.exit_reason,
             outcome.ok,
@@ -5431,6 +5447,29 @@ mod turn {
         assert!(!ok);
     }
 
+    /// regression case — catches: a previous turn's error is reused, or a clean
+    /// turn retains the preceding Usage failure.
+    #[test]
+    fn usage_cause_is_current_and_cleared_after_a_clean_turn() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::Error {
+                    message: "the provider returned HTTP 400".to_owned(),
+                    kind: ErrorKind::Invalid,
+                },
+                AiEvent::Stop(StopReason::Error),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ]);
+        let mut state = SessionState::default();
+        state.errors.push("an earlier turn failed".to_owned());
+        let (reason, _, state) = run(&fx, state, "first");
+        assert_eq!(reason, ExitReason::Usage);
+        let (reason, ok, _) = run(&fx, state, "second");
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+    }
+
     /// The other three classifications land on exit 4, and this pins that as
     /// a decision rather than an accident — including `Unclassified`, which
     /// gets there by failing closed rather than by being read from anything.
@@ -5694,7 +5733,7 @@ mod turn {
     }
 
     /// A usage error is exit 2, and the log says which levels would have
-    /// worked — the summary line in `RunTermination` deliberately does not.
+    /// worked — the terminal summary must preserve the same cause.
     #[test]
     fn a_refused_level_is_named_in_the_log_with_the_levels_that_would_have_worked() {
         let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
@@ -5731,12 +5770,9 @@ mod turn {
 
         let outcome = block_on(turn.run("hi")).expect("the store accepted every append");
 
-        assert_eq!(
-            RunTermination::after_turn(outcome.exit_reason, outcome.denied)
-                .expect("a usage error ends the run")
-                .exit_code(),
-            2
-        );
+        let termination =
+            RunTermination::after_outcome(&outcome).expect("a usage error ends the run");
+        assert_eq!(termination.exit_code(), 2);
         drop(turn);
         let message = fx
             .store
@@ -5749,6 +5785,8 @@ mod turn {
             .expect("the refusal is durable, or nobody can diagnose the run from the log");
         assert!(message.contains("Off"), "{message}");
         assert!(message.contains("High"), "{message}");
+        // Catches: the capability diagnostic is replaced by a generic Usage summary.
+        assert_eq!(termination, RunTermination::UsageError { message });
     }
 
     /// A model that states nothing is refused for a different reason, and the
@@ -7624,6 +7662,15 @@ mod turn {
                 let outcome = block_on(turn.run("hello")).expect("refusal is durable");
                 drop(turn);
                 assert_eq!(outcome.exit_reason, expected);
+                if expected == ExitReason::Usage {
+                    // Catches: profile resolution failures are described as capability gaps.
+                    assert_eq!(
+                        RunTermination::after_outcome(&outcome),
+                        Some(RunTermination::UsageError {
+                            message: "resolution failed".to_owned(),
+                        })
+                    );
+                }
                 assert!(
                     !fx.store
                         .kinds()
@@ -7691,6 +7738,13 @@ mod turn {
             );
             let outcome = block_on(turn.run("hello")).expect("refusal is durable");
             assert_eq!(outcome.exit_reason, ExitReason::Usage);
+            // Catches: an encoding refusal loses its actionable wire-specific cause.
+            assert_eq!(
+                RunTermination::after_outcome(&outcome),
+                Some(RunTermination::UsageError {
+                    message: "the selected wire cannot encode this request".to_owned(),
+                })
+            );
             drop(turn);
             assert_eq!(source.roles(), vec![GenerationRole::Main]);
             assert!(trace.requests.lock().unwrap().is_empty());
@@ -8890,6 +8944,42 @@ mod turn {
                 tools,
             );
             block_on(turn.run("are you there?")).expect("the store accepted every append")
+        }
+
+        /// regression case — catches: every Usage failure is replaced by a capability summary.
+        #[test]
+        fn provider_http_400_usage_keeps_the_journal_cause() {
+            const CAUSE: &str =
+                "the provider returned HTTP 400: invalid request (upstream: Example)";
+            let trace = GenerationTrace::default();
+            let source = Arc::new(ScriptedGenerationSource::new([Ok(profile(
+                "openai/main",
+                false,
+                vec![
+                    AiEvent::Error {
+                        message: CAUSE.to_owned(),
+                        kind: ErrorKind::Invalid,
+                    },
+                    AiEvent::Stop(StopReason::Error),
+                ],
+                &trace,
+                Some(1_024),
+            ))]));
+            let fx = Fixture::new(vec![]);
+            let outcome = run_retrying(
+                &fx,
+                source,
+                0,
+                Arc::new(RecordedPause::default()),
+                CancelToken::new(),
+            );
+            assert_eq!(outcome.exit_reason, ExitReason::Usage);
+            assert_eq!(
+                RunTermination::after_outcome(&outcome),
+                Some(RunTermination::UsageError {
+                    message: CAUSE.to_owned(),
+                })
+            );
         }
 
         const OVERLOADED: &str = "Our servers are currently overloaded. Please try again later.";

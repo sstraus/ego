@@ -291,9 +291,17 @@ impl RunTermination {
     /// [`after_turn`](Self::after_turn) for a whole turn outcome.
     ///
     /// A provider failure carries what the turn learned about it: the cause a
-    /// host may be shown, and whether the turn's effect is known. Everything
-    /// else is decided by the exit reason alone.
+    /// host may be shown, and whether the turn's effect is known.
+    /// Usage failures carry the current turn's journal diagnostic. Other
+    /// outcomes are decided by the exit reason alone.
     pub fn after_outcome(outcome: &crate::turn::TurnOutcome) -> Option<Self> {
+        if outcome.exit_reason == ExitReason::Usage
+            && let Some(message) = &outcome.usage_error
+        {
+            return Some(Self::UsageError {
+                message: message.clone(),
+            });
+        }
         match (&outcome.exit_reason, &outcome.provider_failure) {
             (ExitReason::Provider, Some(failure)) if failure.effect_known => {
                 Some(RunTermination::Provider {

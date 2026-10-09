@@ -109,6 +109,32 @@ cache_write = "0.0000015625"
 output = "0.00001"
 "#;
 
+/// regression case — catches: CLI stderr substitutes a capability summary for
+/// an HTTP Invalid cause, or disagrees with the ACP turnFailed projection.
+#[test]
+fn http_400_usage_cause_matches_cli_stderr_and_acp_turn_failed() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Status(400)],
+        ..Plan::default()
+    });
+    let finished = Ego::against(&stub)
+        .args(["--model", "ollama/qwen3", "Ask"])
+        .run();
+    let cause = "the provider returned HTTP 400: the stub was told to answer 400";
+    assert_eq!(finished.code, Some(2), "{}", finished.stderr);
+    assert!(
+        finished.stderr.lines().any(|line| line.ends_with(cause)),
+        "{}",
+        finished.stderr
+    );
+    assert!(!finished.stderr.contains("the model does not accept"));
+    let acp = ego_acp::project::stop_reason_v1(&ego_core::run::RunTermination::UsageError {
+        message: cause.to_owned(),
+    })
+    .expect_err("ACP reports Usage through turnFailed");
+    assert_eq!(acp, cause);
+}
+
 // --- the happy path, and §4.1's object ---
 
 /// The shape of every test below it: a run reaches the model, the answer lands
