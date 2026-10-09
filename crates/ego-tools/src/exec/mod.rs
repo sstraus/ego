@@ -694,20 +694,25 @@ fn policy_digest_with_runtime_roots(
     for root in runtime_roots {
         update_path_field(&mut hash, b"runtime_root", root.as_path().as_os_str())?;
     }
-    update_digest_field(
-        &mut hash,
-        b"roots.count",
-        &(policy.roots().len() as u64).to_be_bytes(),
-    )?;
-    for root in policy.roots() {
-        update_path_field(&mut hash, b"root.path", root.path().as_path().as_os_str())?;
+    // An off sandbox does not enforce perimeter roots. ACP measures before
+    // profile/default roots are materialized; those inactive fields must not
+    // invalidate its observation or a durable unconfined run selection.
+    if policy.level() != ego_core::permit::Confinement::Off {
         update_digest_field(
             &mut hash,
-            b"root.access",
-            &[u8::from(
-                root.access() == ego_core::permit::RootAccess::ReadWrite,
-            )],
+            b"roots.count",
+            &(policy.roots().len() as u64).to_be_bytes(),
         )?;
+        for root in policy.roots() {
+            update_path_field(&mut hash, b"root.path", root.path().as_path().as_os_str())?;
+            update_digest_field(
+                &mut hash,
+                b"root.access",
+                &[u8::from(
+                    root.access() == ego_core::permit::RootAccess::ReadWrite,
+                )],
+            )?;
+        }
     }
     let identity = backend.identity();
     update_digest_field(&mut hash, b"backend.name", identity.name().as_bytes())?;
@@ -825,6 +830,68 @@ mod tests {
     fn policy(workspace: &str) -> RunConfinement {
         RunConfinement::new(Confinement::Workspace, false, CanonPath::new(workspace))
             .expect("absolute workspace policy")
+    }
+
+    // Catches: a saved unconfined run becomes unusable after perimeter fields are added.
+    #[cfg(unix)]
+    #[test]
+    fn unconfined_policy_digest_retains_semantic_identity_across_root_materialization() {
+        use ego_core::permit::{ProfileRoot, RootAccess};
+        let backend = super::NullBackend;
+        let initial = RunConfinement::new(
+            Confinement::Off,
+            false,
+            CanonPath::new("/home/example/workspace"),
+        )
+        .expect("absolute workspace");
+        let rooted = initial.clone().with_roots(vec![ProfileRoot::new(
+            CanonPath::new("/home/example/workspace"),
+            RootAccess::ReadWrite,
+        )]);
+        let admitted = policy_digest(&initial, &backend).expect("initial digest");
+        assert_eq!(
+            admitted.as_str(),
+            "cfcf897964188137affec341edbfa33e68d65592e2183aae868bec7f0250a0be"
+        );
+        assert_eq!(
+            admitted,
+            policy_digest(&rooted, &backend).expect("rooted digest")
+        );
+        let offline = RunConfinement::new(Confinement::Off, true, initial.workspace().clone())
+            .expect("offline policy");
+        assert_ne!(
+            admitted,
+            policy_digest(&offline, &backend).expect("offline digest")
+        );
+    }
+
+    // Catches: excluding inactive roots accidentally stops binding confined path/access changes.
+    #[test]
+    fn confined_policy_digest_binds_root_path_and_access() {
+        use ego_core::permit::{ProfileRoot, RootAccess};
+        let backend = IdentityBackend {
+            identity: BackendIdentity::new("backend", "revision"),
+        };
+        for level in [Confinement::Ro, Confinement::Workspace] {
+            let initial = RunConfinement::new(level, false, CanonPath::new(TEST_ROOT))
+                .expect("confined policy");
+            let digest = |path, access| {
+                policy_digest(
+                    &initial
+                        .clone()
+                        .with_roots(vec![ProfileRoot::new(CanonPath::new(path), access)]),
+                    &backend,
+                )
+                .expect("rooted digest")
+            };
+            let read = digest("/perimeter/a", RootAccess::Read);
+            assert_ne!(
+                read,
+                policy_digest(&initial, &backend).expect("empty roots digest")
+            );
+            assert_ne!(read, digest("/perimeter/b", RootAccess::Read));
+            assert_ne!(read, digest("/perimeter/a", RootAccess::ReadWrite));
+        }
     }
 
     #[test]
