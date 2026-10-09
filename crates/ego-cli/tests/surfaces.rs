@@ -127,6 +127,28 @@ fn invalid_hook_candidate_is_rejected_and_inspection_is_read_only() {
 #[test]
 #[cfg(unix)]
 fn executable_ego_shebang_uses_real_run_pipeline_and_relative_schema() {
+    // Catches: a sibling test's fork inherits this script's writable fd before
+    // std::fs::write closes it, so Linux rejects exec with ETXTBSY. A fresh
+    // single-test process keeps the real kernel shebang path without that fork.
+    if std::env::var("EGO_SHEBANG_CHILD_CASE").as_deref() != Ok("1") {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                stringify!(executable_ego_shebang_uses_real_run_pipeline_and_relative_schema),
+                "--test-threads=1",
+            ])
+            .env("EGO_SHEBANG_CHILD_CASE", "1")
+            .output()
+            .expect("isolated shebang test starts");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "the child must execute the shebang test: {stdout}\n{stderr}"
+        );
+        return;
+    }
     let fixture = Fixture::new();
     fixture.ego().home_file("config.toml", "thinking = 'off'\n");
     fixture.ego().file("agents/schema.json", "{}");
