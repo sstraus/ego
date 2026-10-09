@@ -82,3 +82,20 @@ Sources and existing coverage: [model selection](../../crates/ego-cli/src/model.
 [authentication](../../crates/ego-cli/src/auth.rs),
 [provider conformance tests](../../crates/ego-ai/tests/profiles/mod.rs), and
 [catalogue command tests](../../crates/ego-cli/tests/models_command.rs).
+
+Provider function names are wire identities. Ego keeps the original tool name
+in the catalogue and journal, and maps it at the provider boundary when it is
+not a portable ASCII function name of at most 64 bytes. The same request-local
+map encodes historical tool calls and restores streamed calls before dispatch.
+Names in the reserved `__ego_` namespace are also mapped to prevent an original
+name from impersonating an encoded name. Assignment is deterministic and checks
+collisions across the complete request, including historical tool names.
+
+Before installing a candidate binary for TUIC AI Chat, run
+`python3 scripts/ai-chat-smoke.py /absolute/path/to/ego`. The gate starts the
+candidate as `ego acp -C ~/Gits`, uses the real user profile, and relays the live
+TUIC MCP catalogue over ACP. It checks a new turn and a resumed turn for each
+available configured provider, starting with Codex subscription. Each turn must
+have a provider HTTP 200 and a non-empty reply. `--models` supplies an explicit
+model matrix when a configured provider needs login or a particular model must
+be verified. Evidence stays under `~/Gits/.tmp`; the gate never installs ego.

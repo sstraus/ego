@@ -216,7 +216,7 @@ impl StubHttp {
         })
     }
 
-    fn responding(status: u16, body: &'static str) -> Arc<Self> {
+    fn responding(status: u16, body: &str) -> Arc<Self> {
         let chunks: Vec<Result<Vec<u8>, TransportError>> = body
             .as_bytes()
             .chunks(7)
@@ -837,5 +837,135 @@ async fn the_events_returned_are_the_ones_the_rows_mapping_decoded() {
         decoded,
         "the transcript is openai-completions and would decode to its own \
          text; only the row's mapping produces this: {events:?}"
+    );
+}
+
+// Catches invalid MCP punctuation leaking into provider function declarations.
+#[tokio::test]
+async fn provider_tool_names_reject_no_catalogue_identity() {
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = generator(Arc::clone(&http) as Arc<dyn Http>);
+    let mut req = request();
+    for name in [
+        "mcp.tuic.agent",
+        "history.search",
+        "history.open",
+        "mcp_tuic_agent",
+        "工具",
+        "",
+        "1starts_with_digit",
+        &"x".repeat(200),
+    ] {
+        req.tools.push(ego_core::generator::types::ToolDescriptor {
+            name: name.into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type":"object"}),
+        });
+    }
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &req);
+    let _: Vec<_> = generator.generate(req, attempt).collect().await;
+    let seen = http.seen.lock().unwrap();
+    let body: serde_json::Value = serde_json::from_slice(seen[0].body.as_ref().unwrap()).unwrap();
+    let names: Vec<_> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    for name in &names {
+        assert!(
+            !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+            "invalid provider name: {name}"
+        );
+    }
+    assert_eq!(
+        names
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        names.len()
+    );
+}
+
+// Catches a provider alias reaching the catalogue instead of its original tool.
+#[tokio::test]
+async fn provider_tool_names_restore_streamed_dispatch_without_alias_collisions() {
+    const ALIAS: &str = "__ego_7a8fc438b5e79141b36e6c2f6086a9d323b3ed6ab883dc0186b5f8347d";
+    let transcript =
+        include_str!("goldens/chat_completions/stream/tool_calls.sse").replace("read_file", ALIAS);
+    let http = StubHttp::responding(200, &transcript);
+    let generator = generator(Arc::clone(&http) as Arc<dyn Http>);
+    let mut req = request();
+    for name in ["mcp.tuic.agent", ALIAS, "glob"] {
+        req.tools.push(ego_core::generator::types::ToolDescriptor {
+            name: name.into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type":"object"}),
+        });
+    }
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &req);
+    let events: Vec<_> = generator.generate(req, attempt).collect().await;
+    assert!(events.iter().any(
+        |event| matches!(event, AiEvent::ToolCall { call_id, name, args }
+        if call_id == "call_a" && name == "mcp.tuic.agent" && args == r#"{"path":"src/lib.rs"}"#)
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AiEvent::ToolCall { name, .. } if name == "glob"))
+    );
+    let seen = http.seen.lock().unwrap();
+    let body: serde_json::Value = serde_json::from_slice(seen[0].body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["tools"][0]["function"]["name"], ALIAS);
+    assert_ne!(body["tools"][1]["function"]["name"], ALIAS);
+}
+
+// Catches invalid names in resumed history after their tools leave the catalogue.
+#[tokio::test]
+async fn provider_tool_names_encode_retired_history_and_keep_valid_names() {
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = generator(Arc::clone(&http) as Arc<dyn Http>);
+    let mut req = request();
+    req.tools.push(ego_core::generator::types::ToolDescriptor {
+        name: "read_file".into(),
+        description: String::new(),
+        parameters: serde_json::json!({"type":"object"}),
+    });
+    req.messages = Conversation::new(vec![
+        Message::text(Role::User, "list the files"),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                call_id: "old".into(),
+                name: "mcp.tuic.agent".into(),
+                args: "{}".into(),
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                call_id: "old".into(),
+                output: "done".into(),
+                is_error: false,
+            }],
+        },
+        Message::text(Role::User, "continue"),
+    ])
+    .unwrap();
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &req);
+    let _: Vec<_> = generator.generate(req, attempt).collect().await;
+    let seen = http.seen.lock().unwrap();
+    let body: serde_json::Value = serde_json::from_slice(seen[0].body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+    assert_eq!(
+        body["messages"][1]["tool_calls"][0]["function"]["name"],
+        "__ego_7a8fc438b5e79141b36e6c2f6086a9d323b3ed6ab883dc0186b5f8347d"
     );
 }

@@ -312,6 +312,7 @@ pub(crate) fn decode_response(
                 response: Ok(response),
                 decoder,
             } => {
+                tracing::debug!(target: "ego_ai::provider_status", status = response.status, "provider HTTP response");
                 // A status at all proves the request arrived, whatever the
                 // status says. This is the earliest honest reading, and it is
                 // the one that matters: it is taken before anything can cut

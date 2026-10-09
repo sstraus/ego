@@ -22,6 +22,7 @@ use url::Url;
 
 use crate::http::{AdmittedHttpProfile, Http};
 use crate::provider::{ProviderRow, ResolvedCredential};
+use crate::tool_names::ToolNames;
 use crate::wire;
 use crate::wire::WireFormat;
 
@@ -73,7 +74,7 @@ impl StaticRequestProfile {
             .expect("the static request-shape base is a URL");
         let target = wire::RequestTarget::new(&base, &[]);
         self.wire
-            .build_request(&target, request)
+            .build_request(&target, &ToolNames::new(request).encode(request))
             .map(drop)
             .map_err(|refused| RequestExpressibilityError::new(refused.to_string()))
     }
@@ -138,7 +139,7 @@ impl WireGenerator {
     fn build_request(
         &self,
         req: &GenRequest,
-    ) -> Result<crate::http::HttpRequest, wire::RequestRefused> {
+    ) -> Result<(crate::http::HttpRequest, ToolNames), wire::RequestRefused> {
         let mut headers = self.credential.headers();
         for (name, value) in &self.row.extra_headers {
             headers.retain(|existing| !existing.name().eq_ignore_ascii_case(name));
@@ -149,7 +150,33 @@ impl WireGenerator {
         }
         let base = self.credential.base_override().unwrap_or(self.row.base());
         let target = wire::RequestTarget::new(base, &headers);
-        self.wire.build_request(&target, req)
+        let names = ToolNames::new(req);
+        let encoded = names.encode(req);
+        let request = self.wire.build_request(&target, &encoded)?;
+        for (index, (original, tool)) in req.tools.iter().zip(&encoded.tools).enumerate() {
+            tracing::debug!(target: "ego_ai::tool_names", index, original_name = %original.name,
+                provider_name = %tool.name, "provider tool declaration");
+        }
+        // A projection of the serialized request, with no prompt, schemas,
+        // headers or credentials. This records what the wire actually built.
+        if tracing::enabled!(target: "ego_ai::tool_names", tracing::Level::DEBUG)
+            && let Some(body) = &request.body
+            && let Ok(body) = serde_json::from_slice::<serde_json::Value>(body)
+            && let Some(tools) = body.get("tools").and_then(serde_json::Value::as_array)
+        {
+            let sent: Vec<_> = tools
+                .iter()
+                .map(|tool| {
+                    tool.get("name").or_else(|| {
+                        tool.get("function")
+                            .and_then(|function| function.get("name"))
+                    })
+                })
+                .collect();
+            tracing::debug!(target: "ego_ai::tool_names", request_tool_names = ?sent,
+                "serialized provider request tool names");
+        }
+        Ok((request, names))
     }
 }
 
@@ -168,7 +195,7 @@ impl Generator for WireGenerator {
         // refusal re-derived per generation, for a condition that could not
         // have changed since — and it re-read the environment to do it, so a
         // rotated variable silently changed a running turn.
-        let request = match self.build_request(&req) {
+        let (request, names) = match self.build_request(&req) {
             Ok(request) => request,
             // Refused before a socket exists. `DefinitelyUnsent` is honest
             // here because the decision is a pure function of the request —
@@ -192,6 +219,8 @@ impl Generator for WireGenerator {
             }
         };
 
+        tracing::debug!(target: "ego_ai::tool_names", provider = self.row.id(), model = %req.model,
+            "provider generation request");
         let http = Arc::clone(&self.http);
         let profile = self.profile.clone();
         // The row's own declaration of where it states a charge, carried to
@@ -203,6 +232,7 @@ impl Generator for WireGenerator {
         let wire = self.wire;
         let inner = stream::once(async move { profile.execute(http.as_ref(), request).await })
             .flat_map(move |response| wire.decode(response, cost.clone()))
+            .map(move |event| names.restore(event))
             .boxed();
         AttemptStream::new(attempt, inner)
     }
