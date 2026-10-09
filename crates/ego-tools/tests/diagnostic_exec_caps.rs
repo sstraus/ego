@@ -256,3 +256,42 @@ fn recorded_observations_keep_real_per_root_evidence_after_boot_diagnostic() {
         "per-root session observations must retain root-specific policy authority"
     );
 }
+
+// Catches: default/configured roots falsely invalidate the unconfined ACP observation.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn unconfined_admission_ignores_inactive_roots() {
+    block_on(async {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let root = tempfile::tempdir().expect("configured perimeter root");
+        let evidence_root = tempfile::tempdir().expect("session evidence");
+        let evidence =
+            SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), 1024 * 1024)
+                .expect("evidence store");
+        let initial = policy(Confinement::Off, false, workspace.path());
+        let admitted = RunEffectPorts::observe(&recorded_config(
+            initial.clone(),
+            evidence.clone(),
+            CancelToken::new(),
+        ))
+        .await
+        .expect("ACP observation")
+        .0;
+        let execution = initial.with_roots(vec![ego_core::permit::ProfileRoot::new(
+            CanonPath::new(root.path()),
+            ego_core::permit::RootAccess::ReadWrite,
+        )]);
+        for _ in 0..3 {
+            let result = RunEffectPorts::for_run(
+                recorded_config(execution.clone(), evidence.clone(), CancelToken::new())
+                    .with_admitted_observation(admitted.clone()),
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "inactive roots cannot change null confinement: {:?}",
+                result.err()
+            );
+        }
+    });
+}
