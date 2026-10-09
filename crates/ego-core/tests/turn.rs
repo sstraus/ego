@@ -1952,19 +1952,7 @@ mod turn {
         );
         let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
         // Catches: a recovered error is reused as a terminal usage failure.
-        if outcome.exit_reason == ExitReason::Usage {
-            assert_eq!(
-                RunTermination::after_outcome(&outcome),
-                Some(RunTermination::UsageError {
-                    message: turn
-                        .state()
-                        .errors
-                        .last()
-                        .expect("usage records its cause")
-                        .clone(),
-                })
-            );
-        } else {
+        if outcome.exit_reason != ExitReason::Usage {
             assert!(outcome.usage_error.is_none());
         }
         (
@@ -7688,13 +7676,39 @@ mod turn {
             let fx = Fixture::new(vec![]);
             let trace = GenerationTrace::default();
             let source = Arc::new(
-                ScriptedGenerationSource::new([Ok(refusing_profile(
-                    "openai/main",
-                    false,
-                    Vec::new(),
-                    &trace,
-                    Some(2_048),
-                ))])
+                ScriptedGenerationSource::new([
+                    Ok(refusing_profile(
+                        "openai/main",
+                        false,
+                        Vec::new(),
+                        &trace,
+                        Some(2_048),
+                    )),
+                    Ok(profile(
+                        "openai/main",
+                        false,
+                        vec![
+                            AiEvent::Error {
+                                message: "earlier provider debug body".to_owned(),
+                                kind: ErrorKind::Invalid,
+                            },
+                            AiEvent::ProviderFailure {
+                                cause: "earlier provider failure".to_owned(),
+                                retry_after: None,
+                            },
+                            AiEvent::Stop(StopReason::Stop),
+                        ],
+                        &trace,
+                        Some(2_048),
+                    )),
+                    Ok(refusing_profile(
+                        "openai/main",
+                        false,
+                        Vec::new(),
+                        &trace,
+                        Some(2_048),
+                    )),
+                ])
                 .with_trace(trace.clone()),
             );
             let tools = Tools::new(
@@ -7745,7 +7759,6 @@ mod turn {
                     message: "the selected wire cannot encode this request".to_owned(),
                 })
             );
-            drop(turn);
             assert_eq!(source.roles(), vec![GenerationRole::Main]);
             assert!(trace.requests.lock().unwrap().is_empty());
             assert!(
@@ -7763,6 +7776,19 @@ mod turn {
             assert!(fx.store.kinds().iter().any(|kind| kind == "error"));
             assert_eq!(outstanding(&gate), Some(usd("0")));
             assert_eq!(committed(&gate), Some(usd("0")));
+            let recovered =
+                block_on(turn.run("recover first")).expect("recovered stream is durable");
+            assert_eq!(recovered.exit_reason, ExitReason::Completed);
+            assert!(recovered.usage_error.is_none());
+            let local = block_on(turn.run("refuse locally")).expect("local refusal is durable");
+            // Catches: a recovered provider failure displaces a later local refusal.
+            assert_eq!(
+                RunTermination::after_outcome(&local),
+                Some(RunTermination::UsageError {
+                    message: "the selected wire cannot encode this request".to_owned(),
+                })
+            );
+            drop(turn);
         }
 
         #[test]
@@ -8959,6 +8985,10 @@ mod turn {
                     AiEvent::Error {
                         message: CAUSE.to_owned(),
                         kind: ErrorKind::Invalid,
+                    },
+                    AiEvent::ProviderFailure {
+                        cause: CAUSE.to_owned(),
+                        retry_after: None,
                     },
                     AiEvent::Stop(StopReason::Error),
                 ],

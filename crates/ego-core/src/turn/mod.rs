@@ -394,8 +394,8 @@ pub struct TurnOutcome {
     /// far. `None` for a provider failure decided before any attempt, such as
     /// a model that could not be resolved.
     pub provider_failure: Option<ProviderFailure>,
-    /// The current turn's last journal error when it ended as usage.
-    /// Reuses the diagnostic already published by the source; never a raw body.
+    /// The terminating provider's host-safe cause, or a local refusal diagnostic.
+    /// Never a raw provider body from the journal.
     pub usage_error: Option<String>,
 }
 
@@ -2580,6 +2580,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     }
 
     fn mark_turn_error_start(&mut self) {
+        self.provider_failure = None;
         self.turn_error_start = self
             .journal
             .inspect(|state| state.errors.len())
@@ -2589,6 +2590,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     fn usage_error(&self, exit_reason: ExitReason) -> Option<String> {
         if exit_reason != ExitReason::Usage {
             return None;
+        }
+        if let Some(failure) = &self.provider_failure {
+            return Some(failure.cause.clone());
         }
         self.journal
             .inspect(|state| {
@@ -2803,7 +2807,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
             let (capture, generation, terminal, reason, pending, error_kind) =
                 match self.generate(turn).await? {
-                    Generated::Ended(reason) => return Ok(DriveOutcome::Ended(reason, None)),
+                    Generated::Ended(reason) => {
+                        // Local preflight refusals must not reuse a recovered provider failure.
+                        self.provider_failure = None;
+                        return Ok(DriveOutcome::Ended(reason, None));
+                    }
                     Generated::Cancelled { cause, pending } => {
                         self.close_unstarted_siblings(turn, &pending)?;
                         return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));

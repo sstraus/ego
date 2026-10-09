@@ -118,21 +118,53 @@ fn http_400_usage_cause_matches_cli_stderr_and_acp_turn_failed() {
         ..Plan::default()
     });
     let finished = Ego::against(&stub)
-        .args(["--model", "ollama/qwen3", "Ask"])
+        .args(["--model", "ollama/qwen3", "--output", "json", "Ask"])
         .run();
-    let cause = "the provider returned HTTP 400: the stub was told to answer 400";
+    let cause = "the provider returned HTTP 400";
     assert_eq!(finished.code, Some(2), "{}", finished.stderr);
     assert!(
         finished.stderr.lines().any(|line| line.ends_with(cause)),
         "{}",
         finished.stderr
     );
+    assert!(
+        !finished.stderr.contains("the stub was told"),
+        "raw body reached the terminal summary"
+    );
     assert!(!finished.stderr.contains("the model does not accept"));
-    let acp = ego_acp::project::stop_reason_v1(&ego_core::run::RunTermination::UsageError {
-        message: cause.to_owned(),
-    })
-    .expect_err("ACP reports Usage through turnFailed");
-    assert_eq!(acp, cause);
+
+    // Exercise ACP's actual core execution and settlement, not a constructed termination.
+    let places = HarnessPlaces::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        r#"model = "ollama/qwen3"
+thinking = "off"
+sandbox = "off"
+"#,
+    )
+    .expect("isolated ACP configuration");
+    let mut host = support::AcpHost::adopt(
+        HarnessEgo::at(places.home_path(), places.workspace_path(), Some(&stub))
+            .subcommand("acp")
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let session = host.new_session(places.workspace_path().to_str().expect("UTF-8 workspace"));
+    let failed = host.request(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session, "prompt": [{"type": "text", "text": "Ask"}],
+        }),
+    );
+    assert!(failed.get("error").is_some(), "{failed}");
+    let detail = failed["error"].to_string();
+    assert!(detail.contains(cause), "{failed}");
+    assert!(
+        !detail.contains("the stub was told"),
+        "raw body reached ACP: {failed}"
+    );
+    assert!(!detail.contains("the model does not accept"), "{failed}");
+    host.finish();
 }
 
 // --- the happy path, and §4.1's object ---
