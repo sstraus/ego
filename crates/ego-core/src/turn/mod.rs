@@ -394,6 +394,9 @@ pub struct TurnOutcome {
     /// far. `None` for a provider failure decided before any attempt, such as
     /// a model that could not be resolved.
     pub provider_failure: Option<ProviderFailure>,
+    /// The terminating provider's host-safe cause, or a local refusal diagnostic.
+    /// Never a raw provider body from the journal.
+    pub usage_error: Option<String>,
 }
 
 /// A provider failure as the run reports it to a host.
@@ -1072,6 +1075,8 @@ pub struct TurnLoop<'session, 'turn> {
     retry_pause: Arc<dyn RetryPause>,
     /// Set when the last generation plan stopped on a provider failure.
     provider_failure: Option<ProviderFailure>,
+    /// Journal error count at entry, so an earlier turn cannot supply the cause.
+    turn_error_start: usize,
 }
 
 struct HookBindingState<'session> {
@@ -1214,6 +1219,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             generation_role: GenerationRole::Main,
             retry_pause: runtime.retry_pause,
             provider_failure: None,
+            turn_error_start: 0,
         })
     }
 
@@ -1993,6 +1999,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                 denied: None,
                                 skill: None,
                                 provider_failure: None,
+                                usage_error: None,
                             })
                         }
                         ToolOutcome::Ended(exit_reason) => Ok(TurnOutcome {
@@ -2002,6 +2009,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             denied: None,
                             skill: None,
                             provider_failure: None,
+                            usage_error: None,
                         }),
                         ToolOutcome::Answered { .. }
                         | ToolOutcome::Executed { .. }
@@ -2100,6 +2108,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         reason = "TurnAbandoned carries the exact durable session state by contract"
     )]
     pub async fn resume_turn(&mut self, turn: TurnId) -> Result<TurnOutcome, TurnAbandoned> {
+        self.mark_turn_error_start();
         let live = self
             .state()
             .live_attempts
@@ -2179,9 +2188,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     denied: None,
                     skill: None,
                     provider_failure: None,
+                    usage_error: None,
                 });
             }
         };
+        let usage_error = self.usage_error(exit_reason);
         let ok = exit_reason == ExitReason::Completed;
         if let Err(cause) = self.journal.append(
             turn,
@@ -2207,6 +2218,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             exit_reason,
             denied,
             skill: None,
+            usage_error,
             provider_failure: self
                 .provider_failure
                 .take()
@@ -2545,6 +2557,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     }
 
     fn begin_turn(&mut self, turn: TurnId) -> Result<(), StoreError> {
+        self.mark_turn_error_start();
         self.deactivate_skill_hooks(turn)?;
         if let Some((observation, probe_evidence)) = self.execution_observation.take() {
             self.journal.append(
@@ -2566,6 +2579,32 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         self.admit_skill_catalogue(turn)
     }
 
+    fn mark_turn_error_start(&mut self) {
+        self.provider_failure = None;
+        self.turn_error_start = self
+            .journal
+            .inspect(|state| state.errors.len())
+            .expect("turn loop journal inspection");
+    }
+
+    fn usage_error(&self, exit_reason: ExitReason) -> Option<String> {
+        if exit_reason != ExitReason::Usage {
+            return None;
+        }
+        if let Some(failure) = &self.provider_failure {
+            return Some(failure.cause.clone());
+        }
+        self.journal
+            .inspect(|state| {
+                state
+                    .errors
+                    .get(self.turn_error_start..)
+                    .and_then(|errors| errors.last())
+                    .cloned()
+            })
+            .expect("turn loop journal inspection")
+    }
+
     async fn finish_turn(
         &mut self,
         turn: TurnId,
@@ -2583,9 +2622,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     denied: None,
                     skill: None,
                     provider_failure: None,
+                    usage_error: None,
                 });
             }
         };
+        let usage_error = self.usage_error(exit_reason);
         let ok = matches!(exit_reason, ExitReason::Completed);
         self.journal.append(
             turn,
@@ -2603,6 +2644,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             exit_reason,
             denied,
             skill: None,
+            usage_error,
             provider_failure: self
                 .provider_failure
                 .take()
@@ -2765,7 +2807,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
             let (capture, generation, terminal, reason, pending, error_kind) =
                 match self.generate(turn).await? {
-                    Generated::Ended(reason) => return Ok(DriveOutcome::Ended(reason, None)),
+                    Generated::Ended(reason) => {
+                        // Local preflight refusals must not reuse a recovered provider failure.
+                        self.provider_failure = None;
+                        return Ok(DriveOutcome::Ended(reason, None));
+                    }
                     Generated::Cancelled { cause, pending } => {
                         self.close_unstarted_siblings(turn, &pending)?;
                         return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
