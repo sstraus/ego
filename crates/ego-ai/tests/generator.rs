@@ -969,3 +969,29 @@ async fn provider_tool_names_encode_retired_history_and_keep_valid_names() {
         "__ego_7a8fc438b5e79141b36e6c2f6086a9d323b3ed6ab883dc0186b5f8347d"
     );
 }
+
+#[tokio::test]
+async fn unknown_provider_names_cannot_bypass_aliases_and_select_catalogue_tools() {
+    // A provider can repeat a familiar original name instead of the declaration
+    // alias. That must not become a callable catalogue identity by pass-through.
+    for original in ["history.search", "__ego_custom"] {
+        let transcript = include_str!("goldens/chat_completions/stream/tool_calls.sse")
+            .replace("read_file", original);
+        let http = StubHttp::responding(200, &transcript);
+        let mut req = request();
+        req.tools = vec![ego_core::generator::types::ToolDescriptor {
+            name: original.to_owned(),
+            description: "Read saved history".to_owned(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let mut gate = BudgetGate::new(usd("10"));
+        let attempt = attempt_for(&mut gate, &req);
+        let events: Vec<_> = generator(http).generate(req, attempt).collect().await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AiEvent::ToolCall { name, .. } if name == original)),
+            "unknown provider name bypassed its alias and selected catalogue tool {original}: {events:?}"
+        );
+    }
+}
