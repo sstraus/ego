@@ -89,7 +89,7 @@ impl ToolNames {
                 // must not turn this rejected call into a successful attempt.
                 return vec![
                     AiEvent::Error {
-                        message: format!("provider returned undeclared tool name {name:?}"),
+                        message: format!("provider returned undeclared tool name '{name}'"),
                         kind: ErrorKind::Unclassified,
                     },
                     AiEvent::Stop(StopReason::Error),
