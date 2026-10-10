@@ -588,6 +588,8 @@ pub struct RunSelections {
     /// Optional ACP host profile ceiling, retained with durable caller selections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ceiling_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_options: Option<crate::config::SessionPromptOptions>,
     /// The confinement the caller picked, if they picked one.
     ///
     /// Here rather than in the per-generation seat because confinement is
@@ -644,6 +646,7 @@ impl RunSelections {
             budget,
             profile,
             ceiling_profile: None,
+            prompt_options: None,
             sandbox: None,
             sandbox_observation: None,
             trust: None,
@@ -681,6 +684,7 @@ impl RunSelections {
             budget: None,
             profile: None,
             ceiling_profile: None,
+            prompt_options: None,
             sandbox: None,
             sandbox_observation: None,
             trust: None,
@@ -736,6 +740,17 @@ impl RunSelections {
         let mut pinned = self.clone();
         pinned.profile = Some(profile.into());
         pinned
+    }
+
+    /// Pin immutable initialization selections for this session's run.
+    pub fn with_prompt_options(mut self, options: crate::config::SessionPromptOptions) -> Self {
+        self.prompt_options = Some(options);
+        self
+    }
+
+    /// The caller's initialization selections, if supplied.
+    pub fn prompt_options(&self) -> Option<&crate::config::SessionPromptOptions> {
+        self.prompt_options.as_ref()
     }
 
     /// Pin the independent host ceiling alongside the selected profile.

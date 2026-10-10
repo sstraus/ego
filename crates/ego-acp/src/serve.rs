@@ -583,6 +583,18 @@ pub trait SessionConfinementAdmission: Send + Sync {
         })
     }
 
+    /// Validate and pin per-session prompt selections before creation.
+    fn configure_prompt(
+        &self,
+        _session: SessionId,
+        _options: ego_core::config::SessionPromptOptions,
+    ) -> Result<(), ControlError> {
+        Err(ControlError::Refused {
+            control: "systemPrompt",
+            why: "session prompt selections are not supported".into(),
+        })
+    }
+
     /// Carry admitted profile authority through the durable run boundary.
     fn profile_selections(
         &self,
@@ -2055,6 +2067,7 @@ where
     let mut current = source;
     let mut visited = std::collections::HashSet::new();
     let mut selected = RunSelections::empty();
+    let mut prompt_options = None;
     loop {
         if !visited.insert(current) {
             return Err(Error::internal_error().data("cyclic session profile lineage"));
@@ -2069,6 +2082,9 @@ where
                 .map_err(|error| control_error(&error))?,
             Err(error) => return Err(Error::internal_error().data(error.to_string())),
         };
+        if prompt_options.is_none() {
+            prompt_options = selections.prompt_options().cloned();
+        }
         if let Some(profile) = profiles.profile {
             selections = selections.with_profile_name(profile);
         }
@@ -2092,6 +2108,11 @@ where
             ego_core::session::SessionLineage::Fork { source, .. }
             | ego_core::session::SessionLineage::Compaction { source, .. } => source,
         };
+    }
+    if let Some(options) = prompt_options {
+        admission
+            .configure_prompt(target, options)
+            .map_err(|error| control_error(&error))?;
     }
     if selected.profile().is_some() || selected.ceiling_profile().is_some() {
         admission
@@ -2169,6 +2190,32 @@ fn session_profiles(meta: Option<&v1::Meta>) -> Result<Option<SessionProfiles>, 
             ceiling_profile: ceiling,
         }),
     )
+}
+
+/// Decode only prompt-owned fields; profile and trust fields have separate owners.
+fn session_prompt(
+    meta: Option<&v1::Meta>,
+) -> Result<Option<ego_core::config::SessionPromptOptions>, Error> {
+    let Some(ego) = meta.and_then(|meta| meta.get("ego")) else {
+        return Ok(None);
+    };
+    let mut fields = serde_json::Map::new();
+    for key in ["systemPrompt", "bare"] {
+        if let Some(value) = ego.get(key) {
+            if value.is_null() {
+                return Err(
+                    Error::invalid_params().data(format!("_meta.ego.{key} must not be null"))
+                );
+            }
+            fields.insert(key.to_owned(), value.clone());
+        }
+    }
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_value(serde_json::Value::Object(fields))
+        .map(Some)
+        .map_err(|error| Error::invalid_params().data(format!("_meta.ego: {error}")))
 }
 
 /// A session request whose MCP selection arrived whole.
@@ -2984,6 +3031,20 @@ where
                         Ok(profiles) => profiles,
                         Err(error) => return responder.respond_with_error(error),
                     };
+                    let prompt_options = match session_prompt(request.meta.as_ref()) {
+                        Ok(options) => options,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    if let Some(options) = prompt_options {
+                        match confinement.as_ref() {
+                            Some(admission) => {
+                                if let Err(error) = admission.configure_prompt(session, options) {
+                                    return responder.respond_with_error(control_error(&error));
+                                }
+                            }
+                            None => return responder.respond_with_error(Error::invalid_params().data("session prompt selections are not supported")),
+                        }
+                    }
                     let creation_profiles = profiles.clone().unwrap_or_default();
                     let profile_meta = match profiles {
                         Some(SessionProfiles { profile, ceiling_profile }) => match confinement.as_ref() {

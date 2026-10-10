@@ -76,8 +76,8 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l mcp -d 'Attach a named e
 complete -c ego -n "__fish_ego_using_subcommand run" -l mode -d 'Permission mode: plan|default|auto|edits|yolo' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -s c -l set -d 'Dotted-path config override, value parsed as TOML' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
-complete -c ego -n "__fish_ego_using_subcommand run" -l no-tools -d 'Offer no tools at all'
 complete -c ego -n "__fish_ego_using_subcommand run" -l bare -d 'No ambient discovery, even in a trusted workspace'
+complete -c ego -n "__fish_ego_using_subcommand run" -l no-tools -d 'Offer no tools at all'
 complete -c ego -n "__fish_ego_using_subcommand run" -l trust-workspace -d 'Trust this interactive launch\'s workspace without asking; remember the answer'
 complete -c ego -n "__fish_ego_using_subcommand run" -l ephemeral -d 'Refused: every run uses a durable session'
 complete -c ego -n "__fish_ego_using_subcommand run" -l plan -d 'Shorthand for --mode plan'
@@ -118,8 +118,8 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l mcp -d 'Attach a name
 complete -c ego -n "__fish_ego_using_subcommand resume" -l mode -d 'Permission mode: plan|default|auto|edits|yolo' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -s c -l set -d 'Dotted-path config override, value parsed as TOML' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
-complete -c ego -n "__fish_ego_using_subcommand resume" -l no-tools -d 'Offer no tools at all'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l bare -d 'No ambient discovery, even in a trusted workspace'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l no-tools -d 'Offer no tools at all'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l trust-workspace -d 'Trust this interactive launch\'s workspace without asking; remember the answer'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l ephemeral -d 'Refused: every run uses a durable session'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l plan -d 'Shorthand for --mode plan'
@@ -175,6 +175,7 @@ complete -c ego -n "__fish_ego_using_subcommand doctor" -s h -l help -d 'Print h
 complete -c ego -n "__fish_ego_using_subcommand acp" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -s C -d 'Run as if started in DIR' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -l sandbox -d 'The weakest confinement a session may select: ro|workspace|off' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
@@ -185,6 +186,7 @@ complete -c ego -n "__fish_ego_using_subcommand acp" -l listen -d 'Serve on a so
 complete -c ego -n "__fish_ego_using_subcommand acp" -l max-connections -d 'Maximum simultaneous listener connections' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l connection-lifetime -d 'Maximum lifetime of one listener connection: 90s, 10m or 2h' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l max-ingress-bytes -d 'Maximum cumulative bytes read from one listener connection' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l no-tools -d 'Offer no tools at all'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l allow-public-bind -d 'Serve on an address reachable from outside this machine'
 complete -c ego -n "__fish_ego_using_subcommand acp" -s h -l help -d 'Print help'

@@ -184,6 +184,7 @@ Serve the Agent Client Protocol on stdio or an endpoint.
 - `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable
 - `--allow-public-bind` — Serve on an address reachable from outside this machine
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
+- `--bare` — No ambient discovery, even in a trusted workspace
 - `--connection-lifetime <CONNECTION_LIFETIME>` — Maximum lifetime of one listener connection: 90s, 10m or 2h
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
@@ -196,7 +197,19 @@ Serve the Agent Client Protocol on stdio or an endpoint.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|off
 - `--session-dir <SESSION_DIR>` — Override the store location
+- `--system <SYSTEM>` — Replace the system prompt. `@file` reads it from a file
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
+
+Prompt flags use the same composition as `ego run`. For example:
+
+```sh
+ego acp --system @agent-prompt.txt --append-system "Use concise answers" --bare
+```
+
+`--bare` and `--instructions` conflict. ACP hosts can also pass per-session
+`_meta.ego.systemPrompt` (`mode` and `text`) and `_meta.ego.bare` in `session/new`.
+See [session initialization prompt](../integrations/acp.md#session-initialization-prompt)
+for the wire example and launch-default precedence.
 
 ## `ego a2a`
 

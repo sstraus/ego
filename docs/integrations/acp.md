@@ -17,7 +17,7 @@ transport authentication (`EGO_ACP_TOKEN`) at `/acp`, not a custom token preface
 on newline JSON-RPC.
 
 Launch options include `-C`, `--session-dir`, `--profile`, `--instructions`,
-`--append-system`, `--tools`/`--no-tools`, and `--allow`/`--deny`. `--sandbox` is
+`--system`, `--append-system`, `--bare`, `--tools`/`--no-tools`, and `--allow`/`--deny`. `--sandbox` is
 the weakest confinement a session may choose, not an unconditional host grant.
 `--allow-public-bind` alone does not establish network authentication.
 
@@ -106,3 +106,31 @@ including successors with no run records yet. A missing or invalid ceiling
 refuses reopening; it never becomes an absent ceiling. Reattaching to a live
 profile seat also refuses changed profile policy instead of replacing its
 pinned authority.
+
+## Session initialization prompt
+
+`ego acp --system "Use concise answers" --bare` sets launch defaults. As in
+`ego run`, `--system` replaces workspace instructions, `--append-system` appends
+to the selected prompt, and `--bare` disables ambient discovery. `--bare` with
+`--instructions` is refused. Explicit prompt text still works in bare mode.
+The agent identity and runtime facts retain the existing CLI behavior.
+
+A host can select a prompt for one `session/new` request:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace/repo","mcpServers":[],"_meta":{"ego":{"systemPrompt":{"mode":"append","text":"Use concise answers"},"bare":true}}}}
+```
+
+`systemPrompt` requires `mode` (`append` or `replace`) and string `text`.
+Append extends the launch prompt, including its launch-wide append text.
+Replace substitutes the session text for the launch prompt and its append text.
+Both modes accept `@file`, resolved against the session workspace, as CLI flags
+do. An empty string is valid. Invalid modes, types, missing fields, and unknown
+fields inside `systemPrompt` refuse creation. `bare` must be a boolean.
+
+Omitted fields preserve launch defaults. A session can enable bare mode but
+cannot undo launch-wide `--bare` with `bare:false`. A session bare selection
+also conflicts with launch-wide `--instructions`. These selections belong only
+to the created session and remain in its stable system prefix across turns;
+they do not become user messages. Run selections retain them for a later load
+or fork after the session has started its run.

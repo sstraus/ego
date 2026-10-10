@@ -79,6 +79,7 @@ struct SessionSeat {
     chosen: Chosen,
     confinement: Option<ConfinementMeasurements>,
     profile: Option<ProfileSeat>,
+    prompt: Option<ego_core::config::SessionPromptOptions>,
 }
 
 /// One ACP connection's generation controls.
@@ -216,12 +217,24 @@ impl AcpSessionControls {
         Ok(())
     }
 
+    pub(crate) fn seed_prompt(
+        &self,
+        session: SessionId,
+        options: ego_core::config::SessionPromptOptions,
+    ) -> Result<(), ControlError> {
+        self.lock_sessions()?.entry(session).or_default().prompt = Some(options);
+        Ok(())
+    }
+
     pub(crate) fn profile_selections(
         &self,
         session: SessionId,
         mut selections: ego_core::run::RunSelections,
     ) -> Result<ego_core::run::RunSelections, ControlError> {
         let sessions = self.lock_sessions()?;
+        if let Some(prompt) = sessions.get(&session).and_then(|seat| seat.prompt.as_ref()) {
+            selections = selections.with_prompt_options(prompt.clone());
+        }
         if let Some(profile) = sessions
             .get(&session)
             .and_then(|seat| seat.profile.as_ref())

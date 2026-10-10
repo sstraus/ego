@@ -103,6 +103,22 @@ impl CliSessionConfinementAdmission {
 }
 
 impl SessionConfinementAdmission for CliSessionConfinementAdmission {
+    fn configure_prompt(
+        &self,
+        session: SessionId,
+        options: ego_core::config::SessionPromptOptions,
+    ) -> Result<(), ControlError> {
+        ego_core::config::validate_prompt_options(
+            self.shape.bare || options.bare.unwrap_or(false),
+            self.shape.instructions.is_some(),
+        )
+        .map_err(|why| ControlError::Refused {
+            control: "bare",
+            why: why.to_owned(),
+        })?;
+        self.controls.seed_prompt(session, options)
+    }
+
     fn configure_profiles(
         &self,
         session: SessionId,
