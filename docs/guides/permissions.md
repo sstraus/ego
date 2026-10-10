@@ -129,8 +129,11 @@ intentional. Workspace and derived toolchain/target executables remain runnable.
 Adaptive's OS credential floors cannot be lifted by permission rules or human
 sandbox grants: SSH/AWS/GnuPG, netrc, keychain/browser stores, provider/ego/Cargo
 credentials and `.env*` outside the workspace. Git config/hooks and worktree
-selectors stay protected against writes. Ordinary OS privacy restrictions also
-remain. These OS floors are separate from the default read rules described above.
+selectors stay protected against writes. Metadata roots, module directories,
+worktree entries, hooks and info directories cannot be relocated. Git can still
+remove transient operation state and empty object/ref directories. Ordinary OS
+privacy restrictions also remain. These OS floors are separate from the default
+read rules described above.
 Report the exact refused target and its task relevance. A failed mutation can
 leave partial effects; do not assume replay is safe. Automatic residual-write
 judgment is pending the shared judge integration; the existing human grant flow

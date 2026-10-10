@@ -49,7 +49,7 @@ fn adaptive_floor_denials_never_offer_an_ineffective_grant() {
     let env = root.join("home/.env.fixture");
     std::fs::write(&env, "synthetic").unwrap();
     let config = root.join("main/.git/config");
-    let metadata_directory = root.join("main/.git/objects/empty");
+    let metadata_directory = root.join("main/.git/worktrees/empty");
     std::fs::create_dir(&metadata_directory).unwrap();
     let policy = admit(&workspace).unwrap();
     for (path, script, floor) in [

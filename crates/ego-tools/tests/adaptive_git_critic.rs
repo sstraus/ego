@@ -156,3 +156,67 @@ fn adaptive_confined_git_rebase_finishes_and_leaves_no_rebase_state() {
         "{result}"
     );
 }
+
+// Catches: unanchored control-name floors deny ordinary refs/logs such as
+// feat/hooks, and mistake a worktree named config for a config file.
+#[test]
+fn adaptive_confined_git_allows_control_named_branches_and_worktrees() {
+    let Some(root) = isolated("adaptive_confined_git_allows_control_named_branches_and_worktrees")
+    else {
+        return;
+    };
+    let workspace = repository(&root);
+    git(&workspace, &["worktree", "add", "-b", "linked", "config"]);
+    std::fs::write(workspace.join("config/tracked"), "fixture").unwrap();
+    let result = confined(
+        &workspace,
+        &root,
+        "git switch -c feat/hooks && git branch feat/config && git branch feat/gitdir && git -C config add tracked",
+    );
+    for branch in ["feat/hooks", "feat/config", "feat/gitdir"] {
+        assert_eq!(
+            git(&workspace, &["rev-parse", branch]),
+            git(&workspace, &["rev-parse", "main"]),
+            "{result}"
+        );
+    }
+    assert_eq!(
+        git(
+            &workspace.join("config"),
+            &["diff", "--cached", "--name-only"]
+        ),
+        "tracked",
+        "{result}"
+    );
+}
+
+// Catches: directory floors prevent Git from cleaning operation state and
+// empty object/ref fan-out directories even though those are operational data.
+#[test]
+fn adaptive_confined_git_can_remove_transient_metadata_directories() {
+    let Some(root) = isolated("adaptive_confined_git_can_remove_transient_metadata_directories")
+    else {
+        return;
+    };
+    let workspace = repository(&root);
+    let transient = [
+        "rebase-apply",
+        "sequencer",
+        "objects/empty",
+        "refs/heads/empty",
+    ];
+    for name in transient {
+        std::fs::create_dir(workspace.join(".git").join(name)).unwrap();
+    }
+    let result = confined(
+        &workspace,
+        &root,
+        "rmdir .git/rebase-apply .git/sequencer .git/objects/empty .git/refs/heads/empty",
+    );
+    for name in transient {
+        assert!(
+            !workspace.join(".git").join(name).exists(),
+            "{name}: {result}"
+        );
+    }
+}

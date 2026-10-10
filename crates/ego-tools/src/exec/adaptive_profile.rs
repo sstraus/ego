@@ -47,22 +47,19 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     // A captured Git root has config and hooks controls even when absent.
     // Cover nested submodules/worktrees beneath separately named metadata too.
     for root in floor::metadata_roots(perimeter) {
-        out.push_str("  (require-all\n");
-        subpath(&mut out, root)?;
-        out.push_str(&format!("    (regex #\"{}\"))\n", floor::METADATA_CONTROL));
+        rooted_regex(&mut out, root, floor::METADATA_CONTROL)?;
     }
     out.push_str(")\n(deny file-write-unlink\n");
-    // Any nested metadata directory could otherwise be moved outside the
-    // path-based floor, edited, and moved back. File unlink remains available
-    // for Git's index/refs lock cleanup.
+    // Protect structural boundaries from relocation, while leaving transient
+    // operation directories and objects/refs cleanup available to Git.
     out.push_str(&format!(
         "  (require-all (regex #\"{}\") (vnode-type DIRECTORY))\n",
-        floor::GIT_METADATA
+        floor::GIT_BOUNDARY
     ));
     for root in floor::metadata_roots(perimeter) {
-        out.push_str("  (require-all (subpath ");
-        out.push_str(&path_literal(root)?);
-        out.push_str(") (vnode-type DIRECTORY))\n");
+        out.push_str("  (require-all\n");
+        rooted_regex(&mut out, root, floor::METADATA_BOUNDARY)?;
+        out.push_str("    (vnode-type DIRECTORY))\n");
     }
     // Subpath denies protect contents, but a rename of any parent would move
     // those contents out from under their captured names. Deny only unlink
@@ -87,6 +84,17 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     out.push_str(&path_literal(input.workspace)?);
     out.push_str("))))\n");
     Ok(out)
+}
+
+fn rooted_regex(out: &mut String, root: &Path, suffix: &str) -> Result<(), ProfileError> {
+    // Validate host data with the same rules as literal paths, then encode the
+    // regex's backslashes and quotes as SBPL string data.
+    path_literal(root)?;
+    let pattern = floor::rooted_pattern(root, suffix)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    out.push_str(&format!("  (regex #\"{pattern}\")\n"));
+    Ok(())
 }
 
 fn subpath(out: &mut String, path: &Path) -> Result<(), ProfileError> {

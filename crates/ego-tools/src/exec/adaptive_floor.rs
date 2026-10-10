@@ -4,12 +4,17 @@ use ego_core::permit::{AdaptivePerimeter, RunConfinement};
 use std::path::Path;
 
 pub(in crate::exec) const GIT_ENTRY: &str = "(^|/)[.][gG][iI][tT]$";
-pub(in crate::exec) const GIT_METADATA: &str = "(^|/)[.][gG][iI][tT](/|$)";
-pub(in crate::exec) const GIT_CONTROL: &str =
-    "(^|/)[.][gG][iI][tT]/(.*/)?(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)";
-pub(in crate::exec) const METADATA_CONTROL: &str =
-    "/(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)";
+pub(in crate::exec) const GIT_CONTROL: &str = "(^|/)[.][gG][iI][tT](/modules/.+)?(/worktrees/[^/]+)?/(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)";
+pub(in crate::exec) const METADATA_CONTROL: &str = "(/modules/.+)?(/worktrees/[^/]+)?/(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)";
+pub(in crate::exec) const METADATA_BOUNDARY: &str =
+    "(/modules(/.*)?|/worktrees(/[^/]+)?|/hooks|/info)?$";
+pub(in crate::exec) const GIT_BOUNDARY: &str =
+    "(^|/)[.][gG][iI][tT](/modules(/.*)?|/worktrees(/[^/]+)?|/hooks|/info)?$";
 pub(in crate::exec) const ENV: &str = "(^|/)[.]env[^/]*(/|$)";
+
+pub(in crate::exec) fn rooted_pattern(root: &Path, suffix: &str) -> String {
+    format!("^{}{suffix}", regex::escape(&root.to_string_lossy()))
+}
 
 pub(in crate::exec) fn metadata_roots(
     perimeter: &AdaptivePerimeter,
@@ -33,7 +38,7 @@ pub(in crate::exec) fn blocks(path: &Path, policy: &RunConfinement) -> bool {
         return false;
     };
     let text = path.to_string_lossy();
-    let matches = |pattern| {
+    let matches = |pattern: &str| {
         regex::Regex::new(pattern)
             .expect("fixed floor pattern")
             .is_match(&text)
@@ -45,9 +50,10 @@ pub(in crate::exec) fn blocks(path: &Path, policy: &RunConfinement) -> bool {
         .any(|floor| path.starts_with(floor.as_path()))
         || matches(GIT_ENTRY)
         || matches(GIT_CONTROL)
-        || metadata_roots(perimeter).any(|root| path.starts_with(root) && matches(METADATA_CONTROL))
+        || metadata_roots(perimeter).any(|root| matches(&rooted_pattern(root, METADATA_CONTROL)))
         || (path.is_dir()
-            && (matches(GIT_METADATA)
-                || metadata_roots(perimeter).any(|root| path.starts_with(root))))
+            && (matches(GIT_BOUNDARY)
+                || metadata_roots(perimeter)
+                    .any(|root| matches(&rooted_pattern(root, METADATA_BOUNDARY)))))
         || (!path.starts_with(policy.workspace().as_path()) && matches(ENV))
 }
