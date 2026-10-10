@@ -650,7 +650,7 @@ fn project_url(word: &str) -> Option<String> {
     let url = url::Url::parse(word).ok()?;
     matches!(url.scheme(), "http" | "https").then(|| {
         format!(
-            "<url:scheme={} host={} port={} path={}>",
+            "<url:scheme={};host={};port={};path={}>",
             url.scheme(),
             url.host_str().unwrap_or("unknown"),
             url.port_or_known_default().unwrap_or(0),
