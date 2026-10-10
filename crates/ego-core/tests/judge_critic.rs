@@ -185,20 +185,20 @@ fn shell_with_path(script: &str, path: &str, named: &str, resolved: &str) -> Spa
     )
 }
 
-// Catches: a workspace directory before the captured system executable can shadow cat.
+// Catches: a workspace directory before the captured system executable can shadow ls.
 #[test]
-fn shell_workspace_path_before_system_cat_must_ask() {
+fn shell_workspace_path_before_system_ls_must_ask() {
     assert_asks(shell_with_path(
-        "cat README.md",
+        "ls src",
         "/ws/tools:/usr/bin",
-        "/usr/bin/cat",
-        "/usr/bin/cat",
+        "/usr/bin/ls",
+        "/usr/bin/ls",
     ));
 }
 
 // Catches: empty and relative PATH roots borrow the outer shell's trusted identity.
 #[test]
-fn shell_relative_or_empty_path_before_system_cat_must_ask() {
+fn shell_relative_or_empty_path_before_system_ls_must_ask() {
     for path in [
         ".:/usr/bin",
         "tools:/usr/bin",
@@ -206,51 +206,47 @@ fn shell_relative_or_empty_path_before_system_cat_must_ask() {
         "/usr/bin/../local/bin:/usr/bin",
     ] {
         assert_asks(shell_with_path(
-            "cat README.md",
+            "ls src",
             path,
-            "/usr/bin/cat",
-            "/usr/bin/cat",
+            "/usr/bin/ls",
+            "/usr/bin/ls",
         ));
     }
 }
 
 // Catches: a system PATH spelling that resolves to workspace code is auto-approved.
 #[test]
-fn shell_system_symlink_to_workspace_cat_must_ask() {
+fn shell_system_symlink_to_workspace_ls_must_ask() {
     assert_asks(shell_with_path(
-        "cat README.md",
+        "ls src",
         "/usr/bin",
-        "/usr/bin/cat",
-        "/ws/tools/cat",
+        "/usr/bin/ls",
+        "/ws/tools/ls",
     ));
 }
 
 // Catches: requiring a bare program disables valid absolute system wrapper commands.
 #[test]
-fn shell_observed_system_cat_remains_read_only() {
+fn shell_observed_system_ls_remains_read_only() {
     for (script, path) in [
-        ("cat README.md", "/usr/bin:/ws/tools"),
-        ("/usr/bin/cat README.md", "/ws/tools:/usr/bin"),
+        ("ls src", "/usr/bin:/ws/tools"),
+        ("/usr/bin/ls src", "/ws/tools:/usr/bin"),
     ] {
         assert!(ego_core::permit::shell::trusted_read_only(
-            &shell_with_path(script, path, "/usr/bin/cat", "/usr/bin/cat")
+            &shell_with_path(script, path, "/usr/bin/ls", "/usr/bin/ls")
         ));
     }
 }
 
-// Catches: ./cat and tools/cat are mistaken for the trusted system cat basename.
+// Catches: ./ls and tools/ls are mistaken for the trusted system ls basename.
 #[test]
-fn shell_relative_cat_program_must_ask() {
-    for script in [
-        "./cat README.md",
-        "tools/cat README.md",
-        "/usr/bin/../../ws/cat README.md",
-    ] {
+fn shell_relative_ls_program_must_ask() {
+    for script in ["./ls src", "tools/ls src", "/usr/bin/../../ws/ls src"] {
         assert_asks(shell_with_path(
             script,
             "/usr/bin",
-            "/usr/bin/cat",
-            "/usr/bin/cat",
+            "/usr/bin/ls",
+            "/usr/bin/ls",
         ));
     }
 }

@@ -47,6 +47,23 @@ pub fn trusted_read_only(spec: &SpawnSpec) -> bool {
     if !observation.complete || !observation.read_only {
         return false;
     }
+    // Executable capture does not pin input files. Even a static benign name
+    // can resolve through a symlink to a credential/control file. Content reads
+    // therefore need ordinary call-bound authorization, not this syntax proof.
+    let reads_content = |program: &str| {
+        matches!(
+            program.rsplit('/').next(),
+            Some("cat" | "head" | "tail" | "wc" | "sed" | "rg" | "grep")
+        )
+    };
+    if argv.first().is_some_and(|program| reads_content(program))
+        || observation
+            .programs
+            .iter()
+            .any(|program| reads_content(program))
+    {
+        return false;
+    }
     if observation.programs.is_empty() {
         return true;
     }

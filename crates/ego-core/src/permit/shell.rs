@@ -122,20 +122,26 @@ impl Walker<'_> {
                     .iter()
                     .map(|child| self.text(*child).to_owned())
                     .collect();
+                let literal_words: Option<Vec<_>> = children
+                    .iter()
+                    .map(|child| proof_word(self.text(*child)))
+                    .collect();
                 if let Some(program) = words.first() {
                     self.programs
                         .push(program.trim_matches(['\'', '"']).to_owned());
                 }
-                if !read_only_command(&words) {
+                if !literal_words.is_some_and(|words| read_only_command(&words)) {
                     self.read_only = false;
                 }
                 let projected = project_words(&words);
                 let curl = curl_command(&words);
                 for (index, child) in children.iter().enumerate() {
                     if index > 0
-                        && (private_option_operand(&words[index - 1], &words[index], curl)
+                        && ((private_option_operand(&words[index - 1], &words[index], curl)
+                            && !rm_flag(&words[index - 1], &words))
                             || short_option_operand(words[index].trim_matches(['\'', '"']), curl)
-                                .is_some())
+                                .is_some()
+                            || password_option(&words[index], &words).is_some())
                     {
                         self.replace(*child, projected[index].clone());
                     }
@@ -266,6 +272,22 @@ fn sensitive_path(word: &str) -> bool {
     .any(|part| lower.contains(part))
 }
 
+// Only whole static literals qualify. Escapes, concatenation and expansion
+// require shell semantics that the read-only proof does not establish.
+fn proof_word(source: &str) -> Option<String> {
+    let literal = if source.starts_with('\'') && source.ends_with('\'') && source.len() >= 2 {
+        let inner = &source[1..source.len() - 1];
+        (!inner.contains('\'')).then_some(inner)?
+    } else if source.starts_with('"') && source.ends_with('"') && source.len() >= 2 {
+        let inner = &source[1..source.len() - 1];
+        (!inner.contains(['"', '\\', '$', '`'])).then_some(inner)?
+    } else {
+        (!source.contains(['\'', '"', '\\', '$', '`', '*', '?', '[', ']', '{', '}', '~']))
+            .then_some(source)?
+    };
+    Some(literal.to_owned())
+}
+
 /// Narrow proof, not a name allowlist: reject write flags, dynamic text, sensitive
 /// reads, configuration overrides, and unknown options before accepting a command.
 fn read_only_command(raw: &[String]) -> bool {
@@ -299,14 +321,8 @@ fn read_only_command(raw: &[String]) -> bool {
                 return false;
             };
             match subcommand.as_str() {
-                "status" => words[2..].iter().all(|word| {
-                    matches!(
-                        word.as_str(),
-                        "--short" | "-s" | "--porcelain" | "--branch" | "-b"
-                    )
-                }),
-                // Repository configuration can invoke external diff/textconv helpers.
-                "log" | "diff" | "show" => false,
+                // Repository configuration can invoke fsmonitor/diff/textconv helpers.
+                "status" | "log" | "diff" | "show" => false,
                 "branch" => {
                     words.len() == 2
                         || words[2..].iter().all(|word| {
@@ -339,13 +355,8 @@ fn read_only_command(raw: &[String]) -> bool {
                     .skip(1)
                     .all(|c| "alhFnrbqvctu0123456789".contains(c))
         }),
-        "rg" | "grep" => words[1..].iter().all(|word| {
-            !word.starts_with('-')
-                || matches!(
-                    word.as_str(),
-                    "-n" | "-r" | "-R" | "-l" | "-i" | "-F" | "--fixed-strings" | "--"
-                )
-        }),
+        // Source text cannot prove which files directory/implicit search selects.
+        "rg" | "grep" => false,
         _ => false,
     }
 }
@@ -463,7 +474,12 @@ fn project_words(words: &[String]) -> Vec<String> {
         .iter()
         .enumerate()
         .map(|(index, word)| {
-            if index > 0 && private_option_operand(&words[index - 1], &words[index], curl) {
+            if let Some(projected) = password_option(word, words) {
+                projected
+            } else if index > 0
+                && private_option_operand(&words[index - 1], &words[index], curl)
+                && !rm_flag(&words[index - 1], words)
+            {
                 if matches!(words[index - 1].as_str(), "-H" | "--header") {
                     "<header:secret>".into()
                 } else if !secret_flag(&words[index - 1])
@@ -480,6 +496,34 @@ fn project_words(words: &[String]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn password_option(word: &str, words: &[String]) -> Option<String> {
+    let program = words
+        .first()?
+        .trim_matches(['\'', '"'])
+        .rsplit('/')
+        .next()?;
+    if matches!(program, "mysql" | "mariadb" | "mysqldump" | "7z" | "7za")
+        && word.trim_matches(['\'', '"']).starts_with("-p")
+        && word.trim_matches(['\'', '"']).len() > 2
+    {
+        Some("-p<secret:flag-value>".into())
+    } else {
+        None
+    }
+}
+
+fn rm_flag(flag: &str, words: &[String]) -> bool {
+    words
+        .first()
+        .is_some_and(|program| program.trim_matches(['\'', '"']).rsplit('/').next() == Some("rm"))
+        && flag
+            .trim_matches(['\'', '"'])
+            .strip_prefix('-')
+            .is_some_and(|flags| {
+                !flags.is_empty() && flags.chars().all(|option| "firdvIPRW".contains(option))
+            })
 }
 
 fn structural_word(word: &str, curl: bool) -> String {
@@ -686,11 +730,32 @@ fn cache_script(script: &str) -> Option<String> {
 }
 
 fn project_url(word: &str) -> Option<String> {
-    let url = url::Url::parse(word).ok()?;
+    let explicit = url::Url::parse(word).ok().filter(url::Url::has_host);
+    let scheme_less = word.starts_with("//")
+        || word.split(['/', '?', '#']).next().is_some_and(|host| {
+            !host.starts_with('.')
+                && host.contains('.')
+                && host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-:@".contains(c))
+                && word.contains(['/', '?', '#'])
+        });
+    let url = match explicit {
+        Some(url) => url,
+        None if scheme_less => {
+            url::Url::parse(&format!("https://{}", word.trim_start_matches('/'))).ok()?
+        }
+        None if word.contains("://") => return Some("<url:unsupported>".into()),
+        None => return None,
+    };
     url.has_host().then(|| {
         format!(
             "<url:scheme={};host={};port={};path-segments={}>",
-            url.scheme(),
+            if scheme_less {
+                "unspecified"
+            } else {
+                url.scheme()
+            },
             url.host_str().unwrap_or("unknown"),
             url.port_or_known_default().unwrap_or(0),
             url.path_segments()
@@ -722,7 +787,14 @@ pub fn redact_atom(word: &str) -> String {
         ("glpat-", "gitlab"),
         ("AIza", "google"),
     ];
-    if let Some((_, kind)) = prefixes.iter().find(|(prefix, _)| word.contains(prefix)) {
+    if let Some((_, kind)) = prefixes.iter().find(|(prefix, _)| {
+        word.match_indices(prefix).any(|(index, _)| {
+            index == 0
+                || word[..index].chars().next_back().is_some_and(|before| {
+                    !before.is_ascii_alphanumeric() && before != '_' && before != '-'
+                })
+        })
+    }) {
         return format!("<secret:{kind}>");
     }
     if word.to_ascii_lowercase().contains("authorization:") {
@@ -742,18 +814,20 @@ pub fn redact_atom(word: &str) -> String {
     {
         return "<phone>".into();
     }
-    if word.len() >= 24
+    if !word.starts_with('/')
         && word
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '='))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '=' | '/' | '.'))
+        && word.split('/').any(|segment| {
+            segment.len() >= 24
+                && segment
+                    .chars()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    >= 12
+        })
     {
-        let unique = word
-            .chars()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        if unique >= 12 {
-            return "<secret:high-entropy>".into();
-        }
+        return "<secret:high-entropy>".into();
     }
     bounded(word.replace("$HOME", "~"))
 }
@@ -829,7 +903,7 @@ mod tests {
     #[test]
     fn read_only_shell_proof_does_not_allow_write_flags_or_secret_reads() {
         for source in [
-            "pwd; git status --short",
+            "pwd; ls src",
             "ls src | wc -l",
             "git branch --show-current",
             "sed -n '1,20p' README.md",
@@ -837,6 +911,7 @@ mod tests {
             assert!(shell(source).read_only, "{source}");
         }
         for source in [
+            "git status --short",
             "cat .env",
             "cat ~/.ssh/id_rsa",
             "cat AGENTS.md",
