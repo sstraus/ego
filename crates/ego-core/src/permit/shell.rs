@@ -130,8 +130,13 @@ impl Walker<'_> {
                     self.read_only = false;
                 }
                 let projected = project_words(&words);
+                let curl = curl_command(&words);
                 for (index, child) in children.iter().enumerate() {
-                    if index > 0 && private_option_operand(&words[index - 1], &words[index]) {
+                    if index > 0
+                        && (private_option_operand(&words[index - 1], &words[index], curl)
+                            || short_option_operand(words[index].trim_matches(['\'', '"']), curl)
+                                .is_some())
+                    {
                         self.replace(*child, projected[index].clone());
                     }
                 }
@@ -194,7 +199,7 @@ impl Walker<'_> {
             }
             "word" | "number" => {
                 let text = self.text(node).to_owned();
-                self.replace(node, structural_word(&text));
+                self.replace(node, structural_word(&text, false));
                 return;
             }
             "command_name" => {
@@ -389,8 +394,32 @@ fn secret_flag(word: &str) -> bool {
             | "--proxy-tlspassword"
     )
 }
-fn private_option_operand(flag: &str, operand: &str) -> bool {
+/// The first value-taking short option ends a cluster: the remaining bytes are
+/// its operand, never more flags. Keep the preceding flags as risk evidence.
+fn short_option_operand(word: &str, curl: bool) -> Option<(&str, &str)> {
+    let cluster = word.strip_prefix('-')?;
+    if cluster.starts_with('-') {
+        return None;
+    }
+    for (index, option) in cluster.char_indices() {
+        if (if curl {
+            "AbcCdDeEFHKmoQrTtuUwXxyYz"
+        } else {
+            "uUHEb"
+        })
+        .contains(option)
+        {
+            return Some(word.split_at(1 + index + option.len_utf8()));
+        }
+    }
+    None
+}
+
+fn private_option_operand(flag: &str, operand: &str, curl: bool) -> bool {
     let flag = flag.trim_matches(['\'', '"']);
+    if let Some((_, attached)) = short_option_operand(flag, curl) {
+        return attached.is_empty();
+    }
     secret_flag(flag)
         || (flag.starts_with('-')
             && flag != "--"
@@ -422,32 +451,42 @@ fn private_option_operand(flag: &str, operand: &str) -> bool {
             ))
 }
 
+fn curl_command(words: &[String]) -> bool {
+    words
+        .first()
+        .is_some_and(|word| word.trim_matches(['\'', '"']).rsplit('/').next() == Some("curl"))
+}
+
 fn project_words(words: &[String]) -> Vec<String> {
+    let curl = curl_command(words);
     words
         .iter()
         .enumerate()
         .map(|(index, word)| {
-            if index > 0 && private_option_operand(&words[index - 1], &words[index]) {
+            if index > 0 && private_option_operand(&words[index - 1], &words[index], curl) {
                 if matches!(words[index - 1].as_str(), "-H" | "--header") {
                     "<header:secret>".into()
-                } else if !secret_flag(&words[index - 1]) {
+                } else if !secret_flag(&words[index - 1])
+                    && short_option_operand(words[index - 1].trim_matches(['\'', '"']), curl)
+                        .is_none()
+                {
                     project_url(word.trim_matches(['\'', '"']))
                         .unwrap_or_else(|| "<secret:option-operand>".into())
                 } else {
                     "<secret:flag-value>".into()
                 }
             } else {
-                structural_word(word)
+                structural_word(word, curl)
             }
         })
         .collect()
 }
 
-fn structural_word(word: &str) -> String {
-    for flag in ["-u", "-U", "-H", "-E", "-b"] {
-        if word.starts_with(flag) && word.len() > flag.len() {
-            return format!("{flag}<secret:flag-value>");
-        }
+fn structural_word(word: &str, curl: bool) -> String {
+    if let Some((flags, operand)) = short_option_operand(word.trim_matches(['\'', '"']), curl)
+        && !operand.is_empty()
+    {
+        return format!("{flags}<secret:flag-value>");
     }
 
     if let Some((name, _)) = word.split_once('=')
@@ -650,11 +689,13 @@ fn project_url(word: &str) -> Option<String> {
     let url = url::Url::parse(word).ok()?;
     matches!(url.scheme(), "http" | "https").then(|| {
         format!(
-            "<url:scheme={};host={};port={};path={}>",
+            "<url:scheme={};host={};port={};path-segments={}>",
             url.scheme(),
             url.host_str().unwrap_or("unknown"),
             url.port_or_known_default().unwrap_or(0),
-            url.path()
+            url.path_segments()
+                .map(|segments| segments.filter(|segment| !segment.is_empty()).count())
+                .unwrap_or(0)
         )
     })
 }
@@ -733,7 +774,7 @@ pub fn redact_text(text: &str) -> String {
                 redact_next = true;
                 return "<header:authorization>".into();
             }
-            structural_word(word)
+            structural_word(word, false)
         })
         .collect::<Vec<_>>()
         .join(" ")

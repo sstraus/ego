@@ -36,7 +36,7 @@ fn request_text(argv: &[String]) -> String {
     serde_json::to_string(&request.messages).unwrap()
 }
 
-// Catches: quoted URL redaction erases risk-bearing destinations or leaks userinfo/query/fragment.
+// Catches: URL redaction erases destination/shape or leaks path/userinfo/query/fragment text.
 #[test]
 fn static_urls_preserve_destination_and_remove_credentials_with_any_quoting() {
     let url = "https://private-user:private-password@upload.example.com:8443/collect?token=sk-private#private-fragment";
@@ -49,10 +49,11 @@ fn static_urls_preserve_destination_and_remove_credentials_with_any_quoting() {
             ego_core::permit::shell::observe(&argv).skeleton,
             request_text(&argv),
         ] {
-            for required in ["https", "upload.example.com", "8443", "/collect"] {
+            for required in ["https", "upload.example.com", "8443", "path-segments=1"] {
                 assert!(skeleton.contains(required), "{required}: {skeleton}");
             }
             for secret in [
+                "collect",
                 "private-user",
                 "private-password",
                 "sk-private",
