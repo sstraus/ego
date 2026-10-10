@@ -137,9 +137,11 @@ impl Walker<'_> {
                 let curl = curl_command(&words);
                 for (index, child) in children.iter().enumerate() {
                     if index > 0
-                        && (private_option_operand(&words[index - 1], &words[index], curl)
+                        && ((private_option_operand(&words[index - 1], &words[index], curl)
+                            && !rm_flag(&words[index - 1], &words))
                             || short_option_operand(words[index].trim_matches(['\'', '"']), curl)
-                                .is_some())
+                                .is_some()
+                            || password_option(&words[index], &words).is_some())
                     {
                         self.replace(*child, projected[index].clone());
                     }
@@ -472,7 +474,12 @@ fn project_words(words: &[String]) -> Vec<String> {
         .iter()
         .enumerate()
         .map(|(index, word)| {
-            if index > 0 && private_option_operand(&words[index - 1], &words[index], curl) {
+            if let Some(projected) = password_option(word, words) {
+                projected
+            } else if index > 0
+                && private_option_operand(&words[index - 1], &words[index], curl)
+                && !rm_flag(&words[index - 1], words)
+            {
                 if matches!(words[index - 1].as_str(), "-H" | "--header") {
                     "<header:secret>".into()
                 } else if !secret_flag(&words[index - 1])
@@ -489,6 +496,34 @@ fn project_words(words: &[String]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn password_option(word: &str, words: &[String]) -> Option<String> {
+    let program = words
+        .first()?
+        .trim_matches(['\'', '"'])
+        .rsplit('/')
+        .next()?;
+    if matches!(program, "mysql" | "mariadb" | "mysqldump" | "7z" | "7za")
+        && word.trim_matches(['\'', '"']).starts_with("-p")
+        && word.trim_matches(['\'', '"']).len() > 2
+    {
+        Some("-p<secret:flag-value>".into())
+    } else {
+        None
+    }
+}
+
+fn rm_flag(flag: &str, words: &[String]) -> bool {
+    words
+        .first()
+        .is_some_and(|program| program.trim_matches(['\'', '"']).rsplit('/').next() == Some("rm"))
+        && flag
+            .trim_matches(['\'', '"'])
+            .strip_prefix('-')
+            .is_some_and(|flags| {
+                !flags.is_empty() && flags.chars().all(|option| "firdvIPRW".contains(option))
+            })
 }
 
 fn structural_word(word: &str, curl: bool) -> String {
@@ -695,11 +730,31 @@ fn cache_script(script: &str) -> Option<String> {
 }
 
 fn project_url(word: &str) -> Option<String> {
-    let url = url::Url::parse(word).ok()?;
+    let explicit = url::Url::parse(word).ok().filter(url::Url::has_host);
+    let scheme_less = word.starts_with("//")
+        || word.split(['/', '?', '#']).next().is_some_and(|host| {
+            host.contains('.')
+                && host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-:@".contains(c))
+                && word.contains(['/', '?', '#'])
+        });
+    let url = match explicit {
+        Some(url) => url,
+        None if scheme_less => {
+            url::Url::parse(&format!("https://{}", word.trim_start_matches('/'))).ok()?
+        }
+        None if word.contains("://") => return Some("<url:unsupported>".into()),
+        None => return None,
+    };
     url.has_host().then(|| {
         format!(
             "<url:scheme={};host={};port={};path-segments={}>",
-            url.scheme(),
+            if scheme_less {
+                "unspecified"
+            } else {
+                url.scheme()
+            },
             url.host_str().unwrap_or("unknown"),
             url.port_or_known_default().unwrap_or(0),
             url.path_segments()
@@ -731,7 +786,14 @@ pub fn redact_atom(word: &str) -> String {
         ("glpat-", "gitlab"),
         ("AIza", "google"),
     ];
-    if let Some((_, kind)) = prefixes.iter().find(|(prefix, _)| word.contains(prefix)) {
+    if let Some((_, kind)) = prefixes.iter().find(|(prefix, _)| {
+        word.match_indices(prefix).any(|(index, _)| {
+            index == 0
+                || word[..index].chars().next_back().is_some_and(|before| {
+                    !before.is_ascii_alphanumeric() && before != '_' && before != '-'
+                })
+        })
+    }) {
         return format!("<secret:{kind}>");
     }
     if word.to_ascii_lowercase().contains("authorization:") {
@@ -751,10 +813,11 @@ pub fn redact_atom(word: &str) -> String {
     {
         return "<phone>".into();
     }
-    if word.len() >= 24
+    if !word.starts_with('/')
+        && word.len() >= 24
         && word
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '='))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '=' | '/' | '.'))
     {
         let unique = word
             .chars()

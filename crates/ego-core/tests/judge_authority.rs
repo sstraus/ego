@@ -49,6 +49,11 @@ fn sensitive_shell_selection_cannot_gain_read_only_authority() {
             "unsafe selection received authority: {script}"
         );
     }
+    // Static source does not establish the filesystem target of a path alias.
+    for program in ["cat", "head", "tail", "wc", "sed"] {
+        let path = format!("/usr/bin/{program}");
+        assert!(!trusted_read_only(&captured(&[&path, "README.md"], &[])));
+    }
 }
 
 // Catches: escaped option spelling is treated as data although bash removes the escape.

@@ -47,6 +47,7 @@ fn curl_operand_rules_do_not_erase_other_commands_flags() {
         for argv in [argv, vec!["bash".into(), "-c".into(), command.into()]] {
             let skeleton = observe(&argv).skeleton;
             assert!(skeleton.contains(flags), "{skeleton}");
+            assert!(skeleton.contains("/ws"), "target lost: {skeleton}");
         }
     }
 }
