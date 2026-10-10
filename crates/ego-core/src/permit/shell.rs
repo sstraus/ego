@@ -518,12 +518,15 @@ fn rm_flag(flag: &str, words: &[String]) -> bool {
     words
         .first()
         .is_some_and(|program| program.trim_matches(['\'', '"']).rsplit('/').next() == Some("rm"))
-        && flag
-            .trim_matches(['\'', '"'])
-            .strip_prefix('-')
-            .is_some_and(|flags| {
+        && {
+            let flag = flag.trim_matches(['\'', '"']);
+            matches!(
+                flag,
+                "--recursive" | "--force" | "--dir" | "--verbose" | "--interactive"
+            ) || flag.strip_prefix('-').is_some_and(|flags| {
                 !flags.is_empty() && flags.chars().all(|option| "firdvIPRW".contains(option))
             })
+        }
 }
 
 fn structural_word(word: &str, curl: bool) -> String {
