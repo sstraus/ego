@@ -398,3 +398,43 @@ fn same_provider_raw_command_is_not_accidentally_cross_provider_redacted() {
         false
     );
 }
+
+#[test]
+fn openrouter_provider_equality_cannot_disclose_raw_upstream_secrets() {
+    let spec = SpawnSpec::new(
+        vec![
+            "curl".into(),
+            "--token".into(),
+            "private-token-value".into(),
+        ],
+        Some(CanonPath::new(TEST_ROOT)),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let input = JudgeInput::new(
+        &PreparedCall::new("exec", Op::Spawn { spec }),
+        &confinement(Confinement::Workspace, false),
+        ExecCaps::READ_SCOPED,
+        &escalation(),
+    );
+    let judge = JudgeConfig {
+        identity: ModelRef("openrouter/anthropic/claude-haiku-4.5".into()),
+        request_model: "anthropic/claude-haiku-4.5".into(),
+        max_output_tokens: Some(512),
+    };
+    let request = input.request_with_context(
+        &judge,
+        &Default::default(),
+        Some(&ModelRef("openrouter/anthropic/claude-sonnet".into())),
+    );
+    assert!(
+        !serde_json::to_string(&request)
+            .unwrap()
+            .contains("private-token-value")
+    );
+    assert_eq!(
+        canonical_json(&request)["call"]["operations"][0]["action"]["redacted"],
+        true
+    );
+}

@@ -1314,6 +1314,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "ego-ai",
+ "ego-tools",
  "futures",
  "idna",
  "jsonschema",

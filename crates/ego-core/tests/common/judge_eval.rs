@@ -140,6 +140,13 @@ impl GenerationModelSource for EvalSource {
                 "scripted-main".into()
             };
             // Actual provider usage/cost is recorded separately, never the fixture quote.
+            if judge {
+                profile.thinking = if std::env::var("EGO_JUDGE_EFFORT").as_deref() == Ok("low") {
+                    ThinkingLevel::Low
+                } else {
+                    ThinkingLevel::Off
+                };
+            }
             profile.rates = None;
             Ok(profile)
         })
@@ -167,135 +174,188 @@ fn live_judge_eval() {
     let output = std::env::var("EGO_JUDGE_OUTPUT").expect("output JSONL");
     let cases =
         std::fs::read_to_string(std::env::var("EGO_JUDGE_CASES").expect("cases file")).unwrap();
-    for line in cases.lines() {
-        let case: Case = serde_json::from_str(line).unwrap();
-        let metadata = Arc::new(Mutex::new(Vec::new()));
-        let credential = row
-            .credential
-            .resolve(&EnvCredentials)
-            .expect("environment credential");
-        let real = Arc::new(WireGenerator::new(
-            row.clone(),
-            wire,
-            Arc::new(BridgeHttp {
-                metadata: metadata.clone(),
-            }),
-            credential,
-        ));
-        let judge: Arc<dyn Generator> = real;
-        let mut fx = Fixture::new(vec![]);
-        fx.set_mode(Mode::Auto);
-        // Synthetic ports record authorization but cannot touch any real filesystem/process.
-        fx.registry = vec![Arc::new(Typed(EvalTool { case: case.clone() }))];
-        fx.process = Arc::new(NoProcess);
-        *fx.gate.borrow_mut() =
-            SharedBudgetGate::new(BudgetGate::unlimited(CurrencyCode::new("USD").unwrap()));
+    let replay = std::env::var("EGO_JUDGE_REPLAY").as_deref() == Ok("1");
+    let rounds = if replay { 2 } else { 1 };
+    let cache_home = std::env::var("EGO_JUDGE_CACHE_HOME").ok();
+    for round in 0..rounds {
+        for line in cases.lines() {
+            let case: Case = serde_json::from_str(line).unwrap();
+            let metadata = Arc::new(Mutex::new(Vec::new()));
+            let credential = row
+                .credential
+                .resolve(&EnvCredentials)
+                .expect("environment credential");
+            let real = Arc::new(WireGenerator::new(
+                row.clone(),
+                wire,
+                Arc::new(BridgeHttp {
+                    metadata: metadata.clone(),
+                }),
+                credential,
+            ));
+            let judge: Arc<dyn Generator> = real;
+            let mut fx = Fixture::new(vec![]);
+            fx.set_mode(Mode::Auto);
+            // Synthetic ports record authorization but cannot touch any real filesystem/process.
+            fx.registry = vec![Arc::new(Typed(EvalTool { case: case.clone() }))];
+            fx.process = Arc::new(EvalObservedProcess);
+            *fx.gate.borrow_mut() =
+                SharedBudgetGate::new(BudgetGate::unlimited(CurrencyCode::new("USD").unwrap()));
 
-        let source = Arc::new(EvalSource {
-            main: Arc::new(FakeGenerator::new([
-                vec![
-                    AiEvent::ToolCall {
-                        call_id: "eval".into(),
-                        name: case.tool.clone(),
-                        args: case.args.to_string(),
-                    },
-                    AiEvent::Stop(StopReason::ToolUse),
-                ],
-                vec![AiEvent::Stop(StopReason::Stop)],
-            ])),
-            judge,
-            model: model.clone(),
-        });
-        let tools = Tools::new(
-            &fx.registry,
-            ToolEffectPorts::new(
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
-                Arc::new(NoResolver),
-                Arc::new(NoHop),
-                Arc::new(NoDuplex),
-            ),
-            CanonPath::new(&case.cwd),
-        );
-        let runtime = GenerationRuntime {
-            policy_source: common::policy_source_with_root(
-                &case.cwd,
-                Mode::Auto,
-                Ruleset::default(),
-            ),
-            source,
-            gate: fx.gate.borrow().clone(),
-            config: TurnConfig {
-                cache: CacheRetention::Short,
-                system: None,
-                identity: None,
-                token_ceiling: None,
-                retry: 0,
-                fallbacks: vec![],
-            },
-            admission: Arc::new(EvidenceAdmissionService::new()),
-            invocation: RunInvocationId::new(),
-            retry_pause: Arc::new(NoRetryPause),
-        };
-        let mut turn = TurnLoop::open(
-            session(
-                SessionState::default(),
-                &fx.store,
-                &fx.clock,
-                &fx.sink,
-                CancelToken::new(),
-            ),
-            runtime,
-            tools,
-        )
-        .with_judge(JudgeContext {
-            confinement: RunConfinement::new(
-                Confinement::Workspace,
-                false,
+            let source = Arc::new(EvalSource {
+                main: Arc::new(FakeGenerator::new([
+                    vec![
+                        AiEvent::ToolCall {
+                            call_id: "eval".into(),
+                            name: case.tool.clone(),
+                            args: case.args.to_string(),
+                        },
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                ])),
+                judge,
+                model: model.clone(),
+            });
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
                 CanonPath::new(&case.cwd),
+            );
+            let runtime = GenerationRuntime {
+                policy_source: common::policy_source_with_root(
+                    &case.cwd,
+                    Mode::Auto,
+                    Ruleset::default(),
+                ),
+                source,
+                gate: fx.gate.borrow().clone(),
+                config: TurnConfig {
+                    cache: CacheRetention::Short,
+                    system: None,
+                    identity: None,
+                    token_ceiling: None,
+                    retry: 0,
+                    fallbacks: vec![],
+                },
+                admission: Arc::new(EvidenceAdmissionService::new()),
+                invocation: RunInvocationId::new(),
+                retry_pause: Arc::new(NoRetryPause),
+            };
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                runtime,
+                tools,
             )
-            .unwrap(),
-            exec_caps: ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
-        });
-        let start = Instant::now();
-        let outcome = block_on(turn.run(&case.task_context)).expect("eval journal");
-        let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
-        drop(turn);
-        let mut actual = "escalate";
-        let mut authority = "unresolved";
-        let mut usage = Usage::IDENTITY;
-        let mut reason = String::new();
-        for event in fx.store.events() {
-            match event.kind {
-                EventKind::PermissionDecided {
-                    allowed,
-                    by,
-                    reason: message,
-                } => {
-                    actual = match allowed {
-                        Some(true) => "allow",
-                        Some(false) => "deny",
-                        None => "escalate",
-                    };
-                    authority = if matches!(by, Some(Authority::Judge { .. })) {
-                        "judge"
-                    } else {
-                        "policy"
-                    };
-                    reason = message.unwrap_or_default();
-                }
-                EventKind::UsageUpdated { usage: delta, .. } => usage.add(&delta),
-                _ => {}
+            .with_judge(JudgeContext {
+                confinement: RunConfinement::new(
+                    Confinement::Workspace,
+                    false,
+                    CanonPath::new(&case.cwd),
+                )
+                .unwrap(),
+                exec_caps: ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+            });
+            if let Some(home) = &cache_home {
+                let cache = Arc::new(
+                    ego_tools::permission_analysis_cache::FilePermissionAnalysisCache::new(
+                        std::path::Path::new(home),
+                    ),
+                );
+                turn = turn
+                    .with_execution_observation(
+                        ego_core::permit::ExecObservation::new(
+                            ego_core::permit::BackendIdentity::new("eval-synthetic", "1"),
+                            ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+                            "11".repeat(32).try_into().unwrap(),
+                        ),
+                        None,
+                    )
+                    .with_permission_analysis_cache(cache, Trust::Trusted);
             }
+            let start = Instant::now();
+            let outcome = block_on(turn.run(&case.task_context)).expect("eval journal");
+            let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+            drop(turn);
+            let mut actual = "escalate";
+            let mut authority = "unresolved";
+            let mut usage = Usage::IDENTITY;
+            let mut reason = String::new();
+            for event in fx.store.events() {
+                match event.kind {
+                    EventKind::PermissionDecided {
+                        allowed,
+                        by,
+                        reason: message,
+                    } => {
+                        actual = match allowed {
+                            Some(true) => "allow",
+                            Some(false) => "deny",
+                            None => "escalate",
+                        };
+                        authority = if matches!(by, Some(Authority::CachedJudge { .. })) {
+                            "cached_judge"
+                        } else if matches!(by, Some(Authority::Judge { .. })) {
+                            "judge"
+                        } else {
+                            "policy"
+                        };
+                        reason = message.unwrap_or_default();
+                    }
+                    EventKind::UsageUpdated { usage: delta, .. } => usage.add(&delta),
+                    _ => {}
+                }
+            }
+            let result = json!({"case":case.id,"model":model,"projection":projection,"expected":case.expected,"severity":case.severity,"actual":actual,"authority":authority,"critical_false_allow":critical_false_allow(&case,actual),"latency_ms":latency_ms,"usage":usage,"metadata":metadata.lock().unwrap().clone(),"reason":reason,"exit_reason":format!("{:?}",outcome.exit_reason),"opinion_cache_hit":authority == "cached_judge", "round":round, "effort":std::env::var("EGO_JUDGE_EFFORT").unwrap_or_else(|_| "off".into())});
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&output)
+                .unwrap();
+            writeln!(file, "{result}").unwrap();
         }
-        let result = json!({"case":case.id,"model":model,"projection":projection,"expected":case.expected,"severity":case.severity,"actual":actual,"authority":authority,"critical_false_allow":critical_false_allow(&case,actual),"latency_ms":latency_ms,"usage":usage,"metadata":metadata.lock().unwrap().clone(),"reason":reason,"exit_reason":format!("{:?}",outcome.exit_reason),"opinion_cache_hit":false});
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&output)
-            .unwrap();
-        writeln!(file, "{result}").unwrap();
+    }
+}
+
+struct EvalObservedProcess;
+impl ProcessExecutor for EvalObservedProcess {
+    fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
+        use ego_core::permit::analysis::{ExecutableFileIdentity, ExecutionIdentity};
+        let target = CanonPath::new("/eval/non-executable-image");
+        Ok(spec.clone().with_execution_identity(
+            EnvPolicy::exact(vec![]).unwrap(),
+            ExecutionIdentity {
+                target: target.clone(),
+                files: vec![ExecutableFileIdentity {
+                    named: target.clone(),
+                    resolved: target,
+                    content: Some([1; 32]),
+                    platform: vec![1],
+                }],
+                failures: vec![],
+                dynamic_code: true,
+            },
+        ))
+    }
+    fn execute<'a>(&'a self, _: &'a SpawnSpec) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+        Box::pin(async {
+            Err(ProcessError::Invariant(
+                "eval process must never execute".into(),
+            ))
+        })
     }
 }
 

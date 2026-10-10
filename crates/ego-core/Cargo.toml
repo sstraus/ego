@@ -45,6 +45,7 @@ zeroize = "1.9.0"
 
 [dev-dependencies]
 ego-ai = { path = "../ego-ai" }
+ego-tools = { path = "../ego-tools" }
 bytes = "1.10"
 trybuild = "1.0.121"
 

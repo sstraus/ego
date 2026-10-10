@@ -26,11 +26,7 @@ pub fn observe(argv: &[String]) -> ShellObservation {
         None
     };
     if let Some(script) = script {
-        let mut observation = observe_script(script);
-        // Login shells may execute arbitrary startup files before the script.
-        if argv.iter().any(|argument| argument == "-lc") {
-            observation.read_only = false;
-        }
+        let observation = observe_script(script);
         observation
     } else {
         ShellObservation {
@@ -440,6 +436,21 @@ pub fn cache_argv(argv: &[String]) -> Vec<String> {
     else {
         return argv.to_vec();
     };
+    if matches!(program, "bash" | "sh" | "zsh") {
+        if let Some(index) = argv
+            .iter()
+            .position(|word| matches!(word.as_str(), "-c" | "-lc"))
+        {
+            if let Some(script) = argv.get(index + 1) {
+                if let Some(normalized) = cache_script(script) {
+                    let mut result = argv.to_vec();
+                    result[index + 1] = normalized;
+                    return result;
+                }
+            }
+        }
+        return argv.to_vec();
+    }
     let mut result = argv.to_vec();
     if !PURE_DATA_POSITIONS
         .iter()
@@ -499,6 +510,97 @@ pub fn cache_argv(argv: &[String]) -> Vec<String> {
         _ => {}
     }
     result
+}
+
+fn cache_script(script: &str) -> Option<String> {
+    if script.len() > MAX_SOURCE_BYTES {
+        return None;
+    }
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(script, None)?;
+    if tree.root_node().has_error() {
+        return None;
+    }
+    let mut stack = vec![tree.root_node()];
+    let mut edits = Vec::new();
+    let mut commands = 0;
+    while let Some(node) = stack.pop() {
+        if !matches!(
+            node.kind(),
+            "program"
+                | "list"
+                | "pipeline"
+                | "command"
+                | "command_name"
+                | "word"
+                | "number"
+                | "string"
+                | "string_content"
+                | "raw_string"
+        ) {
+            return None;
+        }
+        if node.kind() == "command" {
+            commands += 1;
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.named_children(&mut cursor).collect();
+            let words: Vec<String> = children
+                .iter()
+                .map(|child| {
+                    child
+                        .utf8_text(script.as_bytes())
+                        .unwrap_or("")
+                        .trim_matches(['\'', '"'])
+                        .to_owned()
+                })
+                .collect();
+            if words
+                .iter()
+                .any(|word| word.contains('$') || word.contains('`'))
+            {
+                return None;
+            }
+            let normalized = cache_argv(&words);
+            // Every inner command must either qualify for data normalization or
+            // be a conservative read-only command whose exact words are retained.
+            if normalized == words && !read_only_command(&words) {
+                return None;
+            }
+            for (index, (old, new)) in words.iter().zip(normalized.iter()).enumerate() {
+                if old != new {
+                    edits.push((
+                        children[index].start_byte(),
+                        children[index].end_byte(),
+                        new.clone(),
+                    ));
+                }
+            }
+        }
+        if matches!(node.kind(), "string" | "raw_string") {
+            let text = node.utf8_text(script.as_bytes()).ok()?;
+            if text.contains('$') || text.contains('`') {
+                return None;
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    if commands == 0 {
+        return None;
+    }
+    edits.sort_by_key(|edit| edit.0);
+    let mut result = String::new();
+    let mut end = 0;
+    for (start, next, replacement) in edits {
+        result.push_str(&script[end..start]);
+        result.push_str(&replacement);
+        end = next;
+    }
+    result.push_str(&script[end..]);
+    Some(result)
 }
 
 /// Atom redaction is a fallback for native argv and unsupported AST spans. AST
@@ -709,47 +811,86 @@ mod tests {
         assert!(!shell("source /ws/script; ls").read_only);
     }
 
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+    fn same_data(first: &[&str], second: &[&str]) {
+        assert_eq!(cache_argv(&args(first)), cache_argv(&args(second)));
+    }
     #[test]
-    fn data_positions_do_not_generalize_paths_code_flags_or_hosts() {
-        let args = |words: &[&str]| {
-            words
-                .iter()
-                .map(|word| word.to_string())
-                .collect::<Vec<_>>()
-        };
-        for (first, second) in [
-            (vec!["rg", "first", "src/"], vec!["rg", "other", "src/"]),
-            (vec!["grep", "first", "src/"], vec!["grep", "other", "src/"]),
-            (
-                vec!["git", "commit", "-m", "first"],
-                vec!["git", "commit", "-m", "other"],
-            ),
-            (
-                vec!["git", "log", "--grep", "first"],
-                vec!["git", "log", "--grep", "other"],
-            ),
-            (vec!["echo", "first"], vec!["echo", "other"]),
-            (vec!["printf", "first"], vec!["printf", "other"]),
-            (
-                vec!["sed", "-n", "1,20p", "file"],
-                vec!["sed", "-n", "2,30p", "file"],
-            ),
-        ] {
-            assert_eq!(cache_argv(&args(&first)), cache_argv(&args(&second)));
-        }
-        for words in [
-            vec!["rg", "--pre", "code", "src/"],
-            vec!["sed", "-n", "1e evil", "file"],
-            vec!["sed", "-n", "1w output", "file"],
-            vec!["curl", "https://example.com"],
-            vec!["bash", "-c", "echo first"],
-        ] {
-            assert_eq!(cache_argv(&args(&words)), args(&words));
-        }
+    fn rg_pattern_reuse_does_not_generalize_preprocessor_code() {
+        same_data(&["rg", "one", "src"], &["rg", "two", "src"]);
+        let code = args(&["rg", "--pre", "code", "src"]);
+        assert_eq!(cache_argv(&code), code);
+    }
+    #[test]
+    fn grep_pattern_reuse_does_not_generalize_read_paths() {
+        same_data(&["grep", "one", "src"], &["grep", "two", "src"]);
         assert_ne!(
-            cache_argv(&args(&["rg", "first", "src/"])),
-            cache_argv(&args(&["rg", "first", "/etc/"]))
+            cache_argv(&args(&["grep", "one", "src"])),
+            cache_argv(&args(&["grep", "one", "/etc"]))
         );
+    }
+    #[test]
+    fn commit_message_reuse_does_not_generalize_commit_flags() {
+        same_data(
+            &["git", "commit", "-m", "one"],
+            &["git", "commit", "-m", "two"],
+        );
+        assert_ne!(
+            cache_argv(&args(&["git", "commit", "-m", "one"])),
+            cache_argv(&args(&["git", "commit", "--amend", "-m", "one"]))
+        );
+    }
+    #[test]
+    fn log_grep_reuse_does_not_generalize_revision_paths() {
+        same_data(
+            &["git", "log", "--grep", "one", "master"],
+            &["git", "log", "--grep", "two", "master"],
+        );
+    }
+    #[test]
+    fn echo_data_reuse_does_not_generalize_redirection() {
+        same_data(&["echo", "one"], &["echo", "two"]);
+        let redir = args(&["echo", "one", ">", "file"]);
+        assert_eq!(cache_argv(&redir), redir);
+    }
+    #[test]
+    fn printf_data_reuse_does_not_generalize_option_code() {
+        same_data(&["printf", "one"], &["printf", "two"]);
+        let flags = args(&["printf", "-v", "name", "text"]);
+        assert_eq!(cache_argv(&flags), flags);
+    }
+    #[test]
+    fn sed_print_range_reuse_does_not_generalize_exec_or_write_commands() {
+        same_data(
+            &["sed", "-n", "1,20p", "file"],
+            &["sed", "-n", "2,30p", "file"],
+        );
+        for command in ["1e evil", "1w output"] {
+            let argv = args(&["sed", "-n", command, "file"]);
+            assert_eq!(cache_argv(&argv), argv);
+        }
+    }
+    #[test]
+    fn literal_shell_wrapper_reuse_does_not_generalize_dynamic_scripts() {
+        for shell in ["bash", "/bin/bash", "zsh"] {
+            for flag in ["-c", "-lc"] {
+                same_data(
+                    &[shell, flag, "grep 'one' src; pwd"],
+                    &[shell, flag, "grep 'two' src; pwd"],
+                );
+            }
+        }
+        for script in [
+            "grep $(cat .env) src",
+            "eval grep one",
+            "grep $PATTERN src",
+            "grep one src > output",
+        ] {
+            let argv = args(&["bash", "-c", script]);
+            assert_eq!(cache_argv(&argv), argv);
+        }
     }
 
     #[test]

@@ -85,7 +85,7 @@ impl JudgeInput {
         let same_provider = main
             .and_then(|model| model.0.split_once('/'))
             .zip(config.identity.0.split_once('/'))
-            .is_some_and(|((main, _), (judge, _))| main == judge);
+            .is_some_and(|((main, _), (judge, _))| main == judge && main != "openrouter");
         let mut facts: serde_json::Value =
             serde_json::from_str(&self.canonical).expect("canonical facts");
         let mut spawns = self.raw_argv.iter();
