@@ -430,6 +430,10 @@ const PURE_DATA_POSITIONS: &[(&str, &str)] = &[
 ];
 
 pub fn cache_argv(argv: &[String]) -> Vec<String> {
+    // Option termination changes positional meaning; retain the whole execution identity.
+    if argv.iter().any(|word| word == "--") {
+        return argv.to_vec();
+    }
     let Some(program) = argv
         .first()
         .map(|word| word.rsplit('/').next().unwrap_or(word))
@@ -561,6 +565,9 @@ fn cache_script(script: &str) -> Option<String> {
                 .iter()
                 .any(|word| word.contains('$') || word.contains('`'))
             {
+                return None;
+            }
+            if words.iter().any(|word| word == "--") {
                 return None;
             }
             let normalized = cache_argv(&words);
