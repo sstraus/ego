@@ -733,7 +733,8 @@ fn project_url(word: &str) -> Option<String> {
     let explicit = url::Url::parse(word).ok().filter(url::Url::has_host);
     let scheme_less = word.starts_with("//")
         || word.split(['/', '?', '#']).next().is_some_and(|host| {
-            host.contains('.')
+            !host.starts_with('.')
+                && host.contains('.')
                 && host
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || ".-:@".contains(c))
@@ -814,18 +815,19 @@ pub fn redact_atom(word: &str) -> String {
         return "<phone>".into();
     }
     if !word.starts_with('/')
-        && word.len() >= 24
         && word
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '=' | '/' | '.'))
+        && word.split('/').any(|segment| {
+            segment.len() >= 24
+                && segment
+                    .chars()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    >= 12
+        })
     {
-        let unique = word
-            .chars()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        if unique >= 12 {
-            return "<secret:high-entropy>".into();
-        }
+        return "<secret:high-entropy>".into();
     }
     bounded(word.replace("$HOME", "~"))
 }

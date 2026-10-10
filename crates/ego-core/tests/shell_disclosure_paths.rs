@@ -28,7 +28,10 @@ fn dot_prefixed_relative_rm_targets_are_not_projected_as_urls() {
 fn long_relative_paths_are_not_redacted_as_high_entropy_secrets() {
     let structure = skeleton("rm -rf crates/ego-core/src/permit");
     assert!(!structure.contains("<secret:"), "{structure}");
-    assert!(structure.contains("crates/ego-core/src/permit"), "{structure}");
+    assert!(
+        structure.contains("crates/ego-core/src/permit"),
+        "{structure}"
+    );
 }
 
 // Catches: URL projection runs before path classification, so a quoted
