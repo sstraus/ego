@@ -1146,6 +1146,14 @@ fn overview(program: &str) -> String {
         "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
          documents the remaining commands; each is refused by name, with the subsystem it \
          waits on. Start Ollama and run `ollama pull qwen3` before the local \
+    use clap::CommandFactory;
+    text.push('\n');
+    text.push_str(
+        &RunCommand::command()
+            .help_template("{options}")
+            .render_help()
+            .to_string(),
+    );
          example above.\n"
     ));
     text
