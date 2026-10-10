@@ -6605,6 +6605,12 @@ mod turn {
                 "/tests/common/context_window.rs"
             ));
         }
+        mod critic_context_window {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/common/critic_context_window.rs"
+            ));
+        }
         mod judge_eval {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
