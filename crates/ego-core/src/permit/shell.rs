@@ -357,6 +357,7 @@ fn print_only_sed(words: &[String]) -> bool {
 }
 
 fn secret_flag(word: &str) -> bool {
+    let word = word.trim_matches(['\'', '"']);
     matches!(
         word,
         "--token"
@@ -389,6 +390,7 @@ fn secret_flag(word: &str) -> bool {
     )
 }
 fn private_option_operand(flag: &str, operand: &str) -> bool {
+    let flag = flag.trim_matches(['\'', '"']);
     secret_flag(flag)
         || (flag.starts_with('-')
             && flag != "--"
@@ -448,14 +450,13 @@ fn structural_word(word: &str) -> String {
         }
     }
 
-    if let Some((name, _)) = word.split_once('=') {
-        if !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            return format!("{}=<assignment-value>", redact_atom(name));
-        }
+    if let Some((name, _)) = word.split_once('=')
+        && !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return format!("{}=<assignment-value>", redact_atom(name));
     }
     redact_atom(word)
 }
@@ -487,14 +488,12 @@ pub fn cache_argv(argv: &[String]) -> Vec<String> {
         if let Some(index) = argv
             .iter()
             .position(|word| matches!(word.as_str(), "-c" | "-lc"))
+            && let Some(script) = argv.get(index + 1)
+            && let Some(normalized) = cache_script(script)
         {
-            if let Some(script) = argv.get(index + 1) {
-                if let Some(normalized) = cache_script(script) {
-                    let mut result = argv.to_vec();
-                    result[index + 1] = normalized;
-                    return result;
-                }
-            }
+            let mut result = argv.to_vec();
+            result[index + 1] = normalized;
+            return result;
         }
         return argv.to_vec();
     }
