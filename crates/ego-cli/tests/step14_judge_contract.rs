@@ -768,23 +768,39 @@ fn judge_provider_failure_escalates_once_without_retrying_or_executing() {
 
 #[test]
 fn judge_aggregate_output_cap_escalates_and_never_parses_a_prefix() {
-    let oversized = format!(
-        "{{\"verdict\":\"allow\",\"reason\":\"{}\"}}",
-        "x".repeat(16 * 1024)
-    );
-    let stub = Stub::start(plan(Reply::Sse(text(&oversized)), None));
-    let finished = run_without_durable_analysis(auto_run(&stub));
-
-    assert_eq!(
-        finished.code,
-        Some(3),
-        "oversized judge response was accepted"
-    );
-    assert_eq!(
-        stub.generations().len(),
-        2,
-        "oversized output caused a retry"
-    );
+    for character in ["x", "€"] {
+        let oversized = format!(
+            "{{\"verdict\":\"allow\",\"reason\":\"{}\"}}",
+            character.repeat(16 * 1024)
+        );
+        let stub = Stub::start(plan(Reply::Sse(text(&oversized)), None));
+        let ego = auto_run(&stub);
+        let config = ego.home_path().join("config.toml");
+        let finished = run_without_durable_analysis(ego);
+        assert_eq!(
+            finished.code,
+            Some(3),
+            "oversized judge response was accepted"
+        );
+        assert_eq!(
+            stub.generations().len(),
+            2,
+            "oversized output caused a retry"
+        );
+        let events = durable_events(&config);
+        let response = events
+            .iter()
+            .find(|event| event["kind"]["kind"] == "JudgeResponse")
+            .unwrap();
+        let raw = response["kind"]["text"].as_str().unwrap();
+        assert!(!raw.is_empty());
+        assert!(raw.len() <= 16 * 1024);
+        assert!(
+            oversized.starts_with(raw),
+            "raw evidence is not the original prefix"
+        );
+        assert_eq!(response["kind"]["truncated"], true);
+    }
 }
 
 #[test]
@@ -883,4 +899,59 @@ fn explicit_none_judge_does_not_generate_an_advisory_call() {
     let finished = ego.run();
     assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
     assert_eq!(stub.generations().len(), 1);
+}
+
+// Catches: a single provider JSON fence escalates instead of authorizing its exact call.
+#[test]
+fn fenced_judge_response_executes_and_persists_raw_text() {
+    // Recorded from OpenRouter anthropic/claude-haiku-4.5, 2026-10-10,
+    // with production JUDGE_INSTRUCTIONS and a bounded pwd action.
+    let raw = include_str!("fixtures/judge-haiku-response.txt");
+    let stub = Stub::start(plan(Reply::Sse(text(raw)), Some(Reply::Sse(text("done")))));
+    let ego = auto_run(&stub);
+    let config = ego.home_path().join("config.toml");
+    let finished = ego.run();
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    assert_judge_decision(
+        &durable_events(&config),
+        Some(true),
+        MODEL,
+        &["main", "judge", "main"],
+    );
+    assert_raw_judge_response(&durable_events(&config), raw);
+    assert!(
+        !finished.stdout.contains("```json"),
+        "raw judge output became public"
+    );
+    assert_eq!(stub.generations().len(), 3);
+}
+
+// Catches: a malformed paid judge response is discarded rather than retained for diagnosis.
+#[test]
+fn malformed_judge_response_persists_raw_text_without_public_disclosure() {
+    let raw = "unparseable private judge response";
+    let stub = Stub::start(plan(Reply::Sse(text(raw)), None));
+    let ego = auto_run(&stub);
+    let config = ego.home_path().join("config.toml");
+    let finished = ego.run();
+    assert_eq!(finished.code, Some(3));
+    assert_raw_judge_response(&durable_events(&config), raw);
+    assert!(!finished.stdout.contains(raw));
+    assert_eq!(stub.generations().len(), 2);
+}
+
+fn assert_raw_judge_response(events: &[serde_json::Value], raw: &str) {
+    let response = events
+        .iter()
+        .find(|event| event["kind"]["kind"] == "JudgeResponse")
+        .expect("raw judge response is durable even when parsing fails");
+    assert_eq!(response["kind"]["text"], raw);
+    assert_eq!(response["kind"]["truncated"], false);
+    let started = events
+        .iter()
+        .find(|event| {
+            event["kind"]["kind"] == "GenerationStarted" && event["kind"]["role"] == "judge"
+        })
+        .unwrap();
+    assert_eq!(response["kind"]["attempt"], started["kind"]["attempt"]);
 }

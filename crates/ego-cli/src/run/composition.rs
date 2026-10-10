@@ -1205,13 +1205,24 @@ impl CliAutoPreflight {
                 });
             }
         };
-        let request = fixed_judge_request(
+        let mut request = fixed_judge_request(
             identity,
             profile.request_model(),
             profile.output_ceiling(),
             confinement,
             ExecCaps::empty(),
         );
+        request.thinking = match model::judge_thinking(profile.capabilities()) {
+            Ok(thinking) => thinking,
+            Err(error) => {
+                return Self::new(CapturedAutoPreflight::Refused {
+                    diagnostic: format!(
+                        "judge model `{}` is incompatible with the fixed judge request: {error}",
+                        identity.0,
+                    ),
+                });
+            }
+        };
         let state =
             match validate_judge_request(identity, profile.capabilities(), &request, |request| {
                 profile.ensure_expressible(request)

@@ -2023,7 +2023,7 @@ impl SessionState {
                 }
             }
             EventKind::FallbackDecision { .. } => {}
-            EventKind::ExecutionObserved { .. } => {}
+            EventKind::ExecutionObserved { .. } | EventKind::JudgeResponse { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
                 usage,

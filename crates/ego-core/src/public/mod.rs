@@ -732,6 +732,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         EventKind::GenerationStarted { .. }
         | EventKind::AttemptSettled { .. }
         | EventKind::UsageCorrected { .. }
-        | EventKind::ExecutionObserved { .. } => None,
+        | EventKind::ExecutionObserved { .. }
+        | EventKind::JudgeResponse { .. } => None,
     }
 }

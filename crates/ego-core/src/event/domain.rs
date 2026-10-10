@@ -227,7 +227,7 @@ pub enum OccupancyProvenance {
 /// ReasoningDelta | ReasoningState | ToolCallStarted |
 /// ToolCallDelta | ToolCallCompleted | PermissionRequested |
 /// PermissionAmended | PermissionDecided | GenerationStarted |
-/// ExecutionObserved | FallbackDecision | AttemptSettled | UsageUpdated | UsageCorrected |
+/// ExecutionObserved | FallbackDecision | JudgeResponse | AttemptSettled | UsageUpdated | UsageCorrected |
 /// ContextWindowUpdated | TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled |
@@ -451,6 +451,13 @@ pub enum EventKind {
     ExecutionObserved {
         observation: ExecObservation,
         probe_evidence: Option<crate::store::evidence::EvidenceRef>,
+    },
+    /// Private bounded judge text, retained even when decoding fails.
+    /// This is evidence, never conversation content or permission authority.
+    JudgeResponse {
+        attempt: AttemptRef,
+        text: String,
+        truncated: bool,
     },
     /// One attempt reached a terminal state.
     ///
@@ -748,6 +755,7 @@ impl EventKind {
             EventKind::GenerationStarted { .. } => "generation_started",
             EventKind::FallbackDecision { .. } => "fallback_decision",
             EventKind::ExecutionObserved { .. } => "execution_observed",
+            EventKind::JudgeResponse { .. } => "judge_response",
             EventKind::AttemptSettled { .. } => "attempt_settled",
             EventKind::UsageUpdated { .. } => "usage_updated",
             EventKind::UsageCorrected { .. } => "usage_corrected",

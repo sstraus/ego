@@ -4846,6 +4846,18 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             },
         )?;
 
+        let (raw, truncated) = decoder.response_evidence();
+        self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::JudgeResponse {
+                attempt: reference,
+                text: raw.to_owned(),
+                truncated,
+            },
+        )?;
+
         if interrupted {
             return Ok(JudgeRun::Ended(ExitReason::Cancelled(
                 self.cancel.cause().unwrap_or(CancelCause::User),
