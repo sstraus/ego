@@ -1260,7 +1260,7 @@ mod confinement_ceiling_tests {
         );
         assert_eq!(
             confinement_ceiling(&args(None), None, None),
-            Confinement::Workspace,
+            Confinement::Adaptive,
             "the default applies when neither flag nor configuration names a ceiling"
         );
         assert_eq!(

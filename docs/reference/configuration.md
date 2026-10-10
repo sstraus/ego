@@ -41,7 +41,7 @@ higher or lower layer supplies a value.
 | `model` | Full `provider/model` string | No fixed model; interactive first-run selection, explicit/configured model in headless |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | Model-declared default; unknown requires explicit selection |
 | `mode` | `plan`, `default`, `auto`, `edits`, `yolo` | Trusted interactive with no configured mode uses `auto`; ordinary unresolved policy uses `default` |
-| `sandbox` | `ro`, `workspace`, `adaptive`, `off` | `workspace` absent a stronger floor/selection; adaptive is opt-in until its separate default change; mode is independent |
+| `sandbox` | `ro`, `workspace`, `adaptive`, `off` | `adaptive` when absent; explicit selections retain their meaning, system ceilings bind, mode is independent |
 | `max_mode` | Same mode vocabulary | Absent = no system maximum; system-only, does not select a mode |
 | `roots` | Array of `{path="...", access="read"\|"read-write"}` | Under strict levels, absent declaration adds read-write `~/Gits` when present. Adaptive omits that implicit root; `[]` clears configured roots, while adaptive derived roots remain. System declarations cap additional roots |
 | `exec_paths` | Array of paths | Empty; extra read/executable roots, under system root bounds |

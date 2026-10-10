@@ -67,7 +67,10 @@ extra root. Adaptive omits that implicit root. Use `ego config set 'roots=[]'` t
 root declarations have stricter read-only constraints and cannot replace this
 user declaration. The effective perimeter reports the resulting source.
 
-Select `--sandbox adaptive` independently of permission mode `auto`. Adaptive
+Adaptive is the fresh-config default, independently of permission mode `auto`.
+Explicit `workspace`, `ro`, and `off` selections retain their behavior; no config
+file is rewritten. Select those levels when their stricter or open reach is
+required. Adaptive
 currently requires macOS Seatbelt and successful native capability probes;
 unsupported platforms fail admission with explicit alternatives. It captures
 operator `CARGO_HOME`, `RUSTUP_HOME`, trusted mbx `cache_dir`, validated git common

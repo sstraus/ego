@@ -437,8 +437,8 @@ impl std::error::Error for SpawnSpecError {}
 #[serde(rename_all = "lowercase")]
 pub enum Confinement {
     Ro,
-    #[default]
     Workspace,
+    #[default]
     Adaptive,
     Off,
 }
