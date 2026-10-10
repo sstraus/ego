@@ -199,7 +199,8 @@ mod tests {
             "adaptive must not inherit ~/Gits writes"
         );
         let workspace = ConfigLayer::parse(Source::User, "sandbox='workspace'").unwrap();
-        let mut effective = resolve(&[workspace.clone()], Trust::Untrusted, None).unwrap();
+        let mut effective =
+            resolve(std::slice::from_ref(&workspace), Trust::Untrusted, None).unwrap();
         assert!(defaults(&mut effective, &home).is_empty());
         assert_eq!(effective.roots[0].path, home.join("Gits"));
         assert_eq!(

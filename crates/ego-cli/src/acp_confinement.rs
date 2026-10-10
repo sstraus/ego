@@ -259,10 +259,12 @@ pub(crate) async fn warm_process_cache(
     cancel: CancelToken,
     root: &std::path::Path,
 ) -> Result<(), ControlError> {
-    for confinement in Confinement::ALL
-        .into_iter()
-        .filter(|candidate| candidate.within(ceiling))
-    {
+    for confinement in Confinement::ALL.into_iter().filter(|candidate| {
+        candidate.within(ceiling)
+            && (*candidate != Confinement::Adaptive
+                || cfg!(target_os = "macos")
+                || *candidate == ceiling)
+    }) {
         let policy = ego_tools::exec::admit_confinement(confinement, false, CanonPath::new(root))
             .map_err(|error| {
             ControlError::Internal(format!(
@@ -311,10 +313,12 @@ async fn initialize_once(
         })?;
 
     let mut measured = Vec::new();
-    for confinement in Confinement::ALL
-        .into_iter()
-        .filter(|candidate| candidate.within(ceiling))
-    {
+    for confinement in Confinement::ALL.into_iter().filter(|candidate| {
+        candidate.within(ceiling)
+            && (*candidate != Confinement::Adaptive
+                || cfg!(target_os = "macos")
+                || *candidate == ceiling)
+    }) {
         let policy =
             ego_tools::exec::admit_confinement(confinement, false, CanonPath::new(root.as_path()))
                 .map_err(|error| {

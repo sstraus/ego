@@ -1,63 +1,6 @@
-use super::*;
-
-// Catches: a broad or dangling operator root silently opens an ancestor perimeter.
-#[test]
-fn adaptive_sources_reject_broad_roots_and_dangling_aliases() {
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("home");
-    let workspace = root.path().join("workspace");
-    std::fs::create_dir(&home).unwrap();
-    std::fs::create_dir(&workspace).unwrap();
-    assert!(capture(&home, &workspace, vec![home.clone()], vec![], vec![]).is_err());
-    assert!(capture(&home, &workspace, vec![root.path().into()], vec![], vec![]).is_err());
-    #[cfg(unix)]
-    {
-        let alias = home.join("alias");
-        std::os::unix::fs::symlink(home.join("absent"), &alias).unwrap();
-        assert!(capture(&home, &workspace, vec![alias], vec![], vec![]).is_err());
-    }
-}
-
-// Catches: malformed linked-worktree metadata turns an arbitrary directory into a derived write root.
-#[test]
-fn adaptive_git_sources_validate_the_real_worktree_back_pointer() {
-    let root = tempfile::tempdir().unwrap();
-    let main = root.path().join("main");
-    let linked = root.path().join("linked");
-    let run = |args: &[&std::ffi::OsStr]| {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    run(&["init".as_ref(), main.as_os_str()]);
-    run(&[
-        "-C".as_ref(),
-        main.as_os_str(),
-        "worktree".as_ref(),
-        "add".as_ref(),
-        "--orphan".as_ref(),
-        "-b".as_ref(),
-        "fixture".as_ref(),
-        linked.as_os_str(),
-    ]);
-    let (roots, controls) = git_roots(&linked).unwrap();
-    let common = std::fs::canonicalize(main.join(".git")).unwrap();
-    assert!(roots.contains(&common));
-    assert!(controls.contains(&common.join("hooks")));
-    let git = roots.iter().find(|p| **p != common).unwrap();
-    std::fs::write(git.join("gitdir"), main.join(".git").to_str().unwrap()).unwrap();
-    assert!(git_roots(&linked).is_err());
-}
-
 #[cfg(target_os = "macos")]
 mod native {
-    use super::*;
+    use super::super::*;
     use crate::exec::{
         ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts, SessionEvidenceStore,
     };

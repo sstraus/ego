@@ -38,6 +38,10 @@ pub fn admit_confinement(
         ".aws",
         ".gnupg",
         ".netrc",
+        ".git-credentials",
+        ".config/gh/hosts.yml",
+        ".cargo/credentials",
+        ".cargo/credentials.toml",
         ".codex/auth.json",
         ".claude/.credentials.json",
         ".config/ego/credentials.json",
@@ -53,6 +57,7 @@ pub fn admit_confinement(
     .into_iter()
     .map(|path| home.join(path))
     .collect::<Vec<_>>();
+    credentials.extend(env("GH_CONFIG_DIR").map(|root| root.join("hosts.yml")));
     credentials.extend([cargo.join("credentials"), cargo.join("credentials.toml")]);
     let ego = env("EGO_HOME").unwrap_or_else(|| home.join(".ego"));
     credentials.extend([ego.join("auth.json"), ego.join("auth.json.tmp")]);
