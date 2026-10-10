@@ -34,7 +34,11 @@ mentions of LM Studio, vLLM, or llama.cpp are not additional selectable profiles
 ## API keys and model selection
 
 Set the relevant key in the process environment using your secret-management
-workflow. Then select a listed full slug with `-m`. Current built-in defaults
+workflow. Ego does not load a repository `.env` file. For Anthropic, a key
+available as `ANTHROPIC_API_KEY` in ego's process environment works; a key only
+in `.env` does not. The catalogue's `missing_credential` message recommends
+`ego auth login anthropic` but does not mention this environment alternative.
+Do not print the key or paste it into the conversation. Then select a listed full slug with `-m`. Current built-in defaults
 come from [models.toml](../../crates/ego-cli/catalogue/models.toml), not a hard-coded
 name in this guide. They currently name `openai/gpt-6.1-sol`,
 `openai-codex/gpt-6.1-sol`, `anthropic/claude-opus-5-5`, and
