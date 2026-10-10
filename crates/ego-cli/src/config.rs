@@ -192,6 +192,9 @@ async fn execute_inner(
                 })
                 .map_err(store_failure)?;
             roots::receipt(result, out)?;
+            output::note(
+                "Running sessions keep their current permissions; exit and resume to apply saved roots.",
+            );
         }
         ConfigAction::Set { target, key, value } => {
             let result = set_managed(&store, target.clone(), *key, value.clone())?;
