@@ -79,6 +79,36 @@ fn git_at(root: &Path, args: &[&std::ffi::OsStr]) {
 #[path = "support/adaptive_git_layouts.rs"]
 mod git_layouts;
 
+// Catches: the outside probe uses only the workspace parent even when that
+// parent is host-unwritable.
+#[test]
+fn adaptive_probe_uses_safe_outside_location_for_locked_workspace() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(root) = isolated("adaptive_probe_uses_safe_outside_location_for_locked_workspace")
+    else {
+        return;
+    };
+    let locked = root.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    for workspace in [locked.join("workspace")] {
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            execute(
+                admit(&workspace).unwrap(),
+                &root,
+                vec![
+                    "/usr/bin/touch".into(),
+                    workspace.join("created").into_os_string(),
+                ],
+            )
+        });
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.unwrap().is_ok());
+        assert!(workspace.join("created").is_file());
+    }
+}
+
 fn execute(
     policy: ego_core::permit::RunConfinement,
     root: &Path,
