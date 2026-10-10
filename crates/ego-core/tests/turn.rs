@@ -6593,6 +6593,9 @@ mod turn {
     }
 
     mod generation_boundary {
+        mod context_window {
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/context_window.rs"));
+        }
         mod judge_eval {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),

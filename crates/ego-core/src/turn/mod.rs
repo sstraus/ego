@@ -12,6 +12,7 @@
 
 mod catalogue;
 mod control;
+mod context_capacity;
 mod identity;
 mod journal;
 mod mcp_registry;
@@ -2849,6 +2850,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         error_kind,
                     } => (capture, generation, terminal, reason, pending, error_kind),
                 };
+            if let Some(message) = context_capacity::exhausted(
+                self.state().context,
+                self.state().context.window,
+            ) {
+                self.close_unstarted_siblings(turn, &pending)?;
+                return self.refuse_drive(turn, message, ExitReason::ContextOverflow);
+            }
             let policy = capture.policy();
             let policy_snapshot = capture.snapshot();
 
@@ -3469,6 +3477,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     Controlled::Failed(cause) => return Err(cause),
                 };
 
+                if let Some(message) = context_capacity::exhausted(
+                    self.state().context,
+                    profile.capabilities.max_context_tokens,
+                ) {
+                    return self.refuse(turn, message, ExitReason::ContextOverflow);
+                }
+
                 // Per candidate: a fallback runs on a different model, and the
                 // model must be told the one actually answering.
                 let identity = self.config.identity.as_ref().map(|identity| {
@@ -3887,7 +3902,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             None,
             EventKind::Error {
                 message: reason,
-                kind: ErrorKind::Unclassified,
+                kind: if exit == ExitReason::ContextOverflow {
+                    ErrorKind::ContextOverflow
+                } else {
+                    ErrorKind::Unclassified
+                },
             },
         )?;
         Ok(Generated::Ended(exit))
