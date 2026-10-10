@@ -81,3 +81,29 @@ fn webhook_url_path_credential_must_not_be_disclosed_to_judge() {
         assert!(wire.contains("hooks.slack.com"));
     }
 }
+
+// Catches: HTTP-only projection releases other URL schemes' userinfo and bearer paths.
+#[test]
+fn non_http_url_credentials_must_not_be_disclosed_to_judge() {
+    let mut leaks = Vec::new();
+    for url in [
+        "ftp://alice:private-password@files.example.com/private-path-token",
+        "git+ssh://alice:private-password@git.example.com/private-path-token",
+    ] {
+        for argv in [
+            vec!["curl".into(), url.into()],
+            vec!["bash".into(), "-c".into(), format!("curl {url}")],
+            vec!["bash".into(), "-c".into(), format!("curl '{url}'")],
+        ] {
+            let borrowed = argv.iter().map(String::as_str).collect::<Vec<_>>();
+            let wire = disclosed(&borrowed);
+            if wire.contains("private-password") || wire.contains("private-path-token") {
+                leaks.push(argv);
+            }
+        }
+    }
+    assert!(
+        leaks.is_empty(),
+        "URL credentials disclosed to judge: {leaks:?}"
+    );
+}

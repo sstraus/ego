@@ -687,7 +687,7 @@ fn cache_script(script: &str) -> Option<String> {
 
 fn project_url(word: &str) -> Option<String> {
     let url = url::Url::parse(word).ok()?;
-    matches!(url.scheme(), "http" | "https").then(|| {
+    url.has_host().then(|| {
         format!(
             "<url:scheme={};host={};port={};path-segments={}>",
             url.scheme(),
