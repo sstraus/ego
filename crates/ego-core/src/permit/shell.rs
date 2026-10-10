@@ -295,15 +295,7 @@ fn read_only_command(raw: &[String]) -> bool {
                 _ => false,
             }
         }
-        "sed" => {
-            words.get(1).is_some_and(|word| word == "-n")
-                && words.get(2).is_some_and(|word| {
-                    word.trim_matches(['\'', '"'])
-                        .chars()
-                        .all(|c| c.is_ascii_digit() || matches!(c, ',' | 'p' | '$'))
-                })
-                && words.len() >= 4
-        }
+        "sed" => print_only_sed(&words),
         "find" => words[1..].iter().all(|word| {
             !word.starts_with('-')
                 || matches!(
@@ -335,6 +327,17 @@ fn read_only_command(raw: &[String]) -> bool {
         }),
         _ => false,
     }
+}
+
+fn print_only_sed(words: &[String]) -> bool {
+    words.len() >= 4
+        && words[1] == "-n"
+        && words[2].trim_matches(['\'', '"']).strip_suffix('p').is_some_and(|range| {
+            !range.is_empty() && range.chars().all(|c| c.is_ascii_digit() || matches!(c, ',' | '$'))
+        })
+        // After the one script, only file operands qualify. sed accepts script
+        // options anywhere, including after a file on GNU implementations.
+        && words[3..].iter().all(|word| !word.starts_with('-'))
 }
 
 fn secret_flag(word: &str) -> bool {
@@ -540,13 +543,7 @@ pub fn cache_argv(argv: &[String]) -> Vec<String> {
                 *value = "<data:stdout>".into();
             }
         }
-        "sed"
-            if argv.len() >= 4
-                && argv[1] == "-n"
-                && argv[2]
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || matches!(c, ',' | 'p' | '$')) =>
-        {
+        "sed" if print_only_sed(argv) => {
             result[2] = "<data:print-range>".into();
         }
         _ => {}
