@@ -63,12 +63,12 @@ fn known_full_context_refuses_before_provider_request() {
     }
 }
 
-// Catches: stopping neither the turn nor its continuation after over-window usage.
+// Catches: failing a delivered answer or clamping over-window provider accounting.
 #[test]
-fn over_window_report_stops_and_preserves_provider_accounting() {
+fn over_window_report_completes_and_preserves_provider_accounting() {
     let usage = tokens(100_000, 250_000, 0, 6_048);
     let (exit, state, requests, _) = run_window(None, Some(usage));
-    assert_eq!(exit, ExitReason::ContextOverflow);
+    assert_eq!(exit, ExitReason::Completed);
     assert_eq!(requests, 1);
     assert_eq!(state.usage, usage);
     assert_eq!(state.context.used_tokens, Some(356_048));

@@ -2851,12 +2851,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         error_kind,
                     } => (capture, generation, terminal, reason, pending, error_kind),
                 };
-            if let Some(message) =
-                context_capacity::exhausted(self.state().context, self.state().context.window)
-            {
-                self.close_unstarted_siblings(turn, &pending)?;
-                return self.refuse_drive(turn, message, ExitReason::ContextOverflow);
-            }
             let policy = capture.policy();
             let policy_snapshot = capture.snapshot();
 
