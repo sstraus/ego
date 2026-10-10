@@ -1120,11 +1120,12 @@ through the same interactive owner as the answer and never through the
 ephemeral status row. The row is drawn when the call finishes, because it needs
 the outcome and the duration: `✓ read calc.py · 2 lines · 75ms`, `✓ edit
 calc.py +3 -1 · 12ms`, `✓ $ seq 1 20 · exit 0 · 0.4s`, `✗ $ make · exit 2 ·
-1.2s`, `✗ read gone.py · …No such file or directory · 3ms`. `✓` and `✗` are the
+1.2s`, `✗ read gone.py · …no such file or directory · 3ms`. `✓` and `✗` are the
 outcome and a failed call never carries `✓`. An `exec` row is followed by the
 last three lines of its output, and a line saying how many earlier lines were
-left out. Execution and human approval wait are measured separately with a
-monotonic clock and saved before the completion event. The row shows the
+left out. Execution (or preparation that fails before execution) and human
+approval wait are measured separately with a monotonic clock and saved before
+the completion event. The row shows the
 execution duration and, when nonzero, `approval 15.0s`. Replay uses the saved
 values. Calls without an execution measurement show `duration unavailable`.
 A row is cut to the terminal width at the moment

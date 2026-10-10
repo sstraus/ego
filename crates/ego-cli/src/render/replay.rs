@@ -160,12 +160,7 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
 
 #[cfg(test)]
 mod tests {
-    mod measured {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/render/replay_measurements.rs"
-        ));
-    }
+    mod measured;
     use super::*;
     use crate::output::Diagnostics;
     use ego_core::event::domain::Envelope;

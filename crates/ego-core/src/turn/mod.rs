@@ -4944,9 +4944,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             // never established.
             Err(refusal) => return Ok(answered(false, refusal)),
         };
+        let preparation_started = Instant::now();
         let prepared = match self.tools.prepare_selected(selected, &call.args) {
             Ok(prepared) => prepared,
-            Err(refusal) => return Ok(answered(false, refusal)),
+            Err(refusal) => {
+                call.timing.execution_ms = Some(
+                    u64::try_from(preparation_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                );
+                return Ok(answered(false, refusal));
+            }
         };
         let (tool, mut prepared, mut presentation) = match prepared {
             PreparedToolCall::Task(_) => {
