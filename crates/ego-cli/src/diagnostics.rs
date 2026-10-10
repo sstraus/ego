@@ -42,8 +42,8 @@ use tracing_subscriber::fmt::writer::BoxMakeWriter;
 /// The filter every resolution starts from, before the operator's own is
 /// appended.
 ///
-/// `ego::body` is the target of the two sites that log a whole upstream
-/// response body (`ego-ai`'s `http::refusal` and `oauth`'s login refusal). The
+/// `ego::body` is the target of provider request body logging and upstream
+/// refusal bodies (`ego-ai`'s `http::refusal` and `oauth`'s login refusal). The
 /// ordering is the mechanism: a bare `EGO_LOG=info`, or even `trace`, leaves
 /// them off, because a directive naming a target beats a global level;
 /// `EGO_LOG=ego::body=debug` turns them on, because a later directive for an

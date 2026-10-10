@@ -166,6 +166,9 @@ impl<'a> RequestTarget<'a> {
     /// because it is the same two headers for every streaming JSON API, and a
     /// mapping that had to remember them is a mapping that can forget one.
     pub fn post_json(&self, path: &str, body: Vec<u8>) -> HttpRequest {
+        // Explicit opt-in only: request bodies can contain private prompt text.
+        // Never include headers, which carry credentials.
+        tracing::debug!(target: "ego::body", path, body = %String::from_utf8_lossy(&body), "provider request");
         let mut headers = Vec::with_capacity(self.headers.len() + 2);
         headers.push(
             ego_core::permit::HttpHeader::new("content-type", b"application/json".to_vec())
