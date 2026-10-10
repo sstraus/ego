@@ -41,3 +41,36 @@ fn quoted_dot_prefixed_secret_path_keeps_sensitive_marker() {
     let structure = skeleton("cat './.env'");
     assert!(structure.contains(":sensitive"), "{structure}");
 }
+
+// Catches: rm_flag matching short flags only, so `rm --recursive --force build`
+// shows `<secret:option-operand>` instead of the deletion target.
+#[test]
+fn rm_long_flags_keep_the_target() {
+    for flags in [
+        "--recursive --force",
+        "--force --recursive",
+        "--dir",
+        "--verbose",
+        "--interactive",
+        "--recursive -f",
+    ] {
+        let script = format!("rm {flags} target/build-cache");
+        let structure = skeleton(&script);
+        assert!(!structure.contains("<secret:"), "{script}: {structure}");
+        assert!(
+            structure.contains("target/build-cache"),
+            "{script}: {structure}"
+        );
+        assert!(
+            structure.contains(flags.split(' ').next().unwrap()),
+            "{script}: {structure}"
+        );
+
+        let mut argv = vec!["rm".to_string()];
+        argv.extend(flags.split(' ').map(String::from));
+        argv.push("target/build-cache".into());
+        let native = observe(&argv).skeleton;
+        assert!(!native.contains("<secret:"), "{argv:?}: {native}");
+        assert!(native.contains("target/build-cache"), "{argv:?}: {native}");
+    }
+}
