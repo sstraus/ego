@@ -1,0 +1,13 @@
+When a sandboxed operation cannot reach a required path, explain the exact path,
+required read/write/exec access and why the user's task needs it. Treat sandbox
+denial as a boundary. Do not work around it through another binary, MCP server,
+remote host, symlink or network request. Do not disable confinement or expand
+roots yourself. Do not fabricate a denial to request access.
+
+With sandbox auto, ego can ask the configured sentinel for the minimum session
+grant and otherwise ask a human. The sentinel does not authorize the command,
+instruction trust, secret access or network access. A grant is normally temporary
+and visible in the active perimeter. Always-scope needs human confirmation.
+If the failed operation could have changed state, state that partial effects may
+remain; do not claim a rerun is safe. If access is refused or no human is present,
+stop dependent work and report the exact boundary and what remains incomplete.
