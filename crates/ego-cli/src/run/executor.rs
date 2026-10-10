@@ -71,12 +71,14 @@ pub(super) fn settlement(termination: RunTermination) -> Result<RunSettlement, R
         RunTermination::ContextOverflow { .. } => Ok(RunSettlement::ContextOverflow),
         // A known failure, not an executor error: the turn ended and its
         // effect is known, so the run settles and the next prompt is admitted.
-        // Only `ProviderUncertain` falls to the catch-all below and leaves the
-        // run uncertain. regression case: an overloaded provider settled every
-        // provider failure as uncertain and wedged the conversation.
-        RunTermination::Provider { message } => Ok(RunSettlement::Interrupted {
-            diagnostic: Some(message),
-        }),
+        // A post-submission UsageError also records a known refusal (such as
+        // HTTP 400), not transport ambiguity. ProviderUncertain still falls
+        // to the catch-all and leaves the run uncertain.
+        RunTermination::UsageError { message } | RunTermination::Provider { message } => {
+            Ok(RunSettlement::Interrupted {
+                diagnostic: Some(message),
+            })
+        }
         // Not the catch-all below: an executor error says the run could not
         // be carried out, and a paused run was carried out exactly as far as
         // it was asked to go. It is a settlement, and the one the host that
@@ -959,3 +961,59 @@ impl RunExecutor for CliRunExecutor {
 
 #[cfg(test)]
 mod regression_case_tests;
+
+#[cfg(test)]
+mod regression_case_tests {
+    use super::*;
+
+    // Catches: widening known-failure settlement to include a lost exchange.
+    #[test]
+    fn ambiguous_provider_failure_remains_an_executor_error() {
+        let error = settlement(RunTermination::ProviderUncertain {
+            message: "response lost after output".to_owned(),
+        })
+        .expect_err("an ambiguous exchange must not settle as known");
+        assert_eq!(error.to_string(), "response lost after output");
+    }
+
+    // Catches: regression of the existing known transient-failure path.
+    #[test]
+    fn known_provider_failure_keeps_its_failed_settlement() {
+        assert_eq!(
+            settlement(RunTermination::Provider {
+                message: "the provider returned HTTP 503".to_owned(),
+            })
+            .expect("known provider failure"),
+            RunSettlement::Interrupted {
+                diagnostic: Some("the provider returned HTTP 503".to_owned()),
+            }
+        );
+    }
+
+    // Catches: an internal defect being classified as a known provider refusal.
+    #[test]
+    fn internal_failure_is_not_reclassified_as_known() {
+        assert!(
+            settlement(RunTermination::Failed {
+                message: "journal write failed".to_owned(),
+            })
+            .is_err()
+        );
+    }
+
+    // Catches: a known post-submission usage failure reaches the executor-error
+    // path and is persisted as Uncertain instead of a failed turn.
+    #[test]
+    fn known_usage_failure_does_not_become_uncertain() {
+        let message = "the provider returned HTTP 400".to_owned();
+        assert_eq!(
+            settlement(RunTermination::UsageError {
+                message: message.clone(),
+            })
+            .expect("a known usage failure settles"),
+            RunSettlement::Interrupted {
+                diagnostic: Some(message),
+            }
+        );
+    }
+}

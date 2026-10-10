@@ -444,3 +444,67 @@ fn an_overloaded_provider_is_retried_visibly_then_fails_known_and_the_next_promp
     assert!(order[2..].iter().all(|step| step == "answer"), "{order:?}");
     host.finish();
 }
+
+/// Catches: a received HTTP 400 becoming Uncertain and blocking the next ACP
+/// prompt, or settlement rewriting the failed attempt's delivery evidence.
+#[test]
+fn known_http_400_does_not_wedge_the_next_acp_prompt_or_erase_delivery() {
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Status(400), Reply::Sse(text("recovered"))],
+        ..Plan::default()
+    });
+    let mut host = host(&places, &stub);
+    host.initialize();
+    let session = host.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
+    let failed = host.request("session/prompt", prompt(&session));
+    let message = failed["error"]["message"].as_str().expect("failed turn");
+    assert_eq!(
+        message, "the turn failed: the provider returned HTTP 400",
+        "{failed}"
+    );
+    assert!(failed["error"].get("data").is_none(), "{failed}");
+    assert_eq!(
+        stub.generations().len(),
+        1,
+        "a usage refusal is not retried"
+    );
+
+    let log = std::fs::read_to_string(
+        places
+            .home_path()
+            .join("sessions")
+            .join(&session)
+            .join("events.jsonl"),
+    )
+    .expect("durable failed turn journal");
+    let attempt = log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("journal record"))
+        .filter_map(|record| record.get("payload").cloned())
+        .filter_map(|payload| {
+            serde_json::from_value::<ego_core::store::session_store::SessionEntry>(payload).ok()
+        })
+        .find_map(|entry| match entry {
+            ego_core::store::session_store::SessionEntry::Event(event) => match event.kind {
+                ego_core::event::domain::EventKind::AttemptSettled { outcome, .. } => Some(outcome),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("failed attempt evidence");
+    assert_eq!(
+        attempt.delivery(),
+        ego_core::generator::attempt::DeliveryCertainty::PossiblySent,
+        "settlement must preserve delivery evidence"
+    );
+
+    let next = host.request("session/prompt", prompt(&session));
+    assert_eq!(next["result"]["stopReason"], "end_turn", "{next}");
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "the next prompt reached the provider"
+    );
+    host.finish();
+}
