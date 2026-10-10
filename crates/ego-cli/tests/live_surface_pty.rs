@@ -4838,11 +4838,11 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     let quit_start = output.len();
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    until_normalized(&reader, &mut output, quit_start, "unsent drafts");
+    until_normalized(&reader, &mut output, quit_start, "Saved drafts:");
     bounded_exit(child);
     drain(&reader, &mut output);
     assert!(
-        normalized(&output[quit_start..]).contains("unsent drafts"),
+        normalized(&output[quit_start..]).contains("Saved drafts:"),
         "/quit must be accepted before the process exits: {:?}",
         normalized(&output[quit_start..]),
     );
@@ -6160,7 +6160,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     assert!(status.success(), "interactive process failed: {status:?}");
     drain(&reader, &mut output);
     assert!(
-        normalized(&output[quit_start..]).contains("unsent drafts"),
+        normalized(&output[quit_start..]).contains("Saved drafts:"),
         "/quit did not render its explicit exit accounting"
     );
     let generations = stub.generations();
@@ -6497,7 +6497,7 @@ fn quitting_after_a_turn_prints_the_resume_hint_for_that_session() {
 fn quitting_without_any_turn_prints_no_resume_hint() {
     let after_quit = output_after_quit(None);
     assert!(
-        after_quit.contains("unsent drafts"),
+        after_quit.contains("Saved drafts:"),
         "exit accounting missing, the run did not reach its exit: {after_quit:?}"
     );
     assert!(
