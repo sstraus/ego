@@ -6,6 +6,11 @@ use super::*;
 pub(super) struct TokioRetryPause;
 
 impl ego_core::turn::RetryPause for TokioRetryPause {
+    fn jitter_basis_points(&self) -> u16 {
+        let random = uuid::Uuid::new_v4();
+        u16::from_be_bytes([random.as_bytes()[0], random.as_bytes()[1]]) % 2_501
+    }
+
     fn pause(&self, delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
         Box::pin(tokio::time::sleep(delay))
     }

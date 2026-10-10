@@ -500,9 +500,12 @@ a served session anything about its workspace.
 Final retry semantics are owned above provider mappings. `--retry N` permits
 at most N additional attempts on the same resolved model after a `Transient`
 failure that was `DefinitelyUnsent` or emitted no text, reasoning or tool
-call. Each retry waits 1, 2, 4 … seconds (at most 60), or the provider's
-`Retry-After`, and is announced to the host while it waits. `ego acp`
-sessions allow six retries; a headless run defaults to none. Each repeatable `--fallback P/M` is an ordered
+call. Each retry uses exponential backoff of 1, 2, 4 … seconds (at most 60),
+with up to 25% downward jitter, or the provider's `Retry-After` without jitter.
+`Retry-After` accepts delta seconds and HTTP-date; `retry-after-ms` takes precedence.
+A provider wait above 60 seconds stops the plan rather than retrying early. Each retry is announced to the host while it waits. `ego acp`
+sessions and interactive seats allow six retries; a headless run defaults to none.
+An explicit `--retry 0` disables interactive retries. Each repeatable `--fallback P/M` is an ordered
 candidate that is re-resolved from current facts and attempted only after
 capability and request-expressibility checks preserve tools, images, schemas,
 limits, and reasoning state. A possibly-sent attempt that showed output stops

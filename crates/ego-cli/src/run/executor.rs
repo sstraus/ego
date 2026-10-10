@@ -26,7 +26,7 @@ use super::*;
 /// served better by six visible retries with backoff than by a turn that dies
 /// on the first overload. A headless `ego run` keeps `--retry 0` by default,
 /// because a script owns its own retry policy and reads exit 4 for it.
-pub(super) const ACP_PROVIDER_RETRIES: u32 = 6;
+pub(super) const ACP_PROVIDER_RETRIES: u32 = crate::cli::INTERACTIVE_PROVIDER_RETRIES;
 
 pub(super) fn public_result_artifact(
     result: Value,

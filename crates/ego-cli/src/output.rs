@@ -545,6 +545,19 @@ impl EventSink for TextSink<'_> {
                     self.out.note(&message);
                 }
             }
+            PublicEvent::ProviderRetry {
+                attempt,
+                limit,
+                delay_ms,
+                cause,
+                ..
+            } if !self.quiet => {
+                self.finish();
+                self.out.note(&format!(
+                    "{cause} — connection problem, retrying in {:.1}s (attempt {attempt}/{limit})",
+                    *delay_ms as f64 / 1_000.0
+                ));
+            }
             PublicEvent::Error { message, .. } => {
                 self.finish();
                 self.out.note(message);

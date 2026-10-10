@@ -152,7 +152,7 @@ async fn an_error_status_carries_its_retry_after_and_never_relays_a_raw_body() {
     );
 
     let unreadable = vec![
-        HttpHeader::new("retry-after", b"Wed, 21 Oct 2026 07:28:00 GMT".to_vec()).expect("header"),
+        HttpHeader::new("retry-after", b"Wed, 21 Oct 2015 07:28:00 GMT".to_vec()).expect("header"),
     ];
     let dated = decode(&wire, 503, unreadable, "").await;
     assert_eq!(
@@ -161,6 +161,26 @@ async fn an_error_status_carries_its_retry_after_and_never_relays_a_raw_body() {
             "the provider returned HTTP 503 with an empty body".to_owned(),
             None
         )],
-        "an HTTP-date Retry-After is not read as seconds"
+        "an expired HTTP-date Retry-After is not used"
     );
+}
+
+#[tokio::test]
+async fn all_responses_mappings_retry_sdk_transient_statuses_and_not_invalid_requests() {
+    // Catches: 409 conflicts or 529 overloads bypass shared retry classification.
+    for (name, wire) in mappings() {
+        for status in [408, 409, 429, 500, 503, 529] {
+            let events = decode(
+                wire.as_ref(),
+                status,
+                vec![HttpHeader::new("retry-after-ms", b"1250".to_vec()).unwrap()],
+                "",
+            )
+            .await;
+            assert_eq!(kinds(&events), [ErrorKind::Transient], "{name} {status}");
+            assert_eq!(causes(&events)[0].1, Some(Duration::from_millis(1250)));
+        }
+        let events = decode(wire.as_ref(), 400, Vec::new(), "").await;
+        assert_eq!(kinds(&events), [ErrorKind::Invalid], "{name}");
+    }
 }

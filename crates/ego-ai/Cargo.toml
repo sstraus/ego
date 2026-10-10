@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+httpdate = "1.0.3"
 ego-core.workspace = true
 futures = "0.3.34"
 bytes = "1.10"
@@ -22,6 +23,7 @@ serde_json = { version = "1.0.151", features = ["raw_value"] }
 tracing = "0.1.44"
 url = "2.5.8"
 [dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }
 
 [lints]

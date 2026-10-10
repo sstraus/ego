@@ -376,6 +376,28 @@ async fn one_turn(
     wire: &'static dyn WireFormat,
     transcript: impl Into<String>,
 ) -> (ExitReason, SessionState) {
+    let (outcome, state) = turn_over_http(
+        slug,
+        row,
+        wire,
+        StubHttp::replaying(transcript),
+        0,
+        Arc::new(NoRetryPause),
+        Vec::new(),
+    )
+    .await;
+    (outcome.exit_reason, state)
+}
+
+async fn turn_over_http(
+    slug: &str,
+    row: ProviderRow,
+    wire: &'static dyn WireFormat,
+    http: Arc<dyn Http>,
+    retry: u32,
+    retry_pause: Arc<dyn ego_core::turn::RetryPause>,
+    registry: Vec<Arc<dyn Tool>>,
+) -> (ego_core::turn::TurnOutcome, SessionState) {
     let slug = ModelSlug::parse(slug).expect("a constant this file controls");
     // Through the catalogue rather than around it: "configuration" is the
     // claim, and a row handed straight to the generator would prove only that
@@ -390,7 +412,6 @@ async fn one_turn(
         .resolve(&FakeCredentials::holding(KEY))
         .expect("every variable is set on this fake machine");
 
-    let http: Arc<dyn Http> = StubHttp::replaying(transcript);
     let generator = Arc::new(WireGenerator::new(
         resolved.row.clone(),
         resolved.wire,
@@ -403,7 +424,6 @@ async fn one_turn(
     let process = NoProcess;
     let evidence = NoEvidence;
     let foreign: Arc<NoForeign> = Arc::new(NoForeign);
-    let registry: Vec<Arc<dyn Tool>> = Vec::new();
     let gate = SharedBudgetGate::new(BudgetGate::new(usd("10")));
 
     let mut loop_ = TurnLoop::new(
@@ -435,12 +455,12 @@ async fn one_turn(
                 system: None,
                 identity: None,
                 token_ceiling: None,
-                retry: 0,
+                retry,
                 fallbacks: Vec::new(),
             },
             admission: Arc::new(EvidenceAdmissionService::new()),
             invocation: RunInvocationId::new(),
-            retry_pause: Arc::new(NoRetryPause),
+            retry_pause,
         },
         Tools::new(
             &registry,
@@ -462,7 +482,7 @@ async fn one_turn(
         .await
         .expect("the store accepted every append");
     (
-        outcome.exit_reason,
+        outcome,
         loop_.into_state().expect("journal ownership is released"),
     )
 }
@@ -840,5 +860,247 @@ struct NoRetryPause;
 impl ego_core::turn::RetryPause for NoRetryPause {
     fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
         Box::pin(futures::future::ready(()))
+    }
+}
+
+// regression case: real HTTP framing and body truncation, with no external provider.
+const CODEX_TEXT: &str = include_str!("goldens/profile/openai-codex/stream/text.sse");
+const CODEX_TOOL: &str = include_str!("goldens/profile/openai-codex/stream/tool_calls.sse");
+
+struct SocketHttp {
+    base: String,
+    client: reqwest::Client,
+}
+
+impl Http for SocketHttp {
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        Box::new(SocketCall {
+            base: self.base.clone(),
+            client: self.client.clone(),
+        })
+    }
+}
+
+struct SocketCall {
+    base: String,
+    client: reqwest::Client,
+}
+
+impl HttpCall for SocketCall {
+    fn execute(
+        &mut self,
+        call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        let (_, _, _, request) = call.into_parts();
+        let mut builder = self
+            .client
+            .post(format!("{}{}", self.base, request.path()))
+            .body(request.body().to_vec());
+        for header in request.headers() {
+            builder = builder.header(header.name(), header.value());
+        }
+        Box::pin(async move {
+            let response = builder.send().await.map_err(|error| {
+                TransportError::possibly_sent(TransportFailure::Exchange(error.to_string()))
+            })?;
+            let status = response.status().as_u16();
+            let body = response.bytes_stream().map(|chunk| {
+                chunk.map(|bytes| bytes.to_vec()).map_err(|error| {
+                    TransportError::possibly_sent(TransportFailure::ResponseBody(error.to_string()))
+                })
+            });
+            Ok(OneHopResponse::streaming_response(
+                status,
+                Vec::new(),
+                body.boxed(),
+            ))
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordedBodyPause(Mutex<Vec<std::time::Duration>>);
+impl ego_core::turn::RetryPause for RecordedBodyPause {
+    fn pause(&self, delay: std::time::Duration) -> BoxFuture<'static, ()> {
+        self.0.lock().unwrap().push(delay);
+        Box::pin(future::ready(()))
+    }
+}
+
+async fn dropped_codex_turn(
+    prefix: &str,
+    retry: u32,
+) -> (
+    ego_core::turn::TurnOutcome,
+    SessionState,
+    Vec<Vec<u8>>,
+    Vec<std::time::Duration>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let server_seen = seen.clone();
+    let prefix = prefix.to_owned();
+    let server = tokio::spawn(async move {
+        let mut index = 0;
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                request.extend_from_slice(&buf[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let size: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(str::to_owned)
+                        })
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    if request.len() >= end + 4 + size {
+                        break;
+                    }
+                }
+            }
+            server_seen.lock().unwrap().push(request);
+            let body = if index == 0 { &prefix } else { CODEX_TEXT };
+            let size = body.len() + if index == 0 { 128 } else { 0 };
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+            index += 1;
+        }
+    });
+    let pause = Arc::new(RecordedBodyPause::default());
+    let http = Arc::new(SocketHttp {
+        base,
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+    });
+    let (outcome, state) = turn_over_http(
+        "openai/gpt-6.1-sol",
+        ProviderRow::openai_at(Url::parse("https://fixture.invalid/backend-api/").unwrap()),
+        &ego_ai::wire::openai_codex_responses::OpenAiCodexResponses,
+        http,
+        retry,
+        pause.clone(),
+        vec![Arc::new(NeverRunTool)],
+    )
+    .await;
+    server.abort();
+    let requests = seen.lock().unwrap().clone();
+    let delays = pause.0.lock().unwrap().clone();
+    (outcome, state, requests, delays)
+}
+
+#[tokio::test]
+async fn codex_dropped_body_before_output_retries_without_changing_cache_identity() {
+    // Catches: an answered, truncated body is excluded from no-output retries.
+    let (outcome, state, requests, delays) =
+        dropped_codex_turn(": body will be dropped\n\n", 6).await;
+    assert_eq!(outcome.exit_reason, ExitReason::Completed);
+    assert_eq!(answer(&state), "ok");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(delays, [std::time::Duration::from_secs(1)]);
+    let identities: Vec<_> = requests
+        .iter()
+        .map(|request| {
+            let end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&request[end + 4..]).unwrap();
+            let headers = String::from_utf8_lossy(&request[..end]);
+            let session = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("session-id: "))
+                .unwrap()
+                .to_owned();
+            assert_eq!(body["prompt_cache_key"], session);
+            (body, session)
+        })
+        .collect();
+    assert_eq!(identities[0], identities[1]);
+}
+
+#[tokio::test]
+async fn codex_dropped_body_after_text_does_not_replay_and_has_uncertain_notice() {
+    // Catches: partial output is retried or loses its distinct uncertain failure notice.
+    let prefix = CODEX_TEXT
+        .split("data: {\"type\":\"response.completed\"")
+        .next()
+        .unwrap();
+    let (outcome, state, requests, delays) = dropped_codex_turn(prefix, 6).await;
+    assert_eq!(answer(&state), "ok");
+    assert_eq!(requests.len(), 1);
+    assert!(delays.is_empty());
+    assert!(!outcome.provider_failure.as_ref().unwrap().effect_known);
+    match ego_core::run::RunTermination::after_outcome(&outcome) {
+        Some(ego_core::run::RunTermination::ProviderUncertain { message }) => {
+            assert!(message.contains("automatic retry was suppressed"))
+        }
+        other => panic!("expected distinct uncertain failure, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn codex_dropped_body_after_tool_bytes_never_replays_or_executes_partial_call() {
+    // Catches: a buffered tool call is discarded from retry safety and requested again.
+    let prefix = CODEX_TOOL
+        .split("data: {\"type\":\"response.completed\"")
+        .next()
+        .unwrap();
+    let (outcome, state, requests, delays) = dropped_codex_turn(prefix, 6).await;
+    assert_eq!(outcome.exit_reason, ExitReason::Provider);
+    assert_eq!(requests.len(), 1);
+    assert!(delays.is_empty());
+    assert!(!outcome.provider_failure.unwrap().effect_known);
+    assert!(
+        state
+            .items
+            .values()
+            .all(|item| item.kind != ItemKind::ToolCall || item.ok != Some(true))
+    );
+}
+
+#[tokio::test]
+async fn codex_dropped_body_respects_zero_retry_and_settles_known_without_output() {
+    // Catches: a provider mapping retries behind the turn owner's explicit zero allowance.
+    let (outcome, _, requests, delays) = dropped_codex_turn(": dropped\n\n", 0).await;
+    assert_eq!(outcome.exit_reason, ExitReason::Provider);
+    assert_eq!(requests.len(), 1);
+    assert!(delays.is_empty());
+    assert!(outcome.provider_failure.unwrap().effect_known);
+}
+
+struct NeverRunTool;
+impl Tool for NeverRunTool {
+    fn descriptor(&self) -> ego_core::permit::ToolDescriptor {
+        ego_core::permit::ToolDescriptor {
+            name: "read_file".to_owned(),
+            description: "Must not run after an incomplete response".to_owned(),
+            schema: serde_json::from_value(serde_json::json!({"type":"object"})).unwrap(),
+        }
+    }
+    fn prepare(
+        &self,
+        _: serde_json::Value,
+        _: &ego_core::permit::PrepareCtx<'_>,
+    ) -> Result<ego_core::permit::PreparedCall, ego_core::permit::ToolError> {
+        panic!("a tool from a failed response must not be prepared")
+    }
+    fn execute<'a, 'io>(
+        &'a self,
+        _: ego_core::permit::PreparedCall,
+        _: &'a dyn ego_core::permit::GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ego_core::mcp::ToolExecution, ego_core::permit::ToolError>>
+    where
+        'io: 'a,
+    {
+        panic!("a tool from a failed response must not execute")
     }
 }

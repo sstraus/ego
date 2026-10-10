@@ -135,3 +135,21 @@ fn nonbinding_or_non_table_rates_are_silent() {
     }
     assert!(render(&[table_event(CeilingEffect::None)], false).is_empty());
 }
+
+#[test]
+fn interactive_retry_notice_is_visible_without_becoming_answer_text() {
+    // Catches: interactive seats ignore the coordinator's retry status and appear idle.
+    let event = PublicEvent::ProviderRetry {
+        turn: TurnId::new(),
+        attempt: 1,
+        limit: 6,
+        delay_ms: 750,
+        kind: ego_core::generator::types::ErrorKind::Transient,
+        cause: "the network failed".to_owned(),
+    };
+    assert_eq!(
+        render(&[event.clone()], false),
+        ["the network failed — connection problem, retrying in 0.8s (attempt 1/6)"]
+    );
+    assert!(render(&[event], true).is_empty());
+}

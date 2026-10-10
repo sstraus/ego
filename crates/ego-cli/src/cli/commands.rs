@@ -712,8 +712,8 @@ pub(super) struct Flags {
     pub(super) schema_retries: u32,
 
     /// Additional delivery-safe attempts for each candidate.
-    #[arg(long, default_value_t = 0)]
-    pub(super) retry: u32,
+    #[arg(long)]
+    pub(super) retry: Option<u32>,
 
     /// Ordered provider/model candidate used after a delivery-safe failure.
     #[arg(
