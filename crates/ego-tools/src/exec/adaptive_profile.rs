@@ -53,13 +53,16 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     // Protect structural boundaries from relocation, while leaving transient
     // operation directories and objects/refs cleanup available to Git.
     out.push_str(&format!(
-        "  (require-all (regex #\"{}\") (vnode-type DIRECTORY))\n",
-        floor::GIT_BOUNDARY
+        "  (require-all (regex #\"{}\") (vnode-type DIRECTORY)\n    (require-not (regex #\"{}\")))\n",
+        floor::GIT_BOUNDARY,
+        floor::GIT_MODULE_TRANSIENT
     ));
     for root in floor::metadata_roots(perimeter) {
         out.push_str("  (require-all\n");
         rooted_regex(&mut out, root, floor::METADATA_BOUNDARY)?;
-        out.push_str("    (vnode-type DIRECTORY))\n");
+        out.push_str("    (vnode-type DIRECTORY)\n    (require-not\n");
+        rooted_regex(&mut out, root, floor::METADATA_MODULE_TRANSIENT)?;
+        out.push_str("    ))\n");
     }
     // Subpath denies protect contents, but a rename of any parent would move
     // those contents out from under their captured names. Deny only unlink
