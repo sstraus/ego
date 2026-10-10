@@ -67,6 +67,18 @@ fn admit(
     )
 }
 
+fn git_at(root: &Path, args: &[&std::ffi::OsStr]) {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[path = "support/adaptive_git_layouts.rs"]
+mod git_layouts;
+
 fn execute(
     policy: ego_core::permit::RunConfinement,
     root: &Path,
