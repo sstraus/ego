@@ -782,7 +782,7 @@ pub(super) enum RootsSubcommand {
     Add {
         #[arg(long)]
         profile: Option<String>,
-        #[arg(long, default_value = "read")]
+        #[arg(long, default_value = "read", value_parser = ["read", "read-write"])]
         access: String,
         path: PathBuf,
     },

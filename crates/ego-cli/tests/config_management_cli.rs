@@ -420,7 +420,7 @@ fn roots_commands_update_exact_user_target_without_erasing_other_settings() {
             .success()
     );
     let output = fixture.run(&["roots", "ls", "--profile", "strict"]);
-    assert_eq!(text(&output).trim(), "[]");
+    assert!(text(&output).contains("No roots are stored"));
     let before_invalid = std::fs::read_to_string(fixture.config_path()).unwrap();
     let output = fixture.run(&["config", "set", "roots=[{path='relative',access='read'}]"]);
     assert!(!output.status.success());

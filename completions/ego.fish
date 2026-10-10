@@ -246,7 +246,8 @@ complete -c ego -n "__fish_ego_using_subcommand roots; and not __fish_seen_subco
 complete -c ego -n "__fish_ego_using_subcommand roots; and not __fish_seen_subcommand_from add rm ls" -f -a "rm" -d 'Remove a root by its stored spelling'
 complete -c ego -n "__fish_ego_using_subcommand roots; and not __fish_seen_subcommand_from add rm ls" -f -a "ls" -d 'List roots stored in the selected user target'
 complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from add" -l profile -r
-complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from add" -l access -r
+complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from add" -l access -r -f -a "read\t''
+read-write\t''"
 complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from rm" -l profile -r
 complete -c ego -n "__fish_ego_using_subcommand roots; and __fish_seen_subcommand_from rm" -s h -l help -d 'Print help'

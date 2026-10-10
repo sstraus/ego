@@ -32,6 +32,8 @@ use serde::Deserialize;
 use crate::cli::{Args, ConfigAction, ConfigArgs, McpSelector, SessionMetadataArgs, UsageError};
 use crate::output::{self, Diagnostics, Stdout, empty_listing};
 
+mod roots;
+
 /// The system layer: an administrator's fleet defaults and the only source of
 /// non-relaxable ceilings.
 const SYSTEM_CONFIG: &str = "/etc/ego/config.toml";
@@ -128,6 +130,9 @@ async fn execute_inner(
         ConfigAction::Effective { .. } => {
             unreachable!("effective listing returns before stored-value management")
         }
+        ConfigAction::RootsList { target, json } => {
+            roots::list(&store, target, *json, out)?;
+        }
         ConfigAction::Get { target, key, json } => {
             let snapshot = snapshot(&store, target.clone())?;
             let value = snapshot
@@ -186,7 +191,10 @@ async fn execute_inner(
                     access: *access,
                 })
                 .map_err(store_failure)?;
-            render_receipt(result, out)?;
+            roots::receipt(result, out)?;
+            output::note(
+                "Running sessions keep their current permissions; exit and resume to apply saved roots.",
+            );
         }
         ConfigAction::Set { target, key, value } => {
             let result = set_managed(&store, target.clone(), *key, value.clone())?;

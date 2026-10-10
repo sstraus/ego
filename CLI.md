@@ -753,7 +753,9 @@ a script that pipes `--help` must not get an empty stdout and a failure.
 hooks, skills and MCP servers load only after an explicit terminal trust
 answer or `--trust-workspace` admits the canonical workspace. Declining, Ctrl-C or EOF
 continues bare. Headless always runs untrusted and bare automatically (no
-dialog, no ambient code execution). `--bare` forces this and skips the trust
+dialog, no ambient code execution). The trust offer names absolute file paths
+and explains that yes loads project instructions, configuration, skills, hooks
+and MCP servers, while no continues without project files. `--bare` forces this and skips the trust
 question. The question is asked only where there is something to answer about:
 a workspace holding no project config, skill, or discoverable instruction file
 starts untrusted in silence, and the `trust` status segment says so. For a
@@ -1822,6 +1824,10 @@ which owns recovery. Pending source work prevents switching. Sequential stdin ke
 the `/sessions` table; headless `ego resume` without an ID keeps latest-in-workspace
 selection. `ego ls` and machine output keep their existing format.
 
+When current configuration or flags select a different model from the saved
+session, resume prints both model references before the next turn. An explicit
+quiet launch suppresses this diagnostic; model precedence does not change.
+
 On human-terminal resume, the transcript replays the most recent 10 user turns
 before the composer, using canonical final answers and the live compact tool
 renderer. A line reports how many earlier turns were omitted. Display replay
@@ -1840,7 +1846,11 @@ reports the workspace-only perimeter. Explicit lists replace that default;
 `ego roots add [--profile NAME] [--access read|read-write] PATH`,
 `ego roots rm [--profile NAME] PATH`, and `ego roots ls [--profile NAME] [--json]`
 manage the exact stored user target. Add defaults to read, updates an existing
-path in place, and rm matches its stored spelling. Each edit is one locked,
+path in place, and rm matches its stored spelling. Text listings show access and
+path columns; an absent list and an explicit empty list have distinct explanations.
+Mutation receipts use plain language and remind the user to exit and resume
+running sessions before saved roots can apply. `--json` retains the versioned
+stored-config object. `ego config get roots` still prints the raw stored value. Each edit is one locked,
 validated atomic transaction; the first edit creates an explicit list.
 `ego config set 'roots=[{path="~/Gits",access="read"}]'` and its `--profile`
 form replace the list. Single-file read roots are supported on Seatbelt and

@@ -935,7 +935,7 @@ _ego() {
                     return 0
                     ;;
                 --access)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "read read-write" -- "${cur}"))
                     return 0
                     ;;
                 *)

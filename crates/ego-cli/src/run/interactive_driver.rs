@@ -634,19 +634,8 @@ pub(super) async fn interactive_through(
     text_sink.finish();
     let counts = seat.exit_counts();
     output.note(&format!(
-        "{} unsent {}, {} accepted {}",
-        counts.drafts,
-        if counts.drafts == 1 {
-            "draft"
-        } else {
-            "drafts"
-        },
-        counts.accepted,
-        if counts.accepted == 1 {
-            "input"
-        } else {
-            "inputs"
-        },
+        "{} unsent drafts discarded; {} prompts waiting to run.",
+        counts.drafts, counts.accepted,
     ));
     // An empty session leaves nothing on disk for `ego resume` to open.
     if !ended.state.turns.is_empty() {

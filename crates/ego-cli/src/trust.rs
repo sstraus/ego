@@ -125,7 +125,9 @@ pub(crate) fn resolve(
         })
         .filter(|changes| !changes.is_empty());
     let context = match changes {
-        Some(changes) => format!("Executable changes since the last answer:\n{changes}\n"),
+        Some(changes) => {
+            format!("{content}\nExecutable changes since the last answer:\n{changes}\n")
+        }
         None => content,
     };
     let decision = if explicit_grant {
@@ -511,18 +513,20 @@ pub(crate) fn trustable_content(root: &Path) -> Option<String> {
     }
     let programs: Vec<String> = referenced_commands(root)
         .iter()
-        .filter_map(|path| path.strip_prefix(root).ok())
-        .map(|relative| relative.to_string_lossy().into_owned())
+        .map(|path| path.to_string_lossy().into_owned())
         .collect();
     let (runs, declares): (Vec<&TrustedContent>, Vec<&TrustedContent>) = inventory
         .entries()
         .iter()
         .partition(|entry| programs.iter().any(|program| program == entry.path()));
-    let mut rendered: String = declares
-        .iter()
-        .take(LISTED_CONTENT)
-        .map(|entry| format!("- {}\n", entry.path()))
-        .collect();
+    let mut rendered = String::from("Project files offered for trust:\n");
+    rendered.extend(
+        declares
+            .iter()
+            .take(LISTED_CONTENT)
+            .map(|entry| format!("- {}\n", entry.path())),
+    );
+
     if let Some(remaining) = declares
         .len()
         .checked_sub(LISTED_CONTENT)
@@ -536,6 +540,10 @@ pub(crate) fn trustable_content(root: &Path) -> Option<String> {
             rendered.push_str(&format!("- {}\n", entry.path()));
         }
     }
+    rendered.push_str(
+        "\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\n\
+         No: continue without project files.\n",
+    );
     Some(rendered)
 }
 
@@ -574,13 +582,12 @@ fn inventory(root: &Path) -> TrustInventory {
         &ego_core::config::Selection::Ambient,
         ego_core::config::Limits::default(),
     ) {
-        entries.extend(instructions.loaded.into_iter().filter_map(|file| {
-            let relative = file.path.strip_prefix(&discovery_root).ok()?;
-            Some(TrustedContent::regular(
-                relative.to_string_lossy(),
+        entries.extend(instructions.loaded.into_iter().map(|file| {
+            TrustedContent::regular(
+                file.path.to_string_lossy(),
                 file.bytes,
                 file.text.as_bytes(),
-            ))
+            )
         }));
     }
     TrustInventory::new(entries)
@@ -740,7 +747,7 @@ fn content(root: &Path, path: &Path) -> Option<TrustedContent> {
     if !metadata.is_file() {
         return None;
     }
-    let relative = path.strip_prefix(root).ok()?;
+    path.strip_prefix(root).ok()?;
     let mut prefix = Vec::new();
     readable(
         path,
@@ -749,7 +756,7 @@ fn content(root: &Path, path: &Path) -> Option<TrustedContent> {
             .read_to_end(&mut prefix),
     )?;
     Some(TrustedContent::regular(
-        relative.to_string_lossy(),
+        path.to_string_lossy(),
         metadata.len(),
         &prefix,
     ))
