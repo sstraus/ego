@@ -174,15 +174,19 @@ are not valid overrides. See [authentication keys](../reference/configuration.md
 
 ## Other live E2E limitations
 
-The 2026-10-10 run observed root help without the run options; consult
-[CLI reference](../reference/cli.md) or `ego resume --help`. The trust dialog did
-not explain its file list; trust admits project configuration and instructions,
-not unrestricted execution. Root mutation output such as `published_durably`
-is a publication receipt, not proof that a running session reloaded it.
+The 2026-10-10 run observed root help without the run options. Root help now
+lists the shared run options. The trust offer names absolute file paths and
+explains both answers; trust admits project files and their configuration.
+`ego roots` uses plain receipts and access/path listings. Its edits remind the
+user to exit and resume because running sessions keep their captured perimeter.
+The generic `ego config` publication receipt still describes the stored change,
+not a live session reload.
 
 The run also observed answered approval blocks remaining in scrollback, slow
 exec calls, and a configured MCP server unavailable without a visible warning.
-Check the connected catalogue rather than assuming configured means connected.
+Startup now warns about configured servers that were not attached and reports
+the live registry's sanitized failures. Inspect configuration with `ego mcp ls`
+and select a server with `--mcp NAME`. Configuration alone does not attach it.
 One auto-mode access check later took 4 minutes 29 seconds.
 Exec latency in that run was not isolated to a proven layer; do not treat sandbox
 startup cost as an established cause. Use the built-in read/grep tools for file

@@ -142,7 +142,10 @@ not the implicit default. The first addition replaces the default `~/Gits`
 grant. Removing the final stored root with `ego roots rm PATH` leaves
 `roots = []`; it does not restore the default. Use `ego config unset roots`
 to remove the declaration and restore the implicit default, if no other layer
-selects roots. `ego roots ls` shows stored roots, not the effective perimeter.
+selects roots. `ego roots ls` shows stored roots as access/path columns, not the
+effective perimeter. Its empty messages distinguish an absent declaration from
+an explicit empty list. Root edits report saved, removed or unchanged roots and
+remind the user that running sessions keep their current permissions.
 Use `--profile NAME` consistently when editing a profile's roots.
 
 `ego roots` accepts `read` and `read-write`, not exec. For extra executable
@@ -211,7 +214,9 @@ mode versus confinement, implicit roots, `exec_paths`, root-list traps, inspecti
 commands, and exit/resume after saved perimeter changes. The model must report a
 block and ask the user for the required authority, not bypass it through another
 route. Current runtime facts separately report the selected mode and sandbox;
-they do not expose a full effective-root list or the ego session ID.
+they also name the current durable ego session ID. This ID belongs to ego,
+not a host PTY or TUICommander session. The facts do not expose a full
+effective-root list.
 This guidance is captured in the session's prompt epoch; existing sessions can
 retain the previous identity until an idle `/refresh` opens a new epoch.
 
