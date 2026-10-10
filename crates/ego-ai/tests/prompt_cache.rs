@@ -343,3 +343,55 @@ fn kimi_chat_preserves_lineage_affinity_and_requested_cache_ttl() {
         assert_ne!(a["prompt_cache_key"], c["prompt_cache_key"]);
     }
 }
+
+#[test]
+fn minimax_long_preference_never_exports_an_unsupported_one_hour_ttl() {
+    // Catches: inheriting Claude's one-hour TTL on MiniMax's five-minute-only cache.
+    use ego_ai::wire::{WireFormat, minimax_anthropic::MiniMaxAnthropic};
+    let base = url::Url::parse("https://api.minimax.io/anthropic/").unwrap();
+    let target = RequestTarget::new(&base, &[]);
+    let root = SessionId::new();
+    for retention in [
+        CacheRetention::Short,
+        CacheRetention::Long,
+        CacheRetention::None,
+    ] {
+        let mut req = request("MiniMax-M2.7", root, "host rev1");
+        req.cache.as_mut().unwrap().retention = retention;
+        let a = json(
+            MiniMaxAnthropic
+                .build_request(&target, &req)
+                .unwrap()
+                .body
+                .unwrap(),
+        );
+        if retention == CacheRetention::None {
+            assert_eq!(markers(&a), 0);
+            continue;
+        }
+        assert_eq!(
+            a["system"][0]["cache_control"],
+            serde_json::json!({"type":"ephemeral"})
+        );
+        assert_eq!(
+            a["messages"][1]["content"][0]["cache_control"],
+            serde_json::json!({"type":"ephemeral"})
+        );
+        assert_eq!(markers(&a), 2);
+        assert_eq!(markers(&a["messages"][2]), 0);
+        assert_eq!(markers(&a["messages"][3]), 0);
+        req.messages = request("MiniMax-M2.7", root, "host rev2").messages;
+        let b = json(
+            MiniMaxAnthropic
+                .build_request(&target, &req)
+                .unwrap()
+                .body
+                .unwrap(),
+        );
+        assert_eq!(a["system"], b["system"]);
+        assert_eq!(
+            a["messages"].as_array().unwrap()[..2],
+            b["messages"].as_array().unwrap()[..2]
+        );
+    }
+}
