@@ -2192,3 +2192,54 @@ fn repl_mode_selection_cannot_raise_system_maximum() {
     );
     assert_eq!(selection.capture().unwrap().mode, Mode::Default);
 }
+
+// Catches: auto startup applies Off to fallback models that reject it.
+#[test]
+fn auto_preflight_accepts_fallback_and_explicit_judges_without_off_effort() {
+    let confinement =
+        RunConfinement::new(Confinement::Off, false, CanonPath::new("/workspace")).unwrap();
+    for (main, judge) in [
+        ("openai-codex/gpt-6-sol", None),
+        ("anthropic/claude-sonnet-5-5", None),
+        ("openai-codex/gpt-6-sol", Some("openai-codex/gpt-6-sol")),
+        ("anthropic/claude-sonnet-5-5", Some("none")),
+    ] {
+        let mut effective = ego_core::config::resolve(&[], Trust::Trusted, None).unwrap();
+        effective.model = Some(ModelRef(main.to_owned()));
+        effective.mode = Some(Mode::Auto);
+        effective.judge = judge.map(|value| ModelRef(value.to_owned()));
+        let captured = CliAutoPreflight::capture(&effective, &confinement);
+        assert_eq!(
+            captured.state,
+            CapturedAutoPreflight::Valid,
+            "{main}, {judge:?}"
+        );
+        assert!(captured.validate_startup().is_ok());
+    }
+}
+
+// Catches: judge effort selection falls back to unsupported Off when Low is absent.
+#[test]
+fn judge_effort_uses_the_lowest_supported_level_and_refuses_unknown_facts() {
+    use ego_core::generator::capabilities::ReasoningEffortSupport;
+    let profile = model::supplied_request_profile(&ModelRef("openai-codex/gpt-6-sol".into()))
+        .unwrap()
+        .unwrap();
+    let mut capabilities = profile.capabilities().clone();
+    for (support, expected) in [
+        (ReasoningEffortSupport::Any, Some(ThinkingLevel::Off)),
+        (
+            ReasoningEffortSupport::Only([ThinkingLevel::Medium, ThinkingLevel::High].into()),
+            Some(ThinkingLevel::Medium),
+        ),
+        (
+            ReasoningEffortSupport::Only([ThinkingLevel::Off].into()),
+            Some(ThinkingLevel::Off),
+        ),
+        (ReasoningEffortSupport::Only(BTreeSet::new()), None),
+        (ReasoningEffortSupport::Unknown, None),
+    ] {
+        capabilities.reasoning_efforts = support;
+        assert_eq!(model::judge_thinking(&capabilities).ok(), expected);
+    }
+}

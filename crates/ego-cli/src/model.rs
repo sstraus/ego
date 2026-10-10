@@ -192,6 +192,20 @@ pub(crate) fn supplied_request_profile(
         .map_err(generation_error)
 }
 
+/// Use the least effort the resolved judge explicitly supports.
+/// Startup and generation must validate the same effort policy.
+pub(crate) fn judge_thinking(
+    capabilities: &ego_core::generator::capabilities::ModelCapabilities,
+) -> Result<ThinkingLevel, ego_core::generator::capabilities::ReasoningSelectionError> {
+    use ego_core::generator::capabilities::ReasoningEffortSupport;
+    let effort = match &capabilities.reasoning_efforts {
+        ReasoningEffortSupport::Only(levels) => levels.first().copied(),
+        ReasoningEffortSupport::Any | ReasoningEffortSupport::Unknown => None,
+    }
+    .unwrap_or(ThinkingLevel::Off);
+    capabilities.resolve_reasoning_effort(Some(effort))
+}
+
 /// Resolve `slug` against the daemon or against what was supplied.
 ///
 /// `hosted` comes from [`facts::supplied`] and is passed in rather than read
@@ -509,27 +523,16 @@ impl CliGenerationModelSource {
             resolve(&identity.0, hosted, http, credentials.as_ref(), &self.auth)
                 .await
                 .map_err(generation_error)?;
-        let chosen_effort = if role == GenerationRole::Judge {
-            match &resolved.capabilities.reasoning_efforts {
-                ego_core::generator::capabilities::ReasoningEffortSupport::Any => {
-                    Some(ThinkingLevel::Low)
-                }
-                ego_core::generator::capabilities::ReasoningEffortSupport::Only(levels)
-                    if levels.contains(&ThinkingLevel::Low) =>
-                {
-                    Some(ThinkingLevel::Low)
-                }
-                _ => Some(ThinkingLevel::Off),
-            }
+        let thinking = if role == GenerationRole::Judge {
+            judge_thinking(&resolved.capabilities)
         } else {
-            resolved_thinking.or(requested_thinking)
-        };
-        let thinking = resolved
-            .capabilities
-            .resolve_reasoning_effort(chosen_effort)
-            .map_err(|error| {
-                GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
-            })?;
+            resolved
+                .capabilities
+                .resolve_reasoning_effort(resolved_thinking.or(requested_thinking))
+        }
+        .map_err(|error| {
+            GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
+        })?;
         if initialize_main {
             self.selection
                 .initialize(identity.clone(), thinking, self.initial_thinking)?;
