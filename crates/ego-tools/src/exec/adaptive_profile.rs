@@ -52,6 +52,15 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
         out.push_str(&format!("    (regex #\"{}\"))\n", floor::METADATA_CONTROL));
     }
     out.push_str(")\n(deny file-write-unlink\n");
+    // Any nested metadata directory could otherwise be moved outside the
+    // path-based floor, edited, and moved back. File unlink remains available
+    // for Git's index/refs lock cleanup.
+    out.push_str("  (require-all (regex #\"(^|/)[.][gG][iI][tT](/|$)\") (vnode-type DIRECTORY))\n");
+    for root in floor::metadata_roots(perimeter) {
+        out.push_str("  (require-all (subpath ");
+        out.push_str(&path_literal(root)?);
+        out.push_str(") (vnode-type DIRECTORY))\n");
+    }
     // Subpath denies protect contents, but a rename of any parent would move
     // those contents out from under their captured names. Deny only unlink
     // on each ancestor entry; operational descendants remain writable.

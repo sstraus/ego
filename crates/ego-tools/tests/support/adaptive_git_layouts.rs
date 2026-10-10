@@ -115,7 +115,7 @@ fn adaptive_git_accepts_real_relative_worktree_back_pointers() {
     let policy = admit(&workspace).unwrap();
     std::fs::write(workspace.join("tracked"), "fixture").unwrap();
     execute(
-        policy,
+        policy.clone(),
         &root,
         vec!["git".into(), "add".into(), "tracked".into()],
     )
@@ -208,6 +208,20 @@ fn adaptive_git_control_floors_block_rename_and_nested_control_writes() {
     );
     assert!(result.is_err(), "new Git selector admitted");
     assert!(!selector.exists());
+    let module = metadata.join("modules/nested");
+    let relocated_module = workspace.join("relocated-module");
+    let result = execute(
+        policy.clone(),
+        &root,
+        vec![
+            "/bin/mv".into(),
+            module.clone().into_os_string(),
+            relocated_module.clone().into_os_string(),
+        ],
+    );
+    assert!(result.is_err(), "nested metadata directory rename admitted");
+    assert!(module.is_dir());
+    assert!(!relocated_module.exists());
     let renamed = workspace.join("renamed-metadata");
     let result = execute(
         policy.clone(),
@@ -223,9 +237,22 @@ fn adaptive_git_control_floors_block_rename_and_nested_control_writes() {
     assert!(!renamed.exists());
     std::fs::write(workspace.join("tracked"), "fixture").unwrap();
     execute(
-        policy,
+        policy.clone(),
         &root,
         vec!["git".into(), "add".into(), "tracked".into()],
+    )
+    .unwrap();
+    std::fs::write(workspace.join("nested/tracked"), "fixture").unwrap();
+    execute(
+        policy.clone(),
+        &root,
+        vec![
+            "git".into(),
+            "-C".into(),
+            "nested".into(),
+            "add".into(),
+            "tracked".into(),
+        ],
     )
     .unwrap();
 }
