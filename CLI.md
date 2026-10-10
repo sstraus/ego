@@ -1113,7 +1113,7 @@ escapes. Binary whole-file content shows its byte count instead of a text diff.
 
 The input line runs in **bracketed paste** mode (`ESC[?2004h`, off on exit).
 Every terminal in the compliance matrix implements it, and without it a pasted
-newline submits the first line of a paste as a whole prompt — the failure that
+carriage return submits the first line of a paste as a whole prompt — the failure that
 makes pasting a stack trace impossible. A paste arrives as one edit, never as
 keystrokes, so it is never interpreted as a slash command or a control
 sequence.
@@ -1142,6 +1142,7 @@ bounded channels.
 | Surface | Current | Note |
 |---|---|---|
 | Input line, history, multiline | **yes** | reedline. Active `Ctrl+C` requests cancellation and reports it immediately. Idle `Ctrl+C` abandons the line; a second idle `Ctrl+C` within 500 ms exits. `Ctrl+D` ends it |
+| Enter and newline | **yes** | In the terminal composer, Enter (`CR`) submits once. `LF` (`Ctrl+J`), CSI-u `Ctrl+Enter` (`ESC[13;5u`), and CSI-u `Shift+Enter` (`ESC[13;2u`) insert a newline. Non-terminal scripted input keeps LF as its line terminator |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+B, `/tasks` | **yes** | Ctrl+B retains the running admitted exec as a session-owned detached command without restarting it. `/tasks` lists bounded output and status; `/tasks ID` inspects one task, `/tasks cancel ID` requests cancellation. Settlements are announced once at the next generation boundary; restart reports unsettled tasks as Interrupted |
 | Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |

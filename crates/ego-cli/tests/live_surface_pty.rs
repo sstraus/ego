@@ -1,5 +1,105 @@
 mod support;
 
+// Catches: the terminal keymap treats LF like CR and submits a partial draft.
+#[test]
+fn ego_composer_inserts_a_newline_on_lf() {
+    composer_newline_contract(b"first-probe\nsecond-probe");
+}
+
+// Catches: CSI-u Ctrl+Enter is ignored or submits instead of inserting a newline.
+#[test]
+fn ego_composer_inserts_a_newline_on_ctrl_enter() {
+    composer_newline_contract(b"first-probe\x1b[13;5usecond-probe");
+}
+
+// Catches: CSI-u Shift+Enter loses its newline binding at the terminal boundary.
+#[test]
+fn ego_composer_inserts_a_newline_on_shift_enter() {
+    composer_newline_contract(b"first-probe\x1b[13;2usecond-probe");
+}
+
+// Catches: LF inside bracketed paste submits a partial prompt or loses a line.
+#[test]
+fn ego_composer_keeps_bracketed_paste_with_lf_in_one_draft() {
+    composer_newline_contract(b"\x1b[200~first-probe\nsecond-probe\x1b[201~");
+}
+
+fn composer_newline_contract(draft: &[u8]) {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
+            Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# composer newline fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--sandbox",
+        "off",
+        "--mode",
+        "yolo",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, start);
+    let start = output.len();
+    input.write_all(draft).expect("draft bytes");
+    input.flush().expect("draft flush");
+    until_normalized(&reader, &mut output, start, "first-probe");
+    drain_until_quiet(&reader, &mut output);
+    let requests_before_cr = stub.generations().len();
+    if requests_before_cr == 0 {
+        until_normalized(&reader, &mut output, start, "second-probe");
+        let start = output.len();
+        input.write_all(b"\r").expect("submit CR");
+        input.flush().expect("submit flush");
+        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+        until_prompt_from(&reader, &mut output, start);
+    } else {
+        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+        until_prompt_from(&reader, &mut output, start);
+        input.write_all(b"\x03").expect("discard partial draft");
+        input.flush().expect("discard flush");
+        drain_until_quiet(&reader, &mut output);
+    }
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader");
+    writer_join.join().expect("writer");
+    assert!(status.success(), "REPL exit: {status:?}");
+    assert_eq!(
+        requests_before_cr, 0,
+        "newline submitted the draft before CR"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "CR must submit exactly once");
+    assert_eq!(
+        count_exact_strings(&generations[0]["messages"], "first-probe\nsecond-probe"),
+        1,
+        "the provider must receive the complete multiline draft"
+    );
+}
+
 // Catches: dropping turn-local effects kills a detached command before the next REPL turn.
 #[test]
 fn regression_detached_exec_survives_the_launching_repl_turn() {
