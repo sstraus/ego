@@ -17,6 +17,7 @@ what you want to do; each guide explains the feature before its controls.
 | Set authority and confinement | [Permissions and confinement](guides/permissions.md) |
 | Resume, branch, compact, inspect usage, and export | [Sessions and history](guides/sessions.md) |
 | Connect ACP, MCP, A2A, skills, hooks, or TUICommander | [Integrations](integrations/README.md) |
+| Implement an ACP client for ego's wire extensions | [ACP extensions](integrations/acp-extensions.md) |
 | Diagnose a refusal or platform limitation | [Troubleshooting](guides/troubleshooting.md) |
 | Understand crate responsibilities and design | [Architecture](architecture.md) |
 
