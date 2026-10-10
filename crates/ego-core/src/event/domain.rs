@@ -218,6 +218,13 @@ pub enum OccupancyProvenance {
     LocalEstimate,
 }
 
+/// Monotonic durations measured by the tool owner, never inferred from wall time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolTiming {
+    pub execution_ms: Option<u64>,
+    pub approval_wait_ms: u64,
+}
+
 /// The exhaustive set of internal reducer inputs, per ARCH §1:
 ///
 /// ```text
@@ -225,7 +232,7 @@ pub enum OccupancyProvenance {
 /// SessionResumed | GoalSet | GoalTransitioned | PromptQueued |
 /// PromptDeliveryExpedited | UserPrompt | AssistantDelta | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ToolCallStarted |
-/// ToolCallDelta | ToolCallCompleted | PermissionRequested |
+/// ToolCallDelta | ToolCallMeasured | ToolCallCompleted | PermissionRequested |
 /// PermissionAmended | PermissionDecided | GenerationStarted |
 /// ExecutionObserved | FallbackDecision | JudgeResponse | AttemptSettled | UsageUpdated | UsageCorrected |
 /// ContextWindowUpdated | TurnCompleted | CompactionSeeded | Compacted | Forked |
@@ -378,6 +385,8 @@ pub enum EventKind {
     /// codec-v6 shape: replacing the old string is deliberately not decoded
     /// as a compatibility spelling.
     ToolCallCompleted { ok: bool, result: ToolResult },
+    /// Measured before completion so live display and replay read the same facts.
+    ToolCallMeasured { timing: ToolTiming },
     /// The launch authority was admitted before the process starts.
     DetachedExecStarted { id: DetachedExecId },
     /// One terminal observation, delivered to the model at a generation boundary.
@@ -745,6 +754,7 @@ impl EventKind {
             EventKind::ToolCallStarted { .. } => "tool_call_started",
             EventKind::ToolCallDelta { .. } => "tool_call_delta",
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",
+            EventKind::ToolCallMeasured { .. } => "tool_call_measured",
             EventKind::DetachedExecStarted { .. } => "detached_exec_started",
             EventKind::DetachedExecSettled { .. } => "detached_exec_settled",
             EventKind::QuestionRequested { .. } => "question_requested",

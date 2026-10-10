@@ -34,7 +34,7 @@ _arguments "${_arguments_options[@]}" : \
 '*--attach=[Add exact image bytes as ordered context before the prompt text]:IMAGE_PATH|HTTPS_IMAGE_URL:_default' \
 '-m+[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
 '--model=[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
-'--sandbox=[Filesystem confinement\: ro|workspace|off]:SANDBOX:_default' \
+'--sandbox=[Filesystem confinement\: ro|workspace|adaptive|off]:SANDBOX:_default' \
 '--thinking=[off|minimal|low|medium|high|xhigh|max]:THINKING:_default' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
@@ -84,7 +84,7 @@ _arguments "${_arguments_options[@]}" : \
 '*--attach=[Add exact image bytes as ordered context before the prompt text]:IMAGE_PATH|HTTPS_IMAGE_URL:_default' \
 '-m+[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
 '--model=[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
-'--sandbox=[Filesystem confinement\: ro|workspace|off]:SANDBOX:_default' \
+'--sandbox=[Filesystem confinement\: ro|workspace|adaptive|off]:SANDBOX:_default' \
 '--thinking=[off|minimal|low|medium|high|xhigh|max]:THINKING:_default' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
@@ -226,7 +226,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
-'--sandbox=[The weakest confinement a session may select\: ro|workspace|off]:SANDBOX:_default' \
+'--sandbox=[The weakest confinement a session may select\: ro|workspace|adaptive|off]:SANDBOX:_default' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
@@ -249,7 +249,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
-'--sandbox=[The weakest confinement a session may select\: ro|workspace|off]:SANDBOX:_default' \
+'--sandbox=[The weakest confinement a session may select\: ro|workspace|adaptive|off]:SANDBOX:_default' \
 '--listen=[Where to serve\: a socket path, or an address such as \`127.0.0.1\:8080\`]:LISTEN:_default' \
 '--allow-public-bind[Serve on an address reachable from outside this machine]' \
 '-h[Print help (see more with '\''--help'\'')]' \

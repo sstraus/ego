@@ -1,6 +1,5 @@
 //! Display-only replay from the existing durable session, through live renderers.
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::id::{ItemId, SessionId};
@@ -81,7 +80,8 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
         }
     }
     let mut partials: HashMap<ItemId, String> = HashMap::new();
-    let mut calls: HashMap<ItemId, (&str, &str, u64)> = HashMap::new();
+    let mut calls: HashMap<ItemId, (&str, &str)> = HashMap::new();
+    let mut timings = HashMap::new();
     for (index, event) in events.iter().enumerate() {
         let transcript = matches!(
             event.kind,
@@ -120,12 +120,17 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
             EventKind::ToolCallStarted { name, args, .. } => {
                 calls.insert(
                     event.env.item.expect("transcript item checked above"),
-                    (name, args, event.env.ts.as_millis()),
+                    (name, args),
                 );
+            }
+            EventKind::ToolCallMeasured { timing } => {
+                if let Some(item) = event.env.item {
+                    timings.insert(item, *timing);
+                }
             }
             EventKind::ToolCallCompleted { ok, result } => {
                 let item = event.env.item.expect("transcript item checked above");
-                if let Some((name, args, started)) = calls.remove(&item) {
+                if let Some((name, args)) = calls.remove(&item) {
                     if name == ego_core::question::ASK_QUESTION_TOOL {
                         continue;
                     }
@@ -136,9 +141,7 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
                             args,
                             ok: *ok,
                             result: &result,
-                            elapsed: Duration::from_millis(
-                                event.env.ts.as_millis().saturating_sub(started),
-                            ),
+                            timing: timings.remove(&item),
                         },
                         capabilities,
                     );
@@ -157,6 +160,7 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
 
 #[cfg(test)]
 mod tests {
+    mod measured;
     use super::*;
     use crate::output::Diagnostics;
     use ego_core::event::domain::Envelope;
@@ -166,6 +170,52 @@ mod tests {
     use ego_core::store::session_store::SessionStore;
     use ego_tools::store::{JsonlStore, OsIo};
     use std::sync::Mutex;
+
+    // Catches: wall-clock replay fabricating execution duration including approval.
+    #[test]
+    fn replay_without_measurement_does_not_report_approval_as_execution() {
+        let item = ItemId::new();
+        let turn = TurnId::new();
+        let event = |seq, ts, kind| DomainEvent {
+            env: Envelope {
+                seq: serde_json::from_value(serde_json::json!(seq)).unwrap(),
+                id: EventId::new(),
+                turn,
+                item: Some(item),
+                parent: None,
+                ts: Timestamp::from_millis(ts),
+                producer: Producer::Main,
+            },
+            kind,
+        };
+        let events = [
+            event(
+                1,
+                100,
+                EventKind::ToolCallStarted {
+                    name: "exec".into(),
+                    args: r#"{"command":"pwd"}"#.into(),
+                    call_id: None,
+                },
+            ),
+            event(
+                2,
+                16_000,
+                EventKind::ToolCallCompleted {
+                    ok: true,
+                    result: ego_core::permit::ToolResult::builtin("/ws"),
+                },
+            ),
+        ];
+        let output = Recorded::default();
+        render(&events, &output, Capabilities::plain());
+        let text = output.0.lock().unwrap();
+        assert!(text.contains("duration unavailable"), "{text}");
+        assert!(
+            !text.contains("15.9s"),
+            "approval pause is not execution: {text}"
+        );
+    }
 
     #[derive(Default)]
     struct Recorded(Mutex<String>);

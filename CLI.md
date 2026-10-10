@@ -611,6 +611,12 @@ opposite reason: it publishes no part of the event model.
 are *priced differently*; it is a flow and only grows. `context` is the
 occupancy *level* of the live context window and goes **down** after a
 compaction, so it is reported separately and never derived from `usage`.
+The last measured occupancy is not clamped to the model window. A delivered
+final answer completes its turn even if usage reaches or exceeds the resolved
+window. Before the next provider request, a known-full context is refused with
+`context_overflow`, asking for `/compact` or a larger model window. Unknown occupancy and history added since
+the measurement are not an exact preflight token count; a provider-reported
+context overflow remains a separate typed failure.
 `cost.amount` is an exact decimal **string**, not a JSON number — binary floats
 cannot represent a price. `cost.state` is `unstarted` before the first priced
 generation, and `{"state":"unknown","reason":…}` once any generation could not
@@ -1114,11 +1120,15 @@ through the same interactive owner as the answer and never through the
 ephemeral status row. The row is drawn when the call finishes, because it needs
 the outcome and the duration: `✓ read calc.py · 2 lines · 75ms`, `✓ edit
 calc.py +3 -1 · 12ms`, `✓ $ seq 1 20 · exit 0 · 0.4s`, `✗ $ make · exit 2 ·
-1.2s`, `✗ read gone.py · …No such file or directory · 3ms`. `✓` and `✗` are the
+1.2s`, `✗ read gone.py · …no such file or directory · 3ms`. `✓` and `✗` are the
 outcome and a failed call never carries `✓`. An `exec` row is followed by the
 last three lines of its output, and a line saying how many earlier lines were
-left out. The duration runs from the call's start event, so it includes any
-wait for a permission answer. A row is cut to the terminal width at the moment
+left out. Execution (or preparation that fails before execution) and human
+approval wait are measured separately with a monotonic clock and saved before
+the completion event. The row shows the
+execution duration and, when nonzero, `approval 15.0s`. Replay uses the saved
+values. Calls without an execution measurement show `duration unavailable`.
+A row is cut to the terminal width at the moment
 it is drawn (a resize applies to later rows): the target gives way first, the
 mark, verb, outcome and duration last. Text from a tool result is shown with
 control characters replaced, never passed to the terminal.

@@ -51,7 +51,7 @@ pub struct Finished<'a> {
     pub ok: bool,
     /// The result text the model was given, or the failure message.
     pub result: &'a str,
-    pub elapsed: Duration,
+    pub timing: Option<ego_core::event::domain::ToolTiming>,
 }
 
 pub fn record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
@@ -214,7 +214,20 @@ fn parts(call: &Finished<'_>, args: &Value, width: usize) -> Parts {
         (true, _) => None,
     };
     let mut notes: Vec<String> = outcome.into_iter().collect();
-    notes.push(duration(call.elapsed));
+    notes.push(
+        call.timing
+            .and_then(|timing| timing.execution_ms)
+            .map(|millis| duration(Duration::from_millis(millis)))
+            .unwrap_or_else(|| "duration unavailable".to_owned()),
+    );
+    if let Some(timing) = call.timing
+        && timing.approval_wait_ms > 0
+    {
+        notes.push(format!(
+            "approval {}",
+            duration(Duration::from_millis(timing.approval_wait_ms))
+        ));
+    }
     Parts {
         verb,
         target: printable(&target),
@@ -435,7 +448,10 @@ mod tests {
             args,
             ok,
             result,
-            elapsed: Duration::from_millis(1500),
+            timing: Some(ego_core::event::domain::ToolTiming {
+                execution_ms: Some(1500),
+                approval_wait_ms: 0,
+            }),
         }
     }
 

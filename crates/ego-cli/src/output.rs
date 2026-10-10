@@ -9,7 +9,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Write};
 use std::sync::Mutex;
-use std::time::Instant;
 
 use ego_core::cost::{CumulativeCost, RateSource};
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
@@ -325,7 +324,6 @@ pub struct TextSink<'a> {
 struct StartedCall {
     name: String,
     args: String,
-    at: Instant,
 }
 
 /// The state of the answer currently being written.
@@ -449,7 +447,7 @@ impl<'a> TextSink<'a> {
 }
 
 impl EventSink for TextSink<'_> {
-    fn publish(&self, event: &PublicEvent, _state: &SessionState) {
+    fn publish(&self, event: &PublicEvent, state: &SessionState) {
         match event {
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
@@ -487,7 +485,6 @@ impl EventSink for TextSink<'_> {
                         StartedCall {
                             name: name.clone(),
                             args: text.clone().unwrap_or_default(),
-                            at: Instant::now(),
                         },
                     );
             }
@@ -510,7 +507,7 @@ impl EventSink for TextSink<'_> {
                             args: &started.args,
                             ok: *ok,
                             result: text.as_deref().unwrap_or(""),
-                            elapsed: started.at.elapsed(),
+                            timing: state.items.get(item).and_then(|item| item.tool_timing),
                         },
                         self.capabilities,
                     );

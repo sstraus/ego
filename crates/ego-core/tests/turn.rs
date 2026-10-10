@@ -88,6 +88,12 @@ use serde_json::json;
 mod common;
 
 mod turn {
+    mod tool_timing {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/common/tool_timing.rs"
+        ));
+    }
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 
@@ -6593,6 +6599,18 @@ mod turn {
     }
 
     mod generation_boundary {
+        mod context_window {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/common/context_window.rs"
+            ));
+        }
+        mod critic_context_window {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/common/critic_context_window.rs"
+            ));
+        }
         mod judge_eval {
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
