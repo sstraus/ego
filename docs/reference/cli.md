@@ -46,6 +46,7 @@ Run an agent from a prompt, headless.
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
+- `--trust-workspace` — Trust this interactive launch's workspace without asking; remember the answer
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable
 - `--yolo` — Shorthand for --mode yolo
 - `<PROMPT>` — The prompt. `-` reads it from stdin
@@ -91,6 +92,7 @@ Continue a session; no ID = latest in this workspace.
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
+- `--trust-workspace` — Trust this interactive launch's workspace without asking; remember the answer
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable
 - `--yolo` — Shorthand for --mode yolo
 - `<ID>` — The session to continue. Omit it for the latest in this workspace

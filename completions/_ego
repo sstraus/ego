@@ -63,6 +63,7 @@ _arguments "${_arguments_options[@]}" : \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '(--tools)--no-tools[Offer no tools at all]' \
 '--bare[No ambient discovery, even in a trusted workspace]' \
+'(--bare)--trust-workspace[Trust this interactive launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--plan[Shorthand for --mode plan]' \
 '--yolo[Shorthand for --mode yolo]' \
@@ -112,6 +113,7 @@ _arguments "${_arguments_options[@]}" : \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '(--tools)--no-tools[Offer no tools at all]' \
 '--bare[No ambient discovery, even in a trusted workspace]' \
+'(--bare)--trust-workspace[Trust this interactive launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--plan[Shorthand for --mode plan]' \
 '--yolo[Shorthand for --mode yolo]' \
