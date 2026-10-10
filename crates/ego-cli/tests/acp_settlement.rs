@@ -339,7 +339,7 @@ fn an_overloaded_provider_is_retried_visibly_then_fails_known_and_the_next_promp
     let mut completions = vec![
         Reply::StatusRetryAfter {
             status: 503,
-            seconds: 0,
+            seconds: 1,
         };
         8
     ];
@@ -376,13 +376,13 @@ fn an_overloaded_provider_is_retried_visibly_then_fails_known_and_the_next_promp
         assert_eq!(status["attempt"], attempt, "{status}");
         assert_eq!(status["limit"], 6, "{status}");
         assert_eq!(
-            status["delayMs"], 0,
-            "Retry-After: 0 was honoured: {status}"
+            status["delayMs"], 1_000,
+            "Retry-After: 1 was honoured: {status}"
         );
         assert_eq!(status["cause"], cause, "{status}");
         assert_eq!(
             status["text"],
-            format!("{cause} — connection problem, retrying in 0s (attempt {attempt}/6)"),
+            format!("{cause} — connection problem, retrying in 1s (attempt {attempt}/6)"),
             "{status}"
         );
     }

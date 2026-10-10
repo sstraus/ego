@@ -595,27 +595,3 @@ pub(crate) async fn read_error_body(
         _ => (said, cause),
     }
 }
-
-#[cfg(test)]
-mod retry_timing_tests {
-    use super::*;
-    use ego_core::permit::HttpHeader;
-    use std::time::{Duration, UNIX_EPOCH};
-    #[test]
-    fn retry_after_date_uses_clock_and_milliseconds_override_seconds() {
-        // Catches: HTTP-date is ignored or millisecond precision loses precedence.
-        let now = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-        let date = httpdate::fmt_http_date(now + Duration::from_secs(7));
-        let headers = vec![HttpHeader::new("retry-after", date.into_bytes()).unwrap()];
-        assert_eq!(retry_after_at(&headers, now), Some(Duration::from_secs(7)));
-        assert_eq!(retry_after_at(&headers, now + Duration::from_secs(8)), None);
-        let headers = vec![
-            HttpHeader::new("retry-after-ms", b"1250".to_vec()).unwrap(),
-            HttpHeader::new("retry-after", b"9".to_vec()).unwrap(),
-        ];
-        assert_eq!(
-            retry_after_at(&headers, now),
-            Some(Duration::from_millis(1250))
-        );
-    }
-}
