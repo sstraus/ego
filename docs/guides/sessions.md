@@ -19,6 +19,18 @@ ego usage --json
 Listings are ordered by recency with a stable ID tie-breaker. `--all` spans
 workspaces. Promptless `ego resume` uses the interactive picker; an explicit ID
 opens that session. A resume carrying a prompt or `-` stays headless.
+To keep a human approval seat, run without a prompt and enter the follow-up in
+the composer:
+
+```sh
+ego resume ID --model openai-codex/gpt-6.1-sol --mode auto --sandbox workspace
+```
+
+A configured model overrides the saved session model on resume. Current startup
+uses the saved model only when neither an explicit nor a configured model exists;
+resume does not reliably keep the original model. The status line can show only
+`gpt-6.1-sol`, but `--model` requires the full `openai-codex/gpt-6.1-sol` slug.
+
 Interactive resume replays recent durable conversational turns. `/sessions`
 browses sessions; `/history` exposes the conversational-history entry point.
 History is derived from durable records, not a second authority for execution.
