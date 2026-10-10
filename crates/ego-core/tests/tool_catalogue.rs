@@ -42,6 +42,8 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 mod common;
+#[path = "common/permission_guide.rs"]
+mod permission_guide;
 
 #[derive(Default)]
 struct SourceState {

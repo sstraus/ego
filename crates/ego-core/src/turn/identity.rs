@@ -34,17 +34,26 @@ pub struct HostClient {
 
 impl AgentIdentity {
     pub(crate) fn stable_text(&self) -> String {
+        let confinement = if self.sandbox == Confinement::Adaptive {
+            "Adaptive sandbox: normal reads and installed executables are reachable except credential floors. \
+             Writes are confined to the workspace, captured toolchain/cache/git/temp roots and explicit grants. \
+             Workspace and derived build artifacts remain executable. Permission mode, network policy and \
+             OS privacy restrictions still apply. Report the exact refused path and why the task needs it; \
+             never bypass a refusal or claim a partially failed mutation is safe to replay."
+        } else {
+            "The workspace sandbox confines reads, writes and exec. Absent explicit \
+             roots, an existing ~/Gits is an extra read-write root. Extra read/write roots do \
+             not grant exec; extra executable paths need exec_paths via ego config edit. \
+             The first ego roots add replaces the implicit default; removing all roots leaves \
+             roots=[]; ego config unset roots restores absence."
+        };
         format!(
             "You are ego {}, a coding agent.\n\n\
              Permissions and OS confinement are separate. Modes: plan prevents mutation; \
              default uses deterministic policy and escalation; auto adds bounded analysis and \
              an optional permissions.judge; edits allows ordinary editing; yolo relaxes ordinary \
              approvals, not confinement or hard denies. User config can select mode and sandbox \
-             silently. The workspace sandbox confines reads, writes and exec. Absent explicit \
-             roots, an existing ~/Gits is an extra read-write root. Extra read/write roots do \
-             not grant exec; extra executable paths need exec_paths via ego config edit. \
-             The first ego roots add replaces the implicit default; removing all roots leaves \
-             roots=[]; ego config unset roots restores absence. Saved perimeter changes require \
+             silently. {confinement} Saved perimeter changes require \
              exit and resume without a positional prompt; they do not apply live. Ask the user \
              to inspect /config perimeter for this session, or ego config ls --effective and \
              ego doctor for a fresh resolution. Use ego rules ls/explain/remember to inspect \
@@ -68,7 +77,7 @@ impl AgentIdentity {
             None => "none (direct command-line invocation)".to_owned(),
         };
         let network = if self.offline { "offline" } else { "online" };
-        let mut facts = format!(
+        format!(
             "Current runtime facts (ego-owned; refreshed for this generation):\n\
              - Model: {model} (reasoning effort: {thinking})\n\
              - Workspace root: {workspace}\n\
@@ -82,11 +91,7 @@ impl AgentIdentity {
             sandbox = self.sandbox,
             tools = listed(tools.iter().map(|tool| tool.name.as_str())),
             servers = listed(mcp_servers.iter().map(String::as_str)),
-        );
-        if self.sandbox == Confinement::Adaptive {
-            facts.push_str("\nAdaptive sandbox: normal reads and installed executables are reachable except credential floors. Writes are confined to the workspace, captured toolchain/cache/git/temp roots and explicit grants. Workspace and derived build artifacts remain executable. Permission mode, network policy and OS privacy restrictions still apply. Report the exact refused path and why the task needs it; never bypass a refusal or claim a partially failed mutation is safe to replay.");
-        }
-        facts
+        )
     }
 }
 
