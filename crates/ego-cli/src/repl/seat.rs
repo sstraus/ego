@@ -898,6 +898,14 @@ impl Seat {
             &registry,
         ))));
         let mut keybindings = default_emacs_keybindings();
+        // Raw LF arrives as Ctrl+J; only an unmodified Enter submits.
+        for code in [KeyCode::Char('j'), KeyCode::Enter] {
+            keybindings.add_binding(
+                KeyModifiers::CONTROL,
+                code,
+                ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+            );
+        }
         keybindings.add_binding(
             KeyModifiers::NONE,
             KeyCode::Tab,
