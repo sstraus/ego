@@ -1148,13 +1148,14 @@ pub(super) fn preflight_judge(
     confinement: &RunConfinement,
     exec_caps: ExecCaps,
 ) -> Result<(), RunTermination> {
-    let request = fixed_judge_request(
+    let mut request = fixed_judge_request(
         &judge.identity,
         &judge.request_model,
         judge.output_ceiling(),
         confinement,
         exec_caps,
     );
+    request.thinking = judge.thinking;
     validate_judge_request(&judge.identity, &judge.capabilities, &request, |request| {
         judge.generator.ensure_expressible(request)
     })
@@ -1179,11 +1180,15 @@ impl CliAutoPreflight {
 
     /// Capture only supplied request-shape facts. Dynamic facts defer to generation preflight.
     pub(super) fn capture(effective: &Effective, confinement: &RunConfinement) -> Self {
-        let Some(identity) = effective.judge.as_ref() else {
-            // Deterministic low/bounded calls do not need an advisory model.
-            // Unknown work remains unresolved later, at the existing human
-            // boundary, rather than making an otherwise-local startup fail.
+        if effective
+            .judge
+            .as_ref()
+            .is_some_and(|model| model.0 == "none")
+        {
             return Self::new(CapturedAutoPreflight::Valid);
+        }
+        let Some(identity) = effective.judge.as_ref().or(effective.model.as_ref()) else {
+            return Self::new(CapturedAutoPreflight::DeferredDynamic);
         };
         let profile = match model::supplied_request_profile(identity) {
             Ok(Some(profile)) => profile,
@@ -1434,7 +1439,10 @@ pub(super) async fn generation_preflight_inner(
         );
     }
     let capabilities = main.capabilities.clone();
-    let judge_available = effective.judge.is_some();
+    let judge_available = !effective
+        .judge
+        .as_ref()
+        .is_some_and(|model| model.0 == "none");
     if mode == Mode::Auto && judge_available {
         let judge = bound
             .resolve(GenerationModelRequest::new(GenerationRole::Judge))

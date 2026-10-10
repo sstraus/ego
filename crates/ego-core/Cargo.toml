@@ -10,6 +10,8 @@ publish.workspace = true
 # reqwest / rusqlite / rmcp are forbidden here — enforced by this manifest,
 # not by discipline.
 [dependencies]
+tree-sitter = "0.25.10"
+tree-sitter-bash = "0.25"
 futures = "0.3.34"
 # `net(...)` host normalisation to A-labels (same ADR, §5): an ID that differed
 # by how an editor encoded a character would not be revocable from a config
@@ -42,6 +44,9 @@ xxhash-rust = { version = "0.8.18", features = ["xxh64"] }
 zeroize = "1.9.0"
 
 [dev-dependencies]
+ego-ai = { path = "../ego-ai" }
+ego-tools = { path = "../ego-tools" }
+bytes = "1.10"
 trybuild = "1.0.121"
 
 [lints]

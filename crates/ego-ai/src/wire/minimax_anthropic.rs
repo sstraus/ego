@@ -26,7 +26,14 @@ impl WireFormat for MiniMaxAnthropic {
                 "image input is unsupported by the current MiniMax Anthropic-compatible contract",
             ));
         }
-        AnthropicMessages.build_request(target, req)
+        // MiniMax documents only five-minute explicit cache writes.
+        let mut projected = req.clone();
+        if let Some(cache) = &mut projected.cache
+            && cache.retention == ego_core::generator::capabilities::CacheRetention::Long
+        {
+            cache.retention = ego_core::generator::capabilities::CacheRetention::Short;
+        }
+        AnthropicMessages.build_request(target, &projected)
     }
 
     fn decode(

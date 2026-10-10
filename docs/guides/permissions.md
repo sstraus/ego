@@ -10,11 +10,17 @@ configuration and instructions are admitted. These are separate authorities.
 | --- | --- |
 | `plan` | Prevent mutating operations; inspect and reason |
 | `default` | Apply ordinary deterministic policy and escalation |
-| `auto` | Use deterministic low/bounded analysis, a configured judge where needed, then ordinary escalation |
+| `auto` | Use deterministic low/bounded analysis, a judge where needed (main model by default), then ordinary escalation |
 | `edits` | Allow ordinary editing while retaining separate checks for higher-risk effects |
 | `yolo` | Relax ordinary session approval; retain system denies, confinement, offline, budgets, and hard boundaries |
 
 Trusted interactive sessions choose `auto` only when no mode is configured.
+The user file `~/.ego/config.toml` can silently select `mode="yolo"` and
+`sandbox="off"`. Omitting `--yolo` does not cancel these defaults. Mode and
+sandbox are independent: an approval does not lift OS confinement, and `yolo`
+does not turn the sandbox off. To request approvals and workspace confinement
+explicitly, use `ego --mode auto --sandbox workspace`.
+
 Headless work does not ask a human; unavailable required approval becomes exit 3.
 `--plan` and `--yolo` are mode shortcuts. REPL `/mode`, `/plan`, and `/yolo`
 use live session authorities; a system `max_mode` can refuse a selection.
@@ -38,7 +44,44 @@ ego rules explain read '{"path":"README.md"}'
 
 `rules explain` prepares and matches without executing. `rules remember` previews
 the narrowest expressible predicates and the omitted dimensions; it writes only
-with `--yes`. Interactive remembered permissions use the same transaction.
+with `--yes`. Interactive remembered permissions use the same transaction. In the approval
+prompt, `[d]` shows the parameters and proposed rules; `[a]` persists the displayed
+allow rules. For a shell wrapper such as `bash -c 'git status'`, this is the exact
+rendered argv string inside `exec(...)`, including the script. A different script
+will not match. It is not a general grant for `bash` or for commands in the script.
+Current code can suggest `exec(git status *)` for a bare recognized program and
+subcommand; absolute program paths and interpreters retain exact argv. Cwd,
+timeout, and environment are not represented in the persistent exec rule.
+The live E2E used shell wrappers and absolute paths, so its remembered commands
+stayed exact.
+
+`Risk: unknown` means the analyzer cannot establish bounded effects. It does not
+mean the command is known to be harmful. An exec can report `runs a program`,
+`program not fully identified`, or `runs code from its arguments`, even for a
+read-only shell script. `default` mode can ask for each such call. In `auto`,
+deterministic analysis runs first, then a configured `permissions.judge`, then
+ordinary escalation. No configured judge means there is no sentinel model.
+The judge receives bounded task context and action evidence (see
+[Judge action evidence](#judge-action-evidence)); it cannot classify a shell
+script from content it is not shown. A configured
+judge is not a promise that unknown exec calls will stop asking a human.
+
+For example, select a judge in a user profile (it needs a usable credential and
+supported model facts, just as the main model does):
+
+```sh
+ego config set --profile sentinel 'mode="auto"'
+ego config set --profile sentinel 'permissions.judge="openai-codex/gpt-6.1-sol"'
+ego --profile sentinel --sandbox workspace
+```
+
+Preview an exact exec rule without executing or saving it:
+
+```sh
+ego rules remember allow exec '{"argv":["/usr/bin/git","status","--short"]}'
+```
+
+Add `--yes` only after reviewing the predicates and omitted dimensions.
 An ACP session grant is transient; a persistent grant is a user rule with the
 same origin, preview, and limitations. “Allow all for this session” does not
 persist a global allow or raise system ceilings.
@@ -94,6 +137,26 @@ judgment is pending the shared judge integration; the existing human grant flow
 still handles eligible refusals. A future judge-write grant will also forbid
 execution within that residual root for the rest of its session.
 
+**Root-list traps:** `ego roots add PATH --access read` edits the stored list,
+not the implicit default. The first addition replaces the default `~/Gits`
+grant. Removing the final stored root with `ego roots rm PATH` leaves
+`roots = []`; it does not restore the default. Use `ego config unset roots`
+to remove the declaration and restore the implicit default, if no other layer
+selects roots. `ego roots ls` shows stored roots, not the effective perimeter.
+Use `--profile NAME` consistently when editing a profile's roots.
+
+`ego roots` accepts `read` and `read-write`, not exec. For extra executable
+access, configure `exec_paths` through `ego config edit`; it is not a managed
+`config set` key. A read or read-write root alone cannot authorize execution.
+The workspace and backend runtime paths have separate built-in exec access.
+System ceilings can refuse extra paths. See the macOS recovery entries in
+[troubleshooting](troubleshooting.md).
+
+Saved roots and `exec_paths` do not change a running session's captured perimeter.
+Exit and resume without a positional prompt to admit the new configuration.
+`/config perimeter` shows the current session; the commands below inspect a new
+resolution, not that session.
+
 System sandbox configuration is a floor. Extra roots specify canonical paths
 and access; system roots cap them and configured executable paths. A read-only
 root nested beneath a broader writable grant is refused rather than advertised
@@ -121,3 +184,37 @@ Sources: [policy engine](../../crates/ego-core/src/permit/grant.rs),
 [rule grammar](../../crates/ego-core/src/permit/rule/),
 [confinement adapters](../../crates/ego-tools/src/exec/), and
 [effective-perimeter tests](../../crates/ego-cli/tests/effective_perimeter.rs).
+
+## Judge action evidence
+
+In `auto`, an unset `permissions.judge` prefers the same provider's review model
+when it is in the catalogue: OpenAI Luna, Anthropic Haiku, or a dedicated Codex
+reviewer. Otherwise it uses the active main model. It uses low reasoning effort
+when supported, otherwise off.
+Set `permissions.judge = "none"` to disable advisory generation and keep human
+escalation. An explicit provider/model selects a separate judge. The judge sees
+bounded task context, agent reasoning, recent call outcomes and action evidence.
+Commands are data, not instructions. Same-provider judges receive raw argv;
+cross-provider judges receive AST-backed redacted structure. Environment values
+and repository file contents are not included. Raw-call hashes bind execution;
+they do not replace the action description. See the
+[action-evidence decision](../internals/decisions/2026-10-10-judge-action-evidence.md).
+
+Current recovery behavior is implemented in [root mutations](../../crates/ego-tools/src/config.rs),
+[remembered rules](../../crates/ego-core/src/config/rule_management.rs), and
+[macOS profile rendering](../../crates/ego-tools/src/exec/profile.rs).
+
+## Guidance available to the model
+
+The built-in stable system identity contains a short permission recovery guide:
+mode versus confinement, implicit roots, `exec_paths`, root-list traps, inspection
+commands, and exit/resume after saved perimeter changes. The model must report a
+block and ask the user for the required authority, not bypass it through another
+route. Current runtime facts separately report the selected mode and sandbox;
+they do not expose a full effective-root list or the ego session ID.
+This guidance is captured in the session's prompt epoch; existing sessions can
+retain the previous identity until an idle `/refresh` opens a new epoch.
+
+Sources: [model identity](../../crates/ego-core/src/turn/identity.rs),
+[system-context assembly](../../crates/ego-core/src/turn/mod.rs), and
+[generator-boundary coverage](../../crates/ego-core/tests/tool_catalogue.rs).

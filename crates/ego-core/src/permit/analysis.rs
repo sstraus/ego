@@ -163,6 +163,27 @@ pub fn cache_key(
     )
 }
 
+/// Effort changes the advisory generation contract and must invalidate opinions.
+pub fn cache_key_for_effort(
+    call: &PreparedCall,
+    policy: &crate::turn::GenerationPolicyDigest,
+    observation: &super::ExecObservation,
+    trust: crate::config::Trust,
+    judge: &super::judge::JudgeConfig,
+    effort: crate::generator::types::ThinkingLevel,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    super::prepared_call::frame(
+        &mut digest,
+        &cache_key(call, policy, observation, trust, judge),
+    );
+    super::prepared_call::frame(
+        &mut digest,
+        &serde_json::to_vec(&effort).expect("effort codec"),
+    );
+    digest.finalize().into()
+}
+
 fn cache_key_with_prompt(
     call: &PreparedCall,
     policy: &crate::turn::GenerationPolicyDigest,
@@ -173,8 +194,8 @@ fn cache_key_with_prompt(
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
     let frame = super::prepared_call::frame;
-    frame(&mut digest, b"ego:permission-analysis:analysis1:codec1");
-    frame(&mut digest, &call.authority_fingerprint());
+    frame(&mut digest, b"ego:permission-analysis:pure-data2:codec1");
+    frame(&mut digest, &pure_data_fingerprint(call));
     frame(
         &mut digest,
         &serde_json::to_vec(&(policy, observation, trust)).expect("closed analysis context"),
@@ -189,6 +210,71 @@ fn cache_key_with_prompt(
         .expect("closed judge identity"),
     );
     frame(&mut digest, prompt);
+    digest.finalize().into()
+}
+
+fn pure_data_fingerprint(call: &PreparedCall) -> [u8; 32] {
+    if call.background().is_some() {
+        return call.authority_fingerprint();
+    }
+    let mut digest = Sha256::new();
+    let frame = super::prepared_call::frame;
+    frame(&mut digest, call.tool().as_bytes());
+    for operation in call.ops() {
+        let Op::Spawn { spec } = operation else {
+            return call.authority_fingerprint();
+        };
+        let argv: Vec<String> = spec
+            .argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        let generalized = super::shell::cache_argv(&argv);
+        if generalized == argv {
+            return call.authority_fingerprint();
+        }
+        // Preserve raw byte identity whenever conversion would lose native bytes.
+        if spec
+            .argv()
+            .iter()
+            .any(|argument| argument.to_str().is_none())
+        {
+            return call.authority_fingerprint();
+        }
+        frame(
+            &mut digest,
+            &serde_json::to_vec(&generalized).expect("argv codec"),
+        );
+        frame(
+            &mut digest,
+            &serde_json::to_vec(&(
+                spec.cwd(),
+                spec.timeout().map(|timeout| timeout.as_millis()),
+            ))
+            .expect("spawn codec"),
+        );
+        // Environment and executable identities must change together with their
+        // raw fingerprint. Normalize only the authorized pure-data argv nodes.
+        let normalized = super::SpawnSpec::new(
+            generalized
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+            spec.cwd().cloned(),
+            spec.timeout(),
+            spec.env_policy().clone(),
+        )
+        .expect("normalized argv");
+        let normalized = if let Some(identity) = spec.identity() {
+            normalized.with_execution_identity(spec.env_policy().clone(), identity.clone())
+        } else {
+            normalized
+        };
+        frame(
+            &mut digest,
+            &PreparedCall::new(call.tool(), Op::Spawn { spec: normalized }).authority_fingerprint(),
+        );
+    }
     digest.finalize().into()
 }
 

@@ -317,3 +317,93 @@ fn inline_source_and_environment_values_never_enter_the_judge_projection() {
     assert!(encoded.contains("sha256"));
     assert!(encoded.contains("unknown"));
 }
+
+#[test]
+fn pure_data_cache_reuses_search_pattern_but_not_path_host_or_environment() {
+    use ego_core::config::{Mode, ModelRef, Ruleset, Trust};
+    use ego_core::permit::analysis::cache_key;
+    use ego_core::permit::judge::JudgeConfig;
+    use ego_core::permit::{BackendIdentity, ExecCaps, ExecObservation};
+    let policy = ego_core::turn::GenerationPolicyCapture::new(
+        CanonPath::new(ROOT),
+        Mode::Auto,
+        Ruleset::default(),
+        None,
+    )
+    .unwrap()
+    .snapshot()
+    .digest();
+    let observation = ExecObservation::new(
+        BackendIdentity::new("test", "1"),
+        ExecCaps::READ_SCOPED,
+        "11".repeat(32).try_into().unwrap(),
+    );
+    let judge = JudgeConfig {
+        identity: ModelRef("provider/judge".into()),
+        request_model: "judge".into(),
+        max_output_tokens: Some(512),
+    };
+    let key = |call: &PreparedCall| cache_key(call, &policy, &observation, Trust::Trusted, &judge);
+    let first = spawn(&["rg", "first", "src/"], "env");
+    let other = spawn(&["rg", "other", "src/"], "env");
+    assert_eq!(key(&first), key(&other));
+    assert_ne!(first.authority_fingerprint(), other.authority_fingerprint());
+    for changed in [
+        spawn(&["rg", "first", "/etc/"], "env"),
+        spawn(&["rg", "first", "src/"], "other"),
+        spawn(&["rg", "--pre", "code", "src/"], "env"),
+    ] {
+        assert_ne!(key(&first), key(&changed));
+    }
+    assert_ne!(
+        key(&spawn(&["curl", "https://api.example.com"], "env")),
+        key(&spawn(&["curl", "https://evil.example.com"], "env"))
+    );
+}
+
+#[test]
+fn judge_effort_change_cannot_reuse_an_opinion_from_another_generation_contract() {
+    use ego_core::config::{Mode, ModelRef, Ruleset, Trust};
+    use ego_core::generator::types::ThinkingLevel;
+    use ego_core::permit::analysis::cache_key_for_effort;
+    use ego_core::permit::judge::JudgeConfig;
+    use ego_core::permit::{BackendIdentity, ExecCaps, ExecObservation};
+    let policy = ego_core::turn::GenerationPolicyCapture::new(
+        CanonPath::new(ROOT),
+        Mode::Auto,
+        Ruleset::default(),
+        None,
+    )
+    .unwrap()
+    .snapshot()
+    .digest();
+    let observation = ExecObservation::new(
+        BackendIdentity::new("test", "1"),
+        ExecCaps::READ_SCOPED,
+        "11".repeat(32).try_into().unwrap(),
+    );
+    let judge = JudgeConfig {
+        identity: ModelRef("provider/judge".into()),
+        request_model: "judge".into(),
+        max_output_tokens: Some(512),
+    };
+    let call = spawn(&["grep", "query", "src"], "env");
+    assert_ne!(
+        cache_key_for_effort(
+            &call,
+            &policy,
+            &observation,
+            Trust::Trusted,
+            &judge,
+            ThinkingLevel::Off
+        ),
+        cache_key_for_effort(
+            &call,
+            &policy,
+            &observation,
+            Trust::Trusted,
+            &judge,
+            ThinkingLevel::Low
+        )
+    );
+}
