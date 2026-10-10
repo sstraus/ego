@@ -24,7 +24,8 @@ Never grant writes to /, home root, workspace ancestors, system roots, explicit
 denies, readonly exclusions, credential stores, .ssh, .aws, .gnupg, .netrc,
 keychains, browser profiles, ego/provider/Cargo credentials or .env* outside
 workspace, including aliases and protected descendants. Plan mode forbids writes.
-No exec on any path the session made writable; your opinion cannot override it.
+No exec on residual paths granted for writing by the judge this session; your
+opinion cannot override it. Workspace and derived toolchain roots stay executable.
 Do not change the baseline or derived set, grant an invented parent, rewrite
 control files, or broaden reach to solve an unrelated command failure.
 

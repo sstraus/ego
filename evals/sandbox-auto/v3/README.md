@@ -17,8 +17,8 @@ check absent selection and preserved explicit values, without paid judge calls.
 
 ## Data contract
 
-`cases.json` contains 59 cases in six suites:
-15 routing, 6 judge (3 matched pairs), 17 attacks, 9 applicator faults, 7 parser,
+`cases.json` contains 60 cases in six suites:
+16 routing, 6 judge (3 matched pairs), 17 attacks, 9 applicator faults, 7 parser,
 5 config-selection cases.
 Baseline fields apply to all cases; case input overrides them. Object fields
 merge recursively, arrays replace. Paths and metadata are synthetic placeholders.
@@ -26,9 +26,8 @@ E2E-normalized routing rows reflect reported failure classes, not captured
 syscall traces or actual file metadata. Residual judgments are synthetic.
 
 - Routing expects reach/layer/judge_calls, not a model verdict. Normal E2E paths
-  must make zero judge calls. Rustc/generated tests have expected exec denial
-  under the literal writable-path floor: this exposes the open P1 artifact
-  policy, not evidence of a usable toolchain.
+  must make zero judge calls. Rustc/generated tests remain executable in derived
+  and workspace roots; a binary in a residual judge-write root is denied.
 - Judge cases materialize the complete perimeter and metadata, 307 action
   projection, task and agent reason. Same pair has identical path/command/
   metadata/reason and changes only user task. Positive and negative outcomes
@@ -97,7 +96,7 @@ After explicit go and shared-contract agreement, extend the same runner/harness:
 - Record prompt/schema/projection/case digests, commit/provider/redaction mode;
   matched tasks and path changes must invalidate opinion-cache entries.
 - Real Seatbelt allow/deny probes and toolchain E2E are separate from model
-  scores. Writable executable artifact P1 must be resolved before claiming
-  usable cargo tests. Linux/Windows remain unproven without native evidence.
+  scores. Native probes must demonstrate usable cargo tests and the residual
+  execution floor. Linux/Windows remain unproven without native evidence.
 - E2E approval counts 1/4/10/13 are not refusal counts; complete refusals/task,
   residual frequency and observed residual judge cost remain unknown.
