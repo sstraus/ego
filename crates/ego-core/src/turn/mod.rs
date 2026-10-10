@@ -4492,7 +4492,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if policy.mode() != Mode::Auto {
             return Ok(JudgeRun::Unavailable);
         }
-        use crate::permit::analysis::{AnalysisOpinion, RiskClass, cache_key, complete_identity};
+        use crate::permit::analysis::{
+            AnalysisOpinion, RiskClass, cache_key_for_effort, complete_identity,
+        };
         if policy.risk(pending.call()).class == RiskClass::High {
             return Ok(JudgeRun::Unavailable);
         }
@@ -4551,12 +4553,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             };
         let key = cache.as_ref().zip(self.analysis_observation.as_ref()).map(
             |((_, trust), observation)| {
-                cache_key(
+                cache_key_for_effort(
                     pending.call(),
                     &analysis_policy,
                     observation,
                     *trust,
                     &config,
+                    profile.thinking,
                 )
             },
         );

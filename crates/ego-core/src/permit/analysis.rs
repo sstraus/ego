@@ -163,6 +163,27 @@ pub fn cache_key(
     )
 }
 
+/// Effort changes the advisory generation contract and must invalidate opinions.
+pub fn cache_key_for_effort(
+    call: &PreparedCall,
+    policy: &crate::turn::GenerationPolicyDigest,
+    observation: &super::ExecObservation,
+    trust: crate::config::Trust,
+    judge: &super::judge::JudgeConfig,
+    effort: crate::generator::types::ThinkingLevel,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    super::prepared_call::frame(
+        &mut digest,
+        &cache_key(call, policy, observation, trust, judge),
+    );
+    super::prepared_call::frame(
+        &mut digest,
+        &serde_json::to_vec(&effort).expect("effort codec"),
+    );
+    digest.finalize().into()
+}
+
 fn cache_key_with_prompt(
     call: &PreparedCall,
     policy: &crate::turn::GenerationPolicyDigest,
