@@ -94,6 +94,18 @@ async fn resolve_invocation_phase(
                 message: error.to_string(),
             })?;
             if settings.effective.mode.unwrap_or(Mode::Default) == Mode::Auto {
+            if !args.quiet {
+                for (name, _, _) in config::configured_mcp(&settings.effective) {
+                    if !selected_mcp
+                        .iter()
+                        .any(|(selected, _, _)| selected == &name)
+                    {
+                        diagnostics.note(&format!(
+                            "MCP server `{name}`: configured but not attached. Inspect with ego mcp ls; attach with --mcp {name}."
+                        ));
+                    }
+                }
+            }
                 auto_preflight.validate_startup()?;
             }
             Ok(ResolvedInvocation {
@@ -658,6 +670,10 @@ async fn admit_run_phase<'store>(
     })
 }
 
+    for error in mcp_status.mcp_errors() {
+        host.diagnostics
+            .note(&format!("{error}. Inspect with ego mcp ls."));
+    }
 async fn prepare_generation_phase(
     host: &mut RunHost<'_>,
     cancel: &CancelToken,
