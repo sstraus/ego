@@ -309,7 +309,10 @@ impl RunTermination {
                 })
             }
             (ExitReason::Provider, Some(failure)) => Some(RunTermination::ProviderUncertain {
-                message: failure.cause.clone(),
+                message: format!(
+                    "{}; the response ended after partial output; automatic retry was suppressed to avoid duplicate output or tool calls; the run is uncertain",
+                    failure.cause
+                ),
             }),
             _ => Self::after_turn(outcome.exit_reason, outcome.denied.clone()),
         }

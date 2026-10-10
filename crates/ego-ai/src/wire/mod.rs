@@ -397,7 +397,7 @@ pub(crate) fn classify_status(status: u16) -> ErrorKind {
     match status {
         // The provider is momentarily unable. Nothing about the request is
         // wrong, so the same bytes may work on the next attempt.
-        408 | 429 | 500..=599 => ErrorKind::Transient,
+        408 | 409 | 429 | 500..=599 => ErrorKind::Transient,
         // The account or the credential, never the request: unauthenticated,
         // forbidden, out of credit.
         401..=403 => ErrorKind::Refused,
@@ -409,21 +409,43 @@ pub(crate) fn classify_status(status: u16) -> ErrorKind {
     }
 }
 
-/// A provider's `Retry-After`, when it states a delay in seconds.
-///
-/// The HTTP-date form is not read: it needs a wall clock this mapping does not
-/// own, and the providers ego speaks send seconds. An unreadable value is no
-/// value, so the turn falls back to its own backoff.
+/// Shared provider retry timing: milliseconds, delta seconds, or HTTP-date.
+/// The turn owner enforces its wait ceiling and never shortens this value.
 fn retry_after(headers: &[ego_core::permit::HttpHeader]) -> Option<std::time::Duration> {
-    let header = headers
-        .iter()
-        .find(|header| header.name() == "retry-after")?;
-    std::str::from_utf8(header.value())
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(std::time::Duration::from_secs)
+    retry_after_at(headers, std::time::SystemTime::now())
+}
+
+fn retry_after_at(
+    headers: &[ego_core::permit::HttpHeader],
+    now: std::time::SystemTime,
+) -> Option<std::time::Duration> {
+    let value = |name: &str| {
+        headers
+            .iter()
+            .find(|header| header.name().eq_ignore_ascii_case(name))
+            .and_then(|header| std::str::from_utf8(header.value()).ok())
+            .map(str::trim)
+    };
+    let seconds = |text: &str| {
+        text.parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() && *n > 0.0)
+            .and_then(|n| std::time::Duration::try_from_secs_f64(n).ok())
+    };
+    if let Some(delay) = value("retry-after-ms")
+        .and_then(seconds)
+        .map(|delay| delay.div_f64(1_000.0))
+    {
+        return Some(delay);
+    }
+    let text = value("retry-after")?;
+    seconds(text).or_else(|| {
+        httpdate::parse_http_date(text)
+            .ok()?
+            .duration_since(now)
+            .ok()
+            .filter(|delay| !delay.is_zero())
+    })
 }
 
 /// What a streamed Responses error `code` says about retrying.

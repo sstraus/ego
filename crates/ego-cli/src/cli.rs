@@ -1245,7 +1245,10 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         },
         None => match clap_or_answer::<RunCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Interactive(Box::new(into_args(parsed)?))),
+            Parsed::Command(parsed) => Ok(Invocation::Interactive(Box::new(into_args(
+                parsed,
+                INTERACTIVE_PROVIDER_RETRIES,
+            )?))),
         },
         Some("resume") if resume_metadata => {
             match clap_or_answer::<SessionMetadataCommand>(&tokens)? {
@@ -1493,7 +1496,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         },
         _ => match clap_or_answer::<RunCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed)?))),
+            Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed, 0)?))),
         },
     }
 }
@@ -1705,7 +1708,12 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
         )));
     }
 
-    let mut args = into_args(RunCommand { prompt, flags })?;
+    let retry_default = if prompt.is_none() && flags.file.is_none() && answers.is_empty() {
+        INTERACTIVE_PROVIDER_RETRIES
+    } else {
+        0
+    };
+    let mut args = into_args(RunCommand { prompt, flags }, retry_default)?;
     args.session = SessionChoice::Resume(id);
     args.answers = answers;
     Ok(args)
@@ -1735,7 +1743,10 @@ fn into_session_metadata_args(
     })
 }
 
-fn into_args(command: RunCommand) -> Result<Args, UsageError> {
+/// Interactive and ACP seats recover from transient failures that showed nothing.
+pub const INTERACTIVE_PROVIDER_RETRIES: u32 = 6;
+
+fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError> {
     let RunCommand { prompt, flags } = command;
 
     reject_ephemeral(flags.ephemeral)?;
@@ -1829,7 +1840,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         output: flags.common.output,
         schema: flags.schema,
         schema_retries: flags.schema_retries,
-        retry: flags.retry,
+        retry: flags.retry.unwrap_or(retry_default),
         fallbacks: flags.fallbacks,
         budget: flags.budget,
         max_turns: flags.max_turns,

@@ -152,7 +152,7 @@ async fn an_error_status_carries_its_retry_after_and_never_relays_a_raw_body() {
     );
 
     let unreadable = vec![
-        HttpHeader::new("retry-after", b"Wed, 21 Oct 2026 07:28:00 GMT".to_vec()).expect("header"),
+        HttpHeader::new("retry-after", b"Wed, 21 Oct 2015 07:28:00 GMT".to_vec()).expect("header"),
     ];
     let dated = decode(&wire, 503, unreadable, "").await;
     assert_eq!(
@@ -161,6 +161,79 @@ async fn an_error_status_carries_its_retry_after_and_never_relays_a_raw_body() {
             "the provider returned HTTP 503 with an empty body".to_owned(),
             None
         )],
-        "an HTTP-date Retry-After is not read as seconds"
+        "an expired HTTP-date Retry-After is not used"
     );
+}
+
+#[tokio::test]
+async fn all_responses_mappings_retry_sdk_transient_statuses_and_not_invalid_requests() {
+    // Catches: 409 conflicts or 529 overloads bypass shared retry classification.
+    for (name, wire) in mappings() {
+        for status in [408, 409, 429, 500, 503, 529] {
+            let events = decode(
+                wire.as_ref(),
+                status,
+                vec![HttpHeader::new("retry-after-ms", b"1250".to_vec()).unwrap()],
+                "",
+            )
+            .await;
+            assert_eq!(kinds(&events), [ErrorKind::Transient], "{name} {status}");
+            assert_eq!(causes(&events)[0].1, Some(Duration::from_millis(1250)));
+        }
+        let events = decode(wire.as_ref(), 400, Vec::new(), "").await;
+        assert_eq!(kinds(&events), [ErrorKind::Invalid], "{name}");
+    }
+}
+
+#[tokio::test]
+async fn retry_after_date_and_millisecond_precedence_reach_public_provider_failure() {
+    // Catches: timing helper support fails to reach the decoder's retry event.
+    let now = std::time::SystemTime::now();
+    let deadline = now + Duration::from_secs(60);
+    let date = httpdate::fmt_http_date(deadline);
+    for (name, wire) in mappings() {
+        let events = decode(
+            wire.as_ref(),
+            503,
+            vec![HttpHeader::new("retry-after", date.as_bytes().to_vec()).unwrap()],
+            "",
+        )
+        .await;
+        let delay = causes(&events)[0].1.expect("HTTP-date reaches retry event");
+        let latest = httpdate::parse_http_date(&date)
+            .unwrap()
+            .duration_since(now)
+            .unwrap();
+        assert!(
+            delay <= latest && delay >= latest.saturating_sub(Duration::from_secs(2)),
+            "{name}: {delay:?}"
+        );
+        let events = decode(
+            wire.as_ref(),
+            503,
+            vec![
+                HttpHeader::new("retry-after-ms", b"1250".to_vec()).unwrap(),
+                HttpHeader::new("retry-after", date.as_bytes().to_vec()).unwrap(),
+            ],
+            "",
+        )
+        .await;
+        assert_eq!(
+            causes(&events)[0].1,
+            Some(Duration::from_millis(1250)),
+            "{name}"
+        );
+        let events = decode(
+            wire.as_ref(),
+            503,
+            vec![HttpHeader::new("retry-after", b"0".to_vec()).unwrap()],
+            "",
+        )
+        .await;
+        assert_eq!(
+            causes(&events)[0].1,
+            None,
+            "zero uses local backoff: {name}"
+        );
+    }
 }

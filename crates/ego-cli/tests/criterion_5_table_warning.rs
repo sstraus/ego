@@ -11,7 +11,7 @@ use ego_core::sink::EventSink;
 use ego_core::state::SessionState;
 
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<String>>>);
+struct Capture(Arc<Mutex<Vec<String>>>, Arc<Mutex<String>>);
 
 impl Diagnostics for Capture {
     fn note(&self, message: &str) {
@@ -20,8 +20,14 @@ impl Diagnostics for Capture {
 }
 
 impl TextOutput for Capture {
-    fn write(&self, _: &str) {}
-    fn line(&self, _: &str) {}
+    fn write(&self, text: &str) {
+        self.1.lock().unwrap().push_str(text);
+    }
+    fn line(&self, text: &str) {
+        let mut answer = self.1.lock().unwrap();
+        answer.push_str(text);
+        answer.push('\n');
+    }
 }
 
 fn money(value: &str) -> Money {
@@ -56,6 +62,10 @@ fn render(events: &[PublicEvent], quiet: bool) -> Vec<String> {
     for event in events {
         sink.publish(event, &state);
     }
+    assert!(
+        capture.1.lock().unwrap().is_empty(),
+        "status diagnostics must not become answer text"
+    );
     capture.0.lock().unwrap().clone()
 }
 
@@ -134,4 +144,22 @@ fn nonbinding_or_non_table_rates_are_silent() {
         assert!(render(&[event], false).is_empty());
     }
     assert!(render(&[table_event(CeilingEffect::None)], false).is_empty());
+}
+
+#[test]
+fn interactive_retry_notice_is_visible_without_becoming_answer_text() {
+    // Catches: interactive seats ignore the coordinator's retry status and appear idle.
+    let event = PublicEvent::ProviderRetry {
+        turn: TurnId::new(),
+        attempt: 1,
+        limit: 6,
+        delay_ms: 750,
+        kind: ego_core::generator::types::ErrorKind::Transient,
+        cause: "the network failed".to_owned(),
+    };
+    assert_eq!(
+        render(std::slice::from_ref(&event), false),
+        ["the network failed — connection problem, retrying in 0.8s (attempt 1/6)"]
+    );
+    assert!(render(&[event], true).is_empty());
 }

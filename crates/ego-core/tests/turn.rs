@@ -11352,3 +11352,28 @@ impl ego_core::turn::RetryPause for NoRetryPause {
         Box::pin(futures::future::ready(()))
     }
 }
+
+#[test]
+fn retry_jitter_stays_bounded_and_never_shortens_provider_wait() {
+    // Catches: synchronized retries omit jitter or jitter retries before Retry-After.
+    use ego_core::turn::retry_delay_with_jitter;
+    use std::time::Duration;
+    for (retry, upper_ms, lower_ms) in [
+        (1, 1_000, 750),
+        (2, 2_000, 1_500),
+        (6, 32_000, 24_000),
+        (30, 60_000, 45_000),
+    ] {
+        let upper = Duration::from_millis(upper_ms);
+        let lower = Duration::from_millis(lower_ms);
+        assert_eq!(retry_delay_with_jitter(retry, None, 0), Some(upper));
+        assert_eq!(retry_delay_with_jitter(retry, None, 2500), Some(lower));
+        assert_eq!(retry_delay_with_jitter(retry, None, u16::MAX), Some(lower));
+    }
+    let stated = Duration::from_millis(1250);
+    assert_eq!(retry_delay_with_jitter(1, Some(stated), 2500), Some(stated));
+    assert_eq!(
+        retry_delay_with_jitter(1, Some(Duration::from_secs(61)), 0),
+        None
+    );
+}

@@ -443,6 +443,20 @@ fn retry_defaults_to_zero_and_accepts_explicit_nonnegative_values() {
 }
 
 #[test]
+fn interactive_body_failure_retry_is_not_disabled_by_headless_default() {
+    // Catches: a managed interactive seat inherits --retry 0 and goes idle on a dropped body.
+    for args in [&["Ask"][..], &["resume"][..]] {
+        let Invocation::Interactive(args) = cli::parse(argv_slice(args)).unwrap() else {
+            panic!("interactive seat")
+        };
+        assert_eq!(args.retry, 6);
+    }
+    assert_eq!(converses(["--retry", "0", "Ask"]).retry, 0);
+    assert_eq!(converses(["--retry", "2", "Ask"]).retry, 2);
+    assert_eq!(parsed(["run", "Ask"]).retry, 0);
+}
+
+#[test]
 fn repeatable_fallbacks_preserve_ordered_model_refs() {
     let args = parsed([
         "run",

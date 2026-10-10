@@ -677,6 +677,12 @@ pub struct GenerationRuntime {
 /// implementation only waits and never needs to watch the turn.
 pub trait RetryPause: Send + Sync {
     fn pause(&self, delay: Duration) -> futures::future::BoxFuture<'static, ()>;
+
+    /// Downward jitter in basis points (0..=2500), sampled by the runtime.
+    /// Deterministic runtimes can retain the upper bound.
+    fn jitter_basis_points(&self) -> u16 {
+        0
+    }
 }
 
 /// The first backoff interval; each later retry doubles it (1, 2, 4, 8, 16
@@ -702,6 +708,22 @@ pub fn retry_delay(retry: u32, retry_after: Option<Duration>) -> Option<Duration
                 .min(RETRY_MAX_DELAY),
         ),
     }
+}
+
+/// Apply SDK-style downward jitter only to the local exponential delay.
+/// A provider-stated delay is never shortened.
+pub fn retry_delay_with_jitter(
+    retry: u32,
+    retry_after: Option<Duration>,
+    jitter_basis_points: u16,
+) -> Option<Duration> {
+    retry_delay(retry, retry_after).map(|delay| {
+        if retry_after.is_some() {
+            delay
+        } else {
+            delay.mul_f64(f64::from(10_000 - jitter_basis_points.min(2_500)) / 10_000.0)
+        }
+    })
 }
 
 /// The cause a host is told when a generation fails.
@@ -3742,7 +3764,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     && (unsent || !drained.emitted_output);
                 if retryable
                     && additional_attempts < self.config.retry
-                    && let Some(delay) = retry_delay(additional_attempts + 1, retry_after.flatten())
+                    && let Some(delay) = retry_delay_with_jitter(
+                        additional_attempts + 1,
+                        retry_after.flatten(),
+                        self.retry_pause.jitter_basis_points(),
+                    )
                 {
                     additional_attempts += 1;
                     self.journal.publish(&PublicEvent::ProviderRetry {
