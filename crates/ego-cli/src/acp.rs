@@ -1090,9 +1090,18 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
 
     let reporter = Arc::new(Reporter::new(Arc::new(crate::output::Stderr)));
     if listener.is_some() {
-        let policy =
-            ego_tools::exec::admit_confinement(ceiling, false, CanonPath::new(root.as_path()))
-                .expect("the resolved ACP process root is absolute");
+        let policy = match ego_tools::exec::admit_confinement(
+            ceiling,
+            false,
+            CanonPath::new(root.as_path()),
+        ) {
+            Ok(policy) => policy,
+            Err(error) => {
+                return RunTermination::UsageError {
+                    message: format!("the ACP confinement could not be admitted: {error}"),
+                };
+            }
+        };
         let reporter = Arc::clone(&reporter);
         let cancel = mcp_cancel.clone();
         tokio::spawn(async move {
