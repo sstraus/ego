@@ -87,12 +87,10 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
 }
 
 fn rooted_regex(out: &mut String, root: &Path, suffix: &str) -> Result<(), ProfileError> {
-    // Validate host data with the same rules as literal paths, then encode the
-    // regex's backslashes and quotes as SBPL string data.
+    // Validate host data with the same rules as literal paths. SBPL `#"..."`
+    // is raw: its backslashes reach the regex unchanged, so do not re-escape.
     path_literal(root)?;
-    let pattern = floor::rooted_pattern(root, suffix)
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let pattern = floor::rooted_pattern(root, suffix);
     out.push_str(&format!("  (regex #\"{pattern}\")\n"));
     Ok(())
 }
