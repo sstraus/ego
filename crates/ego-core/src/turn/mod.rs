@@ -78,7 +78,7 @@ use crate::public::PublicEvent;
 use crate::question::{Elicitor, QuestionAnswer, QuestionOutcome, QuestionTarget};
 use crate::run::{Denial, DeniedBy, RequestId};
 use crate::sink::EventSink;
-use crate::state::{SessionState, Usage};
+use crate::state::{ItemKind, SessionState, Usage};
 use crate::store::evidence::EvidenceRef;
 use crate::store::session_store::{SessionStore, StoreError};
 
@@ -1072,6 +1072,7 @@ pub struct TurnLoop<'session, 'turn> {
     prompt_snapshot: crate::session::PromptSnapshot,
     lineage_root: SessionId,
     judge: Option<JudgeContext>,
+    main_model_identity: Option<ModelRef>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
         crate::config::Trust,
@@ -1221,6 +1222,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             prompt_snapshot,
             lineage_root: session_id,
             judge: None,
+            main_model_identity: None,
             analysis_cache: None,
             analysis_observation: None,
             execution_observation: None,
@@ -3420,6 +3422,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             primary_model = Some(profile.identity.clone());
                             primary_capabilities = Some(profile.capabilities.clone());
                         }
+                        self.main_model_identity = Some(profile.identity.clone());
                         profile
                     }
                     Controlled::Completed(Err(error)) => {
@@ -4489,7 +4492,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if policy.mode() != Mode::Auto {
             return Ok(JudgeRun::Unavailable);
         }
-        use crate::permit::analysis::{AnalysisOpinion, RiskClass, cache_key, complete_identity};
+        use crate::permit::analysis::{
+            AnalysisOpinion, RiskClass, cache_key_for_effort, complete_identity,
+        };
         if policy.risk(pending.call()).class == RiskClass::High {
             return Ok(JudgeRun::Unavailable);
         }
@@ -4548,12 +4553,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             };
         let key = cache.as_ref().zip(self.analysis_observation.as_ref()).map(
             |((_, trust), observation)| {
-                cache_key(
+                cache_key_for_effort(
                     pending.call(),
                     &analysis_policy,
                     observation,
                     *trust,
                     &config,
+                    profile.thinking,
                 )
             },
         );
@@ -4616,7 +4622,57 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             exec_caps,
             pending.request().why(),
         );
-        let request = input.request(&config);
+        let state = self.state();
+        let mut items: Vec<_> = state.items.values().collect();
+        items.sort_by_key(|item| item.seq);
+        let task = items
+            .iter()
+            .rev()
+            .find(|item| item.kind == ItemKind::UserPrompt)
+            .map_or(String::new(), |item| item.text.clone());
+        let agent_reason = items
+            .iter()
+            .rev()
+            .find(|item| item.turn == turn && item.kind == ItemKind::Assistant)
+            .map_or(String::new(), |item| item.text.clone());
+        let recent_calls = items
+            .iter()
+            .rev()
+            .filter(|item| item.kind == ItemKind::ToolCall && item.completed)
+            .take(3)
+            .map(|item| {
+                let structure = serde_json::from_str::<serde_json::Value>(&item.args)
+                    .ok()
+                    .and_then(|args| {
+                        args.get("argv")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|argv| {
+                                let argv: Vec<_> = argv
+                                    .iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect();
+                                crate::permit::shell::observe(&argv).skeleton
+                            })
+                    })
+                    .unwrap_or_else(|| "<non-exec-action>".into());
+                crate::permit::judge::JudgeRecentCall {
+                    tool: item.tool_name.clone().unwrap_or_default(),
+                    structure,
+                    ok: item.ok,
+                }
+            })
+            .collect();
+        let context = crate::permit::judge::JudgeTaskContext {
+            task,
+            agent_reason,
+            recent_calls,
+            roots: policy.judge_roots(),
+        }
+        .bounded();
+        let mut request =
+            input.request_with_context(&config, &context, self.main_model_identity.as_ref());
+        request.thinking = profile.thinking;
 
         let gaps = profile.capabilities.request_gaps(&request);
         if !gaps.is_empty() {

@@ -1160,6 +1160,16 @@ impl PolicyEngine {
         }
     }
 
+    pub(crate) fn judge_roots(&self) -> Vec<String> {
+        std::iter::once(self.workspace.to_string())
+            .chain(
+                self.roots
+                    .iter()
+                    .map(|root| format!("{} ({:?})", root.path(), root.access())),
+            )
+            .collect()
+    }
+
     pub(crate) fn risk(&self, call: &PreparedCall) -> super::analysis::RiskAssessment {
         if self.coordinator {
             super::orchestration::assess(call)
@@ -1493,7 +1503,15 @@ impl PolicyEngine {
             ))),
             Verdict::Escalate { why } => {
                 if self.mode == Mode::Auto
-                    && self.risk(pending.call()).class <= super::analysis::RiskClass::Bounded
+                    && (self.risk(pending.call()).class <= super::analysis::RiskClass::Bounded
+                        || pending
+                            .call()
+                            .ops()
+                            .iter()
+                            .all(|operation| match operation {
+                                Op::Spawn { spec } => super::shell::trusted_read_only(spec),
+                                _ => false,
+                            }))
                 {
                     let call = pending.call;
                     let permit = self.mint(scope_of(&call));

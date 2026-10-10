@@ -68,7 +68,11 @@ fn canonical_json(request: &GenRequest) -> serde_json::Value {
     else {
         panic!("judge canonical facts are not text");
     };
-    serde_json::from_str(text).expect("canonical judge facts are JSON")
+    serde_json::from_str(
+        text.trim_start_matches("<untrusted_action_json>\n")
+            .trim_end_matches("\n</untrusted_action_json>"),
+    )
+    .expect("canonical judge facts are JSON")
 }
 
 fn decode(events: impl IntoIterator<Item = AiEvent>) -> JudgeOutcome {
@@ -114,7 +118,7 @@ fn separately_resolved_judge_model_is_toolless_and_not_the_main_identity() {
 }
 
 #[test]
-fn judge_request_is_toolless_and_contains_only_canonical_authority_facts() {
+fn judge_request_missing_program_name_cannot_assess_the_action() {
     let input = JudgeInput::new(
         &spawn_call(),
         &confinement(Confinement::Workspace, true),
@@ -134,8 +138,11 @@ fn judge_request_is_toolless_and_contains_only_canonical_authority_facts() {
     assert!(!request.parallel_tool_calls);
     assert_eq!(request.thinking, ThinkingLevel::Off);
     assert_eq!(request.max_output_tokens, Some(512));
-    assert!(!encoded.contains("/usr/bin/printf"));
-    assert!(!encoded.contains("argv-native"));
+    assert!(
+        encoded.contains("/usr/bin/printf"),
+        "judge cannot identify the program"
+    );
+    assert!(encoded.contains("argv-native"));
     let argv = &canonical_json(&request)["call"]["operations"][0]["argv"];
     assert_eq!(argv.as_array().unwrap().len(), 2);
     assert_eq!(argv[0]["bytes"], "/usr/bin/printf".len());
@@ -157,10 +164,16 @@ fn judge_request_is_toolless_and_contains_only_canonical_authority_facts() {
         .expect("canonical facts are an object");
     assert_eq!(
         object.len(),
-        4,
+        5,
         "judge received a non-canonical fact: {canonical}"
     );
-    for key in ["call", "confinement", "exec_caps", "escalation"] {
+    for key in [
+        "call",
+        "confinement",
+        "exec_caps",
+        "escalation",
+        "task_context",
+    ] {
         assert!(
             object.contains_key(key),
             "canonical facts omitted {key}: {canonical}"
@@ -327,4 +340,101 @@ fn judge_decoder_persists_a_valid_utf8_reason_inside_the_byte_bound() {
     let persisted = reason(&outcome);
     assert!(persisted.len() <= JUDGE_REASON_MAX_BYTES);
     assert!(std::str::from_utf8(persisted.as_bytes()).is_ok());
+}
+
+#[test]
+fn cross_provider_secret_flag_values_are_not_disclosed_to_judge() {
+    let call = PreparedCall::new(
+        "exec",
+        Op::Spawn {
+            spec: SpawnSpec::new(
+                vec![
+                    "curl".into(),
+                    "--token".into(),
+                    "private-token-value".into(),
+                    "https://example.com/?secret=value".into(),
+                ],
+                Some(CanonPath::new(TEST_ROOT)),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .unwrap(),
+        },
+    );
+    let input = JudgeInput::new(
+        &call,
+        &confinement(Confinement::Workspace, false),
+        ExecCaps::READ_SCOPED,
+        &escalation(),
+    );
+    let context = ego_core::permit::judge::JudgeTaskContext::default();
+    let request =
+        input.request_with_context(&config(), &context, Some(&ModelRef("openai/main".into())));
+    let encoded = serde_json::to_string(&request).unwrap();
+    assert!(!encoded.contains("private-token-value"));
+    assert!(!encoded.contains("?secret=value"));
+    assert!(encoded.contains("curl"));
+    assert!(encoded.contains("example.com"));
+}
+
+#[test]
+fn same_provider_raw_command_is_not_accidentally_cross_provider_redacted() {
+    let input = JudgeInput::new(
+        &spawn_call(),
+        &confinement(Confinement::Workspace, false),
+        ExecCaps::READ_SCOPED,
+        &escalation(),
+    );
+    let request = input.request_with_context(
+        &config(),
+        &ego_core::permit::judge::JudgeTaskContext::default(),
+        Some(&ModelRef("ollama/main".into())),
+    );
+    let encoded = serde_json::to_string(&request).unwrap();
+    assert!(encoded.contains("argv-native"));
+    assert!(encoded.contains("/usr/bin/printf"));
+    assert_eq!(
+        canonical_json(&request)["call"]["operations"][0]["action"]["redacted"],
+        false
+    );
+}
+
+#[test]
+fn openrouter_provider_equality_cannot_disclose_raw_upstream_secrets() {
+    let spec = SpawnSpec::new(
+        vec![
+            "curl".into(),
+            "--token".into(),
+            "private-token-value".into(),
+        ],
+        Some(CanonPath::new(TEST_ROOT)),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let input = JudgeInput::new(
+        &PreparedCall::new("exec", Op::Spawn { spec }),
+        &confinement(Confinement::Workspace, false),
+        ExecCaps::READ_SCOPED,
+        &escalation(),
+    );
+    let judge = JudgeConfig {
+        identity: ModelRef("openrouter/anthropic/claude-haiku-4.5".into()),
+        request_model: "anthropic/claude-haiku-4.5".into(),
+        max_output_tokens: Some(512),
+    };
+    let request = input.request_with_context(
+        &judge,
+        &Default::default(),
+        Some(&ModelRef("openrouter/anthropic/claude-sonnet".into())),
+    );
+    assert!(
+        !serde_json::to_string(&request)
+            .unwrap()
+            .contains("private-token-value")
+    );
+    assert_eq!(
+        canonical_json(&request)["call"]["operations"][0]["action"]["redacted"],
+        true
+    );
 }

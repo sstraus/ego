@@ -51,7 +51,7 @@ higher or lower layer supplies a value.
 | `exec.env_allowlist` | Array of environment names | Empty; used only with `allowlist` |
 | `network` | `on`, `off` | `on`; explicit `--offline` cannot be cleared by this setting |
 | `orchestration.mode` | `observe`, `active` | `observe`; see [orchestration](../integrations/orchestration.md) |
-| `permissions.judge` | Full model slug | Absent; auto analysis can escalate without a configured judge |
+| `permissions.judge` | Full model slug or `none` | Absent uses the active main model; `none` disables advisory generation |
 | `permissions.allow` | Array of canonical predicates | Empty contribution |
 | `permissions.deny` | Array of canonical predicates | Empty contribution; system denies remain immutable |
 | `budget` | String such as `"20k"`, `"400k"`, or `"2.5$"` | No configured ceiling; system money/token limits clamp requests independently |

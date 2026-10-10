@@ -6593,6 +6593,13 @@ mod turn {
     }
 
     mod generation_boundary {
+        mod judge_eval {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/common/judge_eval.rs"
+            ));
+        }
+
         use super::*;
         use ego_core::generation_model_source::{
             GenerationModelError, GenerationModelErrorClass, GenerationModelRequest,

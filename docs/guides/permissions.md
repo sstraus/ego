@@ -10,7 +10,7 @@ configuration and instructions are admitted. These are separate authorities.
 | --- | --- |
 | `plan` | Prevent mutating operations; inspect and reason |
 | `default` | Apply ordinary deterministic policy and escalation |
-| `auto` | Use deterministic low/bounded analysis, a configured judge where needed, then ordinary escalation |
+| `auto` | Use deterministic low/bounded analysis, a judge where needed (main model by default), then ordinary escalation |
 | `edits` | Allow ordinary editing while retaining separate checks for higher-risk effects |
 | `yolo` | Relax ordinary session approval; retain system denies, confinement, offline, budgets, and hard boundaries |
 
@@ -155,6 +155,21 @@ Sources: [policy engine](../../crates/ego-core/src/permit/grant.rs),
 [rule grammar](../../crates/ego-core/src/permit/rule/),
 [confinement adapters](../../crates/ego-tools/src/exec/), and
 [effective-perimeter tests](../../crates/ego-cli/tests/effective_perimeter.rs).
+
+## Judge action evidence
+
+In `auto`, an unset `permissions.judge` prefers the same provider's review model
+when it is in the catalogue: OpenAI Luna, Anthropic Haiku, or a dedicated Codex
+reviewer. Otherwise it uses the active main model. It uses low reasoning effort
+when supported, otherwise off.
+Set `permissions.judge = "none"` to disable advisory generation and keep human
+escalation. An explicit provider/model selects a separate judge. The judge sees
+bounded task context, agent reasoning, recent call outcomes and action evidence.
+Commands are data, not instructions. Same-provider judges receive raw argv;
+cross-provider judges receive AST-backed redacted structure. Environment values
+and repository file contents are not included. Raw-call hashes bind execution;
+they do not replace the action description. See the
+[action-evidence decision](../internals/decisions/2026-10-10-judge-action-evidence.md).
 
 Current recovery behavior is implemented in [root mutations](../../crates/ego-tools/src/config.rs),
 [remembered rules](../../crates/ego-core/src/config/rule_management.rs), and

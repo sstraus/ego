@@ -20,6 +20,7 @@ pub mod rule;
 mod sandbox_grant;
 mod scan;
 mod scope;
+pub mod shell;
 mod spawn;
 mod tool;
 
