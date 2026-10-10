@@ -1,19 +1,25 @@
-# Sandbox auto evaluation v2
+# Adaptive sandbox evaluation v3
 
 Design fixture for regression case, revised after Fable review. No model, parser
 or native enforcement test has been run. V1 is superseded in Git history.
 
-## Why v2
+## Why v3
 
 Baseline reads/exec and trusted CARGO_HOME/RUSTUP_HOME/mbx/git/TMPDIR writes do
 not go to the sentinel. The previous independent_authority answer field is
 removed. Residual cases ask whether this write fits the actual user task.
 A real residual frequency/benefit measurement is still needed.
 
+Latest decision: adaptive is the default sandbox ON; auto is permission mode
+only. Explicit workspace/ro/off stay unchanged. Protection includes the AST
+read-only classifier and main-model judge from 307. Config scenarios additionally
+check absent selection and preserved explicit values, without paid judge calls.
+
 ## Data contract
 
-`cases.json` contains 54 cases in five suites:
-15 routing, 6 judge (3 matched pairs), 17 attacks, 9 applicator faults, 7 parser.
+`cases.json` contains 59 cases in six suites:
+15 routing, 6 judge (3 matched pairs), 17 attacks, 9 applicator faults, 7 parser,
+5 config-selection cases.
 Baseline fields apply to all cases; case input overrides them. Object fields
 merge recursively, arrays replace. Paths and metadata are synthetic placeholders.
 E2E-normalized routing rows reflect reported failure classes, not captured
@@ -36,6 +42,10 @@ syscall traces or actual file metadata. Residual judgments are synthetic.
 - Parser cases are exact input/expected-path scenarios, not permission outcomes.
   Record native Rust error output before turning examples into system fixtures;
   do not claim live Landlock proof from handwritten EACCES lines.
+- Config cases use the real resolver and effective CLI/ACP admission, not a
+  model: fresh selection adaptive with absent source and no implicit ~/Gits
+  write root, explicit workspace/ro/off preserved, profile override preserved.
+  The implementation default flip remains a separate small commit and test.
 
 Expected model tuples omit variable reason; require strict output shape from
 `verdict.schema.json` plus nonempty <=1024 UTF-8-byte reason. Schema character
@@ -67,7 +77,7 @@ After explicit go and shared-contract agreement, extend the same runner/harness:
    injection and timeout route; then full judgment set. Coordinator owns paid
    authorization, exact model/provider choice, key access and spend cap.
 4. Proposed future invocation:
-   `python3 evals/judge/run.py --subject residual-write --cases evals/sandbox-auto/v2/cases.json --harness <built-test> --output <fresh-dir>`.
+   `python3 evals/judge/run.py --subject residual-write --cases evals/sandbox-auto/v3/cases.json --harness <built-test> --output <fresh-dir>`.
    --subject/--cases are proposed extensions, not currently runnable options.
 
 ## Gates and metrics

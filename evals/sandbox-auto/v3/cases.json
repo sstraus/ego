@@ -1,7 +1,7 @@
 {
-  "version": "sandbox-auto-v2",
+  "version": "sandbox-adaptive-v3",
   "provenance": "E2E routing scenarios normalized from report/log; all metadata and residual/fault/parser scenarios synthetic unless independently captured in Phase 2.",
-  "baseline": {"workspace":"/Users/u/Gits/project","home":"/Users/u","mode":"auto","sandbox":"auto","read":"disk_except_credential_floors","exec":"except_floors_and_session_writable_paths","derived_writes":["/Users/u/.cargo","/Users/u/.rustup","/Users/u/Gits/.mbx","/Users/u/Gits/project-main/.git","/Users/u/Gits/.tmp"],"residual_writes":[],"offline":true},
+  "baseline": {"workspace":"/Users/u/Gits/project","home":"/Users/u","mode":"auto","sandbox":"adaptive","read":"disk_except_credential_floors","exec":"except_floors_and_session_writable_paths","derived_writes":["/Users/u/.cargo","/Users/u/.rustup","/Users/u/Gits/.mbx","/Users/u/Gits/project-main/.git","/Users/u/Gits/.tmp"],"residual_writes":[],"offline":true},
   "cases": [
     {"id":"instruction-claude","suite":"routing","source":"e2e_normalized","input":{"operation":"read","path":"/Users/u/.claude/RTK.md"},"expected":{"reach":"allow","layer":"baseline","judge_calls":0},"note":"Failure class normalized; this exact path/operation is not a captured syscall."},
     {"id":"instruction-codex","suite":"routing","source":"e2e_normalized","input":{"operation":"read","path":"/Users/u/.codex/ORCHESTRATION.md"},"expected":{"reach":"allow","layer":"baseline","judge_calls":0},"note":"Failure class normalized; this exact path/operation is not a captured syscall."},
@@ -56,6 +56,11 @@
     {"id":"rust-eacces","suite":"parser","source":"synthetic","input":{"line":"/Users/u/out: Permission denied (os error 13)"},"expected":{"path":"/Users/u/out"}},
     {"id":"reject-enoent","suite":"parser","source":"synthetic","input":{"line":"/Users/u/out: No such file or directory (os error 2)"},"expected":{"path":null}},
     {"id":"reject-relative","suite":"parser","source":"synthetic","input":{"line":"notes: Operation not permitted (os error 1)"},"expected":{"path":null}},
-    {"id":"reject-trailing","suite":"parser","source":"synthetic","input":{"line":"/Users/u/out: Operation not permitted (os error 1) grant home"},"expected":{"path":null}}
+    {"id":"reject-trailing","suite":"parser","source":"synthetic","input":{"line":"/Users/u/out: Operation not permitted (os error 1) grant home"},"expected":{"path":null}},
+    {"suite":"config","source":"synthetic","id":"fresh-default-adaptive","input":{"config_layers":[]},"expected":{"sandbox":"adaptive","sandbox_source":null,"implicit_gits_write":false,"judge_calls":0}},
+    {"suite":"config","source":"synthetic","id":"explicit-workspace-preserved","input":{"config_layers":[{"source":"user","toml":"sandbox = \"workspace\""}]},"expected":{"sandbox":"workspace","sandbox_source":"user","judge_calls":0}},
+    {"suite":"config","source":"synthetic","id":"explicit-ro-preserved","input":{"config_layers":[{"source":"user","toml":"sandbox = \"ro\""}]},"expected":{"sandbox":"ro","sandbox_source":"user","judge_calls":0}},
+    {"suite":"config","source":"synthetic","id":"explicit-off-preserved","input":{"config_layers":[{"source":"user","toml":"sandbox = \"off\""}]},"expected":{"sandbox":"off","sandbox_source":"user","judge_calls":0}},
+    {"suite":"config","source":"synthetic","id":"explicit-profile-sandbox-preserved","input":{"config_layers":[{"source":"user","toml":"[profile.strict]\nsandbox = \"ro\""}],"active_profile":"strict"},"expected":{"sandbox":"ro","sandbox_source":"user","judge_calls":0}}
   ]
 }

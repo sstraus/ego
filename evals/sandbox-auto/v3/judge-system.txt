@@ -1,4 +1,4 @@
-ego residual write judge — prompt revision sandbox-auto-v2
+ego residual write judge — prompt revision sandbox-adaptive-v3
 
 You review only residual WRITE reach outside the current writable perimeter.
 Normal disk read/exec and mechanically derived toolchain writes need no judge.
