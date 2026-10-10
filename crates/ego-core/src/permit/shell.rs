@@ -138,7 +138,10 @@ impl Walker<'_> {
             }
             "string" | "raw_string" | "ansi_c_string" => {
                 let value = self.text(node).to_owned();
-                let projection = if value.to_ascii_lowercase().contains("authorization:") {
+                let literal = value.trim_matches(['\'', '"']);
+                let projection = if let Some(url) = project_url(literal) {
+                    url
+                } else if value.to_ascii_lowercase().contains("authorization:") {
                     "<header:authorization>".into()
                 } else {
                     let literal = value.trim_matches(['\'', '"']);
@@ -660,6 +663,9 @@ fn project_url(word: &str) -> Option<String> {
 /// Atom redaction is a fallback for native argv and unsupported AST spans. AST
 /// node types, not this detector, determine shell literal/assignment redaction.
 pub fn redact_atom(word: &str) -> String {
+    if let Some(projected) = project_url(word) {
+        return projected;
+    }
     if word.contains("-----BEGIN") {
         return "<secret:pem>".into();
     }
@@ -681,9 +687,6 @@ pub fn redact_atom(word: &str) -> String {
     }
     if word.to_ascii_lowercase().contains("authorization:") {
         return "<header:authorization>".into();
-    }
-    if let Some(projected) = project_url(word) {
-        return projected;
     }
     if word.contains('@') && !word.contains('/') {
         return "<email>".into();
