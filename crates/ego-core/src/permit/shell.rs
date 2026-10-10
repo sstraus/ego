@@ -118,7 +118,7 @@ impl Walker<'_> {
                 }
                 let projected = project_words(&words);
                 for (index, child) in children.iter().enumerate() {
-                    if index > 0 && secret_flag(&words[index - 1]) {
+                    if index > 0 && private_option_operand(&words[index - 1], &words[index]) {
                         self.replace(*child, projected[index].clone());
                     }
                 }
@@ -350,16 +350,48 @@ fn secret_flag(word: &str) -> bool {
             | "-u"
             | "--user"
             | "-p"
+            | "--oauth2-bearer"
+            | "--cookie"
+            | "-b"
+            | "--cert"
+            | "-E"
+            | "--key"
+            | "--pass"
+            | "--proxy-user"
+            | "-U"
+            | "--proxy-header"
+            | "--proxy-cert"
+            | "--proxy-key"
+            | "--proxy-pass"
+            | "--tlsuser"
+            | "--tlspassword"
+            | "--proxy-tlsuser"
+            | "--proxy-tlspassword"
     )
 }
+fn private_option_operand(flag: &str, operand: &str) -> bool {
+    secret_flag(flag)
+        || (flag.starts_with('-')
+            && flag != "--"
+            && !operand.starts_with('-')
+            && !matches!(flag,
+                "-n" | "-r" | "-R" | "-l" | "-i" | "-F" | "--fixed-strings"
+                | "--short" | "-s" | "--porcelain" | "--branch" | "--show-current"
+                | "--list" | "-a" | "-L" | "--location" | "-I" | "--head"
+                | "--silent" | "--fail" | "--show-error" | "-fsSL" | "-sS"))
+}
+
 fn project_words(words: &[String]) -> Vec<String> {
     words
         .iter()
         .enumerate()
         .map(|(index, word)| {
-            if index > 0 && secret_flag(&words[index - 1]) {
+            if index > 0 && private_option_operand(&words[index - 1], &words[index]) {
                 if matches!(words[index - 1].as_str(), "-H" | "--header") {
                     "<header:secret>".into()
+                } else if !secret_flag(&words[index - 1]) {
+                    project_url(word.trim_matches(['\'', '"']))
+                        .unwrap_or_else(|| "<secret:option-operand>".into())
                 } else {
                     "<secret:flag-value>".into()
                 }
@@ -371,6 +403,12 @@ fn project_words(words: &[String]) -> Vec<String> {
 }
 
 fn structural_word(word: &str) -> String {
+    for flag in ["-u", "-U", "-H", "-E", "-b"] {
+        if word.starts_with(flag) && word.len() > flag.len() {
+            return format!("{flag}<secret:flag-value>");
+        }
+    }
+
     if let Some((name, _)) = word.split_once('=') {
         if !name.is_empty()
             && name
@@ -610,6 +648,15 @@ fn cache_script(script: &str) -> Option<String> {
     Some(result)
 }
 
+fn project_url(word: &str) -> Option<String> {
+    let url = url::Url::parse(word).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| format!(
+        "<url:scheme={} host={} port={} path={}>",
+        url.scheme(), url.host_str().unwrap_or("unknown"),
+        url.port_or_known_default().unwrap_or(0), url.path()
+    ))
+}
+
 /// Atom redaction is a fallback for native argv and unsupported AST spans. AST
 /// node types, not this detector, determine shell literal/assignment redaction.
 pub fn redact_atom(word: &str) -> String {
@@ -635,15 +682,8 @@ pub fn redact_atom(word: &str) -> String {
     if word.to_ascii_lowercase().contains("authorization:") {
         return "<header:authorization>".into();
     }
-    if let Ok(url) = url::Url::parse(word) {
-        if matches!(url.scheme(), "http" | "https") {
-            return format!(
-                "<url:host={} port={} path={}>",
-                url.host_str().unwrap_or("unknown"),
-                url.port_or_known_default().unwrap_or(0),
-                url.path()
-            );
-        }
+    if let Some(projected) = project_url(word) {
+        return projected;
     }
     if word.contains('@') && !word.contains('/') {
         return "<email>".into();
