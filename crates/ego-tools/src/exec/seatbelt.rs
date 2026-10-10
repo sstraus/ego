@@ -8,25 +8,27 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use ego_core::permit::{
     BackendIdentity, CanonPath, Confinement, ExecCaps, ProcessError, RunConfinement, SandboxGrant,
 };
-use tempfile::{Builder, NamedTempFile};
 
 use super::backend::LaunchPrefix;
 use super::profile::{self, ProfileInput};
 
-const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-private-profile-v2-adaptive";
+#[cfg(test)]
+#[path = "seatbelt_tests.rs"]
+mod tests;
 
-/// The profile file is retained for at least as long as any command prefix
-/// that names it. Dropping the backend removes the private file.
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v3-adaptive";
+
+/// Policy text is owned by the host and passed directly to each launcher.
+/// No child-writable file can change a later spawn's policy.
 pub(crate) struct SeatbeltBackend {
-    profile: NamedTempFile,
+    profile: String,
     maximum_caps: ExecCaps,
     base: ProfileBase,
 }
@@ -102,17 +104,17 @@ impl SeatbeltBackend {
                 })
                 .collect(),
         };
-        Self::render_to_file(base, &[], policy.requirements().required())
+        Self::render_profile(base, &[], policy.requirements().required())
     }
 
     /// The same backend with `grants` added to its profile. The scratch root
     /// stays the one the measured backend owns, so the caller keeps that
     /// backend alive for as long as it uses the result.
     pub(crate) fn widened(&self, grants: &[SandboxGrant]) -> Result<Self, ProcessError> {
-        Self::render_to_file(self.base.clone(), grants, self.maximum_caps)
+        Self::render_profile(self.base.clone(), grants, self.maximum_caps)
     }
 
-    fn render_to_file(
+    fn render_profile(
         base: ProfileBase,
         grants: &[SandboxGrant],
         maximum_caps: ExecCaps,
@@ -128,7 +130,7 @@ impl SeatbeltBackend {
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
         let grants = base.roots.iter().chain(grants).cloned().collect::<Vec<_>>();
-        let rendered = profile::render(&ProfileInput {
+        let profile = profile::render(&ProfileInput {
             adaptive: base.adaptive.as_ref(),
             level: base.level,
             offline: base.offline,
@@ -139,23 +141,6 @@ impl SeatbeltBackend {
             grants: &grants,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
-
-        let mut profile = Builder::new()
-            .prefix(".ego-seatbelt-")
-            .suffix(".sb")
-            // The child may write its scratch root. Keep the policy file in a
-            // different exclusive host-owned file so one spawn cannot alter
-            // the profile used by a later spawn in the same run.
-            .tempfile()
-            .map_err(|error| {
-                ProcessError::Backend(format!("cannot create private Seatbelt profile: {error}"))
-            })?;
-        profile.write_all(rendered.as_bytes()).map_err(|error| {
-            ProcessError::Backend(format!("cannot write private Seatbelt profile: {error}"))
-        })?;
-        profile.flush().map_err(|error| {
-            ProcessError::Backend(format!("cannot flush private Seatbelt profile: {error}"))
-        })?;
 
         Ok(Self {
             profile,
@@ -192,10 +177,7 @@ impl SeatbeltBackend {
     pub(crate) fn launch_prefix(&self) -> LaunchPrefix {
         LaunchPrefix {
             program: Some(OsString::from(SANDBOX_EXEC)),
-            args_before_target: vec![
-                OsString::from("-f"),
-                self.profile.path().as_os_str().to_owned(),
-            ],
+            args_before_target: vec![OsString::from("-p"), OsString::from(&self.profile)],
         }
     }
 }
