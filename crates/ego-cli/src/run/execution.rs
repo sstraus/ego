@@ -21,6 +21,7 @@ async fn resolve_invocation_phase(
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
+    validate_workspace_trust(args, driver).map_err(usage)?;
     match preflight {
         Some(ExecutionPreflight {
             settings,

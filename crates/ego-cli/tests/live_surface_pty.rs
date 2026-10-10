@@ -1,4 +1,6 @@
 mod support;
+#[path = "live_surface_pty/workspace_trust.rs"]
+mod workspace_trust;
 
 // Catches: the terminal keymap treats LF like CR and submits a partial draft.
 #[test]

@@ -323,6 +323,7 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         append_system: shape.append_system,
         instructions: shape.instructions,
         bare: false,
+        trust_workspace: false,
         mode: None,
         allow: shape.allow,
         deny: shape.deny,
