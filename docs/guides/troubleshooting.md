@@ -53,6 +53,12 @@ request/response bodies safe to publish. Keep local exports and private credenti
 stores out of shared logs. Use a sanitized export and review its remaining prose
 before publication.
 
+To compare provider request prefixes, set `EGO_LOG=ego::body=debug` and
+`EGO_LOG_FILE` to a private local file. Each `provider request` entry contains
+the JSON body and API path, without HTTP headers. Prompt text and tool results
+remain sensitive. Codex requests use one lineage routing key in both
+`prompt_cache_key` and the `session-id` header; `cache = 'none'` omits both.
+
 Source: [doctor](../../crates/ego-cli/src/doctor.rs),
 [diagnostics](../../crates/ego-cli/src/diagnostics.rs),
 [confinement diagnostics](../../crates/ego-cli/src/confinement_diagnostics.rs), and

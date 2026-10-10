@@ -1,5 +1,8 @@
 //! Request bytes for the published prompt-cache contracts; no provider response fixture.
-use ego_ai::wire::{anthropic_messages, openai_completions, openai_responses, xai_responses};
+use ego_ai::wire::{
+    RequestTarget, anthropic_messages, openai_codex_responses, openai_completions,
+    openai_responses, xai_responses,
+};
 use ego_core::config::{ConfigLayer, Source, Trust, resolve};
 use ego_core::event::id::SessionId;
 use ego_core::generator::capabilities::CacheRetention;
@@ -43,6 +46,57 @@ fn markers(value: &Value) -> usize {
         Value::Array(values) => values.iter().map(markers).sum(),
         _ => 0,
     }
+}
+
+#[test]
+fn codex_consecutive_turns_keep_cache_key_and_session_affinity() {
+    // Catches: Codex requests omit the session affinity that ChatGPT uses for cache routing.
+    let root = SessionId::new();
+    let first = request("gpt-6.1-sol", root, "host rev1");
+    let second = request("gpt-6.1-sol", root, "host rev2");
+    let base = url::Url::parse("https://chatgpt.com/backend-api/").unwrap();
+    let target = RequestTarget::new(&base, &[]);
+    let a = openai_codex_responses::build_request(&target, &first).unwrap();
+    let b = openai_codex_responses::build_request(&target, &second).unwrap();
+    let a_body = json(a.body.unwrap());
+    let b_body = json(b.body.unwrap());
+    let key = a_body["prompt_cache_key"]
+        .as_str()
+        .expect("Codex cache key");
+    assert_eq!(b_body["prompt_cache_key"], key);
+    for headers in [&a.headers, &b.headers] {
+        assert!(
+            headers
+                .iter()
+                .any(|header| header.name() == "session-id" && header.value() == key.as_bytes())
+        );
+    }
+    assert_eq!(a_body["instructions"], b_body["instructions"]);
+    assert_eq!(
+        a_body["input"].as_array().unwrap()[..2],
+        b_body["input"].as_array().unwrap()[..2]
+    );
+    assert_eq!(a_body["store"], false);
+    assert!(a_body.get("previous_response_id").is_none());
+    let other = request("gpt-6.1-sol", SessionId::new(), "host");
+    assert_ne!(
+        json(openai_codex_responses::request_body(&other).unwrap())["prompt_cache_key"],
+        key
+    );
+    let mut disabled = first;
+    disabled.cache.as_mut().unwrap().retention = CacheRetention::None;
+    let disabled = openai_codex_responses::build_request(&target, &disabled).unwrap();
+    assert!(
+        json(disabled.body.unwrap())
+            .get("prompt_cache_key")
+            .is_none()
+    );
+    assert!(
+        !disabled
+            .headers
+            .iter()
+            .any(|header| header.name() == "session-id")
+    );
 }
 
 #[test]

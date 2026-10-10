@@ -84,6 +84,8 @@ struct WireRequest<'a> {
     stream: bool,
     store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     input: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -210,6 +212,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         model: &req.model,
         stream: true,
         store: false,
+        prompt_cache_key: super::cache::routing_key(req, "openai-codex"),
         instructions: system_instructions(req.messages.messages()),
         input: input_items(req.messages.messages()),
         parallel_tool_calls: (!tools.is_empty()).then_some(req.parallel_tool_calls),
@@ -226,6 +229,16 @@ pub fn build_request(
     req: &GenRequest,
 ) -> Result<HttpRequest, Inexpressible> {
     let mut request = target.post_json(PATH, request_body(req)?);
+    // ChatGPT uses the Responses session header for cache affinity, in addition
+    // to the body's prompt_cache_key. Keep both pinned to the same lineage.
+    if let Some(key) = super::cache::routing_key(req, "openai-codex") {
+        request
+            .headers
+            .retain(|header| !header.name().eq_ignore_ascii_case("session-id"));
+        request
+            .headers
+            .push(crate::http::public_header("session-id", key.into_bytes()));
+    }
     if !request
         .headers
         .iter()
