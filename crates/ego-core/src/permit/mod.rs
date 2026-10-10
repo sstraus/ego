@@ -12,7 +12,6 @@ mod foreign;
 mod fs;
 mod grant;
 pub mod judge;
-pub mod shell;
 mod orchestration;
 mod path;
 mod prepared_call;
@@ -21,6 +20,7 @@ pub mod rule;
 mod sandbox_grant;
 mod scan;
 mod scope;
+pub mod shell;
 mod spawn;
 mod tool;
 
