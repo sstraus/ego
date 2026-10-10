@@ -65,11 +65,8 @@ async fn resolve_invocation_phase(
                 });
             }
             let chosen_session = chosen(args, &settings.root, None).map_err(usage)?;
-            if matches!(args.session, crate::cli::SessionChoice::Resume(_))
-                && settings.effective.model.is_none()
-                && args.model.is_none()
-            {
-                settings.effective.model = chosen_session
+            let recorded_model = if matches!(args.session, crate::cli::SessionChoice::Resume(_)) {
+                chosen_session
                     .store
                     .list()
                     .map_err(|error| RunTermination::Failed {
@@ -78,22 +75,25 @@ async fn resolve_invocation_phase(
                     .into_iter()
                     .find(|session| session.id == chosen_session.id)
                     .and_then(|session| session.model)
-                    .map(ModelRef);
+                    .map(ModelRef)
+            } else {
+                None
+            };
+            if settings.effective.model.is_none() && args.model.is_none() {
+                settings.effective.model = recorded_model.clone();
             }
             select_startup_model(args, &mut settings, driver, cancel, diagnostics).await?;
+            if !args.quiet
+                && let Some(previous) = recorded_model.as_ref()
+                && let Some(selected) = settings.effective.model.as_ref()
+                && previous != selected
+            {
+                diagnostics.note(&format!(
+                    "Resume model changed: {previous} -> {selected} (current configuration or flags)."
+                ));
+            }
             let selected_mcp =
                 config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
-            admit_mcp_transports(&settings.confinement, &selected_mcp).map_err(usage)?;
-            let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
-            let refresh = ego_mcp::McpRegistryRefresh::new(
-                selected_mcp,
-                ego_mcp::RegistryTrigger::ConfigChanged,
-                ego_mcp::RegistryScope::All,
-            )
-            .map_err(|error| RunTermination::Failed {
-                message: error.to_string(),
-            })?;
-            if settings.effective.mode.unwrap_or(Mode::Default) == Mode::Auto {
             if !args.quiet {
                 for (name, _, _) in config::configured_mcp(&settings.effective) {
                     if !selected_mcp
@@ -106,6 +106,17 @@ async fn resolve_invocation_phase(
                     }
                 }
             }
+            admit_mcp_transports(&settings.confinement, &selected_mcp).map_err(usage)?;
+            let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
+            let refresh = ego_mcp::McpRegistryRefresh::new(
+                selected_mcp,
+                ego_mcp::RegistryTrigger::ConfigChanged,
+                ego_mcp::RegistryScope::All,
+            )
+            .map_err(|error| RunTermination::Failed {
+                message: error.to_string(),
+            })?;
+            if settings.effective.mode.unwrap_or(Mode::Default) == Mode::Auto {
                 auto_preflight.validate_startup()?;
             }
             Ok(ResolvedInvocation {
@@ -659,6 +670,10 @@ async fn admit_run_phase<'store>(
     }
     debug_assert!(materialized.context.is_some());
     let mcp_status = scoped.mcp_registry.status();
+    for error in mcp_status.mcp_errors() {
+        host.diagnostics
+            .note(&format!("{error}. Inspect with ego mcp ls."));
+    }
     Ok(AdmittedRun {
         opened: materialized
             .opened
@@ -670,10 +685,6 @@ async fn admit_run_phase<'store>(
     })
 }
 
-    for error in mcp_status.mcp_errors() {
-        host.diagnostics
-            .note(&format!("{error}. Inspect with ego mcp ls."));
-    }
 async fn prepare_generation_phase(
     host: &mut RunHost<'_>,
     cancel: &CancelToken,
