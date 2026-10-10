@@ -66,6 +66,7 @@ impl AgentIdentity {
 
     pub(crate) fn render(
         &self,
+        session: crate::event::id::SessionId,
         model: &ModelRef,
         thinking: ThinkingLevel,
         policy: &GenerationPolicySnapshot,
@@ -79,6 +80,7 @@ impl AgentIdentity {
         let network = if self.offline { "offline" } else { "online" };
         format!(
             "Current runtime facts (ego-owned; refreshed for this generation):\n\
+             - Ego session ID: {session}\n\
              - Model: {model} (reasoning effort: {thinking})\n\
              - Workspace root: {workspace}\n\
              - Posture: permission mode: {mode}; sandbox: {sandbox}; network: {network}\n\

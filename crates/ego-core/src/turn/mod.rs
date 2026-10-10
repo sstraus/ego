@@ -3473,6 +3473,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 // model must be told the one actually answering.
                 let identity = self.config.identity.as_ref().map(|identity| {
                     identity.render(
+                        self.session_id,
                         &profile.identity,
                         profile.thinking,
                         &policy_snapshot,
