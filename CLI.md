@@ -440,6 +440,7 @@ confined execs. The launcher was subsequently fixed.
                         (Codex's mechanism: -c 'sandbox.mode="workspace"')
     --profile NAME      layer [profile.NAME] from config (§7)
     --bare              no ambient discovery even in a trusted workspace
+    --trust-workspace   explicitly trust an interactive launch's workspace, without asking
 -q / --no-color
 ```
 
@@ -544,6 +545,7 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--system`, `--append-system` | **yes** | `--append-system` is part of §3's general session shape, so `ego acp` takes it too; `--system`, which replaces the prompt outright, is not |
 | `--instructions` | **yes** | part of §3's general session shape, so `ego acp` takes it too. It was **missing from §3's grammar** until 2026-09-20 and documented only in §4.5's prose |
 | `--bare` | **yes** | |
+| `--trust-workspace` | **yes** | interactive terminal launches only; conflicts with `--bare`; independent of `--yolo` |
 | `--session`, `--session-id` | **yes** | durable session choices; the parser places them in the §4.5 mutually exclusive session group |
 | `--ephemeral` | no | recognized only to refuse by name with usage error exit 2 before opening or creating a session or causing an effect; use the durable default, `--session`, or `--session-id` |
 | `--session-dir` | **yes** | |
@@ -739,8 +741,8 @@ defines as a usage error. Asking what a command does is not misusing it, and
 a script that pipes `--help` must not get an empty stdout and a failure.
 
 **Ambient discovery is trust-gated.** Project-local config, `AGENTS.md`,
-hooks, skills and MCP servers load only after the interactive seat explicitly
-trusts the canonical workspace. Declining, Ctrl-C or EOF
+hooks, skills and MCP servers load only after an explicit terminal trust
+answer or `--trust-workspace` admits the canonical workspace. Declining, Ctrl-C or EOF
 continues bare. Headless always runs untrusted and bare automatically (no
 dialog, no ambient code execution). `--bare` forces this and skips the trust
 question. The question is asked only where there is something to answer about:
@@ -752,7 +754,39 @@ tree it starts at the workspace root. Scratch work under `~/Gits/.tmp` does not
 inherit shared instructions. `AGENTS.md` is canonical; a relative `CLAUDE.md`
 symlink to it adds no duplicate prompt text.
 
+For an explicitly authorized managed PTY, launch:
 
+```sh
+ego --trust-workspace --thinking medium --sandbox off --yolo --model openai-codex/gpt-6.1-sol 'TASK PROMPT'
+```
+
+`--trust-workspace` supplies a fresh `yes` for the current canonical workspace
+and its current executable surface, without reading a terminal answer. It
+admits ambient instructions, project configuration, hooks, skills and MCP
+declarations, and remembers the answer in `$EGO_HOME/trust.json`, replacing
+an earlier refusal for that root. Executable changes require a new answer on
+later launches without the flag. This grants no tool permission or sandbox
+exception; `--yolo` alone never grants workspace trust. Without the flag,
+the remembered answer or interactive question still applies. `--bare`
+conflicts with the flag, and headless launches reject it. An empty workspace
+still has nothing to admit and stays untrusted.
+
+A standalone `@relative/path` line outside fenced or indented code loads an
+instruction file relative to the containing file. Ambient imports stay inside
+the discovery tree; imports from an explicit file stay inside that file's
+directory. Duplicate files load once. Cycles, missing or malformed imports,
+scope escapes, symlinks, non-text files, and size refusals are reported rather
+than silently ignored. One run loads at most eight files, 64 KiB per file and
+256 KiB in total, and attempts at most eight distinct imports. An answer —
+`yes` or `no` — is remembered in
+`$EGO_HOME/trust.json` against the canonical root and the parsed executable
+declarations, *plus every program inside the workspace they name* —
+`[[hooks]].handler.command`, `[mcp.servers.*].command` and
+`[auth.*].credential_command` — so replacing a trusted hook script asks again
+even when the config that names it is byte-identical. Instruction and skill
+edits do not invalidate the answer. Terminal and ACP seats share this ledger.
+Invalid config is never skipped silently: unknown keys and malformed MCP
+entries are hard errors (Codex's `--strict-config`, as the only behaviour).
 
 `--instructions FILE` is the headless opt-in and is **not** ambient: it names
 a file rather than discovering one, so it survives `Posture::Bare` and

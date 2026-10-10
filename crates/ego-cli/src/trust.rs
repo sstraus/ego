@@ -69,11 +69,13 @@ pub(crate) fn instruction_discovery_root(root: &Path, home: &Path) -> std::io::R
 /// The terminal launch resolves the same per-root answer ACP uses.
 ///
 /// `ask` is called at most once, when the workspace has trustable content and
-/// no answer for its current executable surface.
+/// no answer for its current executable surface. An explicit launch grant
+/// supplies a fresh answer without consulting the seat or a prior refusal.
 pub(crate) fn resolve(
     root: &Path,
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
+    explicit_grant: bool,
     ask: impl FnOnce(&str) -> Trust,
 ) -> Trust {
     let Ok(root) = fs::canonicalize(root) else {
@@ -91,7 +93,7 @@ pub(crate) fn resolve(
     let surface = executable_surface(root);
     let key = root.display().to_string();
     let store = home.map(TrustStore::new);
-    if let Some(store) = &store {
+    if !explicit_grant && let Some(store) = &store {
         match store.read() {
             Ok(ledger) => {
                 if let Some(remembered) = ledger.remembered(&key, &surface) {
@@ -126,7 +128,11 @@ pub(crate) fn resolve(
         Some(changes) => format!("Executable changes since the last answer:\n{changes}\n"),
         None => content,
     };
-    let decision = ask(&context);
+    let decision = if explicit_grant {
+        Trust::Trusted
+    } else {
+        ask(&context)
+    };
     if executable_surface(root) != surface {
         diagnostics.note("the workspace executable surface changed while trust was being answered; this answer was not applied");
         return Trust::Untrusted;
@@ -1005,6 +1011,7 @@ mod tests {
                 self.workspace.path(),
                 Some(self.home.path()),
                 &Silent,
+                false,
                 |_| {
                     self.asked.set(self.asked.get() + 1);
                     answer
@@ -1074,7 +1081,7 @@ mod tests {
 
         let asked = Cell::new(0);
         assert_eq!(
-            resolve(&alias, Some(&home), &Silent, |_: &str| {
+            resolve(&alias, Some(&home), &Silent, false, |_: &str| {
                 asked.set(asked.get() + 1);
                 Trust::Trusted
             }),
@@ -1082,7 +1089,7 @@ mod tests {
         );
         assert_eq!(asked.get(), 1, "the aliased instructions were offered");
         assert_eq!(
-            resolve(&workspace, Some(&home), &Silent, |_: &str| {
+            resolve(&workspace, Some(&home), &Silent, false, |_: &str| {
                 asked.set(asked.get() + 1);
                 Trust::Trusted
             }),
@@ -1105,7 +1112,7 @@ mod tests {
         )
         .expect("new executable declaration");
         assert_eq!(
-            resolve(&alias, Some(&home), &Silent, |_| {
+            resolve(&alias, Some(&home), &Silent, false, |_| {
                 asked.set(asked.get() + 1);
                 Trust::Untrusted
             }),
@@ -1199,7 +1206,7 @@ mod tests {
         for root in [&missing, &dangling] {
             let asked = Cell::new(0);
             assert_eq!(
-                resolve(root, Some(tree.path()), &Silent, |_| {
+                resolve(root, Some(tree.path()), &Silent, false, |_| {
                     asked.set(asked.get() + 1);
                     Trust::Trusted
                 }),
@@ -1440,7 +1447,7 @@ mod tests {
 
         for _ in 0..2 {
             assert_eq!(
-                resolve(fixture.workspace.path(), None, &Silent, |_| {
+                resolve(fixture.workspace.path(), None, &Silent, false, |_| {
                     fixture.asked.set(fixture.asked.get() + 1);
                     Trust::Trusted
                 }),

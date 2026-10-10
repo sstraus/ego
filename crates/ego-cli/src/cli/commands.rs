@@ -680,6 +680,10 @@ pub(super) struct Flags {
     #[arg(long)]
     pub(super) bare: bool,
 
+    /// Trust this interactive launch's workspace without asking; remember the answer.
+    #[arg(long, conflicts_with = "bare")]
+    pub(super) trust_workspace: bool,
+
     /// Named session: created or attached.
     #[arg(long, group = "session-choice")]
     pub(super) session: Option<String>,

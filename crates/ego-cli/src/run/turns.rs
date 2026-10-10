@@ -61,7 +61,7 @@ pub(super) fn run_trust(
     match driver {
         Driver::Once => Trust::Untrusted,
         Driver::Interactive { seat, .. } if !args.bare && seat.has_human() => {
-            crate::trust::resolve(root, home, diagnostics, |context| {
+            crate::trust::resolve(root, home, diagnostics, args.trust_workspace, |context| {
                 let question_context = if args.quiet {
                     context.to_string()
                 } else {
@@ -76,6 +76,18 @@ pub(super) fn run_trust(
         }
         Driver::Interactive { .. } => Trust::Untrusted,
     }
+}
+
+pub(super) fn validate_workspace_trust(args: &Args, driver: &Driver<'_>) -> Result<(), UsageError> {
+    if args.trust_workspace
+        && !matches!(driver, Driver::Interactive { seat, .. } if seat.has_human())
+    {
+        return Err(UsageError(
+            "--trust-workspace requires an interactive terminal launch; headless runs remain untrusted"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// The seat, as the run loop needs it.

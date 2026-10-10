@@ -760,6 +760,7 @@ pub struct Args {
     pub append_system: Option<String>,
     pub instructions: Option<PathBuf>,
     pub bare: bool,
+    pub trust_workspace: bool,
     /// The permission mode (`ARCHITECTURE.md` §3.4 axis 1).
     ///
     /// One field, not three, for the same reason [`SessionChoice`] is one
@@ -1817,6 +1818,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         append_system: shape.append_system,
         instructions: shape.instructions,
         bare: flags.bare,
+        trust_workspace: flags.trust_workspace,
         mode,
         allow: shape.allow,
         deny: shape.deny,
