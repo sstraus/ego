@@ -611,10 +611,10 @@ opposite reason: it publishes no part of the event model.
 are *priced differently*; it is a flow and only grows. `context` is the
 occupancy *level* of the live context window and goes **down** after a
 compaction, so it is reported separately and never derived from `usage`.
-The last measured occupancy is not clamped to the model window. If it reaches
-or exceeds the resolved window, the turn stops with `context_overflow` and
-asks for `/compact` or a larger model window. A known-full context is refused
-before another provider request. Unknown occupancy and history added since
+The last measured occupancy is not clamped to the model window. A delivered
+final answer completes its turn even if usage reaches or exceeds the resolved
+window. Before the next provider request, a known-full context is refused with
+`context_overflow`, asking for `/compact` or a larger model window. Unknown occupancy and history added since
 the measurement are not an exact preflight token count; a provider-reported
 context overflow remains a separate typed failure.
 `cost.amount` is an exact decimal **string**, not a JSON number — binary floats
