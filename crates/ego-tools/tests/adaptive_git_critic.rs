@@ -220,3 +220,6 @@ fn adaptive_confined_git_can_remove_transient_metadata_directories() {
         );
     }
 }
+
+#[path = "support/adaptive_git_critic_r2.rs"]
+mod r2;
