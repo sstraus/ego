@@ -122,11 +122,15 @@ impl Walker<'_> {
                     .iter()
                     .map(|child| self.text(*child).to_owned())
                     .collect();
+                let literal_words: Option<Vec<_>> = children
+                    .iter()
+                    .map(|child| proof_word(self.text(*child)))
+                    .collect();
                 if let Some(program) = words.first() {
                     self.programs
                         .push(program.trim_matches(['\'', '"']).to_owned());
                 }
-                if !read_only_command(&words) {
+                if !literal_words.is_some_and(|words| read_only_command(&words)) {
                     self.read_only = false;
                 }
                 let projected = project_words(&words);
@@ -266,6 +270,22 @@ fn sensitive_path(word: &str) -> bool {
     .any(|part| lower.contains(part))
 }
 
+// Only whole static literals qualify. Escapes, concatenation and expansion
+// require shell semantics that the read-only proof does not establish.
+fn proof_word(source: &str) -> Option<String> {
+    let literal = if source.starts_with('\'') && source.ends_with('\'') && source.len() >= 2 {
+        let inner = &source[1..source.len() - 1];
+        (!inner.contains('\'')).then_some(inner)?
+    } else if source.starts_with('"') && source.ends_with('"') && source.len() >= 2 {
+        let inner = &source[1..source.len() - 1];
+        (!inner.contains(['"', '\\', '$', '`'])).then_some(inner)?
+    } else {
+        (!source.contains(['\'', '"', '\\', '$', '`', '*', '?', '[', ']', '{', '}', '~']))
+            .then_some(source)?
+    };
+    Some(literal.to_owned())
+}
+
 /// Narrow proof, not a name allowlist: reject write flags, dynamic text, sensitive
 /// reads, configuration overrides, and unknown options before accepting a command.
 fn read_only_command(raw: &[String]) -> bool {
@@ -299,14 +319,8 @@ fn read_only_command(raw: &[String]) -> bool {
                 return false;
             };
             match subcommand.as_str() {
-                "status" => words[2..].iter().all(|word| {
-                    matches!(
-                        word.as_str(),
-                        "--short" | "-s" | "--porcelain" | "--branch" | "-b"
-                    )
-                }),
-                // Repository configuration can invoke external diff/textconv helpers.
-                "log" | "diff" | "show" => false,
+                // Repository configuration can invoke fsmonitor/diff/textconv helpers.
+                "status" | "log" | "diff" | "show" => false,
                 "branch" => {
                     words.len() == 2
                         || words[2..].iter().all(|word| {
@@ -339,13 +353,8 @@ fn read_only_command(raw: &[String]) -> bool {
                     .skip(1)
                     .all(|c| "alhFnrbqvctu0123456789".contains(c))
         }),
-        "rg" | "grep" => words[1..].iter().all(|word| {
-            !word.starts_with('-')
-                || matches!(
-                    word.as_str(),
-                    "-n" | "-r" | "-R" | "-l" | "-i" | "-F" | "--fixed-strings" | "--"
-                )
-        }),
+        // Source text cannot prove which files directory/implicit search selects.
+        "rg" | "grep" => false,
         _ => false,
     }
 }
@@ -829,7 +838,7 @@ mod tests {
     #[test]
     fn read_only_shell_proof_does_not_allow_write_flags_or_secret_reads() {
         for source in [
-            "pwd; git status --short",
+            "pwd; ls src",
             "ls src | wc -l",
             "git branch --show-current",
             "sed -n '1,20p' README.md",
@@ -837,6 +846,7 @@ mod tests {
             assert!(shell(source).read_only, "{source}");
         }
         for source in [
+            "git status --short",
             "cat .env",
             "cat ~/.ssh/id_rsa",
             "cat AGENTS.md",
