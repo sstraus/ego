@@ -427,7 +427,7 @@ impl CliGenerationModelSource {
         let initialize_main =
             role == GenerationRole::Main && !has_model_overlay && !has_thinking_overlay;
         let current = self.selection.read()?;
-        let (identity, requested_thinking, resolved_thinking) = match role {
+        let (mut identity, requested_thinking, resolved_thinking) = match role {
             GenerationRole::Main
             | GenerationRole::Compaction
             | GenerationRole::Subagent
@@ -450,16 +450,22 @@ impl CliGenerationModelSource {
                 };
                 (identity, explicit, concrete)
             }
-            GenerationRole::Judge => (
-                self.judge.clone().ok_or_else(|| {
-                    GenerationModelError::new(
-                        GenerationModelErrorClass::Usage,
-                        "no judge model is configured",
-                    )
-                })?,
-                Some(ThinkingLevel::Off),
-                None,
-            ),
+            GenerationRole::Judge => {
+                let identity = match self.judge.as_ref() {
+                    Some(model) if model.0 == "none" => {
+                        return Err(GenerationModelError::new(
+                            GenerationModelErrorClass::Usage,
+                            "permission judge explicitly disabled",
+                        ));
+                    }
+                    Some(model) => model.clone(),
+                    None => current
+                        .as_ref()
+                        .map(|selection| selection.identity.clone())
+                        .unwrap_or_else(|| self.initial_identity.clone()),
+                };
+                (identity, Some(ThinkingLevel::Off), None)
+            }
         };
         let provider_id = identity
             .0
@@ -469,6 +475,24 @@ impl CliGenerationModelSource {
         let hosted = facts::supplied(&self.ceilings).map_err(|error| {
             GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
         })?;
+        if role == GenerationRole::Judge && self.judge.is_none() {
+            let preferred = match provider_id {
+                "openai-codex" => Some("openai-codex/codex-auto-review"),
+                "openai" => Some("openai/gpt-6-luna"),
+                "anthropic" => Some("anthropic/claude-haiku-4-5"),
+                _ => None,
+            };
+            if let Some(preferred) =
+                preferred.filter(|preferred| hosted.iter().any(|(slug, _)| slug == preferred))
+            {
+                identity = ModelRef(preferred.to_owned());
+            }
+        }
+        let provider_id = identity
+            .0
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .unwrap_or(identity.0.as_str());
         let credentials = crate::auth::request_credentials_scoped(
             provider_id,
             self.auth
@@ -485,9 +509,24 @@ impl CliGenerationModelSource {
             resolve(&identity.0, hosted, http, credentials.as_ref(), &self.auth)
                 .await
                 .map_err(generation_error)?;
+        let chosen_effort = if role == GenerationRole::Judge {
+            match &resolved.capabilities.reasoning_efforts {
+                ego_core::generator::capabilities::ReasoningEffortSupport::Any => {
+                    Some(ThinkingLevel::Low)
+                }
+                ego_core::generator::capabilities::ReasoningEffortSupport::Only(levels)
+                    if levels.contains(&ThinkingLevel::Low) =>
+                {
+                    Some(ThinkingLevel::Low)
+                }
+                _ => Some(ThinkingLevel::Off),
+            }
+        } else {
+            resolved_thinking.or(requested_thinking)
+        };
         let thinking = resolved
             .capabilities
-            .resolve_reasoning_effort(resolved_thinking.or(requested_thinking))
+            .resolve_reasoning_effort(chosen_effort)
             .map_err(|error| {
                 GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
             })?;

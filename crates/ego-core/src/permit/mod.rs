@@ -12,6 +12,7 @@ mod foreign;
 mod fs;
 mod grant;
 pub mod judge;
+pub mod shell;
 mod orchestration;
 mod path;
 mod prepared_call;

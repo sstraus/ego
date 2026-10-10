@@ -278,8 +278,8 @@ fn auto_allow_uses_one_toolless_judge_and_then_executes_the_exact_call() {
     );
     let encoded = judge.to_string();
     assert!(
-        !encoded.contains("Ask"),
-        "judge received conversation prompt: {encoded}"
+        encoded.contains("Ask"),
+        "judge omitted the user task context: {encoded}"
     );
     assert!(
         encoded.contains("exec"),
@@ -855,4 +855,32 @@ fn judge_reason_is_utf8_safe_and_bounded_in_the_durable_decision() {
 
     let events = durable_events(&config);
     assert_judge_decision(&events, Some(false), MODEL, &["main", "judge"]);
+}
+
+#[test]
+fn unset_judge_routes_unknown_exec_to_main_model_instead_of_human() {
+    let stub = Stub::start(plan(judge_response("deny", "not authorized"), None));
+    let ego = auto_args(Ego::against(&stub));
+    let config = ego.home_file("config.toml", "");
+    let finished = ego.run();
+    assert_eq!(stub.generations().len(), 2, "stderr: {}", finished.stderr);
+    assert_judge_decision(
+        &durable_events(&config),
+        Some(false),
+        MODEL,
+        &["main", "judge"],
+    );
+}
+
+#[test]
+fn explicit_none_judge_does_not_generate_an_advisory_call() {
+    let stub = Stub::start(Plan {
+        completions: vec![exec_request()],
+        ..Plan::default()
+    });
+    let ego = auto_args(Ego::against(&stub));
+    ego.home_file("config.toml", "[permissions]\njudge = \"none\"\n");
+    let finished = ego.run();
+    assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
+    assert_eq!(stub.generations().len(), 1);
 }
