@@ -318,3 +318,6 @@ fn an_ordinary_failing_exit_is_not_labelled_a_sandbox_block() {
     assert!(!text(&result).contains("sandbox"), "{}", text(&result));
     assert!(seat.asked().is_empty());
 }
+
+#[path = "support/errno_sandbox.rs"]
+mod errno_sandbox;

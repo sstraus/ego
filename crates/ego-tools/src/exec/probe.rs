@@ -22,6 +22,10 @@ use crate::store::SessionEvidenceStore;
 use super::backend::{Backend, MeasuredBackend};
 use super::{ExecLimits, ExecRunConfig, HttpCallTimeout, ProbeLog, ProbeRecord, RunEffectPorts};
 
+#[cfg(target_os = "macos")]
+#[path = "adaptive_probe.rs"]
+mod adaptive;
+
 #[cfg(target_os = "linux")]
 use super::landlock::{LandlockBackend, derived_runtime_roots};
 #[cfg(target_os = "macos")]
@@ -786,6 +790,14 @@ async fn measure(
     limits: ExecLimits,
 ) -> ExecCaps {
     let maximum = backend.maximum_demonstrable_caps();
+    #[cfg(target_os = "macos")]
+    if maximum.contains(ExecCaps::ADAPTIVE) {
+        return if adaptive::measure(backend, policy, scratch, evidence, cancel, limits).await {
+            ExecCaps::ADAPTIVE
+        } else {
+            ExecCaps::empty()
+        };
+    }
     let Some(fixture) = ProbeFixture::new(policy.workspace(), scratch) else {
         return ExecCaps::empty();
     };

@@ -212,14 +212,21 @@ fn read_tool_result_is_an_intrinsic_exact_session_capability() {
 }
 
 #[test]
-fn confinement_is_exact_workspace_default_and_orthogonal_to_mode() {
+fn confinement_is_exact_adaptive_default_and_orthogonal_to_mode() {
     assert_eq!("ro".parse::<Confinement>().unwrap().to_string(), "ro");
     assert_eq!(
         "workspace".parse::<Confinement>().unwrap().to_string(),
         "workspace"
     );
     assert_eq!("off".parse::<Confinement>().unwrap().to_string(), "off");
-    assert_eq!(Confinement::default(), Confinement::Workspace);
+    assert_eq!(
+        Confinement::default(),
+        if cfg!(target_os = "macos") {
+            Confinement::Adaptive
+        } else {
+            Confinement::Workspace
+        }
+    );
     assert!("bogus".parse::<Confinement>().is_err());
 }
 

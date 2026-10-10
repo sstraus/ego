@@ -24,7 +24,7 @@ use ego_core::endpoint::Admitted;
 use ego_core::event::domain::CancelCause;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::mcp::McpRuntimeBinding;
-use ego_core::permit::{CanonPath, Confinement, ExecObservation, RunConfinement, SpawnSpec};
+use ego_core::permit::{CanonPath, Confinement, ExecObservation, SpawnSpec};
 use ego_core::run::RunRoot;
 use ego_core::run::{RunController, RunRetention, RunTermination};
 use ego_core::session_lifecycle::{SessionLifecycle, SessionRunLifecycle};
@@ -75,7 +75,7 @@ impl SessionMcpScope {
     ) -> Result<Self, McpSessionAdmissionError> {
         let cancel = CancelToken::new();
         let run_confinement =
-            RunConfinement::new(confinement, false, CanonPath::new(root.as_path()))
+            ego_tools::exec::admit_confinement(confinement, false, CanonPath::new(root.as_path()))
                 .map_err(|error| safe_mcp_error(error.to_string()))?;
         let effects =
             CommandHttpScope::confined(run_confinement, cancel.clone(), None, observation)
@@ -1090,8 +1090,9 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
 
     let reporter = Arc::new(Reporter::new(Arc::new(crate::output::Stderr)));
     if listener.is_some() {
-        let policy = RunConfinement::new(ceiling, false, CanonPath::new(root.as_path()))
-            .expect("the resolved ACP process root is absolute");
+        let policy =
+            ego_tools::exec::admit_confinement(ceiling, false, CanonPath::new(root.as_path()))
+                .expect("the resolved ACP process root is absolute");
         let reporter = Arc::clone(&reporter);
         let cancel = mcp_cancel.clone();
         tokio::spawn(async move {
@@ -1259,7 +1260,11 @@ mod confinement_ceiling_tests {
         );
         assert_eq!(
             confinement_ceiling(&args(None), None, None),
-            Confinement::Workspace,
+            if cfg!(target_os = "macos") {
+                Confinement::Adaptive
+            } else {
+                Confinement::Workspace
+            },
             "the default applies when neither flag nor configuration names a ceiling"
         );
         assert_eq!(

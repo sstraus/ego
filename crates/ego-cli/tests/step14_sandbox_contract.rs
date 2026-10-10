@@ -198,8 +198,8 @@ fn assert_execution_observation_count(finished: &support::Finished, home: &Path,
 }
 
 #[test]
-fn sandbox_accepts_exactly_ro_workspace_and_off() {
-    for value in ["ro", "workspace", "off"] {
+fn sandbox_accepts_exactly_ro_workspace_adaptive_and_off() {
+    for value in ["ro", "workspace", "adaptive", "off"] {
         let args = run_args(["run", "--sandbox", value, "Ask"]);
         assert_eq!(
             args.sandbox,
@@ -289,7 +289,7 @@ fn sandbox_optionality_survives_empty_layers_and_defaults_only_after_resolution(
 
     // A selected profile with no sandbox key must not manufacture one while
     // resolving the profile.  The final execution boundary supplies the
-    // documented workspace default after this Option remains None.
+    // documented platform default after this Option remains None.
     let profile_only = layer(Source::User, "[profile.ci]\nmodel = \"fixture\"\n");
     assert_eq!(profile_only.value.sandbox, None);
     let effective = resolve(&[profile_only], Trust::Trusted, Some("ci"))
@@ -297,12 +297,23 @@ fn sandbox_optionality_survives_empty_layers_and_defaults_only_after_resolution(
     assert_eq!(effective.sandbox, None);
     assert_eq!(
         effective.sandbox.unwrap_or_default(),
-        Confinement::Workspace
+        if cfg!(target_os = "macos") {
+            Confinement::Adaptive
+        } else {
+            Confinement::Workspace
+        }
     );
 
     let absent = resolve(&[], Trust::Trusted, None).expect("empty layers resolve");
     assert_eq!(absent.sandbox, None);
-    assert_eq!(absent.sandbox.unwrap_or_default(), Confinement::Workspace);
+    assert_eq!(
+        absent.sandbox.unwrap_or_default(),
+        if cfg!(target_os = "macos") {
+            Confinement::Adaptive
+        } else {
+            Confinement::Workspace
+        }
+    );
 }
 
 #[test]
@@ -406,7 +417,7 @@ fn cli_confinement_uses_the_configured_level_without_degrading_to_off() {
 
 #[test]
 #[cfg(not(windows))]
-fn cli_real_enforcement_matrix_covers_omission_override_and_final_workspace_default() {
+fn cli_real_enforcement_matrix_covers_omission_override_and_final_adaptive_default() {
     // A lower user layer remains effective when the CLI omits --sandbox.  Off
     // is deliberately chosen so this case is runnable even where a stronger
     // backend is unavailable: the outside write must succeed only because the
@@ -457,8 +468,16 @@ fn cli_real_enforcement_matrix_covers_omission_override_and_final_workspace_defa
     }
 
     // With no layer value and no flag, Effective remains None and only the
-    // final Settings boundary supplies Workspace.  An outside write therefore
+    // final Settings boundary supplies the platform default. An outside write therefore
     // fails closed (or the prerequisite refusal happens before provider use).
+    assert_eq!(
+        Confinement::default(),
+        if cfg!(target_os = "macos") {
+            Confinement::Adaptive
+        } else {
+            Confinement::Workspace
+        }
+    );
     let (finished, _outside, target, stub) = shell_write_case(None, None);
     assert_sandbox_denied(&finished, &target, &stub, "final absent sandbox default");
 }

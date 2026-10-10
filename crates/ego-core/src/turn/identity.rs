@@ -68,7 +68,7 @@ impl AgentIdentity {
             None => "none (direct command-line invocation)".to_owned(),
         };
         let network = if self.offline { "offline" } else { "online" };
-        format!(
+        let mut facts = format!(
             "Current runtime facts (ego-owned; refreshed for this generation):\n\
              - Model: {model} (reasoning effort: {thinking})\n\
              - Workspace root: {workspace}\n\
@@ -82,7 +82,11 @@ impl AgentIdentity {
             sandbox = self.sandbox,
             tools = listed(tools.iter().map(|tool| tool.name.as_str())),
             servers = listed(mcp_servers.iter().map(String::as_str)),
-        )
+        );
+        if self.sandbox == Confinement::Adaptive {
+            facts.push_str("\nAdaptive sandbox: normal reads and installed executables are reachable except credential floors. Writes are confined to the workspace, captured toolchain/cache/git/temp roots and explicit grants. Workspace and derived build artifacts remain executable. Permission mode, network policy and OS privacy restrictions still apply. Report the exact refused path and why the task needs it; never bypass a refusal or claim a partially failed mutation is safe to replay.");
+        }
+        facts
     }
 }
 

@@ -167,6 +167,7 @@ fn observation(confinement: Confinement) -> ExecObservation {
     let capabilities = match confinement {
         Confinement::Ro => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED),
         Confinement::Workspace => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+        Confinement::Adaptive => ExecCaps::ADAPTIVE,
         Confinement::Off => ExecCaps::empty(),
     };
     ExecObservation::new(

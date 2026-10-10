@@ -15,6 +15,42 @@ fn layer(source: Source, value: ConfigLayer) -> Sourced<ConfigLayer> {
     Sourced { source, value }
 }
 
+// Catches: fresh config selects a confinement unsupported by the platform, or loses Adaptive on macOS.
+#[test]
+fn fresh_config_resolves_to_adaptive_instead_of_legacy_workspace() {
+    let effective = resolve(&[], Trust::Trusted, None).unwrap();
+    assert_eq!(
+        effective.sandbox.unwrap_or_default(),
+        if cfg!(target_os = "macos") {
+            ego_core::permit::Confinement::Adaptive
+        } else {
+            ego_core::permit::Confinement::Workspace
+        }
+    );
+    assert!(effective.sandbox_source.is_none());
+}
+
+// Catches: the adaptive default rewrites explicit values or bypasses profile/system authority.
+#[test]
+fn explicit_sandbox_values_and_profile_system_authority_survive_adaptive_default() {
+    for spelling in ["workspace", "ro", "off", "adaptive"] {
+        let user = ConfigLayer::parse(Source::User, &format!("sandbox='{spelling}'")).unwrap();
+        let effective = resolve(&[user], Trust::Trusted, None).unwrap();
+        assert_eq!(effective.sandbox.unwrap().as_str(), spelling);
+        assert_eq!(effective.sandbox_source, Some(Source::User));
+    }
+    let user = ConfigLayer::parse(
+        Source::User,
+        "sandbox='adaptive'\n[profile.strict]\nsandbox='ro'",
+    )
+    .unwrap();
+    let effective = resolve(&[user], Trust::Trusted, Some("strict")).unwrap();
+    assert_eq!(effective.sandbox.unwrap().as_str(), "ro");
+    let system = ConfigLayer::parse(Source::System, "sandbox='workspace'").unwrap();
+    let flags = ConfigLayer::parse(Source::Flags, "sandbox='adaptive'").unwrap();
+    assert!(resolve(&[system, flags], Trust::Trusted, None).is_err());
+}
+
 /// A rule these tests build directly, bypassing the TOML they usually arrive
 /// in. `load` and not `parse`, so a test cannot hand `resolve` a rule that a
 /// config file could not have contained.

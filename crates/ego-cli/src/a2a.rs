@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use ego_a2a::auth::Credential;
 use ego_core::endpoint::{Admitted, Refusal};
-use ego_core::permit::{CanonPath, RunConfinement};
+use ego_core::permit::CanonPath;
 use ego_core::run::RunTermination;
 use ego_core::turn::CancelToken;
 use ego_tools::exec::{ExecLimits, RunEffectPorts};
@@ -49,7 +49,7 @@ pub async fn serve(args: &A2aArgs) -> RunTermination {
             };
         }
     };
-    let policy = RunConfinement::new(
+    let policy = ego_tools::exec::admit_confinement(
         args.sandbox.unwrap_or_default(),
         false,
         CanonPath::new(root.as_path()),

@@ -273,6 +273,7 @@ fn required_caps(level: Confinement, offline: bool) -> ExecCaps {
     let filesystem = match level {
         Confinement::Ro => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED),
         Confinement::Workspace => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+        Confinement::Adaptive => ExecCaps::ADAPTIVE,
         Confinement::Off => ExecCaps::empty(),
     };
     if offline {

@@ -504,14 +504,18 @@ fn resolve_inner(
             .or(sourced.value.roots.as_ref())
         {
             if matches!(sourced.source, Source::Project | Source::Local) {
-                root_restrictions.push(if roots_source.is_none() {
-                    vec![crate::permit::RootCfg {
-                        path: "~/Gits".into(),
-                        access: crate::permit::RootAccess::ReadWrite,
-                    }]
-                } else {
-                    roots.clone()
-                });
+                root_restrictions.push(
+                    if roots_source.is_none()
+                        && sandbox.unwrap_or_default() != crate::permit::Confinement::Adaptive
+                    {
+                        vec![crate::permit::RootCfg {
+                            path: "~/Gits".into(),
+                            access: crate::permit::RootAccess::ReadWrite,
+                        }]
+                    } else {
+                        roots.clone()
+                    },
+                );
             }
             roots = selected.clone();
             roots_source = Some(sourced.source);

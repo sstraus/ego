@@ -954,10 +954,10 @@ fn acp_takes_a_confinement_ceiling_by_name() {
     }
 }
 
-/// An unknown confinement is refused by name, with the three that would work.
+/// An unknown confinement is refused by name, with the alternatives that work.
 ///
 /// The value and the alternatives both, because a refusal that says only
-/// "invalid" leaves the operator guessing at a closed set of three words.
+/// "invalid" leaves the operator guessing at the closed vocabulary.
 #[test]
 fn acp_refuses_a_confinement_it_does_not_have() {
     let refusal = refused(["acp", "--sandbox", "readonly"]);
@@ -965,7 +965,7 @@ fn acp_refuses_a_confinement_it_does_not_have() {
         refusal.contains("readonly"),
         "the refusal does not say what was rejected: {refusal}"
     );
-    for spelling in ["ro", "workspace", "off"] {
+    for spelling in ["ro", "workspace", "adaptive", "off"] {
         assert!(
             refusal.contains(spelling),
             "the refusal omits `{spelling}`, which would have worked: {refusal}"

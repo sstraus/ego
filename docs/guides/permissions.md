@@ -61,8 +61,9 @@ mean the command is known to be harmful. An exec can report `runs a program`,
 read-only shell script. `default` mode can ask for each such call. In `auto`,
 deterministic analysis runs first, then a configured `permissions.judge`, then
 ordinary escalation. No configured judge means there is no sentinel model.
-The current judge receives argv byte counts and SHA-256 hashes, not command text
-or task context. It cannot classify a shell script from its content. A configured
+The judge receives bounded task context and action evidence (see
+[Judge action evidence](#judge-action-evidence)); it cannot classify a shell
+script from content it is not shown. A configured
 judge is not a promise that unknown exec calls will stop asking a human.
 
 For example, select a judge in a user profile (it needs a usable credential and
@@ -101,12 +102,40 @@ and immutable system denies continue to win.
 | --- | --- |
 | `ro` | Read-only confinement; writes remain denied even under an extra writable root |
 | `workspace` | Workspace writes with the admitted extra-root policy |
+| `adaptive` | Broad reads and executable reach with hard credential exclusions; workspace, configured and captured toolchain writes |
 | `off` | No filesystem confinement guarantee; classifiers/permission checks still apply |
 
-Absent an explicit roots declaration, an existing `~/Gits` is added as a read-write
-extra root. Use `ego config set 'roots=[]'` for workspace-only access; local/flag
+Under strict levels, absent an explicit roots declaration, an existing `~/Gits` is added as a read-write
+extra root. Adaptive omits that implicit root. Use `ego config set 'roots=[]'` to clear configured roots; local/flag
 root declarations have stricter read-only constraints and cannot replace this
 user declaration. The effective perimeter reports the resulting source.
+
+Adaptive is the fresh-config default on macOS, independently of permission mode
+`auto`. Other platforms keep the `workspace` default until they support adaptive
+confinement. Effective config and doctor show the selected level and the platform
+default reason.
+Explicit `workspace`, `ro`, and `off` selections retain their behavior; no config
+file is rewritten. Select those levels when their stricter or open reach is
+required. Adaptive
+currently requires macOS Seatbelt and successful native capability probes;
+explicit adaptive selections on unsupported platforms fail admission with explicit alternatives. It captures
+operator `CARGO_HOME`, `RUSTUP_HOME`, trusted mbx `cache_dir`, validated git common
+and linked-worktree metadata, `TMPDIR`, and an operator `CARGO_TARGET_DIR` before
+commands. Cargo/rustup defaults apply when their environment variables are absent.
+Those roots appear as `derived` in perimeter inspection, with no per-cache judge.
+Configured ceilings and readonly roots remain binding. Shared-cache writes are
+intentional. Workspace and derived toolchain/target executables remain runnable.
+
+Adaptive's OS credential floors cannot be lifted by permission rules or human
+sandbox grants: SSH/AWS/GnuPG, netrc, keychain/browser stores, provider/ego/Cargo
+credentials and `.env*` outside the workspace. Git config/hooks and worktree
+selectors stay protected against writes. Ordinary OS privacy restrictions also
+remain. These OS floors are separate from the default read rules described above.
+Report the exact refused target and its task relevance. A failed mutation can
+leave partial effects; do not assume replay is safe. Automatic residual-write
+judgment is pending the shared judge integration; the existing human grant flow
+still handles eligible refusals. A future judge-write grant will also forbid
+execution within that residual root for the rest of its session.
 
 **Root-list traps:** `ego roots add PATH --access read` edits the stored list,
 not the implicit default. The first addition replaces the default `~/Gits`

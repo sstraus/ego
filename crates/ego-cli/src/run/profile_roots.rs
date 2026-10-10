@@ -4,6 +4,30 @@ use ego_core::config::Effective;
 use ego_core::permit::{CanonPath, PathResolver, ProfileRoot, admit_roots};
 use ego_tools::fs::OsFs;
 
+/// A derived source cannot raise a configured root ceiling.
+pub(crate) fn check_adaptive(
+    effective: &Effective,
+    policy: &ego_core::permit::RunConfinement,
+) -> Result<(), String> {
+    let Some(perimeter) = policy.adaptive_perimeter() else {
+        return Ok(());
+    };
+    let roots = perimeter
+        .writable
+        .iter()
+        .cloned()
+        .map(|path| ProfileRoot::new(path, ego_core::permit::RootAccess::ReadWrite))
+        .collect::<Vec<_>>();
+    ego_core::permit::check_root_ceilings(
+        &roots,
+        &effective.root_ceilings,
+        &perimeter.home,
+        policy.workspace(),
+        &OsFs,
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Resolve the roots the active profile declared against the real filesystem.
 /// Any refusal is a startup failure: a profile that asks for more reach than
 /// it may have must not quietly run with less.
@@ -134,7 +158,9 @@ pub(crate) fn clamp(
 /// Materialize the default at the process edge, keeping missing paths visible.
 pub(crate) fn defaults(effective: &mut Effective, home: &std::path::Path) -> Vec<String> {
     let mut warnings = Vec::new();
-    if effective.roots_source.is_none() {
+    if effective.roots_source.is_none()
+        && effective.sandbox.unwrap_or_default() != ego_core::permit::Confinement::Adaptive
+    {
         let path = home.join("Gits");
         if path.is_dir() {
             effective.roots = vec![ego_core::permit::RootCfg {
@@ -156,7 +182,7 @@ pub(crate) fn defaults(effective: &mut Effective, home: &std::path::Path) -> Vec
     warnings
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use ego_core::config::{ConfigLayer, Source, Trust, resolve};
@@ -166,7 +192,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(home.join("Gits")).unwrap();
-        let mut effective = resolve(&[], Trust::Untrusted, None).unwrap();
+        let adaptive_layer = ConfigLayer::parse(Source::User, "sandbox='adaptive'").unwrap();
+        let mut adaptive = resolve(&[adaptive_layer], Trust::Untrusted, None).unwrap();
+        assert!(defaults(&mut adaptive, &home).is_empty());
+        assert!(
+            adaptive.roots.is_empty(),
+            "adaptive must not inherit ~/Gits writes"
+        );
+        let workspace = ConfigLayer::parse(Source::User, "sandbox='workspace'").unwrap();
+        let mut effective =
+            resolve(std::slice::from_ref(&workspace), Trust::Untrusted, None).unwrap();
         assert!(defaults(&mut effective, &home).is_empty());
         assert_eq!(effective.roots[0].path, home.join("Gits"));
         assert_eq!(
@@ -178,7 +213,7 @@ mod tests {
         assert!(defaults(&mut strict, &home).is_empty());
         assert!(strict.roots.is_empty());
         std::fs::remove_dir(home.join("Gits")).unwrap();
-        let mut missing = resolve(&[], Trust::Untrusted, None).unwrap();
+        let mut missing = resolve(&[workspace], Trust::Untrusted, None).unwrap();
         assert_eq!(defaults(&mut missing, &home).len(), 1);
         assert!(missing.roots.is_empty());
         missing.sandbox = Some(ego_core::permit::Confinement::Off);

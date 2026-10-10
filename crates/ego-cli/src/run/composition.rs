@@ -729,7 +729,7 @@ pub(super) fn admit_windows_unconfined_start(
     };
 
     settings.effective.sandbox = Some(confinement);
-    settings.confinement = RunConfinement::new(
+    settings.confinement = ego_tools::exec::admit_confinement(
         confinement,
         settings.confinement.offline(),
         CanonPath::new(&settings.root),
@@ -863,7 +863,7 @@ pub(super) fn finish_rooted_settings(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let confinement = RunConfinement::new(
+    let confinement = ego_tools::exec::admit_confinement(
         effective.sandbox.unwrap_or_default(),
         args.offline || effective.network == ego_core::config::Network::Off,
         CanonPath::new(&root),
@@ -871,6 +871,8 @@ pub(super) fn finish_rooted_settings(
     .map_err(|err| UsageError(err.to_string()))?
     .with_exec_paths(exec_paths)
     .with_roots(roots);
+
+    super::profile_roots::check_adaptive(&effective, &confinement).map_err(UsageError)?;
 
     Ok(Settings {
         run_deadline,

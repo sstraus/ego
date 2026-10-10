@@ -21,7 +21,7 @@ use super::backend::LaunchPrefix;
 use super::profile::{self, ProfileInput};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-private-profile-v1";
+const BACKEND_REVISION: &str = "seatbelt-private-profile-v2-adaptive";
 
 /// The profile file is retained for at least as long as any command prefix
 /// that names it. Dropping the backend removes the private file.
@@ -35,6 +35,7 @@ pub(crate) struct SeatbeltBackend {
 /// so the same profile can be rendered again with more of them.
 #[derive(Clone)]
 struct ProfileBase {
+    adaptive: Option<ego_core::permit::AdaptivePerimeter>,
     level: Confinement,
     offline: bool,
     workspace: PathBuf,
@@ -63,7 +64,18 @@ impl SeatbeltBackend {
             .map(|path| path.as_path().to_path_buf())
             .collect::<Vec<_>>();
         exec_paths.push(policy.workspace().as_path().to_path_buf());
+        let mut adaptive = policy.adaptive_perimeter().cloned();
+        if let Some(perimeter) = adaptive.as_mut() {
+            perimeter.controls.extend(
+                policy
+                    .roots()
+                    .iter()
+                    .filter(|root| root.access() == ego_core::permit::RootAccess::Read)
+                    .map(|root| root.path().clone()),
+            );
+        }
         let base = ProfileBase {
+            adaptive,
             level: policy.level(),
             offline: policy.offline(),
             workspace: policy.workspace().as_path().to_path_buf(),
@@ -79,8 +91,10 @@ impl SeatbeltBackend {
                 .map(|root| SandboxGrant {
                     path: root.path().clone(),
                     access: if root.access() == ego_core::permit::RootAccess::ReadWrite
-                        && policy.level() == Confinement::Workspace
-                    {
+                        && matches!(
+                            policy.level(),
+                            Confinement::Workspace | Confinement::Adaptive
+                        ) {
                         ego_core::permit::SandboxAccess::Write
                     } else {
                         ego_core::permit::SandboxAccess::Read
@@ -115,6 +129,7 @@ impl SeatbeltBackend {
             .collect::<Vec<_>>();
         let grants = base.roots.iter().chain(grants).cloned().collect::<Vec<_>>();
         let rendered = profile::render(&ProfileInput {
+            adaptive: base.adaptive.as_ref(),
             level: base.level,
             offline: base.offline,
             workspace: &base.workspace,
