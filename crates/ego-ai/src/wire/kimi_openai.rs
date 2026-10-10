@@ -54,6 +54,24 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
     let object = body
         .as_object_mut()
         .expect("the shared Chat request serialises a JSON object");
+    if let Some(key) = super::cache::routing_key(req, "kimi") {
+        object.insert("prompt_cache_key".to_string(), key.into());
+        let ttl = if req
+            .cache
+            .as_ref()
+            .expect("enabled cache metadata")
+            .retention
+            == ego_core::generator::capabilities::CacheRetention::Long
+        {
+            "1h"
+        } else {
+            "5m"
+        };
+        object.insert(
+            "prompt_cache_options".to_string(),
+            serde_json::json!({"mode": "implicit", "ttl": ttl}),
+        );
+    }
     object.remove("reasoning_effort");
     object.remove("parallel_tool_calls");
     object.insert(

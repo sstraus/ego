@@ -260,3 +260,138 @@ fn openrouter_tool_only_history_does_not_gain_a_null_content_field() {
     );
     assert_eq!(markers(&body), 2);
 }
+
+#[test]
+fn kimi_messages_uses_top_level_writes_and_lineage_affinity_not_ignored_breakpoints() {
+    // Catches: Kimi inherits Claude block markers, so it never writes a reusable cache.
+    let root = SessionId::new();
+    for retention in [
+        CacheRetention::Short,
+        CacheRetention::Long,
+        CacheRetention::None,
+    ] {
+        let mut req = request("kimi-k3", root, "host rev1");
+        req.cache.as_mut().unwrap().retention = retention;
+        let a = json(ego_ai::wire::kimi_anthropic::request_body(&req).unwrap());
+        let enabled = retention != CacheRetention::None;
+        assert_eq!(a.get("cache_control").is_some(), enabled);
+        assert_eq!(a["metadata"].get("user_id").is_some(), enabled);
+        assert_eq!(markers(&a["system"]), 0);
+        assert_eq!(markers(&a["messages"]), 0);
+        if enabled {
+            assert_eq!(a["cache_control"]["type"], "ephemeral");
+            assert_eq!(
+                a["cache_control"]["ttl"],
+                if retention == CacheRetention::Long {
+                    "1h"
+                } else {
+                    "5m"
+                }
+            );
+            req.messages = request("kimi-k3", root, "host rev2").messages;
+            let b = json(ego_ai::wire::kimi_anthropic::request_body(&req).unwrap());
+            assert_eq!(a["system"], b["system"]);
+            assert_eq!(
+                a["messages"].as_array().unwrap()[..2],
+                b["messages"].as_array().unwrap()[..2]
+            );
+            assert_eq!(a["metadata"]["user_id"], b["metadata"]["user_id"]);
+            req.cache.as_mut().unwrap().lineage_root = SessionId::new();
+            let c = json(ego_ai::wire::kimi_anthropic::request_body(&req).unwrap());
+            assert_ne!(a["metadata"]["user_id"], c["metadata"]["user_id"]);
+        }
+    }
+}
+
+#[test]
+fn kimi_chat_preserves_lineage_affinity_and_requested_cache_ttl() {
+    // Catches: Kimi Chat omits its session cache key and silently ignores long retention.
+    let root = SessionId::new();
+    for retention in [
+        CacheRetention::Short,
+        CacheRetention::Long,
+        CacheRetention::None,
+    ] {
+        let mut req = request("kimi-k3", root, "host rev1");
+        req.cache.as_mut().unwrap().retention = retention;
+        let a = json(ego_ai::wire::kimi_openai::request_body(&req).unwrap());
+        if retention == CacheRetention::None {
+            assert!(a.get("prompt_cache_key").is_none());
+            assert!(a.get("prompt_cache_options").is_none());
+            continue;
+        }
+        let key = a["prompt_cache_key"].as_str().expect("Kimi cache key");
+        assert_ne!(key, root.to_string());
+        assert_eq!(a["prompt_cache_options"]["mode"], "implicit");
+        assert_eq!(
+            a["prompt_cache_options"]["ttl"],
+            if retention == CacheRetention::Long {
+                "1h"
+            } else {
+                "5m"
+            }
+        );
+        req.messages = request("kimi-k3", root, "host rev2").messages;
+        let b = json(ego_ai::wire::kimi_openai::request_body(&req).unwrap());
+        assert_eq!(
+            a["messages"].as_array().unwrap()[..4],
+            b["messages"].as_array().unwrap()[..4]
+        );
+        assert_eq!(a["prompt_cache_key"], b["prompt_cache_key"]);
+        req.cache.as_mut().unwrap().lineage_root = SessionId::new();
+        let c = json(ego_ai::wire::kimi_openai::request_body(&req).unwrap());
+        assert_ne!(a["prompt_cache_key"], c["prompt_cache_key"]);
+    }
+}
+
+#[test]
+fn minimax_long_preference_never_exports_an_unsupported_one_hour_ttl() {
+    // Catches: inheriting Claude's one-hour TTL on MiniMax's five-minute-only cache.
+    use ego_ai::wire::{WireFormat, minimax_anthropic::MiniMaxAnthropic};
+    let base = url::Url::parse("https://api.minimax.io/anthropic/").unwrap();
+    let target = RequestTarget::new(&base, &[]);
+    let root = SessionId::new();
+    for retention in [
+        CacheRetention::Short,
+        CacheRetention::Long,
+        CacheRetention::None,
+    ] {
+        let mut req = request("MiniMax-M2.7", root, "host rev1");
+        req.cache.as_mut().unwrap().retention = retention;
+        let a = json(
+            MiniMaxAnthropic
+                .build_request(&target, &req)
+                .unwrap()
+                .body
+                .unwrap(),
+        );
+        if retention == CacheRetention::None {
+            assert_eq!(markers(&a), 0);
+            continue;
+        }
+        assert_eq!(
+            a["system"][0]["cache_control"],
+            serde_json::json!({"type":"ephemeral"})
+        );
+        assert_eq!(
+            a["messages"][1]["content"][0]["cache_control"],
+            serde_json::json!({"type":"ephemeral"})
+        );
+        assert_eq!(markers(&a), 2);
+        assert_eq!(markers(&a["messages"][2]), 0);
+        assert_eq!(markers(&a["messages"][3]), 0);
+        req.messages = request("MiniMax-M2.7", root, "host rev2").messages;
+        let b = json(
+            MiniMaxAnthropic
+                .build_request(&target, &req)
+                .unwrap()
+                .body
+                .unwrap(),
+        );
+        assert_eq!(a["system"], b["system"]);
+        assert_eq!(
+            a["messages"].as_array().unwrap()[..2],
+            b["messages"].as_array().unwrap()[..2]
+        );
+    }
+}

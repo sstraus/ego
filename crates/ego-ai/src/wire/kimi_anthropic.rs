@@ -81,6 +81,8 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
     if projected.thinking == ThinkingLevel::Minimal {
         projected.thinking = ThinkingLevel::Low;
     }
+    // Kimi ignores Claude's block breakpoints; cache writes are top-level only.
+    projected.cache = None;
     let bytes = anthropic_messages::request_body(&projected)
         .map_err(|error| RequestRefused::new(error.to_string()))?;
     let mut body: serde_json::Value =
@@ -88,6 +90,14 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
     let object = body
         .as_object_mut()
         .expect("the Messages request serialises a JSON object");
+    if let Some(key) = super::cache::routing_key(req, "kimi") {
+        object.insert("metadata".to_string(), serde_json::json!({"user_id": key}));
+        let mut control = super::cache::control(req).expect("enabled cache metadata");
+        if control.get("ttl").is_none() {
+            control["ttl"] = "5m".into();
+        }
+        object.insert("cache_control".to_string(), control);
+    }
     match effort(req.thinking) {
         None => {
             object.insert(

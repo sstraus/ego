@@ -25,6 +25,8 @@ work; it does not trust project configuration.
 `ego config ls` shows stored managed values. `ego config ls --effective` shows
 current untrusted perimeter resolution. `/config` shows the interactive session's
 captured settings; `/config perimeter` shows its admitted roots and confinement.
+User `mode` and `sandbox` values apply without a source-selection prompt.
+Omitting the corresponding flags retains those values, even `yolo` and `off`.
 Saving a default affects future sessions. Use live `/model`, `/thinking`, or
 `/mode` controls to change current session selections.
 
@@ -71,6 +73,13 @@ fail closed (read refuses, grep skips). Exec refuses protected paths declared
 in argv, including resolved symlink targets, for foreground and background
 calls. This check does not analyze dynamic program code or sanitize arbitrary
 process output.
+The first `ego roots add` writes an explicit list and replaces implicit
+`~/Gits` access. Removing all stored roots leaves an explicit empty list. Use
+`ego config unset roots` to restore absence. Extra execution grants require
+`exec_paths` in the user/system file or invocation flags; `ego roots` cannot
+express them. Use `ego config edit` to edit `exec_paths`. Restart or resume the
+session to apply changed perimeter settings.
+
 Extra roots use canonical paths; conflicting nested read-only/read-write roots
 are refused. See [permissions](../guides/permissions.md).
 

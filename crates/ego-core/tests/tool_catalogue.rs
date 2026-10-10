@@ -789,7 +789,7 @@ fn the_runtime_identity_names_the_model_workspace_posture_tools_and_every_mcp_se
     futures::executor::block_on(turn.run("which model?")).expect("first turn");
 
     let systems = system_texts(&generator.calls()[0]);
-    assert_eq!(systems[0], "You are ego 9.9.9, a coding agent.");
+    assert!(systems[0].starts_with("You are ego 9.9.9, a coding agent."));
     let calls = generator.calls();
     let identity = calls[0]
         .messages
@@ -813,6 +813,72 @@ fn the_runtime_identity_names_the_model_workspace_posture_tools_and_every_mcp_se
         assert!(identity.contains(line), "missing {line:?} in:\n{identity}");
     }
     assert_eq!(systems[1], "the workspace speaks second");
+}
+
+/// Catches: the model-visible system context omits permission recovery guidance.
+#[test]
+fn permission_recovery_guidance_reaches_the_stable_system_context() {
+    let source: Arc<dyn AdmittedToolSource> = Arc::new(SequencedSource {
+        state: Arc::new(Mutex::new(SourceState {
+            catalogues: VecDeque::from([
+                CapturedToolCatalogue::new("g1", Vec::new()).expect("empty catalogue"),
+                CapturedToolCatalogue::new("g2", Vec::new()).expect("empty catalogue"),
+            ]),
+            ..SourceState::default()
+        })),
+    });
+    let generator = Arc::new(FakeGenerator::new([
+        vec![AiEvent::Stop(StopReason::Stop)],
+        vec![AiEvent::Stop(StopReason::Stop)],
+    ]));
+    let (mut turn, _store) = loop_with_policy(
+        generator.clone(),
+        &[],
+        source,
+        common::policy_source_with_root("/workspace", Mode::Auto, Ruleset::default()),
+        None,
+        Some(AgentIdentity {
+            version: "9.9.9".to_owned(),
+            sandbox: Confinement::Workspace,
+            offline: false,
+            host: None,
+        }),
+    )
+    .expect("valid catalogue");
+    futures::executor::block_on(turn.run("how do I unblock a tool?")).expect("first turn");
+    futures::executor::block_on(turn.run("continue")).expect("second turn");
+
+    let calls = generator.calls();
+    let first = system_texts(&calls[0]);
+    let guidance_text = first.first().expect("stable system identity");
+    let second = system_texts(&calls[1]);
+    assert_eq!(
+        Some(guidance_text),
+        second.first(),
+        "permission guidance must stay in the stable system prefix"
+    );
+    for guidance in [
+        "Permissions and OS confinement are separate",
+        "auto",
+        "permissions.judge",
+        "~/Gits",
+        "exec_paths",
+        "ego roots add",
+        "roots=[]",
+        "ego config unset roots",
+        "exit and resume",
+        "/config perimeter",
+        "ego config ls --effective",
+        "ego doctor",
+        "ego rules",
+        "do not bypass",
+    ] {
+        assert!(
+            guidance_text.contains(guidance),
+            "missing permission recovery guidance {guidance:?} in system context: {}",
+            guidance_text
+        );
+    }
 }
 
 #[test]
