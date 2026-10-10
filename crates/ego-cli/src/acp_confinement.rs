@@ -11,7 +11,7 @@ use ego_acp::serve::{SessionConfinementAdmission, SessionConfinementFuture};
 use ego_core::control::ControlError;
 use ego_core::event::domain::EventKind;
 use ego_core::event::id::{Producer, SessionId, TurnId};
-use ego_core::permit::{CanonPath, Confinement, RunConfinement};
+use ego_core::permit::{CanonPath, Confinement};
 use ego_core::run::RunRoot;
 use ego_core::sink::NullSink;
 use ego_core::turn::{CancelToken, Journal};
@@ -263,12 +263,12 @@ pub(crate) async fn warm_process_cache(
         .into_iter()
         .filter(|candidate| candidate.within(ceiling))
     {
-        let policy =
-            RunConfinement::new(confinement, false, CanonPath::new(root)).map_err(|error| {
-                ControlError::Internal(format!(
-                    "the ACP confinement policy could not be constructed: {error}"
-                ))
-            })?;
+        let policy = ego_tools::exec::admit_confinement(confinement, false, CanonPath::new(root))
+            .map_err(|error| {
+            ControlError::Internal(format!(
+                "the ACP confinement policy could not be constructed: {error}"
+            ))
+        })?;
         RunEffectPorts::diagnostic_capabilities(&policy, cancel.clone(), ExecLimits::default())
             .await
             .map_err(|error| {
@@ -315,12 +315,13 @@ async fn initialize_once(
         .into_iter()
         .filter(|candidate| candidate.within(ceiling))
     {
-        let policy = RunConfinement::new(confinement, false, CanonPath::new(root.as_path()))
-            .map_err(|error| {
-                ControlError::Internal(format!(
-                    "the ACP confinement policy could not be constructed: {error}"
-                ))
-            })?;
+        let policy =
+            ego_tools::exec::admit_confinement(confinement, false, CanonPath::new(root.as_path()))
+                .map_err(|error| {
+                    ControlError::Internal(format!(
+                        "the ACP confinement policy could not be constructed: {error}"
+                    ))
+                })?;
         let config = ExecRunConfig::new(
             policy.clone(),
             evidence.clone(),

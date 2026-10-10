@@ -439,12 +439,13 @@ pub enum Confinement {
     Ro,
     #[default]
     Workspace,
+    Adaptive,
     Off,
 }
 
 impl Confinement {
-    /// Every confinement, strongest first — the order a picker renders.
-    pub const ALL: [Self; 3] = [Self::Ro, Self::Workspace, Self::Off];
+    /// Picker order. Adaptive and strict levels have incomparable guarantees.
+    pub const ALL: [Self; 4] = [Self::Ro, Self::Workspace, Self::Adaptive, Self::Off];
 
     /// The one spelling: what `--sandbox` takes, what the config key holds,
     /// and what a host sends as a value id. `FromStr` reads these back.
@@ -452,20 +453,8 @@ impl Confinement {
         match self {
             Self::Ro => "ro",
             Self::Workspace => "workspace",
+            Self::Adaptive => "adaptive",
             Self::Off => "off",
-        }
-    }
-
-    /// How much this confines, for comparison only. Never stored, never sent.
-    ///
-    /// Written out rather than derived from `Ord` on the declaration order:
-    /// the variants are ordered for reading, and a derive would let somebody
-    /// reverse a security predicate by moving a line.
-    const fn strength(self) -> u8 {
-        match self {
-            Self::Ro => 2,
-            Self::Workspace => 1,
-            Self::Off => 0,
         }
     }
 
@@ -481,6 +470,7 @@ impl Confinement {
         match self {
             Self::Ro => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED),
             Self::Workspace => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+            Self::Adaptive => ExecCaps::ADAPTIVE,
             Self::Off => ExecCaps::empty(),
         }
     }
@@ -489,9 +479,16 @@ impl Confinement {
     ///
     /// The only question a ceiling is ever asked
     /// (`ARCHITECTURE.md`).
-    /// `ro` is within every ceiling; `off` is within `off` alone.
+    /// Adaptive and strict levels are incomparable; only an off ceiling admits
+    /// both, since strict levels do not promise adaptive's credential floors.
     pub const fn within(self, ceiling: Self) -> bool {
-        self.strength() >= ceiling.strength()
+        matches!(
+            (self, ceiling),
+            (_, Self::Off)
+                | (Self::Ro, Self::Ro | Self::Workspace)
+                | (Self::Workspace, Self::Workspace)
+                | (Self::Adaptive, Self::Adaptive)
+        )
     }
 }
 
@@ -508,6 +505,7 @@ impl FromStr for Confinement {
         match value {
             "ro" => Ok(Self::Ro),
             "workspace" => Ok(Self::Workspace),
+            "adaptive" => Ok(Self::Adaptive),
             "off" => Ok(Self::Off),
             _ => Err(ConfinementParseError {
                 value: value.to_string(),
@@ -525,7 +523,7 @@ impl fmt::Display for ConfinementParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "invalid sandbox {:?}: expected ro, workspace, or off",
+            "invalid sandbox {:?}: expected ro, workspace, adaptive, or off",
             self.value
         )
     }
@@ -542,6 +540,7 @@ impl ExecCaps {
     pub const WRITE_DENIED: Self = Self(1 << 1);
     pub const WRITE_SCOPED: Self = Self(1 << 2);
     pub const NO_IP_NETWORK: Self = Self(1 << 3);
+    pub const ADAPTIVE: Self = Self(1 << 4);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -586,6 +585,7 @@ impl ExecCaps {
                 Self::NO_IP_NETWORK,
                 "no IP networking for spawned processes, loopback included",
             ),
+            (Self::ADAPTIVE, "broad reads and executable reach with credential floors and confined adaptive writes"),
         ]
         .into_iter()
         .filter(|(capability, _)| self.contains(*capability))
@@ -615,6 +615,7 @@ impl Serialize for ExecCaps {
             (Self::WRITE_DENIED, "write_denied"),
             (Self::WRITE_SCOPED, "write_scoped"),
             (Self::NO_IP_NETWORK, "no_ip_network"),
+            (Self::ADAPTIVE, "adaptive"),
         ] {
             if self.contains(capability) {
                 names.push(name);
@@ -637,6 +638,7 @@ impl<'de> Deserialize<'de> for ExecCaps {
                 "write_denied" => Self::WRITE_DENIED,
                 "write_scoped" => Self::WRITE_SCOPED,
                 "no_ip_network" => Self::NO_IP_NETWORK,
+                "adaptive" => Self::ADAPTIVE,
                 _ => {
                     return Err(serde::de::Error::unknown_variant(
                         &name,
@@ -645,6 +647,7 @@ impl<'de> Deserialize<'de> for ExecCaps {
                             "write_denied",
                             "write_scoped",
                             "no_ip_network",
+                            "adaptive",
                         ],
                     ));
                 }
@@ -895,6 +898,7 @@ pub struct RunConfinement {
     workspace: CanonPath,
     exec_paths: Vec<CanonPath>,
     roots: Vec<super::ProfileRoot>,
+    adaptive: Option<super::AdaptivePerimeter>,
     requirements: ExecRequirements,
 }
 
@@ -919,6 +923,7 @@ impl RunConfinement {
             workspace,
             exec_paths: Vec::new(),
             roots: Vec::new(),
+            adaptive: None,
             requirements: ExecRequirements::new(required),
         })
     }
@@ -943,6 +948,17 @@ impl RunConfinement {
 
     pub fn roots(&self) -> &[super::ProfileRoot] {
         &self.roots
+    }
+
+    /// Captured operator-derived reach, distinct from configured profile roots.
+    #[must_use]
+    pub fn with_adaptive_perimeter(mut self, perimeter: super::AdaptivePerimeter) -> Self {
+        self.adaptive = Some(perimeter);
+        self
+    }
+
+    pub fn adaptive_perimeter(&self) -> Option<&super::AdaptivePerimeter> {
+        self.adaptive.as_ref()
     }
 
     pub fn exec_paths(&self) -> &[CanonPath] {
@@ -1236,7 +1252,7 @@ mod confinement {
     /// spot-check would pass just as happily with the comparison inverted.
     #[test]
     fn a_confinement_is_within_a_ceiling_exactly_when_it_confines_at_least_as_much() {
-        use Confinement::{Off, Ro, Workspace};
+        use Confinement::{Adaptive, Off, Ro, Workspace};
         let expected = [
             ((Ro, Ro), true),
             ((Ro, Workspace), true),
@@ -1247,6 +1263,13 @@ mod confinement {
             ((Off, Ro), false),
             ((Off, Workspace), false),
             ((Off, Off), true),
+            ((Adaptive, Adaptive), true),
+            ((Adaptive, Off), true),
+            ((Adaptive, Ro), false),
+            ((Adaptive, Workspace), false),
+            ((Ro, Adaptive), false),
+            ((Workspace, Adaptive), false),
+            ((Off, Adaptive), false),
         ];
         for ((value, ceiling), within) in expected {
             assert_eq!(
@@ -1264,7 +1287,12 @@ mod confinement {
         // Named one by one, because iterating `ALL` to check `ALL` proves
         // nothing: a variant dropped from the offer would drop out of the
         // loop with it.
-        for confinement in [Confinement::Ro, Confinement::Workspace, Confinement::Off] {
+        for confinement in [
+            Confinement::Ro,
+            Confinement::Workspace,
+            Confinement::Adaptive,
+            Confinement::Off,
+        ] {
             assert!(
                 Confinement::ALL.contains(&confinement),
                 "`{confinement}` exists and is offered to nobody"
@@ -1273,7 +1301,7 @@ mod confinement {
         assert!(
             Confinement::ALL
                 .windows(2)
-                .all(|pair| pair[0].within(pair[1]) && !pair[1].within(pair[0])),
+                .all(|pair| !pair[1].within(pair[0])),
             "the offer is not ordered strongest first: {:?}",
             Confinement::ALL
         );

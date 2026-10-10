@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use ego_core::config::{Source, Trust, resolve_selected};
-use ego_core::permit::{PathResolver, RunConfinement};
+use ego_core::permit::PathResolver;
 use ego_tools::fs::OsFs;
 
 use crate::{cli::UsageError, config};
@@ -36,11 +36,12 @@ pub fn observe(
             "warning: configured perimeter roots could not be admitted: {error}"
         ))
     })?;
-    let confinement = RunConfinement::new(
+    let confinement = ego_tools::exec::admit_confinement(
         effective.sandbox.unwrap_or_default(),
         effective.network == ego_core::config::Network::Off,
         workspace,
     )
     .map_err(|error| UsageError(error.to_string()))?;
+    crate::run::profile_roots::check_adaptive(&effective, &confinement).map_err(UsageError)?;
     Ok(Perimeter::session(&confinement, &effective, &roots).with_warnings(warnings))
 }

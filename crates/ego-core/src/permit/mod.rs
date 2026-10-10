@@ -4,6 +4,7 @@
 //! §3.4 (permissions and sandbox). Effects are governed by a permit minted
 //! only by the policy engine, never by a tool's own declaration.
 
+mod adaptive;
 pub mod analysis;
 mod approver;
 mod authority;
@@ -23,6 +24,7 @@ mod scope;
 mod spawn;
 mod tool;
 
+pub use adaptive::AdaptivePerimeter;
 /// `ModeApprover` is deliberately not re-exported: §6 step 5's implementation
 /// is chosen by `PolicyEngine::new` from the resolved mode, and a type a
 /// caller could name is one step from a caller that supplies one.

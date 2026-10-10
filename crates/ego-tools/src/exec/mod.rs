@@ -1,5 +1,6 @@
 //! Exact argv-native execution behind one run-owned process boundary.
 
+mod adaptive;
 mod backend;
 #[cfg(target_os = "linux")]
 mod bwrap;
@@ -35,6 +36,7 @@ use backend::{Backend, MeasuredBackend};
 use null::NullBackend;
 
 pub use crate::store::SessionEvidenceStore;
+pub use adaptive::admit_confinement;
 pub use editor_process::{EditorProcessError, run_editor_process};
 pub use ego_core::permit::{ProcessError, ProcessExecutor};
 #[cfg(target_os = "linux")]
@@ -698,6 +700,23 @@ fn policy_digest_with_runtime_roots(
     // profile/default roots are materialized; those inactive fields must not
     // invalidate its observation or a durable unconfined run selection.
     if policy.level() != ego_core::permit::Confinement::Off {
+        if let Some(adaptive) = policy.adaptive_perimeter() {
+            update_path_field(
+                &mut hash,
+                b"adaptive.home",
+                adaptive.home.as_path().as_os_str(),
+            )?;
+            for (tag, paths) in [
+                (b"adaptive.write".as_slice(), &adaptive.writable),
+                (b"adaptive.credential".as_slice(), &adaptive.credentials),
+                (b"adaptive.control".as_slice(), &adaptive.controls),
+            ] {
+                update_digest_field(&mut hash, tag, &(paths.len() as u64).to_be_bytes())?;
+                for path in paths {
+                    update_path_field(&mut hash, tag, path.as_path().as_os_str())?;
+                }
+            }
+        }
         update_digest_field(
             &mut hash,
             b"roots.count",

@@ -52,8 +52,10 @@ const fn decide(input: AdmissionInput) -> Admission {
         StartKind::InteractiveHuman if input.offline => Admission::Preserve,
         StartKind::InteractiveHuman => match (input.cli_sandbox, input.effective_sandbox) {
             (_, Some(Confinement::Off)) | (Some(Confinement::Off), None) => Admission::ProceedOff,
-            (_, Some(Confinement::Workspace | Confinement::Ro))
-            | (Some(Confinement::Workspace | Confinement::Ro), None) => Admission::Preserve,
+            (_, Some(Confinement::Workspace | Confinement::Ro | Confinement::Adaptive))
+            | (Some(Confinement::Workspace | Confinement::Ro | Confinement::Adaptive), None) => {
+                Admission::Preserve
+            }
             (None, None) if input.acknowledged => Admission::ProceedOff,
             (None, None) => Admission::RequireAcknowledgement,
         },

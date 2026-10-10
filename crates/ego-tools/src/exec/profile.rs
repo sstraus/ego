@@ -7,8 +7,12 @@ use std::{collections::BTreeSet, error::Error, fmt, path::Path};
 
 use ego_core::permit::{Confinement, SandboxAccess, SandboxGrant};
 
+#[path = "adaptive_profile.rs"]
+mod adaptive;
+
 /// Inputs owned by the execution backend, rather than by a model call.
 pub(super) struct ProfileInput<'a> {
+    pub(super) adaptive: Option<&'a ego_core::permit::AdaptivePerimeter>,
     pub(super) level: Confinement,
     pub(super) offline: bool,
     pub(super) workspace: &'a Path,
@@ -26,6 +30,7 @@ pub(super) struct ProfileInput<'a> {
 pub(super) enum ProfileError {
     RelativePath(String),
     UnrepresentablePath(String),
+    MissingAdaptivePerimeter,
 }
 
 impl fmt::Display for ProfileError {
@@ -35,6 +40,7 @@ impl fmt::Display for ProfileError {
             Self::UnrepresentablePath(path) => {
                 write!(f, "Seatbelt root cannot be represented safely: {path}")
             }
+            Self::MissingAdaptivePerimeter => f.write_str("adaptive perimeter was not admitted"),
         }
     }
 }
@@ -80,6 +86,7 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     );
 
     match input.level {
+        Confinement::Adaptive => profile.push_str(&adaptive::render(input)?),
         Confinement::Off => profile.push_str("(allow process-exec*)\n(allow file*)\n"),
         Confinement::Ro | Confinement::Workspace => {
             profile.push_str("(allow process-exec*\n");
@@ -220,6 +227,7 @@ mod tests {
     fn input(level: Confinement) -> ProfileInput<'static> {
         static RUNTIME: &[&Path] = &[];
         ProfileInput {
+            adaptive: None,
             level,
             offline: false,
             workspace: Path::new("/work"),

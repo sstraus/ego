@@ -4,6 +4,30 @@ use ego_core::config::Effective;
 use ego_core::permit::{CanonPath, PathResolver, ProfileRoot, admit_roots};
 use ego_tools::fs::OsFs;
 
+/// A derived source cannot raise a configured root ceiling.
+pub(crate) fn check_adaptive(
+    effective: &Effective,
+    policy: &ego_core::permit::RunConfinement,
+) -> Result<(), String> {
+    let Some(perimeter) = policy.adaptive_perimeter() else {
+        return Ok(());
+    };
+    let roots = perimeter
+        .writable
+        .iter()
+        .cloned()
+        .map(|path| ProfileRoot::new(path, ego_core::permit::RootAccess::ReadWrite))
+        .collect::<Vec<_>>();
+    ego_core::permit::check_root_ceilings(
+        &roots,
+        &effective.root_ceilings,
+        &perimeter.home,
+        policy.workspace(),
+        &OsFs,
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Resolve the roots the active profile declared against the real filesystem.
 /// Any refusal is a startup failure: a profile that asks for more reach than
 /// it may have must not quietly run with less.
@@ -134,7 +158,9 @@ pub(crate) fn clamp(
 /// Materialize the default at the process edge, keeping missing paths visible.
 pub(crate) fn defaults(effective: &mut Effective, home: &std::path::Path) -> Vec<String> {
     let mut warnings = Vec::new();
-    if effective.roots_source.is_none() {
+    if effective.roots_source.is_none()
+        && effective.sandbox.unwrap_or_default() != ego_core::permit::Confinement::Adaptive
+    {
         let path = home.join("Gits");
         if path.is_dir() {
             effective.roots = vec![ego_core::permit::RootCfg {

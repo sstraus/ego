@@ -59,12 +59,34 @@ and immutable system denies continue to win.
 | --- | --- |
 | `ro` | Read-only confinement; writes remain denied even under an extra writable root |
 | `workspace` | Workspace writes with the admitted extra-root policy |
+| `adaptive` | Broad reads and executable reach with hard credential exclusions; workspace, configured and captured toolchain writes |
 | `off` | No filesystem confinement guarantee; classifiers/permission checks still apply |
 
-Absent an explicit roots declaration, an existing `~/Gits` is added as a read-write
-extra root. Use `ego config set 'roots=[]'` for workspace-only access; local/flag
+Under strict levels, absent an explicit roots declaration, an existing `~/Gits` is added as a read-write
+extra root. Adaptive omits that implicit root. Use `ego config set 'roots=[]'` to clear configured roots; local/flag
 root declarations have stricter read-only constraints and cannot replace this
 user declaration. The effective perimeter reports the resulting source.
+
+Select `--sandbox adaptive` independently of permission mode `auto`. Adaptive
+currently requires macOS Seatbelt and successful native capability probes;
+unsupported platforms fail admission with explicit alternatives. It captures
+operator `CARGO_HOME`, `RUSTUP_HOME`, trusted mbx `cache_dir`, validated git common
+and linked-worktree metadata, `TMPDIR`, and an operator `CARGO_TARGET_DIR` before
+commands. Cargo/rustup defaults apply when their environment variables are absent.
+Those roots appear as `derived` in perimeter inspection, with no per-cache judge.
+Configured ceilings and readonly roots remain binding. Shared-cache writes are
+intentional. Workspace and derived toolchain/target executables remain runnable.
+
+Adaptive's OS credential floors cannot be lifted by permission rules or human
+sandbox grants: SSH/AWS/GnuPG, netrc, keychain/browser stores, provider/ego/Cargo
+credentials and `.env*` outside the workspace. Git config/hooks and worktree
+selectors stay protected against writes. Ordinary OS privacy restrictions also
+remain. These OS floors are separate from the default read rules described above.
+Report the exact refused target and its task relevance. A failed mutation can
+leave partial effects; do not assume replay is safe. Automatic residual-write
+judgment is pending the shared judge integration; the existing human grant flow
+still handles eligible refusals. A future judge-write grant will also forbid
+execution within that residual root for the rest of its session.
 
 System sandbox configuration is a floor. Extra roots specify canonical paths
 and access; system roots cap them and configured executable paths. A read-only

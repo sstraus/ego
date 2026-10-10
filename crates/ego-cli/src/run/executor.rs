@@ -229,7 +229,7 @@ impl ChildAuthorityCeiling {
             ));
         }
         let sandbox = effective.sandbox.unwrap_or_default();
-        if confinement_rank(sandbox) > confinement_rank(self.sandbox) {
+        if !sandbox.within(self.sandbox) {
             return Err(format!(
                 "child profile sandbox {sandbox} widens parent sandbox {}",
                 self.sandbox
@@ -263,14 +263,6 @@ impl ChildAuthorityCeiling {
             return Err("child profile budget widens the parent ceiling".to_owned());
         }
         Ok(())
-    }
-}
-
-fn confinement_rank(confinement: Confinement) -> u8 {
-    match confinement {
-        Confinement::Ro => 0,
-        Confinement::Workspace => 1,
-        Confinement::Off => 2,
     }
 }
 

@@ -62,6 +62,17 @@ impl Perimeter {
                     access: root.access(),
                     source: origin(effective.roots_source),
                 })
+                .chain(
+                    confinement
+                        .adaptive_perimeter()
+                        .into_iter()
+                        .flat_map(|p| &p.writable)
+                        .map(|path| PerimeterRoot {
+                            path: path.as_path().to_path_buf(),
+                            access: RootAccess::ReadWrite,
+                            source: "derived".to_owned(),
+                        }),
+                )
                 .collect(),
             sandbox: confinement.level().to_string(),
             sandbox_source: origin(effective.sandbox_source),

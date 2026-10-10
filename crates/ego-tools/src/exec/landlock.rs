@@ -69,6 +69,7 @@ impl LandlockBackend {
         let level = match policy.level() {
             Confinement::Ro => Level::Ro,
             Confinement::Workspace => Level::Workspace,
+            Confinement::Adaptive => return Err(ProcessError::Backend("adaptive confinement has not been demonstrated on Linux; select workspace, ro or off explicitly".into())),
             Confinement::Off => {
                 return Err(ProcessError::Invariant(
                     "the Landlock backend was selected for sandbox off".into(),
