@@ -242,6 +242,9 @@ pub enum ExportEvent {
     ToolCallCompleted {
         ok: bool,
     },
+    ToolCallMeasured {
+        timing: crate::event::domain::ToolTiming,
+    },
     DetachedExecStarted {
         id: crate::event::id::DetachedExecId,
     },
@@ -844,6 +847,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.tool_material += 1;
             ExportEvent::ToolCallCompleted { ok: *ok }
         }
+        EventKind::ToolCallMeasured { timing } => ExportEvent::ToolCallMeasured { timing: *timing },
         EventKind::DetachedExecStarted { id } => ExportEvent::DetachedExecStarted { id: *id },
         EventKind::DetachedExecSettled { snapshot } => {
             use crate::permit::DetachedExecOutcome;

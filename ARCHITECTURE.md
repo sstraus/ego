@@ -24,7 +24,7 @@ State is a **reduction over an append-only event log** (pi's reducer,
 SessionTitleChanged | SessionDeleted | PromptQueued |
 PromptDeliveryExpedited | UserPrompt | AssistantDelta |
 AssistantMessage | ReasoningDelta | ReasoningState | ToolCallStarted |
-ToolCallDelta | ToolCallCompleted | PermissionRequested | PermissionAmended |
+ToolCallDelta | ToolCallMeasured | ToolCallCompleted | PermissionRequested | PermissionAmended |
 PermissionDecided | QuestionRequested | QuestionSettled | GenerationStarted |
 ExecutionObserved | AttemptSettled | UsageUpdated | UsageCorrected |
 ContextWindowUpdated | TurnCompleted | Compacted | Forked |

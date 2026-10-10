@@ -11,8 +11,8 @@
 //! decision inside it is a pure function it calls.
 
 mod catalogue;
-mod control;
 mod context_capacity;
+mod control;
 mod identity;
 mod journal;
 mod mcp_registry;
@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::future::{Either, select};
@@ -436,6 +436,7 @@ pub struct TurnAbandoned {
 
 /// One tool call the model asked for and the loop has not yet answered.
 struct PendingCall {
+    timing: crate::event::domain::ToolTiming,
     /// The item the call was logged against. `ToolCallCompleted` must name
     /// the same one, or the result attaches to nothing.
     item: ItemId,
@@ -2850,10 +2851,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         error_kind,
                     } => (capture, generation, terminal, reason, pending, error_kind),
                 };
-            if let Some(message) = context_capacity::exhausted(
-                self.state().context,
-                self.state().context.window,
-            ) {
+            if let Some(message) =
+                context_capacity::exhausted(self.state().context, self.state().context.window)
+            {
                 self.close_unstarted_siblings(turn, &pending)?;
                 return self.refuse_drive(turn, message, ExitReason::ContextOverflow);
             }
@@ -3012,10 +3012,19 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 // needed an answer — reading like a refusal somebody
                 // configured on purpose. `DeniedBy` is what carries that
                 // difference past the prose and into §4.1's object.
-                let denial = match self
+                let outcome = self
                     .run_tool(policy.as_ref(), &policy_snapshot, turn, &mut pending[index])
-                    .await?
-                {
+                    .await?;
+                let call = &pending[index];
+                self.journal.append(
+                    turn,
+                    Some(call.item),
+                    Some(call.started),
+                    EventKind::ToolCallMeasured {
+                        timing: call.timing,
+                    },
+                )?;
+                let denial = match outcome {
                     ToolOutcome::Answered { ok, mut result } => {
                         let call = &pending[index];
                         self.tools
@@ -4352,6 +4361,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             )
                             .map(|started| {
                                 pending.push(PendingCall {
+                                    timing: Default::default(),
                                     item,
                                     started,
                                     selected: Some(selected),
@@ -5324,6 +5334,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                         }
                                     }
                                 };
+                                let approval_started = Instant::now();
                                 let decision = await_controlled(
                                     &self.journal,
                                     &self.cancel,
@@ -5334,6 +5345,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                     None,
                                 )
                                 .await;
+                                call.timing.approval_wait_ms =
+                                    call.timing.approval_wait_ms.saturating_add(
+                                        u64::try_from(approval_started.elapsed().as_millis())
+                                            .unwrap_or(u64::MAX),
+                                    );
                                 let decision = match decision {
                                     Controlled::Completed(decision) => decision,
                                     Controlled::Interrupted => {
@@ -5501,6 +5517,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             HookCausality::item(call.item, turn, call.started),
             policy_snapshot,
         );
+        let execution_started = Instant::now();
         let execution = await_controlled(
             &self.journal,
             &self.cancel,
@@ -5512,6 +5529,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             (tool.descriptor().name == "exec").then_some(self.tools.effect_ports().process()),
         )
         .await;
+        call.timing.execution_ms =
+            Some(u64::try_from(execution_started.elapsed().as_millis()).unwrap_or(u64::MAX));
         let execution = match execution {
             Controlled::Completed(execution) => execution,
             Controlled::Interrupted => unreachable!("effect waits are never dropped"),

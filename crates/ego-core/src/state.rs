@@ -424,6 +424,8 @@ pub struct ItemState {
     pub images: Vec<ImageRef>,
     /// The final evidence returned by a completed tool call.
     pub tool_result: Option<ToolResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timing: Option<crate::event::domain::ToolTiming>,
     /// A reasoning item's opaque continuation state, once its block closed.
     ///
     /// Its own field and not [`Self::text`]: the two are different values on
@@ -468,6 +470,7 @@ impl ItemState {
             text: String::new(),
             images: Vec::new(),
             tool_result: None,
+            tool_timing: None,
             reasoning_state: None,
             completed: false,
             ok: None,
@@ -1915,6 +1918,11 @@ impl SessionState {
                     item.tool_result = Some(result.clone());
                     item.completed = true;
                     item.ok = Some(*ok);
+                }
+            }
+            EventKind::ToolCallMeasured { timing } => {
+                if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
+                    item.tool_timing = Some(*timing);
                 }
             }
             EventKind::DetachedExecStarted { id } => {

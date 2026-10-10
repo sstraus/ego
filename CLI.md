@@ -1123,8 +1123,11 @@ calc.py +3 -1 · 12ms`, `✓ $ seq 1 20 · exit 0 · 0.4s`, `✗ $ make · exit 
 1.2s`, `✗ read gone.py · …No such file or directory · 3ms`. `✓` and `✗` are the
 outcome and a failed call never carries `✓`. An `exec` row is followed by the
 last three lines of its output, and a line saying how many earlier lines were
-left out. The duration runs from the call's start event, so it includes any
-wait for a permission answer. A row is cut to the terminal width at the moment
+left out. Execution and human approval wait are measured separately with a
+monotonic clock and saved before the completion event. The row shows the
+execution duration and, when nonzero, `approval 15.0s`. Replay uses the saved
+values. Calls without an execution measurement show `duration unavailable`.
+A row is cut to the terminal width at the moment
 it is drawn (a resize applies to later rows): the target gives way first, the
 mark, verb, outcome and duration last. Text from a tool result is shown with
 control characters replaced, never passed to the terminal.

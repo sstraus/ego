@@ -734,5 +734,6 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::UsageCorrected { .. }
         | EventKind::ExecutionObserved { .. }
         | EventKind::JudgeResponse { .. } => None,
+        EventKind::ToolCallMeasured { .. } => None,
     }
 }
