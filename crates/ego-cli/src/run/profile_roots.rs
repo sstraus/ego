@@ -182,7 +182,7 @@ pub(crate) fn defaults(effective: &mut Effective, home: &std::path::Path) -> Vec
     warnings
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use ego_core::config::{ConfigLayer, Source, Trust, resolve};
@@ -192,7 +192,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(home.join("Gits")).unwrap();
-        let mut adaptive = resolve(&[], Trust::Untrusted, None).unwrap();
+        let adaptive_layer = ConfigLayer::parse(Source::User, "sandbox='adaptive'").unwrap();
+        let mut adaptive = resolve(&[adaptive_layer], Trust::Untrusted, None).unwrap();
         assert!(defaults(&mut adaptive, &home).is_empty());
         assert!(
             adaptive.roots.is_empty(),

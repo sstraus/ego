@@ -13,6 +13,8 @@ pub struct Perimeter {
     roots: Vec<PerimeterRoot>,
     sandbox: String,
     sandbox_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox_reason: Option<&'static str>,
     backend: String,
     capabilities: CapabilityEvidence,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,6 +78,10 @@ impl Perimeter {
                 .collect(),
             sandbox: confinement.level().to_string(),
             sandbox_source: origin(effective.sandbox_source),
+            sandbox_reason: effective
+                .sandbox
+                .is_none()
+                .then(crate::permit::Confinement::default_reason),
             backend: if confinement.level() == crate::permit::Confinement::Off
                 && !(cfg!(target_os = "macos") && confinement.offline())
             {
@@ -170,6 +176,9 @@ impl Perimeter {
             ),
             format!("  network\t{}\tinvocation", self.network),
         ]);
+        if let Some(reason) = self.sandbox_reason {
+            lines.push(format!("  sandbox_reason\t{reason}"));
+        }
         if let Some(reason) = self.capabilities_reason {
             lines.push(format!("  capabilities_reason\t{reason}"));
         }

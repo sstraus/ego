@@ -15,13 +15,17 @@ fn layer(source: Source, value: ConfigLayer) -> Sourced<ConfigLayer> {
     Sourced { source, value }
 }
 
-// Catches: a fresh resolved config silently keeps the old workspace default.
+// Catches: fresh config selects a confinement unsupported by the platform, or loses Adaptive on macOS.
 #[test]
 fn fresh_config_resolves_to_adaptive_instead_of_legacy_workspace() {
     let effective = resolve(&[], Trust::Trusted, None).unwrap();
     assert_eq!(
         effective.sandbox.unwrap_or_default(),
-        ego_core::permit::Confinement::Adaptive
+        if cfg!(target_os = "macos") {
+            ego_core::permit::Confinement::Adaptive
+        } else {
+            ego_core::permit::Confinement::Workspace
+        }
     );
     assert!(effective.sandbox_source.is_none());
 }

@@ -219,7 +219,14 @@ fn confinement_is_exact_adaptive_default_and_orthogonal_to_mode() {
         "workspace"
     );
     assert_eq!("off".parse::<Confinement>().unwrap().to_string(), "off");
-    assert_eq!(Confinement::default(), Confinement::Adaptive);
+    assert_eq!(
+        Confinement::default(),
+        if cfg!(target_os = "macos") {
+            Confinement::Adaptive
+        } else {
+            Confinement::Workspace
+        }
+    );
     assert!("bogus".parse::<Confinement>().is_err());
 }
 

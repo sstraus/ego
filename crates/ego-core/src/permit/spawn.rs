@@ -437,13 +437,22 @@ impl std::error::Error for SpawnSpecError {}
 #[serde(rename_all = "lowercase")]
 pub enum Confinement {
     Ro,
+    #[cfg_attr(not(target_os = "macos"), default)]
     Workspace,
-    #[default]
+    #[cfg_attr(target_os = "macos", default)]
     Adaptive,
     Off,
 }
 
 impl Confinement {
+    /// Why a fresh session selects this platform's implicit confinement.
+    pub fn default_reason() -> &'static str {
+        match Self::default() {
+            Self::Adaptive => "platform default: macOS supports adaptive confinement",
+            _ => "platform default: adaptive confinement is unsupported; using workspace",
+        }
+    }
+
     /// Picker order. Adaptive and strict levels have incomparable guarantees.
     pub const ALL: [Self; 4] = [Self::Ro, Self::Workspace, Self::Adaptive, Self::Off];
 

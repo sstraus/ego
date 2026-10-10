@@ -1260,7 +1260,11 @@ mod confinement_ceiling_tests {
         );
         assert_eq!(
             confinement_ceiling(&args(None), None, None),
-            Confinement::Adaptive,
+            if cfg!(target_os = "macos") {
+                Confinement::Adaptive
+            } else {
+                Confinement::Workspace
+            },
             "the default applies when neither flag nor configuration names a ceiling"
         );
         assert_eq!(

@@ -67,12 +67,15 @@ extra root. Adaptive omits that implicit root. Use `ego config set 'roots=[]'` t
 root declarations have stricter read-only constraints and cannot replace this
 user declaration. The effective perimeter reports the resulting source.
 
-Adaptive is the fresh-config default, independently of permission mode `auto`.
+Adaptive is the fresh-config default on macOS, independently of permission mode
+`auto`. Other platforms keep the `workspace` default until they support adaptive
+confinement. Effective config and doctor show the selected level and the platform
+default reason.
 Explicit `workspace`, `ro`, and `off` selections retain their behavior; no config
 file is rewritten. Select those levels when their stricter or open reach is
 required. Adaptive
 currently requires macOS Seatbelt and successful native capability probes;
-unsupported platforms fail admission with explicit alternatives. It captures
+explicit adaptive selections on unsupported platforms fail admission with explicit alternatives. It captures
 operator `CARGO_HOME`, `RUSTUP_HOME`, trusted mbx `cache_dir`, validated git common
 and linked-worktree metadata, `TMPDIR`, and an operator `CARGO_TARGET_DIR` before
 commands. Cargo/rustup defaults apply when their environment variables are absent.

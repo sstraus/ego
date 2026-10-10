@@ -289,17 +289,31 @@ fn sandbox_optionality_survives_empty_layers_and_defaults_only_after_resolution(
 
     // A selected profile with no sandbox key must not manufacture one while
     // resolving the profile.  The final execution boundary supplies the
-    // documented adaptive default after this Option remains None.
+    // documented platform default after this Option remains None.
     let profile_only = layer(Source::User, "[profile.ci]\nmodel = \"fixture\"\n");
     assert_eq!(profile_only.value.sandbox, None);
     let effective = resolve(&[profile_only], Trust::Trusted, Some("ci"))
         .expect("profile without sandbox resolves");
     assert_eq!(effective.sandbox, None);
-    assert_eq!(effective.sandbox.unwrap_or_default(), Confinement::Adaptive);
+    assert_eq!(
+        effective.sandbox.unwrap_or_default(),
+        if cfg!(target_os = "macos") {
+            Confinement::Adaptive
+        } else {
+            Confinement::Workspace
+        }
+    );
 
     let absent = resolve(&[], Trust::Trusted, None).expect("empty layers resolve");
     assert_eq!(absent.sandbox, None);
-    assert_eq!(absent.sandbox.unwrap_or_default(), Confinement::Adaptive);
+    assert_eq!(
+        absent.sandbox.unwrap_or_default(),
+        if cfg!(target_os = "macos") {
+            Confinement::Adaptive
+        } else {
+            Confinement::Workspace
+        }
+    );
 }
 
 #[test]
@@ -454,8 +468,16 @@ fn cli_real_enforcement_matrix_covers_omission_override_and_final_adaptive_defau
     }
 
     // With no layer value and no flag, Effective remains None and only the
-    // final Settings boundary supplies Adaptive.  An outside write therefore
+    // final Settings boundary supplies the platform default. An outside write therefore
     // fails closed (or the prerequisite refusal happens before provider use).
+    assert_eq!(
+        Confinement::default(),
+        if cfg!(target_os = "macos") {
+            Confinement::Adaptive
+        } else {
+            Confinement::Workspace
+        }
+    );
     let (finished, _outside, target, stub) = shell_write_case(None, None);
     assert_sandbox_denied(&finished, &target, &stub, "final absent sandbox default");
 }
