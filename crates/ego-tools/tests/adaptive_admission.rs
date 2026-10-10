@@ -79,6 +79,9 @@ fn git_at(root: &Path, args: &[&std::ffi::OsStr]) {
 #[path = "support/adaptive_git_layouts.rs"]
 mod git_layouts;
 
+#[path = "support/adaptive_grants.rs"]
+mod adaptive_grants;
+
 // Catches: the outside probe uses only the workspace parent even when that
 // parent is host-unwritable.
 #[test]
@@ -114,6 +117,15 @@ fn execute(
     root: &Path,
     argv: Vec<std::ffi::OsString>,
 ) -> Result<ego_core::permit::ToolResult, ego_core::permit::ProcessError> {
+    execute_with_grants(policy, root, argv, None)
+}
+
+fn execute_with_grants(
+    policy: ego_core::permit::RunConfinement,
+    root: &Path,
+    argv: Vec<std::ffi::OsString>,
+    grants: Option<Arc<dyn ego_core::permit::SandboxGrantPort>>,
+) -> Result<ego_core::permit::ToolResult, ego_core::permit::ProcessError> {
     let evidence =
         SessionEvidenceStore::open(root.join("evidence"), SessionId::new(), 1024 * 1024).unwrap();
     let spec = SpawnSpec::new(
@@ -123,7 +135,7 @@ fn execute(
         EnvPolicy::Inherited,
     )
     .unwrap();
-    let config = ExecRunConfig::new(
+    let mut config = ExecRunConfig::new(
         policy,
         evidence,
         CancelToken::new(),
@@ -132,6 +144,9 @@ fn execute(
         None,
         Arc::new(ego_tools::http::SystemResolver::new()),
     );
+    if let Some(grants) = grants {
+        config = config.with_sandbox_grants(grants);
+    }
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

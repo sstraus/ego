@@ -1,6 +1,7 @@
 //! Adaptive Seatbelt policy. Every path remains encoded SBPL data.
 
 use super::{ProfileError, ProfileInput, path_literal};
+use crate::exec::adaptive::floor;
 use ego_core::permit::SandboxAccess;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -38,25 +39,17 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     for path in &perimeter.controls {
         subpath(&mut out, path.as_path())?;
     }
-    out.push_str(
-        "  (regex #\"(^|/)[.][gG][iI][tT]$\")\n\
-           (regex #\"(^|/)[.][gG][iI][tT]/(.*/)?(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)\")\n",
-    );
+    out.push_str(&format!(
+        "  (regex #\"{}\")\n  (regex #\"{}\")\n",
+        floor::GIT_ENTRY,
+        floor::GIT_CONTROL
+    ));
     // A captured Git root has config and hooks controls even when absent.
     // Cover nested submodules/worktrees beneath separately named metadata too.
-    for control in &perimeter.controls {
-        let path = control.as_path();
-        if path.file_name().is_some_and(|name| name == "config")
-            && let Some(root) = path.parent()
-            && perimeter
-                .controls
-                .iter()
-                .any(|other| other.as_path() == root.join("hooks"))
-        {
-            out.push_str("  (require-all\n");
-            subpath(&mut out, root)?;
-            out.push_str("    (regex #\"/(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)\"))\n");
-        }
+    for root in floor::metadata_roots(perimeter) {
+        out.push_str("  (require-all\n");
+        subpath(&mut out, root)?;
+        out.push_str(&format!("    (regex #\"{}\"))\n", floor::METADATA_CONTROL));
     }
     out.push_str(")\n(deny file-write-unlink\n");
     // Subpath denies protect contents, but a rename of any parent would move
@@ -75,7 +68,10 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     }
     out.push_str(")\n");
     out.push_str("(deny file-read* file-write* process-exec* (require-all\n");
-    out.push_str("  (regex #\"(^|/)[.]env[^/]*(/|$)\")\n  (require-not (subpath ");
+    out.push_str(&format!(
+        "  (regex #\"{}\")\n  (require-not (subpath ",
+        floor::ENV
+    ));
     out.push_str(&path_literal(input.workspace)?);
     out.push_str("))))\n");
     Ok(out)

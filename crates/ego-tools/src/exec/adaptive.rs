@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 use ego_core::permit::{AdaptivePerimeter, CanonPath, Confinement, ProcessError, RunConfinement};
 
+#[path = "adaptive_floor.rs"]
+pub(super) mod floor;
+
 /// The process-edge constructor shared by CLI, ACP, and diagnostics.
 pub fn admit_confinement(
     level: Confinement,
