@@ -126,53 +126,59 @@ pub(super) fn instructions(
     cwd: &Path,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Option<SystemPrompt>, UsageError> {
-    if let Some(text) = &args.system {
-        // `--system` replaces the prompt outright (`CLI.md` §3), so no file
-        // contributed and none is published. `--append-system` still applies:
-        // "append to it" means to whatever `--system` left.
-        let mut text = rooted_at_file(text, cwd)?;
-        if let Some(extra) = &args.append_system {
-            text.push_str("\n\n");
-            text.push_str(&rooted_at_file(extra, cwd)?);
-        }
-        return Ok(Some(SystemPrompt::verbatim(text)));
-    }
-
-    let named = match &args.instructions {
-        Some(path) => Some(explicit(path, cwd)?),
-        None => None,
-    };
-    let selection = Selection::of(effective.posture, named);
-    let discovery_root = if matches!(selection, Selection::Disabled) {
-        root.to_path_buf()
-    } else if let Some(home) = std::env::var_os("HOME") {
-        crate::trust::instruction_discovery_root(root, &PathBuf::from(home)).map_err(|error| {
-            UsageError(format!(
-                "instruction discovery root could not be resolved: {error}"
-            ))
-        })?
+    ego_core::config::validate_prompt_options(args.bare, args.instructions.is_some())
+        .map_err(|message| UsageError(message.to_owned()))?;
+    let session = args.session_prompt.as_ref();
+    let replacing =
+        session.filter(|prompt| prompt.mode == ego_core::config::SystemPromptMode::Replace);
+    let replacement = replacing
+        .map(|prompt| &prompt.text)
+        .or(args.system.as_ref());
+    let mut assembled = if let Some(text) = replacement {
+        Some(SystemPrompt::verbatim(rooted_at_file(text, cwd)?))
     } else {
-        root.to_path_buf()
+        let named = match &args.instructions {
+            Some(path) => Some(explicit(path, cwd)?),
+            None => None,
+        };
+        let selection = Selection::of(effective.posture, named);
+        let discovery_root = if matches!(selection, Selection::Disabled) {
+            root.to_path_buf()
+        } else if let Some(home) = std::env::var_os("HOME") {
+            crate::trust::instruction_discovery_root(root, &PathBuf::from(home)).map_err(
+                |error| {
+                    UsageError(format!(
+                        "instruction discovery root could not be resolved: {error}"
+                    ))
+                },
+            )?
+        } else {
+            root.to_path_buf()
+        };
+        let set = ego_core::config::load(
+            &OsInstructionIo,
+            &discovery_root,
+            cwd,
+            &selection,
+            Limits::default(),
+        )
+        .map_err(|err| UsageError(err.to_string()))?;
+
+        for skipped in &set.skipped {
+            diagnostics.note(&format!(
+                "{} was not used: {}",
+                skipped.path.display(),
+                skipped.reason
+            ));
+        }
+
+        system_prompt(&set, root, &selection)
     };
-    let set = ego_core::config::load(
-        &OsInstructionIo,
-        &discovery_root,
-        cwd,
-        &selection,
-        Limits::default(),
-    )
-    .map_err(|err| UsageError(err.to_string()))?;
-
-    for skipped in &set.skipped {
-        diagnostics.note(&format!(
-            "{} was not used: {}",
-            skipped.path.display(),
-            skipped.reason
-        ));
-    }
-
-    let mut assembled = system_prompt(&set, root, &selection);
-    if let Some(extra) = &args.append_system {
+    let launch_append = args.append_system.as_ref().filter(|_| replacing.is_none());
+    let session_append = session
+        .filter(|prompt| prompt.mode == ego_core::config::SystemPromptMode::Append)
+        .map(|prompt| &prompt.text);
+    for extra in [launch_append, session_append].into_iter().flatten() {
         let extra = rooted_at_file(extra, cwd)?;
         assembled = Some(match assembled {
             Some(mut prompt) => {

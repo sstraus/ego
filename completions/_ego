@@ -61,8 +61,8 @@ _arguments "${_arguments_options[@]}" : \
 '*-c+[Dotted-path config override, value parsed as TOML]:K=V:_default' \
 '*--set=[Dotted-path config override, value parsed as TOML]:K=V:_default' \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
-'(--tools)--no-tools[Offer no tools at all]' \
 '--bare[No ambient discovery, even in a trusted workspace]' \
+'(--tools)--no-tools[Offer no tools at all]' \
 '(--bare)--trust-workspace[Trust this interactive launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--plan[Shorthand for --mode plan]' \
@@ -111,8 +111,8 @@ _arguments "${_arguments_options[@]}" : \
 '*-c+[Dotted-path config override, value parsed as TOML]:K=V:_default' \
 '*--set=[Dotted-path config override, value parsed as TOML]:K=V:_default' \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
-'(--tools)--no-tools[Offer no tools at all]' \
 '--bare[No ambient discovery, even in a trusted workspace]' \
+'(--tools)--no-tools[Offer no tools at all]' \
 '(--bare)--trust-workspace[Trust this interactive launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--plan[Shorthand for --mode plan]' \
@@ -227,6 +227,7 @@ _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
 '--sandbox=[The weakest confinement a session may select\: ro|workspace|off]:SANDBOX:_default' \
+'--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
 '*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
@@ -237,6 +238,7 @@ _arguments "${_arguments_options[@]}" : \
 '--max-connections=[Maximum simultaneous listener connections]:MAX_CONNECTIONS:_default' \
 '--connection-lifetime=[Maximum lifetime of one listener connection\: 90s, 10m or 2h]:CONNECTION_LIFETIME:_default' \
 '--max-ingress-bytes=[Maximum cumulative bytes read from one listener connection]:MAX_INGRESS_BYTES:_default' \
+'--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
 '--allow-public-bind[Serve on an address reachable from outside this machine]' \
 '-h[Print help]' \

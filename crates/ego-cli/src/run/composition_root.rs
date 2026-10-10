@@ -152,6 +152,13 @@ impl CliPrepared {
             args.profile_source = Some(ego_core::config::Source::Flags);
         }
         args.ceiling_profile = request.selections.ceiling_profile().map(str::to_owned);
+        if let Some(options) = request.selections.prompt_options() {
+            args.session_prompt = options.system_prompt.clone();
+            // A host cannot undo a launch-wide bare selection.
+            args.bare |= options.bare.unwrap_or(false);
+        }
+        ego_core::config::validate_prompt_options(args.bare, args.instructions.is_some())
+            .map_err(|message| usage(UsageError(message.to_owned())))?;
         if args.profile.as_deref() == Some("ci") {
             return Err(RunTermination::UsageError {
                 message: "profile ci available only through ego run or ego resume".to_owned(),

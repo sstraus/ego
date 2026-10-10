@@ -570,6 +570,8 @@ pub struct AcpArgs {
 /// session a host got before a served protocol could be shaped at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionShape {
+    pub system: Option<String>,
+    pub bare: bool,
     pub append_system: Option<String>,
     pub instructions: Option<PathBuf>,
     pub allow: Vec<String>,
@@ -583,6 +585,8 @@ pub struct SessionShape {
 impl From<Shape> for SessionShape {
     fn from(shape: Shape) -> Self {
         Self {
+            system: shape.system,
+            bare: shape.bare,
             append_system: shape.append_system,
             instructions: shape.instructions,
             allow: shape.allow,
@@ -757,6 +761,7 @@ pub struct Args {
     pub sandbox: Option<Confinement>,
     pub thinking: Option<ThinkingLevel>,
     pub system: Option<String>,
+    pub session_prompt: Option<ego_core::config::SessionSystemPrompt>,
     pub append_system: Option<String>,
     pub instructions: Option<PathBuf>,
     pub bare: bool,
@@ -1276,6 +1281,11 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         Some("acp") => match clap_or_answer::<AcpCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
+                ego_core::config::validate_prompt_options(
+                    parsed.shape.bare,
+                    parsed.shape.instructions.is_some(),
+                )
+                .map_err(|message| UsageError(message.to_owned()))?;
                 let defaults = ego_listen::ConnectionLimits::default();
                 Ok(Invocation::Acp(Box::new(AcpArgs {
                     session_dir: parsed.places.session_dir,
@@ -1775,18 +1785,8 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         })
         .transpose()?;
 
-    // §4.5's applicability conflict, and the one the instructions ADR said
-    // belonged here rather than in the loader: from a resolved posture alone,
-    // "the user demanded bare" and "the workspace is untrusted" are the same
-    // value and want opposite answers.
-    if flags.bare && flags.shape.instructions.is_some() {
-        return Err(UsageError(
-            "--bare and --instructions contradict each other: --bare turns \
-             ambient discovery off, and --instructions names a file to use \
-             instead. Drop --bare — an explicitly named file is not ambient"
-                .to_string(),
-        ));
-    }
+    ego_core::config::validate_prompt_options(flags.shape.bare, flags.shape.instructions.is_some())
+        .map_err(|message| UsageError(message.to_owned()))?;
 
     let (prompt, stdin) = match prompt.as_deref() {
         Some("-") => (None, Stdin::IsThePrompt),
@@ -1825,10 +1825,11 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         offline: flags.offline,
         sandbox: flags.sandbox,
         thinking: flags.thinking,
-        system: flags.system,
+        system: shape.system,
+        session_prompt: None,
         append_system: shape.append_system,
         instructions: shape.instructions,
-        bare: flags.bare,
+        bare: shape.bare,
         trust_workspace: flags.trust_workspace,
         mode,
         allow: shape.allow,

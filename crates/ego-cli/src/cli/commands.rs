@@ -271,6 +271,14 @@ pub(super) struct AcpCommand {
 /// `ego acp` from growing a `--tools` that means something else.
 #[derive(Debug, ClapArgs)]
 pub(super) struct Shape {
+    /// Replace the system prompt. `@file` reads it from a file.
+    #[arg(long)]
+    pub(super) system: Option<String>,
+
+    /// No ambient discovery, even in a trusted workspace.
+    #[arg(long)]
+    pub(super) bare: bool,
+
     /// Append to the system prompt. `@file` reads it from a file.
     #[arg(long)]
     pub(super) append_system: Option<String>,
@@ -669,16 +677,8 @@ pub(super) struct Flags {
     #[arg(long, value_parser = parse_thinking)]
     pub(super) thinking: Option<ThinkingLevel>,
 
-    /// Replace the system prompt. `@file` reads it from a file.
-    #[arg(long)]
-    pub(super) system: Option<String>,
-
     #[command(flatten)]
     pub(super) shape: Shape,
-
-    /// No ambient discovery, even in a trusted workspace.
-    #[arg(long)]
-    pub(super) bare: bool,
 
     /// Trust this interactive launch's workspace without asking; remember the answer.
     #[arg(long, conflicts_with = "bare")]

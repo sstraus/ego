@@ -105,6 +105,16 @@ fn section(out: &mut String, command: &Command) {
         let _ = writeln!(out, "{flag}");
     }
     out.push('\n');
+    if command.get_name() == "acp" {
+        out.push_str(
+            "Prompt flags use the same composition as `ego run`. For example:\n\n\
+             ```sh\nego acp --system @agent-prompt.txt --append-system \"Use concise answers\" --bare\n```\n\n\
+             `--bare` and `--instructions` conflict. ACP hosts can also pass per-session\n\
+             `_meta.ego.systemPrompt` (`mode` and `text`) and `_meta.ego.bare` in `session/new`.\n\
+             See [session initialization prompt](../integrations/acp.md#session-initialization-prompt)\n\
+             for the wire example and launch-default precedence.\n\n",
+        );
+    }
 }
 
 /// One argument as the reference spells it: how it is typed, then what it does.

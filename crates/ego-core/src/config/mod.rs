@@ -10,6 +10,7 @@ mod mutation;
 mod resolve;
 pub mod rule_management;
 mod ruleset;
+mod session_prompt;
 mod source;
 mod vocabulary;
 mod windows_unconfined;
@@ -42,4 +43,8 @@ pub use windows_unconfined::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger, Unc
 pub use workspace_trust::{
     ExecutableDeclaration, ExecutableSurface, ProgramEvidence, TRUST_DIGEST_MAX_BYTES,
     TrustInventory, TrustLedger, TrustRecord, TrustedContent,
+};
+
+pub use session_prompt::{
+    SessionPromptOptions, SessionSystemPrompt, SystemPromptMode, validate_prompt_options,
 };
