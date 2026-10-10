@@ -634,7 +634,7 @@ pub(super) async fn interactive_through(
     text_sink.finish();
     let counts = seat.exit_counts();
     output.note(&format!(
-        "Saved drafts: {}; prompts waiting to run: {}.",
+        "{} unsent drafts discarded; {} prompts waiting to run.",
         counts.drafts, counts.accepted,
     ));
     // An empty session leaves nothing on disk for `ego resume` to open.

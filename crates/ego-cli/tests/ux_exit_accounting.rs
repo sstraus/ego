@@ -2,9 +2,9 @@
 mod support;
 use support::{Ego, Plan, Stub};
 
-// Catches: the clean exit exposes unexplained 'accepted inputs' and 'unsent drafts'.
+// Catches: the exit note claims drafts are saved although DraftStash is in memory only.
 #[test]
-fn clean_exit_names_saved_drafts_and_prompts_waiting_to_run() {
+fn clean_exit_reports_drafts_as_discarded_not_saved() {
     let stub = Stub::start(Plan::default());
     let result = Ego::against(&stub)
         .conversing()
@@ -14,9 +14,14 @@ fn clean_exit_names_saved_drafts_and_prompts_waiting_to_run() {
     assert!(
         result
             .stdout
-            .contains("Saved drafts: 0; prompts waiting to run: 0."),
+            .contains("0 unsent drafts discarded; 0 prompts waiting to run."),
         "{}",
         result.stdout
     );
     assert!(!result.stdout.contains("accepted inputs"));
+    assert!(
+        !result.stdout.contains("Saved drafts"),
+        "drafts live in memory only; the exit note must not claim persistence: {}",
+        result.stdout
+    );
 }

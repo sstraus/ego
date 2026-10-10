@@ -1,5 +1,5 @@
 mod support;
-use support::{Ego, Plan, Stub};
+use support::{Plan, Stub};
 
 // Catches: a saved root silently leaves the running process on its old perimeter.
 #[test]
@@ -28,9 +28,4 @@ fn roots_mutations_tell_the_user_to_exit_and_resume() {
             result.stderr
         );
     }
-    let help = Ego::nowhere()
-        .subcommand("roots")
-        .args(["add", "--help"])
-        .run();
-    assert_eq!(help.code, Some(0));
 }

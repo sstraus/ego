@@ -541,7 +541,7 @@ pub(crate) fn trustable_content(root: &Path) -> Option<String> {
         }
     }
     rendered.push_str(
-        "\nYes: load project instructions, configuration, skills, hooks and MCP servers.\n\
+        "\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\n\
          No: continue without project files.\n",
     );
     Some(rendered)

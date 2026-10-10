@@ -18,7 +18,7 @@ fn trust_prompt_names_absolute_files_and_explains_yes_and_no() {
         for expected in [
             "Project files offered for trust:",
             &path,
-            "Yes: load project instructions, configuration, skills, hooks and MCP servers.",
+            "Yes: load project instructions, configuration, skills, hooks and MCP server declarations.",
             "No: continue without project files.",
         ] {
             assert!(
