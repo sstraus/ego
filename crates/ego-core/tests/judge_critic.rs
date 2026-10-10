@@ -165,3 +165,92 @@ fn grep_dash_pattern_must_not_share_cached_allow_across_read_paths() {
         "cached allow for README.md is reusable for a credential file"
     );
 }
+
+fn shell_with_path(script: &str, path: &str, named: &str, resolved: &str) -> SpawnSpec {
+    use ego_core::permit::{EnvName, ExplicitEnvBinding};
+    let spec = spec(&["bash", "-c", script], "/bin/bash");
+    let mut identity = spec.identity().unwrap().clone();
+    identity.files.push(ExecutableFileIdentity {
+        named: CanonPath::new(named),
+        resolved: CanonPath::new(resolved),
+        content: Some([2; 32]),
+        platform: vec![2],
+    });
+    spec.with_execution_identity(
+        EnvPolicy::exact(vec![
+            ExplicitEnvBinding::from_native(EnvName::new("PATH").unwrap(), path.into()).unwrap(),
+        ])
+        .unwrap(),
+        identity,
+    )
+}
+
+// Catches: a workspace directory before the captured system executable can shadow cat.
+#[test]
+fn shell_workspace_path_before_system_cat_must_ask() {
+    assert_asks(shell_with_path(
+        "cat README.md",
+        "/ws/tools:/usr/bin",
+        "/usr/bin/cat",
+        "/usr/bin/cat",
+    ));
+}
+
+// Catches: empty and relative PATH roots borrow the outer shell's trusted identity.
+#[test]
+fn shell_relative_or_empty_path_before_system_cat_must_ask() {
+    for path in [
+        ".:/usr/bin",
+        "tools:/usr/bin",
+        ":/usr/bin",
+        "/usr/bin/../local/bin:/usr/bin",
+    ] {
+        assert_asks(shell_with_path(
+            "cat README.md",
+            path,
+            "/usr/bin/cat",
+            "/usr/bin/cat",
+        ));
+    }
+}
+
+// Catches: a system PATH spelling that resolves to workspace code is auto-approved.
+#[test]
+fn shell_system_symlink_to_workspace_cat_must_ask() {
+    assert_asks(shell_with_path(
+        "cat README.md",
+        "/usr/bin",
+        "/usr/bin/cat",
+        "/ws/tools/cat",
+    ));
+}
+
+// Catches: requiring a bare program disables valid absolute system wrapper commands.
+#[test]
+fn shell_observed_system_cat_remains_read_only() {
+    for (script, path) in [
+        ("cat README.md", "/usr/bin:/ws/tools"),
+        ("/usr/bin/cat README.md", "/ws/tools:/usr/bin"),
+    ] {
+        assert!(ego_core::permit::shell::trusted_read_only(
+            &shell_with_path(script, path, "/usr/bin/cat", "/usr/bin/cat")
+        ));
+    }
+}
+
+// Catches: ./cat and tools/cat are mistaken for the trusted system cat basename.
+#[test]
+fn shell_relative_cat_program_must_ask() {
+    for script in [
+        "./cat README.md",
+        "tools/cat README.md",
+        "/usr/bin/../../ws/cat README.md",
+    ] {
+        assert_asks(shell_with_path(
+            script,
+            "/usr/bin",
+            "/usr/bin/cat",
+            "/usr/bin/cat",
+        ));
+    }
+}

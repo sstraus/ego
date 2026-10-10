@@ -61,6 +61,26 @@ pub(super) fn capture(spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
         }
         None => identity.failures.push(IdentityFailure::Resolution),
     }
+    // Static shell syntax names candidates; only this host adapter resolves and
+    // observes them. The policy checks both named and resolved trusted roots.
+    let argv: Vec<_> = spec
+        .argv()
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let shell = ego_core::permit::shell::observe(&argv);
+    if shell.complete && shell.read_only {
+        for program in shell.programs {
+            if let Some(named) = resolve(OsStr::new(&program), &cwd, &snapshot)
+                && !identity
+                    .files
+                    .iter()
+                    .any(|file| file.named.as_path() == named)
+            {
+                observe(&named, &mut identity);
+            }
+        }
+    }
     let captured = SpawnSpec::new(
         spec.argv().to_vec(),
         Some(CanonPath::new(cwd)),
@@ -601,3 +621,7 @@ mod tests {
         assert!(revalidate(&captured).is_err());
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "identity_shell_tests.rs"]
+mod shell_tests;

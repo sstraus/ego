@@ -5,6 +5,10 @@
 use serde::Serialize;
 use tree_sitter::{Node, Parser};
 
+#[path = "shell_trust.rs"]
+mod trust;
+pub use trust::trusted_read_only;
+
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_DISPLAY_BYTES: usize = 16 * 1024;
 
@@ -13,6 +17,9 @@ pub struct ShellObservation {
     pub skeleton: String,
     pub read_only: bool,
     pub complete: bool,
+    /// Static inner program spellings for host-side executable observation.
+    #[serde(skip)]
+    pub programs: Vec<String>,
 }
 
 /// Observe argv without reading scripts, environment values, or filesystem content.
@@ -26,13 +33,13 @@ pub fn observe(argv: &[String]) -> ShellObservation {
         None
     };
     if let Some(script) = script {
-        let observation = observe_script(script);
-        observation
+        observe_script(script)
     } else {
         ShellObservation {
             skeleton: bounded(project_words(argv).join(" ")),
             read_only: read_only_command(argv),
             complete: !argv.is_empty() && argv.iter().all(|arg| arg.len() <= MAX_SOURCE_BYTES),
+            programs: Vec::new(),
         }
     }
 }
@@ -43,6 +50,7 @@ fn observe_script(script: &str) -> ShellObservation {
             skeleton: "<unsupported:source-too-large>".into(),
             read_only: false,
             complete: false,
+            programs: Vec::new(),
         };
     }
     let mut parser = Parser::new();
@@ -54,6 +62,7 @@ fn observe_script(script: &str) -> ShellObservation {
             skeleton: "<unsupported:parse>".into(),
             read_only: false,
             complete: false,
+            programs: Vec::new(),
         };
     };
     let root = tree.root_node();
@@ -62,7 +71,7 @@ fn observe_script(script: &str) -> ShellObservation {
         replacements: Vec::new(),
         complete: !root.has_error(),
         read_only: !root.has_error(),
-        commands: 0,
+        programs: Vec::new(),
     };
     observation.visit(root);
     observation.replacements.sort_by_key(|(start, _, _)| *start);
@@ -83,8 +92,9 @@ fn observe_script(script: &str) -> ShellObservation {
     }
     ShellObservation {
         skeleton: bounded(skeleton),
-        read_only: observation.read_only && observation.commands > 0,
+        read_only: observation.read_only && !observation.programs.is_empty(),
         complete: observation.complete,
+        programs: observation.programs,
     }
 }
 
@@ -93,7 +103,7 @@ struct Walker<'a> {
     replacements: Vec<(usize, usize, String)>,
     complete: bool,
     read_only: bool,
-    commands: usize,
+    programs: Vec<String>,
 }
 impl Walker<'_> {
     fn replace(&mut self, node: Node<'_>, text: String) {
@@ -106,13 +116,16 @@ impl Walker<'_> {
     fn visit(&mut self, node: Node<'_>) {
         match node.kind() {
             "command" => {
-                self.commands += 1;
                 let mut cursor = node.walk();
                 let children: Vec<_> = node.named_children(&mut cursor).collect();
                 let words: Vec<String> = children
                     .iter()
                     .map(|child| self.text(*child).to_owned())
                     .collect();
+                if let Some(program) = words.first() {
+                    self.programs
+                        .push(program.trim_matches(['\'', '"']).to_owned());
+                }
                 if !read_only_command(&words) {
                     self.read_only = false;
                 }
@@ -377,11 +390,31 @@ fn private_option_operand(flag: &str, operand: &str) -> bool {
         || (flag.starts_with('-')
             && flag != "--"
             && !operand.starts_with('-')
-            && !matches!(flag,
-                "-n" | "-r" | "-R" | "-l" | "-i" | "-F" | "--fixed-strings"
-                | "--short" | "-s" | "--porcelain" | "--branch" | "--show-current"
-                | "--list" | "-a" | "-L" | "--location" | "-I" | "--head"
-                | "--silent" | "--fail" | "--show-error" | "-fsSL" | "-sS"))
+            && !matches!(
+                flag,
+                "-n" | "-r"
+                    | "-R"
+                    | "-l"
+                    | "-i"
+                    | "-F"
+                    | "--fixed-strings"
+                    | "--short"
+                    | "-s"
+                    | "--porcelain"
+                    | "--branch"
+                    | "--show-current"
+                    | "--list"
+                    | "-a"
+                    | "-L"
+                    | "--location"
+                    | "-I"
+                    | "--head"
+                    | "--silent"
+                    | "--fail"
+                    | "--show-error"
+                    | "-fsSL"
+                    | "-sS"
+            ))
 }
 
 fn project_words(words: &[String]) -> Vec<String> {
@@ -422,40 +455,6 @@ fn structural_word(word: &str) -> String {
         }
     }
     redact_atom(word)
-}
-
-/// Host-captured identity is required before AST read-only evidence can settle.
-pub fn trusted_read_only(spec: &super::SpawnSpec) -> bool {
-    let Some(identity) = spec.identity().filter(|identity| identity.complete()) else {
-        return false;
-    };
-    let target = identity.target.as_path();
-    let trusted = [
-        "/bin",
-        "/usr/bin",
-        "/usr/sbin",
-        "/opt/homebrew/bin",
-        "/opt/homebrew/opt",
-        "/opt/homebrew/Cellar",
-    ]
-    .iter()
-    .any(|root| target.starts_with(root));
-    if !trusted
-        || spec.env_policy().exact_bindings().iter().any(|binding| {
-            let name = binding.name().as_os_str().to_string_lossy();
-            name.starts_with("LD_")
-                || name.starts_with("DYLD_")
-                || matches!(name.as_ref(), "BASH_ENV" | "ENV" | "ZDOTDIR")
-        })
-    {
-        return false;
-    }
-    let argv: Vec<_> = spec
-        .argv()
-        .iter()
-        .map(|argument| argument.to_string_lossy().into_owned())
-        .collect();
-    observe(&argv).read_only
 }
 
 /// Positions proven to be data for a known command. This is the only table
@@ -647,11 +646,15 @@ fn cache_script(script: &str) -> Option<String> {
 
 fn project_url(word: &str) -> Option<String> {
     let url = url::Url::parse(word).ok()?;
-    matches!(url.scheme(), "http" | "https").then(|| format!(
-        "<url:scheme={} host={} port={} path={}>",
-        url.scheme(), url.host_str().unwrap_or("unknown"),
-        url.port_or_known_default().unwrap_or(0), url.path()
-    ))
+    matches!(url.scheme(), "http" | "https").then(|| {
+        format!(
+            "<url:scheme={} host={} port={} path={}>",
+            url.scheme(),
+            url.host_str().unwrap_or("unknown"),
+            url.port_or_known_default().unwrap_or(0),
+            url.path()
+        )
+    })
 }
 
 /// Atom redaction is a fallback for native argv and unsupported AST spans. AST
