@@ -430,7 +430,7 @@ _arguments "${_arguments_options[@]}" : \
             (add)
 _arguments "${_arguments_options[@]}" : \
 '--profile=[]:PROFILE:_default' \
-'--access=[]:ACCESS:_default' \
+'--access=[]:ACCESS:(read read-write)' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':path:_files' \

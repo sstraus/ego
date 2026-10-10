@@ -677,6 +677,10 @@ pub struct ConfigArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigAction {
+    RootsList {
+        target: UserConfigTarget,
+        json: bool,
+    },
     Root {
         target: UserConfigTarget,
         path: PathBuf,
@@ -1142,10 +1146,6 @@ fn overview(program: &str) -> String {
         };
         text.push_str(&format!("  {name:<width$}{about}\n"));
     }
-    text.push_str(&format!(
-        "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
-         documents the remaining commands; each is refused by name, with the subsystem it \
-         waits on. Start Ollama and run `ollama pull qwen3` before the local \
     use clap::CommandFactory;
     text.push('\n');
     text.push_str(
@@ -1154,6 +1154,10 @@ fn overview(program: &str) -> String {
             .render_help()
             .to_string(),
     );
+    text.push_str(&format!(
+        "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
+         documents the remaining commands; each is refused by name, with the subsystem it \
+         waits on. Start Ollama and run `ollama pull qwen3` before the local \
          example above.\n"
     ));
     text
@@ -1491,9 +1495,8 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                         path,
                         access: None,
                     },
-                    RootsSubcommand::Ls { profile, json } => ConfigAction::Get {
+                    RootsSubcommand::Ls { profile, json } => ConfigAction::RootsList {
                         target: config_target(profile)?,
-                        key: ManagedConfigKey::Roots,
                         json,
                     },
                 };
