@@ -701,3 +701,45 @@ fn exporter_preserves_the_session_model_choice_at_its_physical_position() {
     assert_eq!(choice["position"], position);
     assert_eq!(choice["model"], "ollama/qwen3");
 }
+
+// Catches: private judge provider text leaking through public projection or sanitized export.
+#[test]
+fn raw_judge_response_stays_private_in_projection_and_export() {
+    let (mut fixture, target, _) = fixture();
+    let entries = fixture.entries.get_mut(&target).unwrap().as_mut().unwrap();
+    let mut seq = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionEntry::Event(event) => Some(event.env.seq),
+            _ => None,
+        })
+        .max()
+        .unwrap();
+    seq.next();
+    let raw = "PRIVATE-JUDGE-TEXT";
+    let response = event(
+        &mut seq,
+        EventKind::JudgeResponse {
+            attempt: AttemptRef::first(ego_core::event::id::GenerationId::new()),
+            text: raw.into(),
+            truncated: false,
+        },
+    );
+    let SessionEntry::Event(domain) = &response else {
+        unreachable!()
+    };
+    assert!(ego_core::public::project_public(domain).is_none());
+    entries.push(response);
+    let exported = Exporter::new(&fixture).sanitized(target).unwrap();
+    let encoded = serde_json::to_string(&exported).unwrap();
+    assert!(!encoded.contains(raw));
+    let value = serde_json::to_value(exported).unwrap();
+    let response = value["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["event"]["kind"] == "judge_response")
+        .expect("response metadata survives export");
+    assert_eq!(response["event"]["bytes"], raw.len());
+    assert_eq!(response["event"]["truncated"], false);
+}

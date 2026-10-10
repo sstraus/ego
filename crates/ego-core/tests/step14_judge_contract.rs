@@ -438,3 +438,50 @@ fn openrouter_provider_equality_cannot_disclose_raw_upstream_secrets() {
         true
     );
 }
+
+// Catches: a single fenced closed verdict is mistaken for malformed provider prose.
+#[test]
+fn judge_decoder_accepts_only_one_complete_json_fence() {
+    for (body, expected) in [
+        (
+            "```json\n{\"verdict\":\"allow\",\"reason\":\"bounded\"}\n```",
+            "allow",
+        ),
+        (
+            " \n```\n{\"verdict\":\"deny\",\"reason\":\"bounded\"}\n```\n ",
+            "deny",
+        ),
+        (
+            "```json\r\n{\"verdict\":\"escalate\",\"reason\":\"bounded\"}\r\n```",
+            "escalate",
+        ),
+    ] {
+        let outcome = text_stop(body);
+        let actual = match &outcome {
+            JudgeOutcome::Allow { .. } => "allow",
+            JudgeOutcome::Deny { .. } => "deny",
+            JudgeOutcome::Escalate { .. } => "escalate",
+        };
+        assert_eq!(actual, expected, "{body}");
+        assert_eq!(outcome.reason(), "bounded");
+    }
+    for body in [
+        "prose\n```json\n{\"verdict\":\"allow\",\"reason\":\"bounded\"}\n```",
+        "```json\n{\"verdict\":\"allow\",\"reason\":\"bounded\"}\n```\nprose",
+        "```json\n{\"verdict\":\"allow\",\"reason\":\"bounded\"}",
+        "```json\n{\"verdict\":\"allow\",\"reason\":\"bounded\"}\n```\n```json\n{}\n```",
+        "```json\n{\"verdict\":\"allow\",\"reason\":\"first\",\"reason\":\"second\"}\n```",
+        "```json\n{\"verdict\":\"allow\",\"reason\":\"bounded\",\"extra\":true}\n```",
+        "```python\n{\"verdict\":\"allow\",\"reason\":\"bounded\"}\n```",
+    ] {
+        assert!(
+            matches!(text_stop(body), JudgeOutcome::Escalate { .. }),
+            "{body}"
+        );
+    }
+    let mut decoder = JudgeDecoder::new();
+    decoder.observe(&AiEvent::TextDelta {
+        text: "```json\n{\"verdict\":\"allow\",\"reason\":\"bounded\"}\n```".into(),
+    });
+    assert!(matches!(decoder.finish(), JudgeOutcome::Escalate { .. }));
+}
