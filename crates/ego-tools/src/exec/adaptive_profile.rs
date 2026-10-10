@@ -2,6 +2,7 @@
 
 use super::{ProfileError, ProfileInput, path_literal};
 use ego_core::permit::SandboxAccess;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
@@ -38,8 +39,41 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
         subpath(&mut out, path.as_path())?;
     }
     out.push_str(
-        "  (regex #\"(^|/)[.]git/(config([.]worktree)?|hooks|commondir|gitdir)(/|$)\")\n)\n",
+        "  (regex #\"(^|/)[.][gG][iI][tT]$\")\n\
+           (regex #\"(^|/)[.][gG][iI][tT]/(.*/)?(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)\")\n",
     );
+    // A captured Git root has config and hooks controls even when absent.
+    // Cover nested submodules/worktrees beneath separately named metadata too.
+    for control in &perimeter.controls {
+        let path = control.as_path();
+        if path.file_name().is_some_and(|name| name == "config")
+            && let Some(root) = path.parent()
+            && perimeter
+                .controls
+                .iter()
+                .any(|other| other.as_path() == root.join("hooks"))
+        {
+            out.push_str("  (require-all\n");
+            subpath(&mut out, root)?;
+            out.push_str("    (regex #\"/(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)\"))\n");
+        }
+    }
+    out.push_str(")\n(deny file-write-unlink\n");
+    // Subpath denies protect contents, but a rename of any parent would move
+    // those contents out from under their captured names. Deny only unlink
+    // on each ancestor entry; operational descendants remain writable.
+    let ancestors = perimeter
+        .controls
+        .iter()
+        .chain(&perimeter.credentials)
+        .flat_map(|path| path.as_path().ancestors().skip(1))
+        .collect::<BTreeSet<_>>();
+    for path in ancestors {
+        out.push_str("  (literal ");
+        out.push_str(&path_literal(path)?);
+        out.push_str(")\n");
+    }
+    out.push_str(")\n");
     out.push_str("(deny file-read* file-write* process-exec* (require-all\n");
     out.push_str("  (regex #\"(^|/)[.]env[^/]*(/|$)\")\n  (require-not (subpath ");
     out.push_str(&path_literal(input.workspace)?);
