@@ -49,12 +49,15 @@ fn adaptive_floor_denials_never_offer_an_ineffective_grant() {
     let env = root.join("home/.env.fixture");
     std::fs::write(&env, "synthetic").unwrap();
     let config = root.join("main/.git/config");
+    let metadata_directory = root.join("main/.git/objects/empty");
+    std::fs::create_dir(&metadata_directory).unwrap();
     let policy = admit(&workspace).unwrap();
     for (path, script, floor) in [
         (&credential, "exec /bin/cat \"$1\"", true),
         (&alias, "exec /bin/cat \"$1\"", true),
         (&env, "exec /bin/cat \"$1\"", true),
         (&config, "printf compromised > \"$1\"", true),
+        (&metadata_directory, "exec /bin/rmdir \"$1\"", true),
         (
             &root.join("home/ordinary-output"),
             "exec /usr/bin/touch \"$1\"",

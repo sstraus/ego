@@ -76,6 +76,8 @@ fn git_at(root: &Path, args: &[&std::ffi::OsStr]) {
     assert!(output.status.success(), "{output:?}");
 }
 
+#[path = "support/adaptive_git_controls.rs"]
+mod git_controls;
 #[path = "support/adaptive_git_layouts.rs"]
 mod git_layouts;
 
@@ -93,7 +95,8 @@ fn adaptive_probe_uses_safe_outside_location_for_locked_workspace() {
     };
     let locked = root.join("locked");
     std::fs::create_dir(&locked).unwrap();
-    for workspace in [locked.join("workspace")] {
+    let workspace = locked.join("workspace");
+    {
         std::fs::create_dir(&workspace).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
         let result = std::panic::catch_unwind(|| {

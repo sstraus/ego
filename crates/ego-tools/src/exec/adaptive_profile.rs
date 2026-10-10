@@ -55,7 +55,10 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     // Any nested metadata directory could otherwise be moved outside the
     // path-based floor, edited, and moved back. File unlink remains available
     // for Git's index/refs lock cleanup.
-    out.push_str("  (require-all (regex #\"(^|/)[.][gG][iI][tT](/|$)\") (vnode-type DIRECTORY))\n");
+    out.push_str(&format!(
+        "  (require-all (regex #\"{}\") (vnode-type DIRECTORY))\n",
+        floor::GIT_METADATA
+    ));
     for root in floor::metadata_roots(perimeter) {
         out.push_str("  (require-all (subpath ");
         out.push_str(&path_literal(root)?);

@@ -4,6 +4,7 @@ use ego_core::permit::{AdaptivePerimeter, RunConfinement};
 use std::path::Path;
 
 pub(in crate::exec) const GIT_ENTRY: &str = "(^|/)[.][gG][iI][tT]$";
+pub(in crate::exec) const GIT_METADATA: &str = "(^|/)[.][gG][iI][tT](/|$)";
 pub(in crate::exec) const GIT_CONTROL: &str =
     "(^|/)[.][gG][iI][tT]/(.*/)?(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)";
 pub(in crate::exec) const METADATA_CONTROL: &str =
@@ -45,5 +46,8 @@ pub(in crate::exec) fn blocks(path: &Path, policy: &RunConfinement) -> bool {
         || matches(GIT_ENTRY)
         || matches(GIT_CONTROL)
         || metadata_roots(perimeter).any(|root| path.starts_with(root) && matches(METADATA_CONTROL))
+        || (path.is_dir()
+            && (matches(GIT_METADATA)
+                || metadata_roots(perimeter).any(|root| path.starts_with(root))))
         || (!path.starts_with(policy.workspace().as_path()) && matches(ENV))
 }
