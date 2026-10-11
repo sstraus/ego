@@ -177,3 +177,56 @@ fn adaptive_git_control_floors_block_rename_and_nested_control_writes() {
     )
     .unwrap();
 }
+
+// Catches: dropping a top-level Git floor name silently permits its write.
+#[test]
+fn adaptive_top_level_git_floor_writes_report_native_refusal() {
+    let Some(root) =
+        isolated("git_controls::adaptive_top_level_git_floor_writes_report_native_refusal")
+    else {
+        return;
+    };
+    let workspace = root.join("workspace");
+    git_at(&workspace, &["init".as_ref()]);
+    let policy = admit(&workspace).unwrap();
+    for relative in ["info/attributes", "config.worktree", "commondir"] {
+        let path = workspace.join(".git").join(relative);
+        let before = std::fs::read(&path).ok();
+        let result = execute(
+            policy.clone(),
+            &root,
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf compromised > \"$1\"".into(),
+                "fixture".into(),
+                path.clone().into_os_string(),
+            ],
+        );
+        let Err(ego_core::permit::ProcessError::Exit { result, .. }) = result else {
+            panic!("expected native refusal for {relative}: {result:?}");
+        };
+        let diagnostic = result
+            .content
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            diagnostic.contains("Operation not permitted"),
+            "{relative}: {diagnostic}"
+        );
+        assert_eq!(std::fs::read(&path).ok(), before, "{relative} changed");
+    }
+    let ordinary = workspace.join("ordinary.txt");
+    execute(
+        policy,
+        &root,
+        vec!["/usr/bin/touch".into(), ordinary.clone().into_os_string()],
+    )
+    .unwrap();
+    assert!(
+        ordinary.is_file(),
+        "ordinary workspace writes remain available"
+    );
+}
