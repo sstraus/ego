@@ -155,10 +155,10 @@ impl Write for W {
 #[derive(Debug, PartialEq, Eq)]
 pub struct PainterSuspendedState {
     previous_prompt_rows_range: RangeInclusive<u16>,
-    /// Whether the prompt reached the last row of the screen it was captured on.
-    /// Recorded here rather than tested at re-use, since by then the screen may have
-    /// been resized by whatever ran in between.
-    was_flush_at_bottom: bool,
+    /// The last row of the screen the prompt was captured on. Recorded here rather
+    /// than read at re-use, since by then the screen may have been resized by
+    /// whatever ran in between.
+    bottom_row: u16,
 }
 
 /// Screen bounds of the right prompt when it is visible.
@@ -202,12 +202,13 @@ fn select_prompt_row(
 ) -> PromptRowSelector {
     if let Some(painter_state) = suspended_state {
         // Re-use the previous prompt position when the cursor came back inside it,
-        // unless that prompt sat flush against the bottom of the screen. A suspended
-        // program that scrolled the terminal returns with the cursor pinned on the
-        // bottom row, still inside the stored range and indistinguishable from an
-        // in-place return, so re-using there would redraw over the scrolled-up output.
+        // unless it came back on the bottom row. A suspended program that scrolled
+        // the terminal returns with the cursor pinned on the bottom row, still inside
+        // the stored range and indistinguishable from an in-place return, so
+        // re-using there would redraw over the scrolled-up output. Only that row is
+        // ambiguous: scrolling cannot leave the cursor on any other row.
         // See nushell/reedline#1130.
-        if !painter_state.was_flush_at_bottom
+        if row != painter_state.bottom_row
             && painter_state.previous_prompt_rows_range.contains(&row)
         {
             let start_row = *painter_state.previous_prompt_rows_range.start();
@@ -456,9 +457,7 @@ impl Painter {
         let final_row = start_row + self.last_required_lines;
         PainterSuspendedState {
             previous_prompt_rows_range: start_row..=final_row,
-            // `final_row` can overshoot the last visible row for a prompt at the very
-            // bottom, so this is `>=` rather than an equality.
-            was_flush_at_bottom: final_row >= self.screen_height().saturating_sub(1),
+            bottom_row: self.screen_height().saturating_sub(1),
         }
     }
 
@@ -1439,7 +1438,7 @@ mod tests {
     fn test_select_existing_prompt() {
         let state = PainterSuspendedState {
             previous_prompt_rows_range: 11..=13,
-            was_flush_at_bottom: false,
+            bottom_row: 23,
         };
         assert_eq!(
             select_prompt_row(Some(&state), (0, 12)),
@@ -1462,7 +1461,7 @@ mod tests {
     fn test_select_prompt_row_does_not_reuse_when_flush_at_bottom() {
         let state = PainterSuspendedState {
             previous_prompt_rows_range: 5..=7,
-            was_flush_at_bottom: true,
+            bottom_row: 7,
         };
         assert_eq!(
             select_prompt_row(Some(&state), (0, 7)),
@@ -1470,26 +1469,35 @@ mod tests {
         );
     }
 
-    // The flush-at-bottom fact is captured against the screen the prompt was
-    // suspended on, since whatever runs in between may resize the terminal.
+    // The bottom row is captured against the screen the prompt was suspended
+    // on, since whatever runs in between may resize the terminal.
     #[rstest]
-    #[case::well_above_bottom(2, 3, false)]
-    #[case::reaches_last_row(5, 2, true)]
+    #[case::well_above_bottom(2, 3, (2, 3), true)]
+    // A two-row prompt with an empty row below it: the cursor came back on its
+    // last row, so nothing scrolled.
+    #[case::one_row_above_bottom(5, 2, (2, 6), true)]
     // A prompt at the very bottom pushes `final_row` past the last visible row.
-    #[case::overshoots_last_row(5, 3, true)]
-    fn test_state_before_suspension_records_flush_at_bottom(
+    #[case::cursor_pinned_on_bottom(5, 3, (0, 7), false)]
+    // The empty row below a prompt is in the stored range, but a cursor there
+    // may be a scroll that pinned it to the bottom.
+    #[case::cursor_on_empty_bottom_row(5, 2, (0, 7), false)]
+    fn test_resume_reuses_prompt_unless_cursor_is_on_bottom_row(
         #[case] start_row: u16,
         #[case] required_lines: u16,
-        #[case] expected: bool,
+        #[case] cursor: (u16, u16),
+        #[case] reused: bool,
     ) {
         let mut painter = Painter::new(W::sink());
         painter.handle_resize(80, 8); // rows 0..=7
         painter.prompt_start_row.mark_verified(start_row);
         painter.last_required_lines = required_lines;
+        let state = painter.state_before_suspension();
 
+        let selected = select_prompt_row(Some(&state), cursor);
         assert_eq!(
-            painter.state_before_suspension().was_flush_at_bottom,
-            expected
+            selected == (PromptRowSelector::UseExistingPrompt { start_row }),
+            reused,
+            "{selected:?}"
         );
     }
 
