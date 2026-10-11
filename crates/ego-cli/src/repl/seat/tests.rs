@@ -168,7 +168,7 @@ fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
 
     assert_eq!(waiting.render_prompt_left().as_ref(), "");
     let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
-    assert!(indicator.contains("thinking for 0s — Esc cancels\n"));
+    assert!(indicator.contains("Working 0s \x1b[2m· Esc to interrupt\x1b[22m\n"));
     assert!(indicator.ends_with("\n> "));
 }
 
@@ -187,7 +187,7 @@ fn failed_answer_output_does_not_claim_a_visible_reply() {
 }
 
 #[test]
-fn prompt_redraw_uses_one_reply_phase_for_left_row_and_indicator() {
+fn working_line_stays_above_the_composer_after_the_reply_starts() {
     let status = Arc::new(Mutex::new(SurfaceStatus {
         activity: true,
         ..SurfaceStatus::default()
@@ -195,23 +195,15 @@ fn prompt_redraw_uses_one_reply_phase_for_left_row_and_indicator() {
     let waiting = Waiting::new(Arc::clone(&status));
 
     assert_eq!(waiting.render_prompt_left().as_ref(), "");
-    assert!(
-        waiting
-            .render_prompt_indicator(PromptEditMode::Emacs)
-            .contains("thinking for")
-    );
     status
         .lock()
         .expect("surface status lock")
         .reply_started
         .store(true, Ordering::Release);
-    assert_eq!(waiting.render_prompt_left().as_ref(), "");
-    assert_eq!(
-        waiting
-            .render_prompt_indicator(PromptEditMode::Emacs)
-            .as_ref(),
-        "Esc cancels | > "
-    );
+    let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+    assert!(indicator.contains("Working 0s"));
+    assert!(!indicator.contains("Esc cancels"));
+    assert!(indicator.ends_with("\n> "));
 }
 
 #[test]

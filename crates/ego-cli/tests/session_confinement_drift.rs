@@ -73,7 +73,7 @@ async fn submit_case(
         invocation: RunInvocationId::new(),
         root: root.clone(),
         selections: RunSelections::new(
-            Some(ModelRef("anthropic/claude-sonnet-5".to_owned())),
+            Some(ModelRef("anthropic/claude-sonnet-5-5".to_owned())),
             None,
             Some(Mode::Default),
             None,

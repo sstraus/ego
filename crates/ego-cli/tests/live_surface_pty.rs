@@ -5,6 +5,8 @@ mod raw_columns;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;
+#[path = "live_surface_pty/working_line.rs"]
+mod working_line;
 #[path = "live_surface_pty/workspace_trust.rs"]
 mod workspace_trust;
 
@@ -3302,10 +3304,12 @@ fn until_idle_composer_below(
         let mut screen = vt100::Parser::new(rows, cols, 0);
         screen.process(output);
         let contents = screen.screen().contents();
-        let settled = contents
+        let after: Vec<_> = contents
             .lines()
             .skip_while(|line| !line.contains(marker))
-            .any(|line| line.trim_end() == ">");
+            .collect();
+        let settled = after.iter().any(|line| line.trim_end() == ">")
+            && !after.iter().any(|line| line.contains("Esc to interrupt"));
         if settled {
             return;
         }
@@ -3837,7 +3841,7 @@ fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {
     reader_join.join().expect("reader thread panicked");
     writer_join.join().expect("writer thread panicked");
     assert!(
-        progress.contains("thinking for "),
+        progress.contains("Working "),
         "no elapsed progress while the tool ran: {progress:?}"
     );
     assert!(
@@ -4432,7 +4436,7 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"layout check\r").expect("submit turn");
     input.flush().expect("submit flush");
-    until_normalized(&reader, &mut output, 0, "Esc cancels");
+    until_normalized(&reader, &mut output, 0, "Esc to interrupt");
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(24, 80, 0);
     screen.process(&output);
@@ -4448,8 +4452,8 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
             )
         });
     assert!(
-        lines[user + 1].contains("Esc cancels"),
-        "thinking must occupy the reply row: {visible:?}"
+        lines[user + 1].contains("Esc to interrupt"),
+        "the working line must occupy the reply row: {visible:?}"
     );
     assert!(
         !lines[user + 1].contains('>'),
@@ -4480,8 +4484,8 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
         "reply replaces thinking at the same row: {visible:?}"
     );
     assert!(
-        !visible.contains("Esc cancels"),
-        "thinking must disappear when reply arrives: {visible:?}"
+        !visible.contains("Esc to interrupt"),
+        "the working line must disappear when the turn ends: {visible:?}"
     );
 
     input.write_all(b"/quit\r").expect("quit");
@@ -4541,7 +4545,7 @@ fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
         .write_all(b"a very long prompt that spans terminal rows and ends in tailmarker\r")
         .expect("wrapped turn");
     input.flush().expect("wrapped turn flush");
-    until_normalized(&reader, &mut output, 0, "Esc cancels");
+    until_normalized(&reader, &mut output, 0, "Esc to interrupt");
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(24, 40, 0);
     screen.process(&output);
@@ -4552,8 +4556,8 @@ fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
         .position(|line| line.contains("tailmarker"))
         .unwrap_or_else(|| panic!("wrapped prompt tail absent: {visible:?}"));
     assert!(
-        lines[tail + 1].contains("thinking for") && !lines[tail + 1].contains('>'),
-        "thinking must follow the final wrapped prompt row: {visible:?}"
+        lines[tail + 1].contains("Working") && !lines[tail + 1].contains('>'),
+        "the working line must follow the final wrapped prompt row: {visible:?}"
     );
 
     until_normalized(&reader, &mut output, 0, "WRAPPED-ANSWER");
@@ -4581,7 +4585,7 @@ fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
 }
 
 #[test]
-fn streamed_reply_keeps_escape_hint_visible_without_a_stale_thinking_row() {
+fn streamed_reply_keeps_one_working_line_below_the_partial_text() {
     let (reply, gate) = gated_paced_line("PARTIAL-ANSWER\n");
     let stub = Stub::start(Plan {
         completions: vec![reply],
@@ -4639,12 +4643,13 @@ fn streamed_reply_keeps_escape_hint_visible_without_a_stale_thinking_row() {
         "partial text must occupy the reply row: {visible:?}"
     );
     assert!(
-        visible.contains("Esc cancels"),
-        "the cancel hint must remain visible until the turn ends: {visible:?}"
+        lines[user + 2].contains("Working") && lines[user + 2].contains("Esc to interrupt"),
+        "the working line must stay on its own row below the partial text: {visible:?}"
     );
-    assert!(
-        !visible.contains("thinking"),
-        "the thinking row must disappear after text starts: {visible:?}"
+    assert_eq!(
+        visible.matches("Working").count(),
+        1,
+        "exactly one working line while streaming: {visible:?}"
     );
 
     let finish_start = output.len();
@@ -4704,7 +4709,7 @@ fn cancelling_before_reply_clears_the_thinking_row() {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"cancel check\r").expect("submit turn");
     input.flush().expect("submit flush");
-    until_normalized(&reader, &mut output, 0, "Esc cancels");
+    until_normalized(&reader, &mut output, 0, "Esc to interrupt");
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
@@ -4719,8 +4724,8 @@ fn cancelling_before_reply_clears_the_thinking_row() {
         .position(|line| line.contains("> cancel check"))
         .expect("user line");
     assert!(
-        !lines[user + 1].contains("thinking"),
-        "cancelled work must not leave a stale thinking row: {visible:?}"
+        !lines[user + 1].contains("Working"),
+        "cancelled work must not leave a stale working row: {visible:?}"
     );
     assert!(
         !visible.contains("TOO-LATE"),
@@ -4742,7 +4747,7 @@ fn cancelling_before_reply_clears_the_thinking_row() {
 }
 
 /// catches: an Esc that stops a turn without a word in the transcript, and a
-/// `thinking for` row left behind in the scrollback.
+/// `Working` row left behind in the scrollback.
 #[test]
 fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
     let stub = Stub::start(Plan {
@@ -4789,7 +4794,7 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"cancel check\r").expect("submit turn");
     input.flush().expect("submit flush");
-    until_normalized(&reader, &mut output, 0, "Esc cancels");
+    until_normalized(&reader, &mut output, 0, "Esc to interrupt");
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
@@ -4805,7 +4810,7 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
         "one receipt: {visible:?}"
     );
     assert!(
-        !visible.contains("thinking for") && !visible.contains("working for"),
+        !visible.contains("Working"),
         "no activity row stays behind: {visible:?}"
     );
 
@@ -4876,7 +4881,10 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     let mut streaming_screen = vt100::Parser::new(40, 100, 0);
     streaming_screen.process(&output);
     assert!(
-        streaming_screen.screen().contents().contains("Esc cancels"),
+        streaming_screen
+            .screen()
+            .contents()
+            .contains("Esc to interrupt"),
         "reply must still be streaming when Esc is sent: {:?}",
         streaming_screen.screen().contents()
     );
@@ -4956,7 +4964,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
 }
 
 /// catches: Esc on a running tool leaving no tool row and no receipt, and its
-/// `thinking for` row staying in the scrollback.
+/// `Working` row staying in the scrollback.
 #[cfg(unix)]
 #[test]
 fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
@@ -5047,7 +5055,7 @@ fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
         "the cancelled tool keeps its row: {visible:?}"
     );
     assert!(
-        !visible.contains("thinking for") && !visible.contains("working for"),
+        !visible.contains("Working"),
         "no activity row stays behind: {visible:?}"
     );
 
@@ -5169,7 +5177,7 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     writer_join.join().expect("writer thread");
 
     let counted: Vec<u64> = after_allow
-        .split("thinking for ")
+        .split("Working ")
         .skip(1)
         .filter_map(|rest| rest.split('s').next()?.parse().ok())
         .collect();
@@ -5279,8 +5287,10 @@ fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
         "anthropic/claude-fable-5-1",
         "anthropic/claude-opus-5-5",
         "anthropic/claude-sonnet-5-5",
-        "anthropic/claude-sonnet-5",
-        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-haiku-5-5",
+        "gemini/gemini-3.8-flash",
+        "github-copilot/gpt-6.1-sol",
+        "xai-oauth/grok-4.7",
     ] {
         assert!(slugs.contains(&current), "missing {current} in {slugs:?}");
     }
@@ -5290,6 +5300,9 @@ fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
         "openai/gpt-5.6-luna",
         "openai-codex/gpt-5.6-sol",
         "anthropic/claude-opus-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-4-5",
+        "openai/gpt-5.5",
     ] {
         assert!(
             !slugs.contains(&superseded),
@@ -5459,8 +5472,8 @@ fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
         "streamed rows changed order: {visible:?}"
     );
     assert!(
-        !visible[first_at..second_at].contains("\n> "),
-        "the idle composer appeared before the final streamed row: {visible:?}"
+        !visible[first_at..second_at].contains("qwen3 · "),
+        "the idle composer (status row over the prompt) appeared before the final streamed row: {visible:?}"
     );
 
     let help_start = output.len();
@@ -5929,7 +5942,7 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
         &reader,
         &mut output,
         down_start,
-        b"> 2. anthropic/claude-haiku-4-5",
+        b"> 2. anthropic/claude-haiku-5-5",
     );
     drain_until_quiet(&reader, &mut output);
 
@@ -5945,13 +5958,13 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
     drain_until_quiet(&reader, &mut output);
 
     let chosen_start = output.len();
-    input.write_all(b"2").expect("startup picker number two");
-    input.flush().expect("startup picker number two flush");
+    input.write_all(b"3").expect("startup picker number three");
+    input.flush().expect("startup picker number three flush");
     until_from(
         &reader,
         &mut output,
         chosen_start,
-        b"> 2. anthropic/claude-haiku-4-5",
+        b"> 3. anthropic/claude-opus-5-5",
     );
     drain_until_quiet(&reader, &mut output);
     input.write_all(b"\r").expect("startup model accept");
@@ -5974,8 +5987,8 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
 
     let config = std::fs::read_to_string(home.path().join("config.toml"))
         .expect("startup selection persisted atomically");
-    assert!(config.contains("model = \"anthropic/claude-haiku-4-5\""));
-    assert!(config.contains("thinking = \"off\""));
+    assert!(config.contains("model = \"anthropic/claude-opus-5-5\""));
+    assert!(config.contains("thinking = \"medium\""));
 
     input.write_all(b"\x04").expect("first EOF");
     input.flush().expect("first EOF flush");
