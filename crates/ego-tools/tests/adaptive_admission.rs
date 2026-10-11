@@ -86,6 +86,8 @@ mod git_controls;
 mod git_layouts;
 #[path = "support/adaptive_js_caches.rs"]
 mod js_caches;
+#[path = "support/adaptive_js_host_code.rs"]
+mod js_host_code;
 
 // Catches: the outside probe uses only the workspace parent even when that
 // parent is host-unwritable.
