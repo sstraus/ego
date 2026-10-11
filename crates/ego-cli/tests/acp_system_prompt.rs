@@ -261,3 +261,67 @@ fn launch_bare_cannot_be_undone_by_session_false() {
     assert!(prefix.contains("launch file marker"), "{prefix}");
     assert!(!prefix.contains("ambient instruction marker"), "{prefix}");
 }
+
+/// Catches creation prompt selections living only in the first ACP process.
+#[test]
+fn creation_prompt_selections_survive_restart_before_first_prompt() {
+    let places = Places::new();
+    places.file("AGENTS.md", "ambient instruction marker");
+    let stub = Stub::start(Plan {
+        completions: (0..4).map(|_| Reply::Sse(text("Hello"))).collect(),
+        ..Plan::default()
+    });
+    let mut first = host(&places, &stub, ["--append-system", "launch marker"]);
+    let options = [
+        json!({"trust": "trusted", "systemPrompt": {"mode": "append", "text": "custom append marker"}}),
+        json!({"trust": "trusted", "systemPrompt": {"mode": "replace", "text": "custom replace marker"}}),
+        json!({"trust": "trusted", "bare": true}),
+        json!({"trust": "trusted"}),
+    ];
+    let ids: Vec<_> = options
+        .into_iter()
+        .map(|options| session(&mut first, &places, options))
+        .collect();
+    first.finish();
+    assert!(stub.generations().is_empty());
+    let mut reopened = host(&places, &stub, ["--append-system", "launch marker"]);
+    for id in &ids {
+        let loaded = reopened.request(
+            "session/load",
+            json!({
+                "sessionId": id, "cwd": places.workspace_path(), "mcpServers": [],
+            }),
+        );
+        assert!(loaded["result"].is_object(), "{loaded}");
+        prompt(&mut reopened, id);
+    }
+    reopened.finish();
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 4);
+    let prefixes: Vec<_> = requests
+        .iter()
+        .map(|request| serde_json::to_string(&systems(request)).unwrap())
+        .collect();
+    assert!(
+        prefixes[0].contains("custom append marker"),
+        "{}",
+        prefixes[0]
+    );
+    assert!(prefixes[0].contains("launch marker"), "{}", prefixes[0]);
+    assert!(
+        prefixes[1].contains("custom replace marker"),
+        "{}",
+        prefixes[1]
+    );
+    assert!(!prefixes[1].contains("launch marker"), "{}", prefixes[1]);
+    assert!(
+        !prefixes[2].contains("ambient instruction marker"),
+        "{}",
+        prefixes[2]
+    );
+    assert!(
+        prefixes[3].contains("ambient instruction marker"),
+        "{}",
+        prefixes[3]
+    );
+}

@@ -2094,7 +2094,10 @@ where
             Err(error) => return Err(Error::internal_error().data(error.to_string())),
         };
         if prompt_options.is_none() {
-            prompt_options = selections.prompt_options().cloned();
+            prompt_options = selections
+                .prompt_options()
+                .cloned()
+                .or(profiles.prompt_options);
         }
         if let Some(profile) = profiles.profile {
             selections = selections.with_profile_name(profile);
@@ -2199,6 +2202,7 @@ fn session_profiles(meta: Option<&v1::Meta>) -> Result<Option<SessionProfiles>, 
         (profile.is_some() || ceiling.is_some()).then_some(SessionProfiles {
             profile,
             ceiling_profile: ceiling,
+            prompt_options: None,
         }),
     )
 }
@@ -3046,7 +3050,7 @@ where
                         Ok(options) => options,
                         Err(error) => return responder.respond_with_error(error),
                     };
-                    if let Some(options) = prompt_options {
+                    if let Some(options) = prompt_options.clone() {
                         match confinement.as_ref() {
                             Some(admission) => {
                                 if let Err(error) = admission.configure_prompt(session, options) {
@@ -3056,9 +3060,10 @@ where
                             None => return responder.respond_with_error(Error::invalid_params().data("session prompt selections are not supported")),
                         }
                     }
-                    let creation_profiles = profiles.clone().unwrap_or_default();
+                    let mut creation_profiles = profiles.clone().unwrap_or_default();
+                    creation_profiles.prompt_options = prompt_options;
                     let profile_meta = match profiles {
-                        Some(SessionProfiles { profile, ceiling_profile }) => match confinement.as_ref() {
+                        Some(SessionProfiles { profile, ceiling_profile, .. }) => match confinement.as_ref() {
                             Some(admission) => match admission.configure_profiles(session, &root, profile.as_deref(), ceiling_profile.as_deref()) {
                                 Ok(meta) => Some(serde_json::Map::from_iter([("ego".to_owned(), meta)])),
                                 Err(error) => return responder.respond_with_error(control_error(&error)),

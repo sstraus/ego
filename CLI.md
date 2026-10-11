@@ -1856,7 +1856,9 @@ path in place, and rm matches its stored spelling. Text listings show access and
 path columns; an absent list and an explicit empty list have distinct explanations.
 Mutation receipts use plain language and remind the user to exit and resume
 running sessions before saved roots can apply. `--json` retains the versioned
-stored-config object. `ego config get roots` still prints the raw stored value. Each edit is one locked,
+stored-config object: `values.roots` is `null` when no list is stored, `[]` for an
+explicit empty list, and an array for stored roots. `ego config get roots` still
+prints the raw stored value. Each edit is one locked,
 validated atomic transaction; the first edit creates an explicit list.
 `ego config set 'roots=[{path="~/Gits",access="read"}]'` and its `--profile`
 form replace the list. Single-file read roots are supported on Seatbelt and

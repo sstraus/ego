@@ -98,16 +98,18 @@ impl<'de> Deserialize<'de> for SessionEntry {
     }
 }
 
-/// Profile names that bind authority at session creation, before any run.
+/// Immutable profile and prompt selections at session creation, before any run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionProfiles {
     pub profile: Option<String>,
     pub ceiling_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_options: Option<crate::config::SessionPromptOptions>,
 }
 
 impl SessionProfiles {
     pub fn is_empty(&self) -> bool {
-        self.profile.is_none() && self.ceiling_profile.is_none()
+        self.profile.is_none() && self.ceiling_profile.is_none() && self.prompt_options.is_none()
     }
 }
 

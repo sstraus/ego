@@ -267,7 +267,6 @@ fn git_roots(workspace: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProcessEr
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(error(format!("cannot inspect git boundary: {e}"))),
         };
-        controls.push(marker.clone());
         let git = if metadata.is_dir() {
             marker
         } else {
@@ -315,7 +314,6 @@ fn git_roots(workspace: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProcessEr
         }
         // Protect metadata selectors/config/code while allowing index, objects,
         // refs and worktree operation state required by real git commands.
-        controls.clear();
         if !metadata.is_dir() {
             controls.push(ancestor.join(".git"));
         }

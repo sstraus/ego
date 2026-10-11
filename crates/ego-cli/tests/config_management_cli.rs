@@ -393,6 +393,30 @@ fn child_environment_and_network_controls_are_durable_and_strict() {
     assert_eq!(effective["network"], "online");
 }
 
+// Catches: absent roots become [], hiding the distinction from workspace-only access.
+#[test]
+fn roots_json_distinguishes_absent_empty_and_populated_values() {
+    let fixture = Fixture::new();
+    for (config, expected) in [
+        ("model='ollama/qwen3'\n".to_owned(), serde_json::Value::Null),
+        ("roots=[]\n".to_owned(), serde_json::json!([])),
+        (
+            format!(
+                "roots=[{{path='{}',access='read'}}]\n",
+                fixture.workspace.path().display()
+            ),
+            serde_json::json!([{"path": fixture.workspace.path(), "access": "read"}]),
+        ),
+    ] {
+        fixture.write_config(&config);
+        let output = fixture.run(&["roots", "ls", "--json"]);
+        assert!(output.status.success(), "{}", error(&output));
+        assert!(output.stderr.is_empty(), "{}", error(&output));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["values"]["roots"], expected, "{config}");
+    }
+}
+
 // Catches: roots are not writable through the managed vocabulary or add/rm overwrite sibling fields.
 #[test]
 fn roots_commands_update_exact_user_target_without_erasing_other_settings() {
