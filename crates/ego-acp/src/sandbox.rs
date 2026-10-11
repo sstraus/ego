@@ -173,11 +173,7 @@ impl SandboxGrantPort for AcpSandboxGrants {
         granted
     }
 
-    fn ask<'a>(&'a self, request: &'a SandboxGrant) -> BoxFuture<'a, bool> {
-        Box::pin(self.decide(request, ""))
-    }
-
-    fn ask_for<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool> {
+    fn ask<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(self.decide(request, command))
     }
 }
