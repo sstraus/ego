@@ -70,3 +70,6 @@ pub use tool::{
     ToolDescriptor, ToolError, ToolOutputEncoding, ToolOutputProvenance, ToolResult, Typed,
     TypedTool,
 };
+
+mod terminal_text;
+pub use terminal_text::{TerminalSafe, shell_word, terminal_safe};
