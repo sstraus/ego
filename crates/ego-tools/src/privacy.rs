@@ -27,11 +27,10 @@ pub fn harden_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<()>
 
     #[cfg(windows)]
     {
-        use windows_permissions::LocalBox;
+        use windows_permissions::Sid;
         use windows_permissions::constants::{SeObjectType, SecurityInformation};
         use windows_permissions::utilities::current_process_sid;
         use windows_permissions::wrappers::SetNamedSecurityInfo;
-        use windows_permissions::{SecurityDescriptor, Sid};
 
         let sid = current_process_sid().map_err(|error| {
             io::Error::new(
@@ -39,18 +38,7 @@ pub fn harden_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<()>
                 format!("failed to obtain the current Windows user SID: {error}"),
             )
         })?;
-        let inheritance = match kind {
-            PrivatePathKind::File => "",
-            PrivatePathKind::Directory => "OICI",
-        };
-        let descriptor: LocalBox<SecurityDescriptor> = format!("D:P(A;{inheritance};FA;;;{sid})")
-            .parse()
-            .map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("failed to build an owner-only Windows DACL: {error}"),
-                )
-            })?;
+        let descriptor = owner_only_descriptor(&sid, kind)?;
         let dacl = descriptor.dacl().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -76,6 +64,26 @@ pub fn harden_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<()>
             "private filesystem permissions are unsupported on this platform",
         ))
     }
+}
+
+/// Build the owner-only DACL shared by path and handle hardening.
+#[cfg(windows)]
+pub(crate) fn owner_only_descriptor(
+    sid: &impl std::fmt::Display,
+    kind: PrivatePathKind,
+) -> io::Result<windows_permissions::LocalBox<windows_permissions::SecurityDescriptor>> {
+    let inheritance = match kind {
+        PrivatePathKind::File => "",
+        PrivatePathKind::Directory => "OICI",
+    };
+    format!("D:P(A;{inheritance};FA;;;{sid})")
+        .parse()
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to build an owner-only Windows DACL: {error}"),
+            )
+        })
 }
 
 /// Refuse a path whose current permissions are not the private policy.
