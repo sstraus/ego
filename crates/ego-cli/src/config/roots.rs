@@ -14,14 +14,7 @@ pub(super) fn list(
         .into_iter()
         .find_map(|(key, value)| (key == ManagedConfigKey::Roots).then_some(value).flatten());
     if json {
-        return render_json(
-            target,
-            [(
-                ManagedConfigKey::Roots,
-                roots.unwrap_or(ManagedConfigValue::Roots(Vec::new())),
-            )],
-            out,
-        );
+        return render_json(target, [(ManagedConfigKey::Roots, roots)], out);
     }
     match roots {
         Some(ManagedConfigValue::Roots(roots)) if !roots.is_empty() => {
