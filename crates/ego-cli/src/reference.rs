@@ -105,6 +105,24 @@ fn section(out: &mut String, command: &Command) {
         let _ = writeln!(out, "{flag}");
     }
     out.push('\n');
+    if command.get_name() == "resume" {
+        out.push_str(
+            "With terminal stdin and stdout, `ego resume ID \"next task\"` opens the\n\
+             interactive seat, submits the task once, and accepts further messages.\n\
+             Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file,\n\
+             or profile `ci` selects the headless driver. Redirected stdin or stdout\n\
+             also selects headless execution. `EGO_PROFILE=ci` has the same effect.\n\n\
+             Headless execution never asks for permission: an unresolved approval exits 3.\n\
+             Pre-approve only the required operations in trusted CI profile configuration:\n\n\
+             ```toml\n[profile.ci]\nmodel = \"ollama/qwen3\"\n\
+             session_dir = \"/absolute/ci-sessions\"\nartifact_dir = \"/absolute/ci-artifacts\"\n\n\
+             [profile.ci.permissions]\nallow = [\"exec(seq 1 3)\"]\n```\n\n\
+             Pre-create both roots outside the workspace and outside each other.\n\
+             Supply a non-interactive provider credential when the model requires one.\n\
+             Then run `ego resume ID \"next task\" --profile ci --instructions ci.md`.\n\
+             Allow rules grant policy approval; sandbox and system ceilings still apply.\n\n",
+        );
+    }
     if command.get_name() == "acp" {
         out.push_str(
             "Prompt flags use the same composition as `ego run`. For example:\n\n\

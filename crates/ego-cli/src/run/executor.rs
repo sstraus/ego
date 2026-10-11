@@ -327,6 +327,7 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         session_dir,
         artifact_dir: None,
         output: Output::Json,
+        output_explicit: false,
         schema: None,
         schema_retries: 0,
         retry: 0,
