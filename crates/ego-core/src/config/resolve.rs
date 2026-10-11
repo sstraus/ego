@@ -85,6 +85,8 @@ pub struct Effective {
     pub model: Option<ModelRef>,
     pub thinking: Option<ThinkingLevel>,
     pub mode: Option<Mode>,
+    /// What decided `mode`.
+    pub mode_provenance: super::SettingProvenance,
     /// The system maximum remains available to implicit interactive defaults.
     pub max_mode: Option<Mode>,
     /// Each system declaration must contain every admitted extra root.
@@ -93,8 +95,8 @@ pub struct Effective {
     pub exec: super::ExecLayer,
     pub network: super::Network,
     pub orchestration: crate::orchestrator::Mode,
-    /// Winning layer for the selected sandbox, absent for the default.
-    pub sandbox_source: Option<Source>,
+    /// What decided `sandbox`.
+    pub sandbox_provenance: super::SettingProvenance,
     /// Winning layer for the active profile roots.
     pub roots_source: Option<Source>,
     /// Additional user-selected read and executable roots, before canonicalization.
@@ -375,7 +377,8 @@ fn resolve_inner(
     let mut exec = super::ExecLayer::default();
     let mut network = super::Network::default();
     let mut orchestration = crate::orchestrator::Mode::Observe;
-    let mut sandbox_source = None;
+    let mut mode_provenance = super::SettingProvenance::Default;
+    let mut sandbox_provenance = super::SettingProvenance::Default;
     let mut roots_source = None;
     let mut exec_paths = Vec::new();
     let mut permissions = Ruleset::default();
@@ -428,15 +431,20 @@ fn resolve_inner(
         {
             thinking = Some(value);
         }
-        if let Some(m) = profile.and_then(|p| p.mode).or(sourced.value.mode) {
+        let profile_origin = active_profile_name.map(|name| (name, selected_by));
+        if let Some(m) = profile.and_then(|p| p.mode) {
             mode = Some(m);
+            mode_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
+        } else if let Some(m) = sourced.value.mode {
+            mode = Some(m);
+            mode_provenance = super::SettingProvenance::layer(sourced.source, None);
         }
-        if let Some(value) = profile
-            .and_then(|profile| profile.sandbox)
-            .or(sourced.value.sandbox)
-        {
+        if let Some(value) = profile.and_then(|profile| profile.sandbox) {
             sandbox = Some(value);
-            sandbox_source = Some(sourced.source);
+            sandbox_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
+        } else if let Some(value) = sourced.value.sandbox {
+            sandbox = Some(value);
+            sandbox_provenance = super::SettingProvenance::layer(sourced.source, None);
         }
         for controls in sourced
             .value
@@ -667,6 +675,7 @@ fn resolve_inner(
                 "mode {selected} exceeds profile ceiling {maximum}; using {maximum}"
             ));
             mode = Some(maximum);
+            mode_provenance = super::SettingProvenance::ProfileCeiling;
         }
         let maximum = ceiling.sandbox.unwrap_or_default();
         let selected = sandbox.unwrap_or_default();
@@ -675,6 +684,7 @@ fn resolve_inner(
                 "sandbox {selected} exceeds profile ceiling {maximum}; using {maximum}"
             ));
             sandbox = Some(maximum);
+            sandbox_provenance = super::SettingProvenance::ProfileCeiling;
         }
     }
 
@@ -736,12 +746,13 @@ fn resolve_inner(
         model,
         thinking,
         mode,
+        mode_provenance,
         max_mode,
         root_ceilings,
         sandbox,
         exec,
         network,
-        sandbox_source,
+        sandbox_provenance,
         roots_source,
         orchestration,
         exec_paths,

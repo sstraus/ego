@@ -1,3 +1,5 @@
+#[path = "live_surface_pty/startup_provenance.rs"]
+mod startup_provenance;
 mod support;
 #[path = "live_surface_pty/workspace_trust.rs"]
 mod workspace_trust;
