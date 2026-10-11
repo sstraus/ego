@@ -105,9 +105,12 @@ pub(super) fn unmet_confinement(confinement: &RunConfinement, missing: &MissingE
         ),
         None => String::new(),
     };
-    // The unconfined half of the offline probe failed, so the sandbox level
-    // never decided the result. Say so, and do not claim the host cause.
+    // Name the measured host cause without treating Adaptive filesystem setup
+    // failures as offline listener failures.
     let host_control = match missing.host_control_failure() {
+        Some(failure) if failure.starts_with("adaptive.") => format!(
+            " The Adaptive probe failed during setup or its unconfined host control ({failure}), before confinement could be demonstrated. Fix the recorded probe cause."
+        ),
         Some(failure) if absent.contains(ExecCaps::NO_IP_NETWORK) => format!(
             " The offline probe failed in its unconfined host control ({failure}), before the sandbox was tested on that path, so no `--sandbox` level can change this. Drop `--offline`, or allow the probe's local listener (check the host firewall); the host cause is not proven."
         ),
