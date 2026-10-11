@@ -4,11 +4,12 @@ const CASE: &str = "js_caches::adaptive_derives_js_caches_but_keeps_host_execute
 
 /// Each child write must match the expectation: caches open, host-run code closed.
 fn assert_writes(root: &Path, expectations: &[(PathBuf, bool)]) {
+    let policy = admit(&root.join("workspace")).unwrap();
     for (directory, writable) in expectations {
         std::fs::create_dir_all(directory).unwrap();
         let probe = directory.join("probe");
         let result = execute(
-            admit(&root.join("workspace")).unwrap(),
+            policy.clone(),
             root,
             vec!["/usr/bin/touch".into(), probe.clone().into_os_string()],
         );
@@ -42,6 +43,7 @@ fn rerun(layout: &str, env: &[(&str, PathBuf)]) {
 // home, pnpm itself or npx packages that the host later executes; or ignores
 // the operator's relocated PNPM_HOME/XDG/npm cache; or an empty XDG variable
 // refuses admission instead of meaning unset as it does for pnpm.
+// Also catches missing-store admission leaving future v11 links or dlx writable.
 #[test]
 fn adaptive_derives_js_caches_but_keeps_host_executed_js_code_readonly() {
     let Some(root) = isolated(CASE) else {
@@ -49,8 +51,10 @@ fn adaptive_derives_js_caches_but_keeps_host_executed_js_code_readonly() {
     };
     let home = root.join("home");
     let defaults = [
-        (home.join("Library/pnpm/store/v11"), true),
+        (home.join("Library/pnpm/store/v11/files/00"), true),
+        (home.join("Library/pnpm/store/v11/links"), false),
         (home.join("Library/Caches/pnpm/metadata"), true),
+        (home.join("Library/Caches/pnpm/dlx"), false),
         (home.join(".npm/_cacache"), true),
         (home.join(".npm/_logs"), true),
         (home.join("Library/pnpm/bin"), false),
@@ -62,8 +66,10 @@ fn adaptive_derives_js_caches_but_keeps_host_executed_js_code_readonly() {
             return assert_writes(
                 &root,
                 &[
-                    (root.join("pnpm-home/store/v11"), true),
-                    (root.join("xdg-cache/pnpm"), true),
+                    (root.join("pnpm-home/store/v11/files/00"), true),
+                    (root.join("pnpm-home/store/v11/links"), false),
+                    (root.join("xdg-cache/pnpm/metadata"), true),
+                    (root.join("xdg-cache/pnpm/dlx"), false),
                     (root.join("npm-cache/_cacache"), true),
                     (root.join("pnpm-home/bin"), false),
                     (root.join("npm-cache/_npx"), false),

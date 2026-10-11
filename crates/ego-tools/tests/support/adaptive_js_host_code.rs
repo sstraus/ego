@@ -4,6 +4,7 @@ use super::*;
 // own pnpm and `pnpm dlx` packages. pnpm 12 installs itself and dlx tools into
 // the global virtual store (`store/v11/links`) and `<cache>/pnpm/dlx`; the host
 // shim `~/Library/pnpm/bin/pnpm` execs that code unconfined later.
+// Also catches protecting only v11 when another store version exists at capture.
 #[test]
 fn adaptive_keeps_pnpm_global_virtual_store_and_dlx_code_readonly() {
     let Some(root) =
@@ -14,11 +15,16 @@ fn adaptive_keeps_pnpm_global_virtual_store_and_dlx_code_readonly() {
     let home = root.join("home");
     let pnpm = home.join("Library/pnpm/store/v11/links/@/pnpm/12.5.1/hash/node_modules/pnpm/bin");
     let dlx = home.join("Library/Caches/pnpm/dlx/hash/stamp/node_modules/knip/bin");
+    let other_version = home.join("Library/pnpm/store/v12/links");
     let files = home.join("Library/pnpm/store/v11/files/00");
-    for dir in [&pnpm, &dlx, &files] {
+    for dir in [&pnpm, &dlx, &other_version, &files] {
         std::fs::create_dir_all(dir).unwrap();
     }
-    let host_code = [pnpm.join("pnpm.cjs"), dlx.join("knip.js")];
+    let host_code = [
+        pnpm.join("pnpm.cjs"),
+        dlx.join("knip.js"),
+        other_version.join("probe"),
+    ];
     for path in &host_code {
         std::fs::write(path, "original").unwrap();
     }

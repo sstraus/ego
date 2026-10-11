@@ -1,9 +1,8 @@
 //! Resolve operator-owned adaptive sources once, before a child can mutate them.
 
+use ego_core::permit::{AdaptivePerimeter, CanonPath, Confinement, ProcessError, RunConfinement};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-
-use ego_core::permit::{AdaptivePerimeter, CanonPath, Confinement, ProcessError, RunConfinement};
 
 #[path = "adaptive_floor.rs"]
 pub(super) mod floor;
@@ -34,9 +33,8 @@ pub fn admit_confinement(
     let mut writable = vec![cargo.clone(), rustup, temporary];
     writable.extend(mbx);
     writable.extend(env("CARGO_TARGET_DIR"));
-    // pnpm and npm treat an empty variable as unset. Only the content caches
-    // open: pnpm's home holds its own bin and installation, and npm's `_npx`
-    // holds packages the host later runs unconfined.
+    // Empty variables mean unset. Content caches open; host-executed pnpm
+    // home/bin, store links, dlx tools and npm `_npx` remain read-only.
     let set = |key| env(key).filter(|path| !path.as_os_str().is_empty());
     let pnpm = set("PNPM_HOME")
         .or_else(|| set("XDG_DATA_HOME").map(|data| data.join("pnpm")))
@@ -51,8 +49,25 @@ pub fn admit_confinement(
         npm.join("_cacache"),
         npm.join("_logs"),
     ]);
-    let (git, controls) = git_roots(workspace.as_path())?;
+    let (git, mut controls) = git_roots(workspace.as_path())?;
     writable.extend(git);
+    let store = pnpm.join("store");
+    let versions = match std::fs::read_dir(&store) {
+        Ok(entries) => entries.collect::<Result<Vec<_>, _>>(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+    .map_err(|e| error(format!("cannot inspect pnpm store versions: {e}")))?;
+    let mut links: Vec<_> = versions
+        .into_iter()
+        .filter(|entry| entry.file_name().as_encoded_bytes().starts_with(b"v"))
+        .map(|entry| entry.path().join("links"))
+        .collect();
+    if links.is_empty() {
+        links.push(store.join("v11/links")); // pnpm 12's default store version.
+    }
+    controls.extend(links);
+    controls.push(caches.join("pnpm/dlx"));
     let mut credentials = [
         ".ssh",
         ".aws",
@@ -280,7 +295,6 @@ fn git_roots(workspace: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProcessEr
     }
     Ok((roots, controls))
 }
-
 #[cfg(test)]
 #[path = "adaptive_tests.rs"]
 mod tests;

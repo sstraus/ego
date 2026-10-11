@@ -125,7 +125,11 @@ store (`PNPM_HOME`, `XDG_DATA_HOME/pnpm` or `~/Library/pnpm`, plus `/store`), th
 pnpm cache (`XDG_CACHE_HOME` or `~/Library/Caches`, plus `/pnpm`) and the npm
 `_cacache` and `_logs` (`npm_config_cache` or `~/.npm`) before commands.
 Cargo/rustup defaults apply when their environment variables are absent. The pnpm
-home, its `bin` and npm `_npx` stay read-only: the host runs their code later.
+home, its `bin`, global virtual-store `store/v*/links`, cached `pnpm/dlx` tools
+and npm `_npx` stay read-only: the host runs their code later. Admission protects
+every captured store version's `links` path, or `store/v11/links` when no version
+exists yet (pnpm 12's default). Store versions created later require fresh
+admission to capture their host-code paths.
 Those roots appear as `derived` in perimeter inspection, with no per-cache judge.
 Configured ceilings and readonly roots remain binding. Shared-cache writes are
 intentional. Workspace and derived toolchain/target executables remain runnable.
