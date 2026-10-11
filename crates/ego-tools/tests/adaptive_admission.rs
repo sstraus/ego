@@ -301,3 +301,6 @@ fn adaptive_denies_relocated_github_and_both_cargo_token_spellings() {
 
 #[path = "support/adaptive_toolchains.rs"]
 mod toolchains;
+
+#[path = "support/adaptive_fixture_repositories.rs"]
+mod fixture_repositories;
