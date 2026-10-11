@@ -7968,6 +7968,10 @@ fn modal_session_with(completions: Vec<Reply>) -> ModalSession {
     }
 }
 
+/// How a [`ModalSession`] ended: its exit status, what the model was sent,
+/// and what the user config holds.
+type Quit = (portable_pty::ExitStatus, Vec<serde_json::Value>, String);
+
 impl ModalSession {
     fn press(&mut self, keys: &[u8]) {
         drain_until_quiet(&self.reader, &mut self.output);
@@ -8023,7 +8027,7 @@ impl ModalSession {
     }
 
     /// [`ModalSession::finish`] that leaves the exit status to the caller.
-    fn quit(mut self) -> (portable_pty::ExitStatus, Vec<serde_json::Value>, String) {
+    fn quit(mut self) -> Quit {
         self.input.write_all(b"/quit\r").expect("quit");
         self.input.flush().expect("quit flush");
         let status = bounded_exit(self.child);

@@ -17,6 +17,9 @@ fn filled_session(replies: Vec<Reply>) -> ModalSession {
     let mut session = modal_session_with(completions);
     session.press(b"fill the screen\r");
     session.wait(FILLED);
+    // The text is on screen before the composer turns idle; a resize in
+    // between would race the composer's own change of height.
+    idle_screen(&mut session);
     session
 }
 
@@ -58,10 +61,14 @@ fn rows_with(screen: &[String], needle: &str) -> usize {
 
 /// The settled screen: no answer keys, no answered question, no stale busy
 /// row, each receipt on one row of its own, and the transcript above intact.
-fn assert_settled(screen: &[String], receipts: &[&str]) {
+fn assert_settled(name: &str, screen: &[String], receipts: &[&str]) {
     let shown = screen.join("\n");
     for stale in ["[y] yes", "Allow run seq", "Esc cancels"] {
-        assert_eq!(rows_with(screen, stale), 0, "{stale:?} is left:\n{shown}");
+        assert_eq!(
+            rows_with(screen, stale),
+            0,
+            "{name}: {stale:?} is left:\n{shown}"
+        );
     }
     for receipt in receipts {
         assert_eq!(
@@ -70,13 +77,13 @@ fn assert_settled(screen: &[String], receipts: &[&str]) {
                 .filter(|row| row.trim_end() == *receipt)
                 .count(),
             1,
-            "not one receipt row {receipt:?}:\n{shown}"
+            "{name}: not one receipt row {receipt:?}:\n{shown}"
         );
     }
     assert_eq!(
         rows_with(screen, FILLED),
         1,
-        "the transcript was erased:\n{shown}"
+        "{name}: the transcript was erased:\n{shown}"
     );
 }
 
@@ -103,6 +110,7 @@ fn answered_permission_collapses_before_the_next_request() {
     session.press(b"y");
     session.wait(TOOL_TURN_DONE);
     assert_settled(
+        "two asks",
         &idle_screen(&mut session),
         &["Allowed run seq 1 3", "Allowed run seq 4 6"],
     );
@@ -110,11 +118,14 @@ fn answered_permission_collapses_before_the_next_request() {
     assert_eq!(generations.len(), 4, "both allowed calls ran");
 }
 
+/// Keys to press, and what appears once they are handled.
+type Step = (&'static [u8], &'static str);
+
 // Catches: one answer path (details, deny, amend, Esc, remember) leaves its
 // modal rows on screen or commits no receipt, while plain `y` collapses.
 #[test]
 fn every_answer_settles_into_its_own_receipt() {
-    let cases: [(&str, &[(&[u8], &str)], &[&str], &str); 6] = [
+    let cases: [(&str, &[Step], &[&str], &str); 6] = [
         (
             "yes",
             &[(b"y", TOOL_TURN_DONE)],
@@ -189,7 +200,7 @@ fn every_answer_settles_into_its_own_receipt() {
                 "{name}: {form:?} is left:\n{shown}"
             );
         }
-        assert_settled(&screen, receipts);
+        assert_settled(name, &screen, receipts);
         assert_eq!(
             screen
                 .iter()
@@ -248,6 +259,7 @@ fn answered_permission_collapses_after_a_resize_and_when_wrapped() {
         session.press(b"y");
         session.wait(TOOL_TURN_DONE);
         assert_settled(
+            name,
             &idle_screen(&mut session),
             &["Allowed run seq 1 3", "Allowed run seq 4 6"],
         );
@@ -277,7 +289,7 @@ fn a_draft_typed_before_the_approval_returns_once_after_it() {
     session.wait(TOOL_TURN_DONE);
     let screen = idle_screen(&mut session);
     let shown = screen.join("\n");
-    assert_settled(&screen, &["Allowed run seq 1 3"]);
+    assert_settled("draft", &screen, &["Allowed run seq 1 3"]);
     assert_eq!(
         rows_with(&screen, "draft kept aside"),
         1,
