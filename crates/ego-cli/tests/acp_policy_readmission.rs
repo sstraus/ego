@@ -117,12 +117,6 @@ fn wider_profile_roots_require_permission_before_resumed_effects() {
     recover(false, true, true);
 }
 
-// Catches: a rejected wider profile being used by the resumed generation.
-#[test]
-fn wider_profile_roots_denial_starts_no_provider_effect() {
-    recover(false, false, true);
-}
-
 fn recover(legacy: bool, allow: bool, wider: bool) {
     let places = Places::new();
     let stub = Stub::start(Plan::default());

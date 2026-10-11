@@ -102,7 +102,7 @@ impl AcpPermissionAdapter {
         why: &Escalation,
     ) -> v1::RequestPermissionRequest {
         let title = PermissionRequest::new(tool, ops.to_vec(), why.clone()).to_string();
-        Self::wire_request(session, item, title, false)
+        Self::wire_request(session, item, title, false, false)
     }
 
     fn wire_request(
@@ -110,6 +110,7 @@ impl AcpPermissionAdapter {
         item: ItemId,
         title: String,
         rememberable: bool,
+        explicit_answer: bool,
     ) -> v1::RequestPermissionRequest {
         let tool_call = v1::ToolCallUpdate::new(
             v1::ToolCallId::new(item.to_string()),
@@ -126,13 +127,15 @@ impl AcpPermissionAdapter {
                 "Reject once",
                 v1::PermissionOptionKind::RejectOnce,
             ),
-            v1::PermissionOption::new(
+        ];
+        if !explicit_answer {
+            options.push(v1::PermissionOption::new(
                 v1::PermissionOptionId::new(Self::ALLOW_SESSION),
                 "Allow all for this session",
                 v1::PermissionOptionKind::AllowAlways,
-            ),
-        ];
-        if rememberable {
+            ));
+        }
+        if rememberable && !explicit_answer {
             options.push(v1::PermissionOption::new(
                 v1::PermissionOptionId::new(Self::ALLOW_ALWAYS),
                 "Allow always (remember displayed rules)",
@@ -169,7 +172,13 @@ impl AcpPermissionAdapter {
                 ));
             }
         }
-        Self::wire_request(&self.session, item, title, plan.is_some())
+        Self::wire_request(
+            &self.session,
+            item,
+            title,
+            plan.is_some(),
+            request.requires_explicit_answer(),
+        )
     }
 
     /// What the host answered, in core's vocabulary.
@@ -218,6 +227,9 @@ impl AcpPermissionAdapter {
         let wire = self.live_request(item, &request);
         match connection.send_request(wire).block_task().await {
             Ok(response) => {
+                if request.requires_explicit_answer() {
+                    return Self::decision(&response);
+                }
                 let v1::RequestPermissionOutcome::Selected(selected) = &response.outcome else {
                     return PermissionDecision::Deny;
                 };

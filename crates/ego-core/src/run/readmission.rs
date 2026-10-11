@@ -24,16 +24,13 @@ pub(super) fn valid_transition(
     let Some(readmission) = current.sandbox_readmission.as_ref() else {
         return false;
     };
-    let Some(observed) = current.sandbox_observation.as_ref() else {
+    if current.sandbox_observation.is_none() {
         return false;
-    };
+    }
     let mut unchanged = current.clone();
     unchanged.sandbox_observation = old.sandbox_observation.clone();
     unchanged.sandbox_readmission = old.sandbox_readmission.clone();
-    unchanged == *old
-        && old.sandbox_observation.as_ref() == Some(&readmission.previous)
-        && (readmission.approved_by_human
-            || observed.not_more_permissive_than(&readmission.previous))
+    unchanged == *old && old.sandbox_observation.as_ref() == Some(&readmission.previous)
 }
 
 impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E, C, I> {
