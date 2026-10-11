@@ -2,9 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ego_core::digest::sha256_hex;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{ContentBlock, Conversation, ErrorKind, GenRequest, StopReason};
-use sha2::{Digest, Sha256};
 
 const PREFIX: &str = "__ego_";
 const MAX_BYTES: usize = 64;
@@ -41,7 +41,7 @@ impl ToolNames {
             originals.insert(name.to_owned(), name.to_owned());
         }
         for name in names.into_iter().filter(|name| !portable(name)) {
-            let hash = format!("{:x}", Sha256::digest(name.as_bytes()));
+            let hash = sha256_hex(name.as_bytes());
             let mut number = 0_u64;
             let alias = loop {
                 let suffix = if number == 0 {

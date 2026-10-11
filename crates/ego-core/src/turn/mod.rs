@@ -4650,11 +4650,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         AnalysisOpinion::Deny => JudgeOutcome::Deny { reason },
                         AnalysisOpinion::Escalate => JudgeOutcome::Escalate { reason },
                     };
-                    let analysis = key
-                        .expect("lease has a key")
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect();
+                    let analysis = crate::digest::lower_hex(&key.expect("lease has a key"));
                     return Ok(JudgeRun::Decided {
                         outcome,
                         by: Authority::CachedJudge {

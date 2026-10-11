@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::{Uuid, Variant, Version};
 
 use super::id::{EventId, GenerationId, ItemId, SessionId, SubagentInvocationId, TurnId};
-use crate::digest::{is_lower_sha256, sha256_hex};
+use crate::digest::{is_lower_sha256, lower_hex, sha256_hex};
 use crate::run::RequestId;
 use crate::store::evidence::EvidenceRef;
 
@@ -181,13 +181,13 @@ impl TryFrom<String> for HookContentDigest {
 
 impl From<HookContentDigest> for String {
     fn from(value: HookContentDigest) -> Self {
-        encode_hex(&value.0)
+        lower_hex(&value.0)
     }
 }
 
 impl fmt::Display for HookContentDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&encode_hex(&self.0))
+        f.write_str(&lower_hex(&self.0))
     }
 }
 
@@ -250,7 +250,7 @@ impl From<HookId> for String {
 
 impl fmt::Display for HookId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{HOOK_ID_PREFIX}{}", encode_hex(&self.0))
+        write!(f, "{HOOK_ID_PREFIX}{}", lower_hex(&self.0))
     }
 }
 
@@ -273,16 +273,6 @@ fn hex_nibble(byte: u8) -> u8 {
         b'a'..=b'f' => byte - b'a' + 10,
         _ => unreachable!("validated lowercase hexadecimal byte"),
     }
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
 }
 
 /// One external hook invocation (UUIDv7).
