@@ -272,3 +272,103 @@ fn readmission_cases() {
         }
     }
 }
+
+// Catches: forged readmission selections bypass integrity checks during replay.
+#[test]
+fn forged_readmission_transitions_are_rejected_before_any_effect() {
+    for corruption in [
+        "missing receipt",
+        "missing observation",
+        "wrong previous",
+        "unrelated selection",
+        "start command",
+    ] {
+        let store = Arc::new(RecordingSessionStore::default());
+        let executor = Arc::new(ScriptedRunExecutor::default());
+        executor.allow_effects();
+        let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+        let policy = RunConfinement::new(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(fixture_root("forged-policy").as_path()),
+        )
+        .unwrap();
+        let old = observation(
+            &policy,
+            "sandbox",
+            Confinement::Workspace.required_caps(),
+            "1",
+        );
+        let current = observation(
+            &policy,
+            "sandbox",
+            Confinement::Workspace.required_caps(),
+            "2",
+        );
+        let first = admitted_start(
+            &controller,
+            StartRequest::new(
+                RequestId::session_id(super::request(800)),
+                fixture_root("forged-policy"),
+                super::request(800),
+                digest("first"),
+                selections().with_sandbox_observation(Confinement::Workspace, old.clone()),
+                "first",
+            ),
+        );
+        let run = first.run_id();
+        execute(&controller, first.into_execution());
+        *executor.execution_observation.lock().unwrap() = Some(current);
+        let before = store
+            .transactions(run.session_id())
+            .last()
+            .unwrap()
+            .revision();
+        let next = futures::executor::block_on(controller.continue_run(
+            ContinueRequest::new(run, super::request(801), digest("second"), before, "second"),
+            bindings(),
+        ))
+        .unwrap();
+        let RunCommandOutcome::Admitted(next) = next else {
+            panic!("continuation admission")
+        };
+        execute(&controller, next.into_execution());
+        let transactions = store.transactions(run.session_id());
+        let index = transactions
+            .iter()
+            .position(|transaction| {
+                serde_json::to_value(transaction).unwrap()["selections"]["sandbox_readmission"]
+                    .is_object()
+            })
+            .expect("real readmission transaction");
+        rewrite_transaction(&store, run.session_id(), index, |value| match corruption {
+            "missing receipt" => {
+                value["selections"]["sandbox_readmission"] = serde_json::Value::Null;
+            }
+            "missing observation" => {
+                value["selections"]["sandbox_observation"] = serde_json::Value::Null;
+            }
+            "wrong previous" => {
+                value["selections"]["sandbox_readmission"]["previous"]["policy_digest"] =
+                    serde_json::json!("3".repeat(64));
+            }
+            "unrelated selection" => {
+                value["selections"]["model"] =
+                    serde_json::to_value(model_ref("model/forged")).unwrap();
+            }
+            "start command" => {
+                value["command"]["start"] = serde_json::json!(true);
+            }
+            _ => unreachable!(),
+        });
+        assert_corrupt_run_is_rejected_everywhere(
+            &controller,
+            &executor,
+            &store,
+            run,
+            run.session_id(),
+            802,
+            before,
+        );
+    }
+}

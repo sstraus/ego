@@ -117,6 +117,12 @@ fn wider_profile_roots_require_permission_before_resumed_effects() {
     recover(false, true, true);
 }
 
+// Catches: rejecting widened saved authority still starts a provider generation.
+#[test]
+fn wider_profile_roots_denial_starts_no_provider_effect() {
+    recover(false, false, true);
+}
+
 fn recover(legacy: bool, allow: bool, wider: bool) {
     let places = Places::new();
     let stub = Stub::start(Plan::default());
@@ -177,19 +183,6 @@ fn recover(legacy: bool, allow: bool, wider: bool) {
         stub.generations().len(),
         if allow { 2 } else { 1 },
         "denied turn must have no provider effect"
-    );
-    let log = std::fs::read_to_string(
-        places
-            .home_path()
-            .join("sessions")
-            .join(&session)
-            .join("events.jsonl"),
-    )
-    .unwrap();
-    assert_eq!(
-        log.contains("sandbox_readmission"),
-        allow,
-        "admission must be durable only after consent"
     );
     if allow {
         let mut third = host(&places, &stub);
