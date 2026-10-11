@@ -105,8 +105,16 @@ pub(super) fn unmet_confinement(confinement: &RunConfinement, missing: &MissingE
         ),
         None => String::new(),
     };
+    // The unconfined half of the offline probe failed, so the sandbox level
+    // never decided the result. Say so, and do not claim the host cause.
+    let host_control = match missing.host_control_failure() {
+        Some(failure) if absent.contains(ExecCaps::NO_IP_NETWORK) => format!(
+            " The offline probe failed in its unconfined host control ({failure}), before the sandbox was tested on that path, so no `--sandbox` level can change this. Drop `--offline`, or allow the probe's local listener (check the host firewall); the host cause is not proven."
+        ),
+        _ => String::new(),
+    };
     format!(
-        "--sandbox {} could not be demonstrated on this host: {} showed {}, but this run needs {}.{transcript} Ask for less with {}, or fix the cause the measurement names.",
+        "--sandbox {} could not be demonstrated on this host: {} showed {}, but this run needs {}.{transcript}{host_control} Ask for less with {}, or fix the cause the measurement names.",
         confinement.level(),
         confinement_backend(),
         missing.available(),

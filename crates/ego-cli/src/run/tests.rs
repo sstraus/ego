@@ -610,6 +610,74 @@ fn a_capability_refusal_names_the_mode_the_guarantee_the_backend_and_the_remedie
     );
 }
 
+/// The recorded host-control failure of the 2026-10-10 E2E run: the confined
+/// child was never the part that failed, so no `--sandbox` level can help.
+///
+/// Catches: the refusal blames the sandbox level when the host control failed.
+#[test]
+fn an_offline_refusal_from_a_failed_host_control_does_not_blame_the_sandbox_level() {
+    let owner = tempdir().expect("refusal fixture owner");
+    let workspace = CanonPath::new(owner.path().to_path_buf());
+    let confinement =
+        RunConfinement::new(Confinement::Adaptive, true, workspace).expect("adaptive offline");
+    let failure = "offline.tcp-nonloopback.control.receiver: accept failed: \
+                   Resource temporarily unavailable (os error 35)";
+    let missing = ExecCaps::NO_IP_NETWORK
+        .check(ExecCaps::empty())
+        .expect_err("a host that proved no network denial cannot serve offline")
+        .with_host_control_failure(Some(failure.to_owned()));
+
+    let RunTermination::UsageError { message } = process_error_termination(
+        ProcessError::MissingCapabilities(missing),
+        &confinement,
+        &CancelToken::new(),
+    ) else {
+        panic!("an unmet offline guarantee is a usage refusal");
+    };
+
+    assert!(
+        message.contains(failure) && message.contains("host control"),
+        "the refusal says the host control failed, with the recorded outcome: {message}"
+    );
+    assert!(
+        message.contains("dropping `--offline`") && message.contains("firewall"),
+        "the refusal names the actionable choices: {message}"
+    );
+    assert!(
+        message.contains("no `--sandbox` level"),
+        "the refusal says another sandbox level cannot help: {message}"
+    );
+    assert!(
+        message.contains("not proven"),
+        "the refusal does not claim the host cause as proven: {message}"
+    );
+}
+
+/// Catches: a sandbox-side offline refusal gains host-control wording.
+#[test]
+fn an_offline_refusal_without_a_host_control_failure_keeps_the_sandbox_wording() {
+    let owner = tempdir().expect("refusal fixture owner");
+    let workspace = CanonPath::new(owner.path().to_path_buf());
+    let confinement =
+        RunConfinement::new(Confinement::Workspace, true, workspace).expect("workspace offline");
+    let missing = ExecCaps::NO_IP_NETWORK
+        .check(ExecCaps::empty())
+        .expect_err("a host that proved no network denial cannot serve offline");
+
+    let RunTermination::UsageError { message } = process_error_termination(
+        ProcessError::MissingCapabilities(missing),
+        &confinement,
+        &CancelToken::new(),
+    ) else {
+        panic!("an unmet offline guarantee is a usage refusal");
+    };
+
+    assert!(
+        message.contains("dropping `--offline`") && !message.contains("host control"),
+        "{message}"
+    );
+}
+
 #[tokio::test]
 async fn protocol_ci_profile_is_refused_before_session_or_provider_effects() {
     let owner = tempdir().expect("protocol profile fixture owner");

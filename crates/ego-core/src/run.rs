@@ -57,6 +57,8 @@ use crate::sink::EventSink;
 use crate::store::session_store::{SessionEntry, SessionStore, StoreError};
 use crate::turn::AdmittedToolSource;
 
+mod readmission;
+
 /// Borrowed future returned by run adapters at controller-owned boundaries.
 pub type RunFuture<'a, T> = BoxFuture<'a, T>;
 
@@ -608,6 +610,8 @@ pub struct RunSelections {
     /// admission truth. Non-ACP runs have no session observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sandbox_observation: Option<ExecObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sandbox_readmission: Option<Box<readmission::PolicyReadmission>>,
     /// The workspace posture this run is being started at, if anyone decided.
     ///
     /// Two callers fill it and they are answering the same question. A seat
@@ -649,6 +653,7 @@ impl RunSelections {
             prompt_options: None,
             sandbox: None,
             sandbox_observation: None,
+            sandbox_readmission: None,
             trust: None,
         }
     }
@@ -687,6 +692,7 @@ impl RunSelections {
             prompt_options: None,
             sandbox: None,
             sandbox_observation: None,
+            sandbox_readmission: None,
             trust: None,
         }
     }
@@ -1290,6 +1296,11 @@ impl std::fmt::Debug for RunHandle {
 /// Factory for the live event projection selected after model resolution.
 pub trait EventSinkFactory: Send + Sync {
     fn create(&self, capabilities: &ModelCapabilities) -> Arc<dyn EventSink>;
+
+    /// Visible pre-effect policy change, independent of model capabilities.
+    fn execution_policy_notice(&self, _message: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Non-serializable bindings that travel only with effect authority.
@@ -1477,6 +1488,26 @@ impl std::error::Error for RunExecutorError {}
 /// The sole external execution boundary owned by the controller consumer.
 pub trait RunExecutor: Send + Sync {
     type Prepared: Any + Send + 'static;
+
+    /// Ask the existing human seat after durably journaling its request.
+    /// Adapters that cannot own a serialized permission journal refuse.
+    fn request_execution_policy_permission<'a>(
+        &'a self,
+        _prepared: &'a mut Self::Prepared,
+        _question: crate::permit::PermissionRequest,
+        _bindings: &'a RunExecutionBindings,
+    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    /// Measure current authority without constructing user effect ports.
+    /// The prepared executor must pin this measurement for its final check.
+    fn execution_observation<'a>(
+        &'a self,
+        _prepared: &'a mut Self::Prepared,
+    ) -> BoxFuture<'a, Result<Option<ExecObservation>, RunExecutorError>> {
+        Box::pin(async { Ok(None) })
+    }
 
     fn prepare<'a>(
         &'a self,
@@ -2104,7 +2135,7 @@ where
         }
 
         let model = self.model_of(&folded);
-        let preparation_selections = folded.snapshot.selections.with_model(model.clone());
+        let preparation_selections = folded.snapshot.selections.clone().with_model(model.clone());
         let prepared = self
             .executor
             .prepare(&RunPreparation {
@@ -2116,7 +2147,7 @@ where
                 origin: folded.snapshot.origin.clone(),
             })
             .await?;
-        let (prepared_model, prepared) = prepared.into_parts();
+        let (prepared_model, mut prepared) = prepared.into_parts();
         if prepared_model != model {
             return Err(RunError::Integrity {
                 message: format!(
@@ -2125,6 +2156,9 @@ where
                 ),
             });
         }
+        let selections = self
+            .readmit_policy(&folded.snapshot, &mut prepared, &bindings)
+            .await?;
         let lease = TurnLease(self.ids.next_uuid());
         let revision = folded.snapshot.revision.next();
         let transaction = RunTransaction {
@@ -2132,7 +2166,7 @@ where
             run_id: request.run_id,
             origin: folded.snapshot.origin.clone(),
             root: folded.snapshot.root.clone(),
-            selections: folded.snapshot.selections.clone(),
+            selections: selections.clone(),
             command: RunCommand::CommandAdmitted {
                 request_id: request.request_id,
                 digest: request.digest.clone(),
@@ -2177,7 +2211,7 @@ where
                         run_id: request.run_id,
                         origin: folded.snapshot.origin,
                         root: folded.snapshot.root,
-                        selections: folded.snapshot.selections,
+                        selections,
                         revision: committed,
                         status: RunStatus::Running,
                         settlement: None,
@@ -3245,7 +3279,7 @@ impl FoldedRun {
         let run_id = first.run_id;
         let root = first.root.clone();
         let origin = first.origin.clone();
-        let selections = first.selections.clone();
+        let mut selections = first.selections.clone();
         let mut admissions: Vec<AdmissionReceipt> = Vec::new();
         let mut active: Option<ActiveLease> = None;
         let mut expected = RunRevision::new(1);
@@ -3267,7 +3301,11 @@ impl FoldedRun {
             if transaction.run_id != run_id
                 || transaction.origin != origin
                 || transaction.root != root
-                || transaction.selections != selections
+                || !readmission::valid_transition(
+                    &selections,
+                    &transaction.selections,
+                    &transaction.command,
+                )
                 || transaction.revision != expected
             {
                 return Err(RunError::Integrity {
@@ -3275,6 +3313,8 @@ impl FoldedRun {
                         .to_owned(),
                 });
             }
+            selections = transaction.selections.clone();
+            snapshot.selections = selections.clone();
             match &transaction.command {
                 RunCommand::CommandAdmitted {
                     expected_revision,

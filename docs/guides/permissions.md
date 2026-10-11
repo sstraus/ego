@@ -145,7 +145,11 @@ read rules described above.
 Report the exact refused target and its task relevance. A failed mutation can
 leave partial effects; do not assume replay is safe. Automatic residual-write
 judgment is pending the shared judge integration; the existing human grant flow
-still handles eligible refusals. A future judge-write grant will also forbid
+still handles eligible refusals. A refused write that the approved command
+line does not name (for example inside a script) raises no question. Its note
+gives the exact `ego roots add --access read-write DIR` command for the
+containing directory, applied after exit and resume, unless that directory is
+inside the workspace, `/`, the home directory or a workspace ancestor. A future judge-write grant will also forbid
 execution within that residual root for the rest of its session.
 
 **Root-list traps:** `ego roots add PATH --access read` edits the stored list,

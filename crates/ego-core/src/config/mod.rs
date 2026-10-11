@@ -7,6 +7,7 @@ mod discovery;
 mod error;
 mod layer;
 mod mutation;
+mod provenance;
 mod resolve;
 pub mod rule_management;
 mod ruleset;
@@ -32,6 +33,7 @@ pub use mutation::{
     UserConfigEditResult, UserConfigError, UserConfigMutation, UserConfigMutationFacts,
     UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot, UserConfigStore,
 };
+pub use provenance::SettingProvenance;
 pub use resolve::{
     ActiveProfileProvenance, Effective, McpConfigProvenance, Posture, ResolvedMcpConfig,
     ResolvedMcpEntry, resolve, resolve_selected, resolve_with_profile_ceiling,

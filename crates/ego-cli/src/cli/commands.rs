@@ -620,8 +620,8 @@ pub(super) struct Common {
     pub(super) places: Places,
 
     /// text|json|jsonl
-    #[arg(long, value_enum, default_value_t = Output::Text)]
-    pub(super) output: Output,
+    #[arg(long, value_enum)]
+    pub(super) output: Option<Output>,
 }
 
 /// Which store and which workspace — the two `acp` shares with the rest.

@@ -764,6 +764,7 @@ pub struct PermissionRequest {
     why: Escalation,
     presentation: Option<Box<PermissionPresentation>>,
     child_name: Option<String>,
+    explicit_answer: bool,
 }
 
 /// Display-only facts retained for a human permission decision.
@@ -835,12 +836,32 @@ impl PermissionRequest {
             why,
             presentation: None,
             child_name: None,
+            explicit_answer: false,
         }
     }
 
     /// The child requesting this permission, when the call is delegated.
     pub fn child_name(&self) -> Option<&str> {
         self.child_name.as_deref()
+    }
+
+    /// Reconstructed session authority needs a fresh answer, even when a
+    /// previous tool request received a session-wide approval.
+    pub fn execution_policy_readmission(message: String, workspace: CanonPath) -> Self {
+        let mut request = Self::new(
+            format!("Re-admit execution policy: {message}"),
+            Vec::new(),
+            Escalation::NoRuleCovers {
+                op: super::OpName::Opaque,
+                path: workspace,
+            },
+        );
+        request.explicit_answer = true;
+        request
+    }
+
+    pub const fn requires_explicit_answer(&self) -> bool {
+        self.explicit_answer
     }
 
     pub fn tool(&self) -> &str {
@@ -1619,6 +1640,7 @@ impl PolicyEngine {
                 why,
                 presentation: None,
                 child_name: None,
+                explicit_answer: false,
             },
             call,
         }
@@ -2282,6 +2304,7 @@ mod tests {
             },
             presentation: None,
             child_name: None,
+            explicit_answer: false,
         };
 
         assert_eq!(
@@ -2325,6 +2348,7 @@ mod tests {
             },
             presentation: None,
             child_name: None,
+            explicit_answer: false,
         };
 
         assert_eq!(

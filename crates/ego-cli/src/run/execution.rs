@@ -144,6 +144,8 @@ fn enable_trusted_interactive_auto(settings: &mut Settings, driver: &Driver<'_>)
         && matches!(driver, Driver::Interactive { seat, .. } if seat.has_human())
     {
         settings.effective.mode = Some(Mode::Auto);
+        settings.effective.mode_provenance =
+            ego_core::config::SettingProvenance::TrustedInteractive;
     }
 }
 
@@ -178,9 +180,14 @@ async fn open_scope_phase(
                 .map(|model| model.0.as_str())
         })
     {
+        let effective = &settings.effective;
         host.diagnostics.note(&format!(
-            "ego {} · {model}\n{}",
+            "ego {} · {model}\nmode {} ({}) · sandbox {} ({})\n{}",
             env!("CARGO_PKG_VERSION"),
+            effective.mode.unwrap_or(Mode::Default),
+            effective.mode_provenance,
+            settings.confinement.level(),
+            effective.sandbox_provenance,
             seat.key_hints()
         ));
     }

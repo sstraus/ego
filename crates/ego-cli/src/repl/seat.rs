@@ -1784,8 +1784,7 @@ fn own_terminal(
             let request = crossbeam::channel::select_biased! {
                 recv(startup_output) -> row => {
                     let Ok(row) = row else { break };
-                    let mut output = std::io::stdout().lock();
-                    if output.write_all(row.as_bytes()).and_then(|()| output.flush()).is_err() {
+                    if write_printer_message(&mut std::io::stdout().lock(), &row).is_err() {
                         cancel.cancel(CancelCause::Host);
                         break;
                     }
@@ -1844,6 +1843,10 @@ fn own_terminal(
                     continue;
                 }
                 Ok(request) => {
+                    // The composer stepped aside for this request: whatever
+                    // asks next paints on its rows instead of below them, and
+                    // the composer returns there afterwards with its draft.
+                    let _ = editor.erase_last_prompt();
                     let mut surface = ModalSurface {
                         phase: &phase,
                         status: &status,
@@ -1896,6 +1899,20 @@ fn own_terminal(
             }
         }
     }
+}
+
+/// Write one external-printer message before Reedline reads, with the line
+/// contract its own printer applies once it reads: `str::lines`, then CRLF.
+/// Raw mode turns off output processing, so a bare LF would start the next
+/// row at the column where this one ended. Splitting on lines rather than
+/// replacing LF keeps an existing CRLF single and leaves control sequences
+/// inside a line untouched.
+fn write_printer_message(output: &mut impl std::io::Write, message: &str) -> std::io::Result<()> {
+    for line in message.lines() {
+        output.write_all(line.as_bytes())?;
+        output.write_all(b"\r\n")?;
+    }
+    output.flush()
 }
 
 mod action_execution;

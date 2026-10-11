@@ -42,6 +42,5 @@ pub fn observe(
         workspace,
     )
     .map_err(|error| UsageError(error.to_string()))?;
-    crate::run::profile_roots::check_adaptive(&effective, &confinement).map_err(UsageError)?;
     Ok(Perimeter::session(&confinement, &effective, &roots).with_warnings(warnings))
 }

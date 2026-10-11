@@ -5,7 +5,7 @@
 //! knows about the call sits behind the details key.
 
 use ego_core::permit::analysis::{RiskAssessment, RiskClass, RiskReason};
-use ego_core::permit::{Op, PermissionRequest, SessionProcessAction};
+use ego_core::permit::{Op, PermissionDecision, PermissionRequest, SessionProcessAction};
 
 /// A command longer than this is cut in the compact prompt so it stays one
 /// row on a normal terminal; the details show it whole.
@@ -89,6 +89,33 @@ pub(super) fn details_prompt(
     }
     rows.extend(key_rows(request, false));
     rows.join("\n")
+}
+
+/// The one row a settled approval leaves in the transcript: what was asked,
+/// how it was answered, and the answer's own notice (a remembered rule, an
+/// interruption), if any.
+pub(super) fn settled_receipt(
+    request: &PermissionRequest,
+    decision: &PermissionDecision,
+    notice: Option<&str>,
+) -> String {
+    let mut call = truncate(&describe_operations(request.ops()), COMMAND_CAP);
+    if let Some(name) = request.child_name() {
+        call = format!("child {}: {call}", safe(name));
+    }
+    let mut row = match decision {
+        PermissionDecision::Allow => format!("Allowed {call}"),
+        PermissionDecision::Amend { .. } => format!("Edited {call}"),
+        PermissionDecision::Deny => format!("Denied {call}"),
+        PermissionDecision::DenyWithInstruction { instruction } => {
+            format!("Denied {call}; instead: {}", safe(instruction))
+        }
+    };
+    if let Some(notice) = notice {
+        row.push_str(" · ");
+        row.push_str(&safe(notice));
+    }
+    row
 }
 
 fn headline_rows(request: &PermissionRequest) -> Vec<String> {

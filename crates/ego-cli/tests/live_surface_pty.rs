@@ -1,3 +1,9 @@
+#[path = "live_surface_pty/permission_receipts.rs"]
+mod permission_receipts;
+#[path = "live_surface_pty/raw_columns.rs"]
+mod raw_columns;
+#[path = "live_surface_pty/startup_provenance.rs"]
+mod startup_provenance;
 mod support;
 #[path = "live_surface_pty/workspace_trust.rs"]
 mod workspace_trust;
@@ -600,7 +606,7 @@ use portable_pty::{ExitStatus, NativePtySystem, PtySize, PtySystem};
 use std::{
     io::{self, Read, Write},
     path::Path,
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -2742,17 +2748,38 @@ fn stream_with_screen(
     dsr_responder: mpsc::SyncSender<WriteRequest>,
     screen_size: Option<(u16, u16)>,
 ) -> (mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
+    stream_with_resizable_screen(
+        reader,
+        dsr_responder,
+        screen_size.map(|size| Arc::new(Mutex::new(size))),
+    )
+}
+
+/// [`stream_with_screen`] whose emulated screen follows `screen_size`, so the
+/// cursor reports stay true after the test resizes the PTY.
+fn stream_with_resizable_screen(
+    reader: Box<dyn Read + Send>,
+    dsr_responder: mpsc::SyncSender<WriteRequest>,
+    screen_size: Option<Arc<Mutex<(u16, u16)>>>,
+) -> (mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
     let (sender, receiver) = mpsc::channel();
     let join = thread::spawn(move || {
         let mut reader = reader;
         let mut chunk = [0; 1024];
         let mut pending = Vec::new();
-        let mut screen = screen_size.map(|(rows, cols)| vt100::Parser::new(rows, cols, 0));
+        let mut screen = screen_size.map(|size| {
+            let (rows, cols) = *size.lock().expect("screen size lock");
+            (vt100::Parser::new(rows, cols, 0), size)
+        });
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(length) => {
-                    if let Some(screen) = &mut screen {
+                    if let Some((screen, size)) = &mut screen {
+                        let (rows, cols) = *size.lock().expect("screen size lock");
+                        if screen.screen().size() != (rows, cols) {
+                            screen.screen_mut().set_size(rows, cols);
+                        }
                         screen.process(&chunk[..length]);
                     }
                     pending.extend_from_slice(&chunk[..length]);
@@ -2763,7 +2790,7 @@ fn stream_with_screen(
                         pending.drain(..index + DSR_QUERY.len());
                         let response = screen.as_ref().map_or_else(
                             || DSR_RESPONSE.to_vec(),
-                            |screen| {
+                            |(screen, _)| {
                                 let (row, col) = screen.screen().cursor_position();
                                 format!("\x1b[{};{}R", row + 1, col + 1).into_bytes()
                             },
@@ -7874,15 +7901,24 @@ struct ModalSession {
     /// Where the last key was sent: waits look only after it, so a row drawn
     /// before the key cannot satisfy them.
     mark: usize,
+    /// The terminal size, shared with the reader's emulated screen.
+    size: Arc<Mutex<(u16, u16)>>,
+    /// Each resize: the output offset it took effect at, and the new size.
+    resizes: Vec<(usize, (u16, u16))>,
     joins: [thread::JoinHandle<()>; 2],
 }
 
 fn modal_session(call: (&str, &str)) -> ModalSession {
+    modal_session_with(vec![
+        Reply::Sse(tool_call("call-0", call.0, call.1)),
+        Reply::Sse(text(TOOL_TURN_DONE)),
+    ])
+}
+
+/// [`modal_session`] for a model that answers with `completions` in order.
+fn modal_session_with(completions: Vec<Reply>) -> ModalSession {
     let stub = Stub::start(Plan {
-        completions: vec![
-            Reply::Sse(tool_call("call-0", call.0, call.1)),
-            Reply::Sse(text(TOOL_TURN_DONE)),
-        ],
+        completions,
         ..Plan::default()
     });
     let ego = Ego::against(&stub)
@@ -7910,10 +7946,11 @@ fn modal_session(call: (&str, &str)) -> ModalSession {
     let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
     let (mut input, dsr_responder, writer_join) =
         writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
+    let size = Arc::new(Mutex::new((MODAL_ROWS, MODAL_COLS)));
+    let (reader, reader_join) = stream_with_resizable_screen(
         pair.master.try_clone_reader().expect("reader"),
         dsr_responder,
-        Some((MODAL_ROWS, MODAL_COLS)),
+        Some(Arc::clone(&size)),
     );
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
@@ -7929,9 +7966,15 @@ fn modal_session(call: (&str, &str)) -> ModalSession {
         reader,
         output,
         mark: 0,
+        size,
+        resizes: Vec::new(),
         joins: [reader_join, writer_join],
     }
 }
+
+/// How a [`ModalSession`] ended: its exit status, what the model was sent,
+/// and what the user config holds.
+type Quit = (portable_pty::ExitStatus, Vec<serde_json::Value>, String);
 
 impl ModalSession {
     fn press(&mut self, keys: &[u8]) {
@@ -7945,10 +7988,33 @@ impl ModalSession {
         until_normalized(&self.reader, &mut self.output, self.mark, needle);
     }
 
+    /// Resize the terminal; waits that follow look only at what it repaints.
+    fn resize(&mut self, rows: u16, cols: u16) {
+        drain_until_quiet(&self.reader, &mut self.output);
+        self.mark = self.output.len();
+        self.resizes.push((self.mark, (rows, cols)));
+        *self.size.lock().expect("screen size lock") = (rows, cols);
+        self.pair
+            .master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("resize");
+    }
+
     fn screen(&mut self) -> Vec<String> {
         drain_until_quiet(&self.reader, &mut self.output);
         let mut screen = vt100::Parser::new(MODAL_ROWS, MODAL_COLS, 0);
-        screen.process(&self.output);
+        let mut from = 0;
+        for &(at, (rows, cols)) in &self.resizes {
+            screen.process(&self.output[from..at]);
+            screen.screen_mut().set_size(rows, cols);
+            from = at;
+        }
+        screen.process(&self.output[from..]);
         screen
             .screen()
             .contents()
@@ -7958,10 +8024,17 @@ impl ModalSession {
     }
 
     /// Quit, and return what the model was sent and what the user config holds.
-    fn finish(mut self) -> (Vec<serde_json::Value>, String) {
+    fn finish(self) -> (Vec<serde_json::Value>, String) {
+        let (status, generations, config) = self.quit();
+        assert!(status.success(), "{status:?}");
+        (generations, config)
+    }
+
+    /// [`ModalSession::finish`] that leaves the exit status to the caller.
+    fn quit(mut self) -> Quit {
         self.input.write_all(b"/quit\r").expect("quit");
         self.input.flush().expect("quit flush");
-        assert!(bounded_exit(self.child).success());
+        let status = bounded_exit(self.child);
         drop(self.input);
         drop(self.pair);
         for join in self.joins {
@@ -7969,7 +8042,7 @@ impl ModalSession {
         }
         let config =
             std::fs::read_to_string(self.ego.home_path().join("config.toml")).unwrap_or_default();
-        (self.stub.generations(), config)
+        (status, self.stub.generations(), config)
     }
 }
 
@@ -8079,7 +8152,8 @@ fn a_stores_the_prefix_rule_and_commits_one_plain_receipt_to_the_transcript() {
     let joined = screen.join("\n");
     assert!(
         screen.iter().any(|line| {
-            line.trim_end() == "Remembered: you will not be asked again for exec(seq 1 3)."
+            line.trim_end()
+                == "Allowed run seq 1 3 · Remembered: you will not be asked again for exec(seq 1 3)."
         }),
         "the receipt is not a transcript row of its own:\n{joined}"
     );

@@ -28,9 +28,21 @@ pub fn admit_confinement(
     let env = |key| std::env::var_os(key).map(PathBuf::from);
     let cargo = env("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
     let rustup = env("RUSTUP_HOME").unwrap_or_else(|| home.join(".rustup"));
+    for source in [&cargo, &rustup] {
+        check_write_root(&home, workspace.as_path(), &resolve(source)?, &[])?;
+    }
     let temporary = env("TMPDIR").unwrap_or_else(std::env::temp_dir);
     let mbx = mbx_cache(&home)?;
-    let mut writable = vec![cargo.clone(), rustup, temporary];
+    let mut writable = vec![
+        cargo.join("registry"),
+        cargo.join("git"),
+        cargo.join(".package-cache"),
+        cargo.join(".package-cache-mutate"),
+        cargo.join(".global-cache"),
+        rustup.join("downloads"),
+        rustup.join("tmp"),
+        temporary,
+    ];
     writable.extend(mbx);
     writable.extend(env("CARGO_TARGET_DIR"));
     // Empty variables mean unset. Content caches open; host-executed pnpm
@@ -50,6 +62,25 @@ pub fn admit_confinement(
         npm.join("_logs"),
     ]);
     let (git, mut controls) = git_roots(workspace.as_path())?;
+    // Broad workspace/temp/grant roots must not reopen host-executed controls.
+    // Protect defaults too when an operator relocates the active toolchain home.
+    for root in [home.join(".cargo"), cargo.clone()] {
+        controls.extend(
+            [
+                "env",
+                "bin",
+                "config",
+                "config.toml",
+                ".crates.toml",
+                ".crates2.json",
+            ]
+            .map(|path| root.join(path)),
+        );
+    }
+    for root in [home.join(".rustup"), rustup] {
+        controls
+            .extend(["settings.toml", "toolchains", "update-hashes"].map(|path| root.join(path)));
+    }
     writable.extend(git);
     let store = pnpm.join("store");
     let versions = match std::fs::read_dir(&store) {
@@ -171,19 +202,7 @@ fn capture(
     let controls = protected(controls)?;
     let writable = canonical_set(writable)?;
     for root in &writable {
-        let path = root.as_path();
-        if path == Path::new("/")
-            || home.starts_with(path)
-            || workspace.starts_with(path)
-            || ["/System", "/Library", "/usr", "/bin", "/sbin", "/etc"]
-                .iter()
-                .any(|p| path.starts_with(p))
-            || credentials
-                .iter()
-                .any(|floor| path.starts_with(floor.as_path()))
-        {
-            return Err(error("adaptive source crosses a hard write floor"));
-        }
+        check_write_root(home, workspace, root.as_path(), &credentials)?;
     }
     Ok(AdaptivePerimeter {
         home: CanonPath::new(home),
@@ -191,6 +210,27 @@ fn capture(
         credentials,
         controls,
     })
+}
+
+fn check_write_root(
+    home: &Path,
+    workspace: &Path,
+    path: &Path,
+    credentials: &[CanonPath],
+) -> Result<(), ProcessError> {
+    if path == Path::new("/")
+        || home.starts_with(path)
+        || workspace.starts_with(path)
+        || ["/System", "/Library", "/usr", "/bin", "/sbin", "/etc"]
+            .iter()
+            .any(|root| path.starts_with(root))
+        || credentials
+            .iter()
+            .any(|floor| path.starts_with(floor.as_path()))
+    {
+        return Err(error("adaptive source crosses a hard write floor"));
+    }
+    Ok(())
 }
 
 fn mbx_cache(home: &Path) -> Result<Option<PathBuf>, ProcessError> {

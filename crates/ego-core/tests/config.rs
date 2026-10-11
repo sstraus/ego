@@ -6,7 +6,7 @@
 use ego_core::ceiling::{Budget, Ceilings};
 use ego_core::config::{
     AuthProviderLayer, ConfigError, ConfigLayer, Mode, ModelRef, PermCfg, Posture, ProfileLayer,
-    Source, Sourced, SourcedRule, Trust, resolve,
+    SettingProvenance, Source, Sourced, SourcedRule, Trust, resolve,
 };
 use ego_core::cost::{Amount, CurrencyCode, Money};
 use ego_core::permit::rule::Rule;
@@ -27,7 +27,33 @@ fn fresh_config_resolves_to_adaptive_instead_of_legacy_workspace() {
             ego_core::permit::Confinement::Workspace
         }
     );
-    assert!(effective.sandbox_source.is_none());
+    assert_eq!(effective.sandbox_provenance, SettingProvenance::Default);
+}
+
+// Catches: a layer that sets mode is not the one reported, or a profile in a
+// lower layer is credited to the higher layer that only set the other field.
+#[test]
+fn mode_and_sandbox_provenance_name_the_winning_layer_or_profile() {
+    let user = ConfigLayer::parse(
+        Source::User,
+        "mode='plan'\nsandbox='ro'\n[profile.ci]\nmode='yolo'",
+    )
+    .unwrap();
+    let flags = ConfigLayer::parse(Source::Flags, "sandbox='off'").unwrap();
+    let effective = ego_core::config::resolve_selected(
+        &[flags, user],
+        Trust::Trusted,
+        Some(("ci", Source::Env)),
+    )
+    .unwrap();
+    assert_eq!(effective.mode, Some(Mode::Yolo));
+    assert_eq!(
+        effective.mode_provenance.to_string(),
+        "user profile ci selected by env"
+    );
+    assert_eq!(effective.sandbox_provenance.to_string(), "flags");
+    let plain = resolve(&[], Trust::Trusted, None).unwrap();
+    assert_eq!(plain.mode_provenance.to_string(), "default");
 }
 
 // Catches: the adaptive default rewrites explicit values or bypasses profile/system authority.
@@ -37,7 +63,12 @@ fn explicit_sandbox_values_and_profile_system_authority_survive_adaptive_default
         let user = ConfigLayer::parse(Source::User, &format!("sandbox='{spelling}'")).unwrap();
         let effective = resolve(&[user], Trust::Trusted, None).unwrap();
         assert_eq!(effective.sandbox.unwrap().as_str(), spelling);
-        assert_eq!(effective.sandbox_source, Some(Source::User));
+        assert_eq!(
+            effective.sandbox_provenance,
+            SettingProvenance::Layer {
+                source: Source::User
+            }
+        );
     }
     let user = ConfigLayer::parse(
         Source::User,

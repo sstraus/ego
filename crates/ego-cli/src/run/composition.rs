@@ -735,6 +735,8 @@ pub(super) fn admit_windows_unconfined_start(
     };
 
     settings.effective.sandbox = Some(confinement);
+    settings.effective.sandbox_provenance =
+        ego_core::config::SettingProvenance::UnconfinedAcknowledgement;
     settings.confinement = ego_tools::exec::admit_confinement(
         confinement,
         settings.confinement.offline(),
@@ -877,8 +879,6 @@ pub(super) fn finish_rooted_settings(
     .map_err(|err| UsageError(err.to_string()))?
     .with_exec_paths(exec_paths)
     .with_roots(roots);
-
-    super::profile_roots::check_adaptive(&effective, &confinement).map_err(UsageError)?;
 
     Ok(Settings {
         run_deadline,
