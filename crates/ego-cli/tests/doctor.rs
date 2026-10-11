@@ -228,6 +228,14 @@ fn the_json_rendering_carries_the_version_and_every_section() {
 fn a_warning_or_an_unchecked_fact_is_visible_and_still_exits_zero() {
     let scratch = scratch();
     let workspace = scratch.path();
+    // macOS defaults to Adaptive, which refuses a workspace inside `$TMPDIR`
+    // (where `tempdir` puts it) and doctor reports that refusal as an error.
+    // Doctor runs in this process, so the sandbox is chosen by its config.
+    fs::write(
+        home_in(workspace).join("config.toml"),
+        "sandbox = \"workspace\"\n",
+    )
+    .expect("the scratch config is writable");
     let snapshot = observed(workspace);
 
     // An empty workspace has no credentials and no measured sandbox, so it

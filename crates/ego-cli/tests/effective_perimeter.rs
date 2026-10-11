@@ -177,6 +177,8 @@ fn overlapping_roots_refuse_read_nesting_and_warn_on_workspace_overlap() {
             .args(["config", "ls", "--effective", "--json"])
             .current_dir(&workspace)
             .env("EGO_HOME", &home)
+            // Adaptive refuses a workspace inside `$TMPDIR`, where `tempdir` puts it.
+            .env("TMPDIR", scratch.path().join("tmp"))
             .env("EGO_PROFILE", "inspect")
             .env_remove("EGO_MODEL")
             .output()
