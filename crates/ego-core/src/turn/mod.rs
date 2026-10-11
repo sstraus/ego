@@ -4952,6 +4952,24 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         turn: TurnId,
         call: &mut PendingCall,
     ) -> Result<ToolOutcome, StoreError> {
+        let dispatch_started = Instant::now();
+        let outcome = self
+            .run_tool_inner(policy, policy_snapshot, turn, call)
+            .await;
+        if call.timing.execution_ms.is_none() {
+            let elapsed = u64::try_from(dispatch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            call.timing.execution_ms = Some(elapsed.saturating_sub(call.timing.approval_wait_ms));
+        }
+        outcome
+    }
+
+    async fn run_tool_inner(
+        &mut self,
+        policy: &PolicyEngine,
+        policy_snapshot: &Arc<GenerationPolicySnapshot>,
+        turn: TurnId,
+        call: &mut PendingCall,
+    ) -> Result<ToolOutcome, StoreError> {
         let answered = |ok, text: String| ToolOutcome::Answered {
             ok,
             result: ToolResult::builtin(text),
