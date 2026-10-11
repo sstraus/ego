@@ -399,10 +399,10 @@ async fn list(
         ));
     } else {
         for server in listing.servers {
-            let state = if server.configured {
-                "configured"
-            } else {
-                "masked"
+            let state = match (server.configured, server.disabled) {
+                (true, true) => "disabled",
+                (true, false) => "configured",
+                (false, _) => "masked",
             };
             let diagnostic = server
                 .diagnostic
@@ -442,6 +442,9 @@ impl Listing {
 struct ServerReport {
     name: String,
     configured: bool,
+    /// Present only for an entry marked `enabled = false`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    disabled: bool,
     admitted: bool,
     health: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -465,9 +468,14 @@ impl ServerReport {
             .unwrap_or("absent");
         let projection = RegistryStatusReport::new(status.server(name));
         match entry {
-            ResolvedMcpEntry::Configured { server, provenance } => Self {
+            ResolvedMcpEntry::Configured {
+                server,
+                provenance,
+                enabled,
+            } => Self {
                 name: name.to_string(),
                 configured: true,
+                disabled: !enabled,
                 admitted: matches!(
                     status.server(name).map(|server| server.state()),
                     Some(McpServerState::Admitted)
@@ -484,6 +492,7 @@ impl ServerReport {
             ResolvedMcpEntry::Tombstone { provenance } => Self {
                 name: name.to_string(),
                 configured: false,
+                disabled: false,
                 admitted: false,
                 health,
                 generation: projection.generation,

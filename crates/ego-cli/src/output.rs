@@ -452,7 +452,7 @@ impl EventSink for TextSink<'_> {
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
                     self.finish();
-                    self.out.note(&format!("MCP: {error}"));
+                    self.out.note(&format!("{error}. Inspect with ego mcp ls."));
                 }
             }
             // `AgentMessage` and not "either message kind": stdout is the

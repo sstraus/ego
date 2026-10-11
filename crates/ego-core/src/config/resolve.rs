@@ -46,6 +46,9 @@ pub enum ResolvedMcpEntry {
     Configured {
         server: McpServerConfig,
         provenance: McpConfigProvenance,
+        /// False when the entry says `enabled = false`: configured, but
+        /// attached only by an explicit selection.
+        enabled: bool,
     },
     Tombstone {
         provenance: McpConfigProvenance,
@@ -779,10 +782,13 @@ fn apply_mcp_entries(
 ) {
     for (name, entry) in entries {
         let entry = match entry {
-            McpLayerEntry::Server(server) => ResolvedMcpEntry::Configured {
-                server: server.clone(),
-                provenance: provenance.clone(),
-            },
+            McpLayerEntry::Server(server) | McpLayerEntry::Disabled(server) => {
+                ResolvedMcpEntry::Configured {
+                    server: server.clone(),
+                    provenance: provenance.clone(),
+                    enabled: matches!(entry, McpLayerEntry::Server(_)),
+                }
+            }
             McpLayerEntry::Tombstone => ResolvedMcpEntry::Tombstone {
                 provenance: provenance.clone(),
             },

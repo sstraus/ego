@@ -112,7 +112,9 @@ fn refresh() -> McpRegistryRefresh {
         .entries()
         .iter()
         .filter_map(|(name, entry)| match entry {
-            ResolvedMcpEntry::Configured { server, provenance } => {
+            ResolvedMcpEntry::Configured {
+                server, provenance, ..
+            } => {
                 let McpServerConfig::Stdio(_) = server else {
                     unreachable!()
                 };

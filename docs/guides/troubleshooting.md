@@ -184,9 +184,10 @@ not a live session reload.
 
 The run also observed answered approval blocks remaining in scrollback, slow
 exec calls, and a configured MCP server unavailable without a visible warning.
-Startup now warns about configured servers that were not attached and reports
-the live registry's sanitized failures. Inspect configuration with `ego mcp ls`
-and select a server with `--mcp NAME`. Configuration alone does not attach it.
+Startup now attaches every enabled configured server and reports each one that
+admission refuses or that fails to start, once, with its sanitized cause.
+Inspect configuration with `ego mcp ls`. Set `enabled = false` in the entry to
+detach a server; `--mcp NAME` still attaches it for one run.
 One auto-mode access check later took 4 minutes 29 seconds.
 Exec latency in that run was not isolated to a proven layer; do not treat sandbox
 startup cost as an established cause. Use the built-in read/grep tools for file

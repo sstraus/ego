@@ -2,9 +2,10 @@
 mod support;
 use support::{Ego, Plan, Stub};
 
-// Catches: an absent configured server silently disappears from the live session.
+// Catches: a configured server that cannot start disappears from the live
+// session without a visible cause, or leaks its raw configuration.
 #[test]
-fn interactive_start_warns_when_a_configured_mcp_server_is_absent() {
+fn interactive_start_reports_a_configured_mcp_server_that_cannot_start() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
     let missing = ego.workspace_path().join("missing-server");
@@ -21,9 +22,13 @@ fn interactive_start_warns_when_a_configured_mcp_server_is_absent() {
         .run_pty("hello");
     assert_eq!(result.code, Some(0), "{}", result.stdout);
     assert!(
-        result
-            .stdout
-            .contains("MCP server `missing`: configured but not attached."),
+        !result.stdout.contains("configured but not attached"),
+        "{}",
+        result.stdout
+    );
+    assert_eq!(
+        result.stdout.matches("MCP server `missing`").count(),
+        1,
         "{}",
         result.stdout
     );

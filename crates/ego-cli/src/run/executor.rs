@@ -386,7 +386,8 @@ pub(super) fn complete_run_context(
         format!("ui={:?}", effective.ui),
     ];
     let config_digest = canonical_evidence_digest(&(config_facts, auth, mcp_config))?;
-    let mcp = config::selected_mcp(args, effective, cwd)?
+    let mcp = attach_mcp(args, effective, confinement, cwd)?
+        .attached
         .into_iter()
         .map(|(name, server, provenance)| {
             let transport = match &server {

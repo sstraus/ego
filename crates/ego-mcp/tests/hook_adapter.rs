@@ -268,7 +268,9 @@ fn capture_registry(result: serde_json::Value) -> McpRegistryCapture {
         .entries()
         .iter()
         .find_map(|(name, entry)| match entry {
-            ResolvedMcpEntry::Configured { server, provenance } => Some((
+            ResolvedMcpEntry::Configured {
+                server, provenance, ..
+            } => Some((
                 Arc::new(
                     McpServerAdmission::new(
                         name.clone(),

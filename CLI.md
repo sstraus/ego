@@ -451,8 +451,10 @@ confined execs. The launcher was subsequently fixed.
                         repeatable; exact image bytes admitted as a durable
                         content block before provider projection
     --tools LIST        restrict builtin tools;  --no-tools for pure generation
-    --mcp NAME|@cfg.json  attach a named effective or strict explicitly named
-                          JSON MCP server for this invocation (repeatable)
+    --mcp NAME|@cfg.json  select an effective server by name (even one marked
+                          enabled = false) or attach a strict explicitly named
+                          JSON MCP server for this invocation (repeatable);
+                          enabled effective servers attach without it
 ```
 
 **The general session shape**

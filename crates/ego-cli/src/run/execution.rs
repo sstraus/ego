@@ -92,21 +92,17 @@ async fn resolve_invocation_phase(
                     "Resume model changed: {previous} -> {selected} (current configuration or flags)."
                 ));
             }
-            let selected_mcp =
-                config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
+            let attachment = attach_mcp(
+                args,
+                &settings.effective,
+                &settings.confinement,
+                &settings.cwd,
+            )
+            .map_err(usage)?;
             if !args.quiet {
-                for (name, _, _) in config::configured_mcp(&settings.effective) {
-                    if !selected_mcp
-                        .iter()
-                        .any(|(selected, _, _)| selected == &name)
-                    {
-                        diagnostics.note(&format!(
-                            "MCP server `{name}`: configured but not attached. Inspect with ego mcp ls; attach with --mcp {name}."
-                        ));
-                    }
-                }
+                note_refused_mcp(diagnostics, &attachment.refused);
             }
-            admit_mcp_transports(&settings.confinement, &selected_mcp).map_err(usage)?;
+            let selected_mcp = attachment.attached;
             let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
             let refresh = ego_mcp::McpRegistryRefresh::new(
                 selected_mcp,
@@ -677,10 +673,6 @@ async fn admit_run_phase<'store>(
     }
     debug_assert!(materialized.context.is_some());
     let mcp_status = scoped.mcp_registry.status();
-    for error in mcp_status.mcp_errors() {
-        host.diagnostics
-            .note(&format!("{error}. Inspect with ego mcp ls."));
-    }
     Ok(AdmittedRun {
         opened: materialized
             .opened

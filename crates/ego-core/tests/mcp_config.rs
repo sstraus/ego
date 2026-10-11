@@ -164,7 +164,7 @@ fn resolution_is_whole_entry_profile_trust_and_ambient_aware() {
     .expect("resolution");
     let name = "x".parse().expect("name");
     assert!(
-        matches!(effective.mcp.entry(&name), Some(ResolvedMcpEntry::Configured { server: McpServerConfig::Http(h), provenance: McpConfigProvenance::Profile { source: Source::User, name: profile_name } }) if h.url.to_string() == "https://profile" && profile_name == "dev")
+        matches!(effective.mcp.entry(&name), Some(ResolvedMcpEntry::Configured { server: McpServerConfig::Http(h), provenance: McpConfigProvenance::Profile { source: Source::User, name: profile_name }, .. }) if h.url.to_string() == "https://profile" && profile_name == "dev")
     );
     assert!(effective.mcp.configured(&name).is_some());
     let tombstone = layer(Source::User, "[mcp.servers.x]\nremoved=true");
@@ -315,4 +315,33 @@ fn credential_store_errors_have_only_fixed_closed_diagnostics() {
         assert_eq!(error.diagnostic(), repeated.diagnostic());
         assert!(!format!("{error:?} {error}").contains("opaque"));
     }
+}
+
+// Catches: `enabled = false` dropped by the decoder, or surviving a higher layer's whole-entry replacement.
+#[test]
+fn enabled_false_marks_the_entry_and_a_whole_entry_replacement_resets_it() {
+    let name: McpServerName = "x".parse().expect("name");
+    let disabled = layer(
+        Source::User,
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='base'\nenabled=false",
+    );
+    assert!(matches!(
+        disabled.value.mcp.servers.get(&name),
+        Some(McpLayerEntry::Disabled(McpServerConfig::Stdio(s))) if s.command == "base"
+    ));
+    let effective =
+        resolve(std::slice::from_ref(&disabled), Trust::Trusted, None).expect("resolution");
+    assert!(matches!(
+        effective.mcp.entry(&name),
+        Some(ResolvedMcpEntry::Configured { enabled: false, .. })
+    ));
+    let replacement = layer(
+        Source::Project,
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='project'",
+    );
+    let effective = resolve(&[disabled, replacement], Trust::Trusted, None).expect("resolution");
+    assert!(matches!(
+        effective.mcp.entry(&name),
+        Some(ResolvedMcpEntry::Configured { enabled: true, server: McpServerConfig::Stdio(s), .. }) if s.command == "project"
+    ));
 }

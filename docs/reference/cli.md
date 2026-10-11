@@ -24,7 +24,7 @@ Run an agent from a prompt, headless.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
-- `--mcp <NAME|@FILE>` — Attach a named effective or strict invocation-scoped JSON MCP server
+- `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support
@@ -70,7 +70,7 @@ Continue a session; no ID = latest in this workspace.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
-- `--mcp <NAME|@FILE>` — Attach a named effective or strict invocation-scoped JSON MCP server
+- `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support
