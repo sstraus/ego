@@ -161,13 +161,13 @@ pub(super) async fn drive_execution<S: EventSink>(
         .mcp
         .entries()
         .iter()
-        .filter_map(|(name, entry)| {
-            (matches!(
+        .filter(|(name, entry)| {
+            matches!(
                 entry,
                 ego_core::config::ResolvedMcpEntry::Configured { enabled: false, .. }
-            ) && mcp_registry.status().server(name).is_none())
-            .then(|| name.clone())
+            ) && mcp_registry.status().server(name).is_none()
         })
+        .map(|(name, _)| name.clone())
         .collect();
     let clock = *clock;
     let sink = &sink;
