@@ -67,15 +67,12 @@ pub(super) fn choose_permission_action(
         busy,
         "Choose permission operation",
         &options,
-        true,
-        false,
+        (true, false),
     ) {
-        PermissionField::Value(id) => {
-            match choices.iter().copied().find(|choice| choice.as_str() == id) {
-                Some(choice) => choice,
-                None => return None,
-            }
-        }
+        PermissionField::Value(id) => choices
+            .iter()
+            .copied()
+            .find(|choice| choice.as_str() == id)?,
         PermissionField::Cancelled => return None,
         PermissionField::Propagate(line) => return Some(line),
     };
@@ -131,8 +128,7 @@ fn build_permission_request(
                 busy,
                 "Choose rule effect",
                 &[("allow", "Allow"), ("deny", "Deny")],
-                false,
-                false,
+                (false, false),
             ) {
                 PermissionField::Value(value) => value,
                 PermissionField::Cancelled => return None,
@@ -256,8 +252,7 @@ fn read_permission_call(
         busy,
         "Choose admitted tool",
         &borrowed,
-        false,
-        false,
+        (false, false),
     ) {
         PermissionField::Value(value) => value,
         PermissionField::Cancelled => {
@@ -301,17 +296,6 @@ fn read_permission_call(
     PermissionCallField::Value { call, workspace }
 }
 
-fn permission_selector_key(
-    status: &SharedStatus,
-    command: &str,
-    cancel_missing_key: bool,
-) -> Result<Option<SelectorKey>, ()> {
-    match next_selector_key(status, command) {
-        None if cancel_missing_key => Err(()),
-        key => Ok(key),
-    }
-}
-
 fn select_permission_value(
     editor: &mut Reedline,
     phase: &SurfacePhase,
@@ -319,8 +303,7 @@ fn select_permission_value(
     busy: bool,
     prompt: &str,
     choices: &[(&str, &str)],
-    cancel_missing_key: bool,
-    ignore_unexpected_line: bool,
+    (cancel_missing_key, ignore_unexpected_line): (bool, bool),
 ) -> PermissionField {
     if choices.is_empty() {
         return PermissionField::Cancelled;
@@ -356,10 +339,11 @@ fn select_permission_value(
             .unwrap_or_else(|| answer(false, editor.read_line(&question)))
         {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let key = match permission_selector_key(status, &command, cancel_missing_key) {
-                    Ok(Some(key)) => key,
-                    Ok(None) => continue,
-                    Err(()) => break PermissionField::Cancelled,
+                let Some(key) = next_selector_key(status, &command) else {
+                    if cancel_missing_key {
+                        break PermissionField::Cancelled;
+                    }
+                    continue;
                 };
                 let mut selector = selector.lock().expect("permission value selector lock");
                 selector.key(key);
@@ -439,8 +423,7 @@ pub(super) fn choose_policy_mode(
         busy,
         "Choose execution mode",
         &borrowed,
-        true,
-        false,
+        (true, false),
     ) {
         PermissionField::Value(id) => modes
             .iter()
@@ -562,8 +545,7 @@ pub(super) fn choose_statusline_preset(
         busy,
         "Choose status-line setup",
         &choices,
-        false,
-        true,
+        (false, true),
     ) {
         PermissionField::Value(id) => STATUSLINE_PRESETS
             .iter()
@@ -631,11 +613,27 @@ mod tests {
     // Catches: sharing the selector silently retries a missing action-menu key.
     #[test]
     fn action_menu_cancels_when_next_selector_key_returns_none() {
-        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
-        assert!(permission_selector_key(&status, "wake", true).is_err());
-        assert!(matches!(
-            permission_selector_key(&status, "wake", false),
-            Ok(None)
-        ));
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[
+            EditCommand::InsertString("draft text".into()),
+            EditCommand::MoveToPosition {
+                position: 5,
+                select: false,
+            },
+        ]);
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            origin: InputOrigin::BracketedPaste,
+            picker_keys: vec!["invalid-key".into(), "enter".into()],
+            ..SurfaceStatus::default()
+        }));
+        assert!(choose_permission_action(&mut editor, &phase, &status, true).is_none());
+        assert_eq!(editor.current_buffer_contents(), "draft text");
+        assert_eq!(editor.current_insertion_point(), 5);
+        assert_eq!(phase.get(), EditPhase::Busy);
+        let status = status.lock().unwrap();
+        assert_eq!(status.origin, InputOrigin::BracketedPaste);
+        assert!(status.question_selector.is_none());
+        assert!(status.picker_keys.is_empty());
     }
 }
