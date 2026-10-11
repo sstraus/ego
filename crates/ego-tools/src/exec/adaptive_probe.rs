@@ -13,29 +13,36 @@ pub(super) async fn measure(
     let Some(perimeter) = policy.adaptive_perimeter() else {
         return false;
     };
-    let Some(parent) = policy.workspace().as_path().parent() else {
+    // A workspace's parent need not be host-writable. Captured HOME offers
+    // another location, but every candidate must preserve the negative probe.
+    let outside = policy
+        .workspace()
+        .as_path()
+        .parent()
+        .into_iter()
+        .chain([perimeter.home.as_path()])
+        .find_map(|parent| {
+            let directory = tempfile::Builder::new()
+                .prefix(".ego-adaptive-probe-")
+                .tempdir_in(parent)
+                .ok()?;
+            let path = fs::canonicalize(directory.path()).ok()?;
+            let covered = path.starts_with(policy.workspace().as_path())
+                || path.starts_with(scratch.as_path())
+                || perimeter
+                    .writable
+                    .iter()
+                    .chain(&perimeter.credentials)
+                    .any(|root| path.starts_with(root.as_path()))
+                || policy
+                    .roots()
+                    .iter()
+                    .any(|root| path.starts_with(root.path().as_path()));
+            (!covered).then_some((directory, path))
+        });
+    let Some((_outside, outside_path)) = outside else {
         return false;
     };
-    let Ok(outside) = tempfile::Builder::new()
-        .prefix(".ego-adaptive-probe-")
-        .tempdir_in(parent)
-    else {
-        return false;
-    };
-    let Ok(outside_path) = fs::canonicalize(outside.path()) else {
-        return false;
-    };
-    if perimeter
-        .writable
-        .iter()
-        .any(|root| outside_path.starts_with(root.as_path()))
-        || policy
-            .roots()
-            .iter()
-            .any(|root| outside_path.starts_with(root.path().as_path()))
-    {
-        return false;
-    }
     let inside = match tempfile::Builder::new()
         .prefix(".ego-adaptive-probe-")
         .tempdir_in(policy.workspace().as_path())

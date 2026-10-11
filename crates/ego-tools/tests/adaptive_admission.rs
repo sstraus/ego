@@ -67,10 +67,64 @@ fn admit(
     )
 }
 
+fn git_at(root: &Path, args: &[&std::ffi::OsStr]) {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[path = "support/adaptive_grants.rs"]
+mod adaptive_grants;
+#[path = "support/adaptive_git_controls.rs"]
+mod git_controls;
+#[path = "support/adaptive_git_layouts.rs"]
+mod git_layouts;
+
+// Catches: the outside probe uses only the workspace parent even when that
+// parent is host-unwritable.
+#[test]
+fn adaptive_probe_uses_safe_outside_location_for_locked_workspace() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(root) = isolated("adaptive_probe_uses_safe_outside_location_for_locked_workspace")
+    else {
+        return;
+    };
+    let locked = root.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    let workspace = locked.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = std::panic::catch_unwind(|| {
+        execute(
+            admit(&workspace).unwrap(),
+            &root,
+            vec![
+                "/usr/bin/touch".into(),
+                workspace.join("created").into_os_string(),
+            ],
+        )
+    });
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(result.unwrap().is_ok());
+    assert!(workspace.join("created").is_file());
+}
+
 fn execute(
     policy: ego_core::permit::RunConfinement,
     root: &Path,
     argv: Vec<std::ffi::OsString>,
+) -> Result<ego_core::permit::ToolResult, ego_core::permit::ProcessError> {
+    execute_with_grants(policy, root, argv, None)
+}
+
+fn execute_with_grants(
+    policy: ego_core::permit::RunConfinement,
+    root: &Path,
+    argv: Vec<std::ffi::OsString>,
+    grants: Option<Arc<dyn ego_core::permit::SandboxGrantPort>>,
 ) -> Result<ego_core::permit::ToolResult, ego_core::permit::ProcessError> {
     let evidence =
         SessionEvidenceStore::open(root.join("evidence"), SessionId::new(), 1024 * 1024).unwrap();
@@ -81,7 +135,7 @@ fn execute(
         EnvPolicy::Inherited,
     )
     .unwrap();
-    let config = ExecRunConfig::new(
+    let mut config = ExecRunConfig::new(
         policy,
         evidence,
         CancelToken::new(),
@@ -90,6 +144,9 @@ fn execute(
         None,
         Arc::new(ego_tools::http::SystemResolver::new()),
     );
+    if let Some(grants) = grants {
+        config = config.with_sandbox_grants(grants);
+    }
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

@@ -1,7 +1,9 @@
 //! Adaptive Seatbelt policy. Every path remains encoded SBPL data.
 
 use super::{ProfileError, ProfileInput, path_literal};
+use crate::exec::adaptive::floor;
 use ego_core::permit::SandboxAccess;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
@@ -37,14 +39,63 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     for path in &perimeter.controls {
         subpath(&mut out, path.as_path())?;
     }
-    out.push_str(
-        "  (regex #\"(^|/)[.]git/(config([.]worktree)?|hooks|commondir|gitdir)(/|$)\")\n)\n",
-    );
+    out.push_str(&format!(
+        "  (regex #\"{}\")\n  (regex #\"{}\")\n",
+        floor::GIT_ENTRY,
+        floor::GIT_CONTROL
+    ));
+    // A captured Git root has config and hooks controls even when absent.
+    // Cover nested submodules/worktrees beneath separately named metadata too.
+    for root in floor::metadata_roots(perimeter) {
+        rooted_regex(&mut out, root, floor::METADATA_CONTROL)?;
+    }
+    out.push_str(")\n(deny file-write-unlink\n");
+    // Protect structural boundaries from relocation, while leaving transient
+    // operation directories and objects/refs cleanup available to Git.
+    out.push_str(&format!(
+        "  (require-all (regex #\"{}\") (vnode-type DIRECTORY)\n    (require-not (regex #\"{}\")))\n",
+        floor::GIT_BOUNDARY,
+        floor::GIT_MODULE_TRANSIENT
+    ));
+    for root in floor::metadata_roots(perimeter) {
+        out.push_str("  (require-all\n");
+        rooted_regex(&mut out, root, floor::METADATA_BOUNDARY)?;
+        out.push_str("    (vnode-type DIRECTORY)\n    (require-not\n");
+        rooted_regex(&mut out, root, floor::METADATA_MODULE_TRANSIENT)?;
+        out.push_str("    ))\n");
+    }
+    // Subpath denies protect contents, but a rename of any parent would move
+    // those contents out from under their captured names. Deny only unlink
+    // on each ancestor entry; operational descendants remain writable.
+    let ancestors = perimeter
+        .controls
+        .iter()
+        .chain(&perimeter.credentials)
+        .flat_map(|path| path.as_path().ancestors().skip(1))
+        .collect::<BTreeSet<_>>();
+    for path in ancestors {
+        out.push_str("  (literal ");
+        out.push_str(&path_literal(path)?);
+        out.push_str(")\n");
+    }
+    out.push_str(")\n");
     out.push_str("(deny file-read* file-write* process-exec* (require-all\n");
-    out.push_str("  (regex #\"(^|/)[.]env[^/]*(/|$)\")\n  (require-not (subpath ");
+    out.push_str(&format!(
+        "  (regex #\"{}\")\n  (require-not (subpath ",
+        floor::ENV
+    ));
     out.push_str(&path_literal(input.workspace)?);
     out.push_str("))))\n");
     Ok(out)
+}
+
+fn rooted_regex(out: &mut String, root: &Path, suffix: &str) -> Result<(), ProfileError> {
+    // Validate host data with the same rules as literal paths. SBPL `#"..."`
+    // is raw: its backslashes reach the regex unchanged, so do not re-escape.
+    path_literal(root)?;
+    let pattern = floor::rooted_pattern(root, suffix);
+    out.push_str(&format!("  (regex #\"{pattern}\")\n"));
+    Ok(())
 }
 
 fn subpath(out: &mut String, path: &Path) -> Result<(), ProfileError> {

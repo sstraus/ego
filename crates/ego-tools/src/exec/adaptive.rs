@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 use ego_core::permit::{AdaptivePerimeter, CanonPath, Confinement, ProcessError, RunConfinement};
 
+#[path = "adaptive_floor.rs"]
+pub(super) mod floor;
+
 /// The process-edge constructor shared by CLI, ACP, and diagnostics.
 pub fn admit_confinement(
     level: Confinement,
@@ -214,10 +217,7 @@ fn git_roots(workspace: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProcessEr
             Err(e) => return Err(error(format!("cannot read git common directory: {e}"))),
         };
         roots.push(common.clone());
-        if common.file_name() != Some(std::ffi::OsStr::new(".git"))
-            || !common.join("objects").is_dir()
-            || !common.join("HEAD").is_file()
-        {
+        if !common.join("objects").is_dir() || !common.join("HEAD").is_file() {
             return Err(error(
                 "git common directory is not a verified repository metadata root",
             ));
@@ -230,7 +230,7 @@ fn git_roots(workspace: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProcessEr
             }
             let back = std::fs::read_to_string(git.join("gitdir"))
                 .map_err(|_| error("linked worktree has no back pointer"))?;
-            let back = std::fs::canonicalize(back.trim())
+            let back = std::fs::canonicalize(git.join(back.trim()))
                 .map_err(|_| error("invalid worktree back pointer"))?;
             if back
                 != std::fs::canonicalize(ancestor.join(".git"))
