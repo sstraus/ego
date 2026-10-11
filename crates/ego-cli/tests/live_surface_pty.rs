@@ -4058,8 +4058,8 @@ fn live_surface_ctrl_enter_steers_a_busy_turn_once() {
     );
 }
 
-// Catches: Ctrl+Enter on a busy composer inserting a newline or queueing behind
-// the turn, instead of the one durable expedite Esc uses, and a second delivery.
+// Catches: Up on a busy composer leaving the old text queued, or delivering the
+// original and the edited text both.
 #[test]
 fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
     let steer = "original queued text";
@@ -4105,7 +4105,7 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
     let steer_start = output.len();
     input.write_all(steer.as_bytes()).expect("steer text");
     input.write_all(b"\r").expect("queue Enter");
-    input.flush().expect("Ctrl+Enter flush");
+    input.flush().expect("queue Enter flush");
     until_normalized(
         &reader,
         &mut output,
@@ -4161,11 +4161,7 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
     writer_join.join().expect("writer thread panicked");
 
     let generations = stub.generations();
-    assert_eq!(
-        generations.len(),
-        2,
-        "one interrupted turn, one steered turn"
-    );
+    assert_eq!(generations.len(), 2, "the initial turn and one queued turn");
     assert_eq!(
         generations
             .iter()
@@ -4192,6 +4188,103 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
         events.matches("PromptRetracted").count(),
         1,
         "withdrawal is durable"
+    );
+}
+
+// Catches: recalling pasted slash text turns the next Enter into a local action,
+// withdrawing the user prompt instead of delivering it once to the provider.
+#[test]
+fn live_surface_recalled_pasted_slash_text_is_not_reinterpreted_as_a_command() {
+    let steer = "/help recalled prompt";
+    let edited = steer;
+    let (initial, initial_gate) = gated_paced_line("STREAMED-BEFORE-STEER");
+    let stub = Stub::start(Plan {
+        completions: vec![initial, Reply::Sse(text("STEER-RECEIVED"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"STREAMED-BEFORE-STEER");
+
+    let steer_start = output.len();
+    input.write_all(b"\x1b[200~").expect("paste start");
+    input
+        .write_all(steer.as_bytes())
+        .expect("pasted prompt text");
+    input.write_all(b"\x1b[201~").expect("paste end");
+    input.write_all(b"\r").expect("queue Enter");
+    input.flush().expect("queue flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        steer_start,
+        "Messages to be submitted after next tool call",
+    );
+    let recall_start = output.len();
+    input.write_all(b"\x1b[A").expect("recall Up");
+    input.flush().expect("recall flush");
+    until_normalized(&reader, &mut output, recall_start, steer);
+    input.write_all(b"\r").expect("requeue Enter");
+    input.flush().expect("requeue flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        recall_start,
+        "Messages to be submitted after next tool call",
+    );
+    initial_gate.release();
+    until(&reader, &mut output, b"STEER-RECEIVED");
+    until_prompt_from(&reader, &mut output, steer_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        2,
+        "initial generation and one recalled prompt delivery"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, edited))
+            .collect::<Vec<_>>(),
+        vec![0, 1]
     );
 }
 
