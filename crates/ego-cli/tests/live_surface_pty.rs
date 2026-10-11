@@ -4210,11 +4210,12 @@ fn model_picker_title_remains_visible_in_a_short_terminal() {
 
 #[test]
 fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
+    let gate = ReleaseGate::new();
     let stub = Stub::start(Plan {
-        completions: vec![Reply::Paced {
+        completions: vec![Reply::GatedPaced {
             head: String::new(),
             tail: text("ANSWER-ON-REPLY-ROW"),
-            pause: Duration::from_secs(2),
+            gate: Arc::clone(&gate),
         }],
         ..Plan::default()
     });
@@ -4267,12 +4268,28 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
         "status must occur once before the user turn: {visible:?}"
     );
 
+    gate.release();
     until_normalized(&reader, &mut output, 0, "ANSWER-ON-REPLY-ROW");
-    // The turn-end redraw follows the reply text by more than the quiet window
-    // on a slow host; wait for the idle composer instead of sampling the
-    // streaming prompt.
-    until_idle_composer_below(&reader, &mut output, 24, 80, "ANSWER-ON-REPLY-ROW");
-    drain_until_quiet(&reader, &mut output);
+    // A composer may be drawn before a queued working-row repaint. Observe
+    // the complete idle screen after draining, not a transient prompt frame.
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    loop {
+        drain_until_quiet(&reader, &mut output);
+        let lines = screen_rows(&output, 24, 80);
+        if lines.iter().any(|line| line.trim_end() == ">")
+            && !lines.iter().any(|line| line.contains("Esc to interrupt"))
+            && lines
+                .iter()
+                .any(|line| line.contains("ANSWER-ON-REPLY-ROW"))
+        {
+            break;
+        }
+        output.extend(
+            reader
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("delayed reply never reached the idle screen"),
+        );
+    }
     let mut final_screen = vt100::Parser::new(24, 80, 0);
     final_screen.process(&output);
     let visible = final_screen.screen().contents();

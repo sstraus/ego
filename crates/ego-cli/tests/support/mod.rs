@@ -1702,3 +1702,20 @@ impl AcpHost {
         self.running.finish().stderr
     }
 }
+
+pub fn configure_permission_profile(places: &Places) {
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"workspace\"\nmode = \"default\"\n",
+    )
+    .expect("isolated profile configuration");
+}
+
+pub fn permission_host(places: &Places, stub: &Stub) -> AcpHost {
+    AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), Some(stub))
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    )
+}
