@@ -63,7 +63,7 @@ fn rows_with(screen: &[String], needle: &str) -> usize {
 /// row, each receipt on one row of its own, and the transcript above intact.
 fn assert_settled(name: &str, screen: &[String], receipts: &[&str]) {
     let shown = screen.join("\n");
-    for stale in ["[y] yes", "Allow run seq", "Esc cancels"] {
+    for stale in ["[y] yes", "Allow run seq", "Esc to interrupt"] {
         assert_eq!(
             rows_with(screen, stale),
             0,
@@ -280,7 +280,7 @@ fn a_draft_typed_before_the_approval_returns_once_after_it() {
     // The provider holds the tool call, so the turn stays busy while the
     // draft is typed.
     session.press(b"use the tools\r");
-    session.wait("thinking");
+    session.wait("Working");
     session.press(b"draft kept aside");
     session.wait("draft kept aside");
     gate.release();

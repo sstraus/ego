@@ -159,20 +159,16 @@ fn readable(raw: &str) -> String {
 }
 
 fn is_prompt_repaint(line: &str) -> bool {
-    line.replace("working — Esc cancels |", "")
-        .replace("Esc cancels |", "")
-        .replace('>', "")
-        .trim()
-        .is_empty()
+    line.replace('>', "").trim().is_empty()
 }
 
 fn is_thinking_repaint(line: &str) -> bool {
-    let Some((frame, elapsed)) = line.split_once(" thinking for ") else {
+    let Some((frame, elapsed)) = line.split_once(" Working ") else {
         return false;
     };
     ["◐", "◓", "◑", "◒"].contains(&frame)
         && elapsed
-            .strip_suffix("s — Esc cancels")
+            .strip_suffix("s · Esc to interrupt")
             .is_some_and(|seconds| seconds.parse::<u64>().is_ok())
 }
 
@@ -245,7 +241,7 @@ fn strip_escapes(raw: &str) -> String {
 
 #[test]
 fn readable_discards_status_prompt_repaints_but_keeps_transcript_rows() {
-    let raw = "\x1b]0;C:\\ego.exe\x07Trust files? [y/N]\r\nTrust files? [y/N] yes\r\nhello\r\nworking — Esc cancels | > working — Esc cancels | >\r\nanswer\r\n> ";
+    let raw = "\x1b]0;C:\\ego.exe\x07Trust files? [y/N]\r\nTrust files? [y/N] yes\r\nhello\r\n> >\r\nanswer\r\n> ";
 
     assert_eq!(readable(raw), "Trust files? [y/N] yes\nhello\nanswer\n");
 }
@@ -254,7 +250,7 @@ fn readable_discards_status_prompt_repaints_but_keeps_transcript_rows() {
 fn readable_discards_reply_row_repaints_but_keeps_the_answer() {
     // The real PTY stream after the reply-row change redraws an echoed prompt,
     // a timed thinking row, and a busy composer before the answer arrives.
-    let raw = "hello> hello\r\n◐ thinking for 0s — Esc cancels\r\n◓ thinking for 1s — Esc cancels\r\nEsc cancels | >\r\na launch transcript\r\n";
+    let raw = "hello> hello\r\n◐ Working 0s · Esc to interrupt\r\n>\r\n◓ Working 1s · Esc to interrupt\r\n>\r\na launch transcript\r\n";
     assert_eq!(readable(raw), "hello\na launch transcript\n");
 }
 

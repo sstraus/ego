@@ -1414,17 +1414,14 @@ fn status_right(status: &SharedStatus) -> String {
         .unwrap_or_default()
 }
 
-fn status_row(status: &SurfaceStatus, reply_started: bool) -> String {
+fn status_row(status: &SurfaceStatus) -> String {
     if status.activity {
-        if reply_started {
-            return String::new();
-        }
         let elapsed = status
             .activity_since
             .map(|started| started.elapsed().as_secs())
             .unwrap_or(0);
         return format!(
-            "{} thinking for {elapsed}s — Esc cancels\n",
+            "{} Working {elapsed}s \x1b[2m· Esc to interrupt\x1b[22m\n",
             ACTIVITY_FRAMES[(elapsed as usize) % ACTIVITY_FRAMES.len()]
         );
     }
@@ -1451,10 +1448,8 @@ impl Prompt for Waiting {
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
         let status = self.status.lock().expect("surface status lock");
-        let streaming = status.activity && status.reply_started.load(Ordering::Acquire);
-        let row = status_row(&status, streaming);
-        let cancel = if streaming { "Esc cancels | " } else { "" };
-        Cow::Owned(format!("{row}{}{cancel}> ", status_prefix(&status)))
+        let row = status_row(&status);
+        Cow::Owned(format!("{row}{}> ", status_prefix(&status)))
     }
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,
