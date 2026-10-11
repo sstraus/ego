@@ -1,3 +1,5 @@
+#[path = "live_surface_pty/permission_receipts.rs"]
+mod permission_receipts;
 mod support;
 #[path = "live_surface_pty/workspace_trust.rs"]
 mod workspace_trust;
@@ -7878,11 +7880,16 @@ struct ModalSession {
 }
 
 fn modal_session(call: (&str, &str)) -> ModalSession {
+    modal_session_with(vec![
+        Reply::Sse(tool_call("call-0", call.0, call.1)),
+        Reply::Sse(text(TOOL_TURN_DONE)),
+    ])
+}
+
+/// [`modal_session`] for a model that answers with `completions` in order.
+fn modal_session_with(completions: Vec<Reply>) -> ModalSession {
     let stub = Stub::start(Plan {
-        completions: vec![
-            Reply::Sse(tool_call("call-0", call.0, call.1)),
-            Reply::Sse(text(TOOL_TURN_DONE)),
-        ],
+        completions,
         ..Plan::default()
     });
     let ego = Ego::against(&stub)
