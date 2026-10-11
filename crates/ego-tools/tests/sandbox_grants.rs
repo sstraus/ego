@@ -60,7 +60,7 @@ impl SandboxGrantPort for Seat {
         self.granted.lock().expect("granted").clone()
     }
 
-    fn ask<'a>(&'a self, request: &'a SandboxGrant) -> BoxFuture<'a, bool> {
+    fn ask<'a>(&'a self, request: &'a SandboxGrant, _command: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(async move {
             self.asked.lock().expect("asked").push(request.clone());
             if self.allow {

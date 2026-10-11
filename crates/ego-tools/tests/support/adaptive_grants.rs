@@ -11,7 +11,7 @@ impl SandboxGrantPort for Seat {
         vec![]
     }
 
-    fn ask<'a>(&'a self, request: &'a SandboxGrant) -> BoxFuture<'a, bool> {
+    fn ask<'a>(&'a self, request: &'a SandboxGrant, _command: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(async move {
             self.0.lock().unwrap().push(request.clone());
             false

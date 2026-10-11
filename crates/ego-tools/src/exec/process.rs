@@ -464,7 +464,7 @@ impl RunProcessContext {
         background_cancel: Option<&CancelToken>,
     ) -> Option<bool> {
         let command = denial::command_line(spec);
-        let question = grants.ask_for(request, &command);
+        let question = grants.ask(request, &command);
         tokio::pin!(question);
         loop {
             tokio::select! {
@@ -1616,7 +1616,7 @@ mod sandbox_question_tests {
             Vec::new()
         }
 
-        fn ask<'a>(&'a self, _: &'a SandboxGrant) -> BoxFuture<'a, bool> {
+        fn ask<'a>(&'a self, _: &'a SandboxGrant, _command: &'a str) -> BoxFuture<'a, bool> {
             self.asked.fetch_add(1, Ordering::SeqCst);
             if self.hang {
                 Box::pin(std::future::pending())
