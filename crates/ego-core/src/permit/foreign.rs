@@ -714,8 +714,10 @@ fn decode_native(value: &str) -> Result<OsString, &'static str> {
         return Err("invalid native string encoding");
     }
     let units = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk));
     Ok(OsString::from_wide(&units.collect::<Vec<_>>()))
 }
 
@@ -1335,5 +1337,30 @@ impl DuplexSettlement {
     }
     pub fn evidence(&self) -> &Result<ToolResult, EvidenceError> {
         &self.evidence
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_native_codec_tests {
+    use super::*;
+    use std::os::windows::ffi::OsStringExt as _;
+
+    #[test]
+    fn native_decode_preserves_empty_string_instead_of_inventing_units() {
+        assert_eq!(decode_native(""), Ok(OsString::new()));
+    }
+
+    #[test]
+    fn native_decode_preserves_unpaired_surrogates_instead_of_lossy_utf8() {
+        let original = OsString::from_wide(&[0x0041, 0xd800, 0x0000, 0xdc00]);
+        assert_eq!(decode_native(&encode_native(&original)), Ok(original));
+    }
+
+    #[test]
+    fn native_decode_rejects_odd_bytes_instead_of_dropping_remainder() {
+        assert_eq!(
+            decode_native(&base64url_encode(&[0x41, 0x00, 0x42])),
+            Err("invalid native string encoding")
+        );
     }
 }

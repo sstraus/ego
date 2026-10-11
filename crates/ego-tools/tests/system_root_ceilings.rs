@@ -1,5 +1,7 @@
 use ego_core::config::{ConfigLayer, Source, Trust, resolve};
-use ego_core::permit::{CanonPath, RootAccess, RootCfg, admit_roots, check_root_ceilings};
+use ego_core::permit::{CanonPath, admit_roots, check_root_ceilings};
+#[cfg(unix)]
+use ego_core::permit::{RootAccess, RootCfg};
 use ego_tools::fs::OsFs;
 
 // Catches: lexical prefix comparisons, a symlink escape, wider write access,

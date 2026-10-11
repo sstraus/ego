@@ -160,6 +160,10 @@ fn spawn_descendant(path: &Path) {
     spawn_descendant_with_mode(path, "tree-descendant");
 }
 
+#[expect(
+    clippy::zombie_processes,
+    reason = "fixture deliberately leaves the descendant for the ownership check; reaped by ManagedChild's Windows JobObject wait/terminate cleanup"
+)]
 fn spawn_descendant_with_mode(path: &Path, mode: &str) {
     Command::new(std::env::current_exe().expect("test executable"))
         .args([
@@ -185,6 +189,10 @@ fn windows_process_ownership_fixture() {
     let mode = args.next().expect("fixture mode");
 
     match mode.to_string_lossy().as_ref() {
+        #[expect(
+            clippy::zombie_processes,
+            reason = "fixture deliberately leaves the descendant for the ownership check; reaped by ManagedChild's Windows JobObject wait cleanup after inherited output closes"
+        )]
         "args-and-stdin" => {
             let mut input = Vec::new();
             std::io::stdin()

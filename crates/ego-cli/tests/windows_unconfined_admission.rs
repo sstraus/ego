@@ -154,7 +154,7 @@ fn human_explicit_off_proceeds_without_an_acknowledgement_prompt() {
     assert_eq!(finished.code, Some(0), "{}", output(&finished));
     assert!(!output(&finished).contains(UNCONFINED_PROMPT));
     assert!(
-        stub.generations().len() >= 1,
+        !stub.generations().is_empty(),
         "the explicit choice reached the provider"
     );
 }
@@ -178,7 +178,7 @@ fn human_configured_off_proceeds_without_rewriting_configuration() {
     );
     assert!(!places.home_path().join("unconfined.json").exists());
     assert!(
-        stub.generations().len() >= 1,
+        !stub.generations().is_empty(),
         "configured off reached the provider"
     );
 }
@@ -283,7 +283,7 @@ fn implicit_default_prompts_once_per_canonical_workspace_and_records_yes() {
     assert_eq!(first.code, Some(0), "{}", output(&first));
     assert_unconfined_prompt(&first);
     assert!(
-        stub.generations().len() >= 1,
+        !stub.generations().is_empty(),
         "yes must change this invocation to off"
     );
 
@@ -349,7 +349,7 @@ fn corrupt_acknowledgement_warns_asks_again_and_is_not_overwritten() {
     );
     assert_eq!(fs::read(&corrupt).expect("corrupt ledger remains"), before);
     assert!(
-        stub.generations().len() >= 1,
+        !stub.generations().is_empty(),
         "accepted answer proceeds for this invocation"
     );
 }
@@ -376,7 +376,7 @@ fn accepted_answer_with_write_failure_warns_and_proceeds_once() {
     );
     assert_eq!(fs::read(&ledger).expect("ledger remains readable"), before);
     assert!(
-        stub.generations().len() >= 1,
+        !stub.generations().is_empty(),
         "write failure is not a refusal for this invocation"
     );
 

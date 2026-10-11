@@ -108,11 +108,11 @@ fn open_directory(path: &Path) -> io::Result<fs::File> {
         // directory handle. The standard File::open path omits it and returns
         // ERROR_ACCESS_DENIED before the durability barrier can run.
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        return fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path);
+            .open(path)
     }
 
     #[cfg(not(windows))]
@@ -122,7 +122,7 @@ fn open_directory(path: &Path) -> io::Result<fs::File> {
 fn open_for_sync(path: &Path) -> io::Result<fs::File> {
     #[cfg(windows)]
     {
-        return fs::OpenOptions::new().read(true).write(true).open(path);
+        fs::OpenOptions::new().read(true).write(true).open(path)
     }
 
     #[cfg(not(windows))]

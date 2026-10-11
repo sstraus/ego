@@ -114,7 +114,9 @@ pub(super) fn image(max_bytes: u64) -> Result<Vec<u8>, String> {
     use clipboard_win::{Clipboard, formats, size};
     {
         let _clipboard = Clipboard::new_attempts(5).map_err(|error| error.to_string())?;
-        let bytes = size(formats::CF_DIB).map_err(|error| error.to_string())? as u64;
+        let bytes = size(formats::CF_DIB)
+            .ok_or_else(|| "pasteboard has no image".to_string())?
+            .get() as u64;
         if bytes > max_bytes {
             return Err(format!(
                 "pasteboard image is {bytes} bytes, above the {max_bytes}-byte limit"

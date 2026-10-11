@@ -90,7 +90,7 @@ pub enum PermitDenied {
         endpoint: String,
     },
     Spawn {
-        spec: SpawnSpec,
+        spec: Box<SpawnSpec>,
     },
     Evidence {
         request: EvidenceRead,
@@ -232,7 +232,9 @@ impl Permit {
         if self.scope.spawns.contains(spec) {
             Ok(())
         } else {
-            Err(PermitDenied::Spawn { spec: spec.clone() })
+            Err(PermitDenied::Spawn {
+                spec: Box::new(spec.clone()),
+            })
         }
     }
 
@@ -2611,6 +2613,27 @@ mod tests {
             .read(&CanonPath::new("/ws/allowed-evil/secret.txt"))
             .unwrap_err();
         assert!(matches!(err, IoDenied::Permit(PermitDenied::Read { .. })));
+    }
+
+    #[test]
+    fn spawn_denial_preserves_exact_spec_and_diagnostic_when_payload_is_boxed() {
+        let spec = SpawnSpec::new(
+            vec![OsString::from("git"), OsString::from("status")],
+            None,
+            Some(Duration::from_secs(30)),
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let permit = minter().mint(Scope::default());
+        let denied = permit.allows_spawn(&spec).unwrap_err();
+        assert_eq!(
+            denied.to_string(),
+            format!("spawn denied: specification {spec:?} is outside the permit's scope")
+        );
+        let PermitDenied::Spawn { spec: denied_spec } = denied else {
+            panic!("expected a spawn denial");
+        };
+        assert_eq!(*denied_spec, spec);
     }
 
     #[test]
