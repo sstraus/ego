@@ -45,7 +45,7 @@ pub fn harden_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<()>
                 "the owner-only Windows security descriptor has no DACL",
             )
         })?;
-        return SetNamedSecurityInfo(
+        SetNamedSecurityInfo(
             path.as_os_str(),
             SeObjectType::SE_FILE_OBJECT,
             SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
@@ -53,7 +53,7 @@ pub fn harden_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<()>
             None::<&Sid>,
             Some(dacl),
             None,
-        );
+        )
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -139,9 +139,9 @@ pub fn validate_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<(
         {
             return Ok(());
         }
-        return Err(private_error(
+        Err(private_error(
             "the private path Windows DACL is not owner-only",
-        ));
+        ))
     }
 
     #[cfg(not(any(unix, windows)))]

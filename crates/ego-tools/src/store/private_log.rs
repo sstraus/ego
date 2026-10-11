@@ -3,7 +3,9 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
+#[cfg(unix)]
+use std::time::Duration;
 
 use super::io::PrivateLogWriter;
 
@@ -204,12 +206,14 @@ fn private_directory(root: &Path) -> io::Result<File> {
         Err(error) => return Err(error),
     }
     fs::create_dir_all(private_parent(root))?;
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     let created = match builder.create(root) {
         Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,

@@ -22,12 +22,12 @@ fn sync_directory(path: &Path) -> io::Result<()> {
         use std::os::windows::fs::OpenOptionsExt as _;
 
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        return fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)?
-            .sync_all();
+            .sync_all()
     }
 
     #[cfg(not(windows))]
