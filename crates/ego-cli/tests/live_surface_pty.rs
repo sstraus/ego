@@ -4161,11 +4161,7 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
     writer_join.join().expect("writer thread panicked");
 
     let generations = stub.generations();
-    assert_eq!(
-        generations.len(),
-        2,
-        "the initial turn and one queued turn"
-    );
+    assert_eq!(generations.len(), 2, "the initial turn and one queued turn");
     assert_eq!(
         generations
             .iter()
