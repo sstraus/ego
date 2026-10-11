@@ -2357,14 +2357,13 @@ async fn adaptive_setup_failure_is_named_in_the_user_refusal() {
         cause.contains("adaptive.setup") && cause.contains("os error"),
         "{cause}"
     );
-    use ego_core::store::evidence::{EvidenceRead, EvidenceStore as _};
+    use ego_core::store::evidence::{EvidenceRead, EvidenceStore};
     let reference = missing
         .probe_evidence()
         .expect("persisted transcript")
         .clone();
     let request = EvidenceRead::new(reference.clone(), 0).unwrap();
-    let page = evidence
-        .read_page(&request)
+    let page = EvidenceStore::read_page(&evidence, &request)
         .await
         .expect("read measured evidence");
     let transcript = String::from_utf8(page.bytes).expect("JSON Lines transcript");
