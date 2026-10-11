@@ -217,11 +217,24 @@ fn every_answer_settles_into_its_own_receipt() {
         }
         // Esc interrupts the turn as well; like the other Esc tests, only
         // the screen is asserted for it, not how the session exits.
-        let (status, _, _) = session.quit();
+        let (status, generations, _) = session.quit();
         assert!(
             status.success() || name == "escape",
             "{name}: the session failed: {status:?}"
         );
+        if name == "edit" {
+            let result = generations.last().expect("request after the edited call")["messages"]
+                .as_array()
+                .expect("provider messages")
+                .iter()
+                .find(|message| message["role"] == "tool")
+                .and_then(|message| message["content"].as_str())
+                .expect("the edited call's tool result");
+            assert!(
+                result.contains("1\n2\n3\n4\n"),
+                "the provider did not receive edited seq 1 4 output: {result}"
+            );
+        }
     }
 }
 
