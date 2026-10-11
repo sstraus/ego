@@ -2311,3 +2311,61 @@ fn judge_effort_uses_the_lowest_supported_level_and_refuses_unknown_facts() {
         assert_eq!(model::judge_thinking(&capabilities).ok(), expected);
     }
 }
+
+/// Catches: a real Adaptive setup failure reaches the transcript but is omitted
+/// from the CLI refusal, leaving the operator with no setup cause to fix.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn adaptive_setup_failure_is_named_in_the_user_refusal() {
+    let owner = tempdir().expect("adaptive refusal fixture");
+    let blocker = owner.path().join("not-a-directory");
+    std::fs::write(&blocker, "fixture").expect("non-directory probe parent");
+    let confinement = RunConfinement::new(
+        Confinement::Adaptive,
+        false,
+        CanonPath::new(blocker.join("workspace")),
+    )
+    .expect("absolute workspace")
+    .with_adaptive_perimeter(ego_core::permit::AdaptivePerimeter {
+        home: CanonPath::new(&blocker),
+        writable: vec![],
+        credentials: vec![],
+        controls: vec![],
+    });
+    let evidence = SessionEvidenceStore::open(owner.path(), SessionId::new(), 1024 * 1024)
+        .expect("refusal evidence store");
+    let cancel = CancelToken::new();
+    let config = ego_tools::exec::ExecRunConfig::new(
+        confinement.clone(),
+        evidence,
+        cancel.clone(),
+        ego_tools::exec::ExecLimits::default(),
+        ego_tools::exec::HttpCallTimeout::default(),
+        None,
+        Arc::new(ego_tools::http::SystemResolver::new()),
+    );
+    let missing = match RunEffectPorts::for_run(config).await {
+        Err(ProcessError::MissingCapabilities(missing)) => missing,
+        Err(other) => panic!("expected measured Adaptive refusal, got {other}"),
+        Ok(_) => panic!("non-directory fixture parent admitted Adaptive"),
+    };
+    let cause = missing
+        .host_control_failure()
+        .expect("real measurement recorded its host cause")
+        .to_owned();
+    assert!(
+        cause.contains("adaptive.setup") && cause.contains("os error"),
+        "{cause}"
+    );
+    let RunTermination::UsageError { message } = process_error_termination(
+        ProcessError::MissingCapabilities(missing),
+        &confinement,
+        &cancel,
+    ) else {
+        panic!("unsupported Adaptive is a usage refusal");
+    };
+    assert!(
+        message.contains(&cause),
+        "Adaptive refusal omitted the measured setup cause {cause:?}: {message}"
+    );
+}
