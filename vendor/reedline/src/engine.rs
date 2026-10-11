@@ -1384,6 +1384,15 @@ impl Reedline {
                 self.input_mode = InputMode::Regular;
                 Ok(EventStatus::Handled)
             }
+            ReedlineEvent::ExecuteHostCommandIfEmpty(host_command) => {
+                if self.editor.get_buffer().is_empty() {
+                    self.last_render_snapshot = None;
+                    self.suspended_state = Some(self.painter.state_before_suspension());
+                    Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
+                } else {
+                    Ok(EventStatus::Inapplicable)
+                }
+            }
             ReedlineEvent::ExecuteHostCommand(host_command) => {
                 self.last_render_snapshot = None;
                 self.suspended_state = Some(self.painter.state_before_suspension());
@@ -1682,6 +1691,15 @@ impl Reedline {
 
                         Ok(EventStatus::Handled)
                     }
+                }
+            }
+            ReedlineEvent::ExecuteHostCommandIfEmpty(host_command) => {
+                if self.editor.get_buffer().is_empty() {
+                    self.last_render_snapshot = None;
+                    self.suspended_state = Some(self.painter.state_before_suspension());
+                    Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
+                } else {
+                    Ok(EventStatus::Inapplicable)
                 }
             }
             ReedlineEvent::ExecuteHostCommand(host_command) => {
@@ -4489,6 +4507,24 @@ mod tests {
             reedline.painter.prompt_anchor_is_verified_for_test(),
             stays_verified
         );
+    }
+
+    // Catches: conditional host commands stealing Up from a nonempty composer.
+    #[test]
+    fn empty_only_host_command_does_not_steal_nonempty_buffer() {
+        let mut editor = Reedline::create();
+        let prompt = DefaultPrompt::default();
+        let event = ReedlineEvent::ExecuteHostCommandIfEmpty("recall".into());
+        assert!(
+            matches!(editor.handle_event(&prompt, event.clone()).unwrap(),
+            EventStatus::Exits(Signal::HostCommand(command)) if command == "recall")
+        );
+        editor.run_edit_commands(&[EditCommand::InsertString("draft".into())]);
+        assert!(matches!(
+            editor.handle_event(&prompt, event).unwrap(),
+            EventStatus::Inapplicable
+        ));
+        assert_eq!(editor.current_buffer_contents(), "draft");
     }
 
     fn send_edit(reedline: &mut Reedline, command: EditCommand) {

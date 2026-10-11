@@ -510,6 +510,33 @@ fn apply_intent(
             }
             Ok(false)
         }
+        ControlIntent::Recall { reply } => {
+            let prompt = journal
+                .inspect(|state| {
+                    state
+                        .unacknowledged_prompts()
+                        .last()
+                        .filter(|prompt| prompt.images().is_empty())
+                        .map(|prompt| (prompt.id(), prompt.text().to_owned()))
+                })
+                .map_err(StoreError::from)?;
+            let Some((id, text)) = prompt else {
+                let _ = reply.send(Ok(None));
+                return Ok(false);
+            };
+            if let Err(cause) = journal.append(turn, None, None, EventKind::PromptRetracted { id })
+            {
+                let _ = reply.send(Err(ControlError::Store(cause.to_string())));
+                return Err(cause.into());
+            }
+            control.refresh(
+                journal
+                    .inspect(SessionState::queue_status)
+                    .map_err(StoreError::from)?,
+            );
+            let _ = reply.send(Ok(Some((text, control.status()))));
+            Ok(false)
+        }
         ControlIntent::Submit { text, reply } => {
             let id = QueuedPromptId::new();
             match journal.append(
