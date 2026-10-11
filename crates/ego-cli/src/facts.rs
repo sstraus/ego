@@ -423,6 +423,9 @@ fn project_defaults(
 }
 
 #[cfg(test)]
+mod critic_tests;
+
+#[cfg(test)]
 mod snapshot_tests;
 
 #[cfg(test)]

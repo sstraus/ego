@@ -7473,11 +7473,7 @@ fn rows_fit_the_terminal_at_120_80_60_and_40_columns() {
     }
 }
 
-/// Tall enough that the whole builtin catalogue (about 35 rows since regression_case)
-/// fits below the cursor. When a picker frame does not fit, the emulated screen
-/// keeps rows of earlier frames after the picker closes; that residue is not
-/// diagnosed (harness cursor reply or the surface); further terminal-harness investigation is required.
-const PICKER_ROWS: u16 = 80;
+const PICKER_ROWS: u16 = 40;
 /// Three chat models around the session's `qwen3`, so the current model is
 /// neither the first nor the last row.
 const PICKER_TAGS: &str = r#"{"models":[{"name":"aaa-first","capabilities":["completion","tools"]},{"name":"qwen3","capabilities":["completion","tools"]},{"name":"zzz-last","capabilities":["completion","tools"]}]}"#;
