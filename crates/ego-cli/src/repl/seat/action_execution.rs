@@ -362,7 +362,7 @@ pub(super) fn surface_line(
                         editor.run_edit_commands(&[EditCommand::InsertString(text)]);
                         let mut current = status.lock().expect("surface status lock");
                         current.queue = queue;
-                        current.origin = InputOrigin::Typed;
+                        current.origin = InputOrigin::BracketedPaste;
                         current.notice = None;
                         if let Some(snapshot) = current.snapshot.as_mut() {
                             snapshot.set_queue(queue);

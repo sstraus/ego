@@ -4058,8 +4058,8 @@ fn live_surface_ctrl_enter_steers_a_busy_turn_once() {
     );
 }
 
-// Catches: Ctrl+Enter on a busy composer inserting a newline or queueing behind
-// the turn, instead of the one durable expedite Esc uses, and a second delivery.
+// Catches: Up on a busy composer leaving the old text queued, or delivering the
+// original and the edited text both.
 #[test]
 fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
     let steer = "original queued text";
@@ -4105,7 +4105,7 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
     let steer_start = output.len();
     input.write_all(steer.as_bytes()).expect("steer text");
     input.write_all(b"\r").expect("queue Enter");
-    input.flush().expect("Ctrl+Enter flush");
+    input.flush().expect("queue Enter flush");
     until_normalized(
         &reader,
         &mut output,
@@ -4164,7 +4164,7 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
     assert_eq!(
         generations.len(),
         2,
-        "one interrupted turn, one steered turn"
+        "the initial turn and one queued turn"
     );
     assert_eq!(
         generations
