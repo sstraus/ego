@@ -349,6 +349,7 @@ fn a_refusal_line_from_a_command_that_exited_zero_is_not_a_question() {
 /// Catches: the path named by the child is not the one the human is shown: a
 /// forged relative `..` spelling or a symlink inside the workspace must be asked
 /// about by its resolved location, never by the spelling the child printed.
+#[cfg(unix)]
 #[test]
 fn the_question_names_the_resolved_location_not_the_printed_spelling() {
     let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
@@ -554,6 +555,7 @@ fn a_flag_value_path_on_the_command_line_is_a_question_for_that_path() {
 /// Catches: a symlink on the command line is compared by spelling, so a refusal
 /// printed below the link's target (the path the sandbox actually checks) is not
 /// recognised as named by the command line.
+#[cfg(unix)]
 #[test]
 fn a_symlinked_command_line_path_anchors_the_files_below_its_target() {
     let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
@@ -614,6 +616,7 @@ fn a_command_line_naming_only_the_filesystem_root_does_not_anchor_other_paths() 
 /// Catches: the same hole through the home directory: a symlink spelled on the
 /// command line that resolves to HOME anchors everything below HOME (`.ssh`,
 /// `Library`), though the person approved a command about a workspace link.
+#[cfg(unix)]
 #[test]
 fn a_command_line_path_that_resolves_to_home_does_not_anchor_files_below_it() {
     let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
@@ -642,6 +645,7 @@ fn a_command_line_path_that_resolves_to_home_does_not_anchor_files_below_it() {
 /// Catches: HOME, an ancestor of HOME, or `/`, reached through a symlink spelled
 /// on the command line and printed back, escapes the too-broad rule, which only
 /// looks at the printed spelling.
+#[cfg(unix)]
 #[test]
 fn symlinks_to_home_its_parent_and_root_are_never_asked() {
     let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
@@ -777,6 +781,7 @@ fn control_and_bidi_characters_in_arguments_never_reach_the_question_raw() {
 /// Catches: a command line that names a symlink chain ending at an ancestor of
 /// the workspace still anchors everything below that ancestor, because only the
 /// spelled path (not the resolved one) is compared with the workspace.
+#[cfg(unix)]
 #[test]
 fn a_symlink_chain_to_an_ancestor_of_the_workspace_anchors_nothing() {
     let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
@@ -845,6 +850,7 @@ fn pathdiff_from(workspace: &Path, target: &Path) -> PathBuf {
 /// Catches: the renderable filter drops the whole stored list when one entry is
 /// unrenderable (control character, non-UTF-8, relative), so a valid grant next
 /// to a hand-edited one stops working.
+#[cfg(unix)]
 #[test]
 fn a_valid_stored_grant_still_applies_beside_unrenderable_ones() {
     use std::os::unix::ffi::OsStringExt;

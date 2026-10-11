@@ -234,7 +234,7 @@ impl ProbeLog {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(crate) fn record(&self, record: ProbeRecord) {
         self.entries().push(record);
     }
