@@ -1,3 +1,42 @@
+// Catches: removing the discarded marker mutation accidentally keeps the plain
+// repository directory as a control, blocking ordinary Git state writes.
+#[test]
+fn plain_git_controls_exclude_the_repository_directory() {
+    let root = tempfile::tempdir().expect("repository");
+    let output = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(root.path())
+        .output()
+        .expect("git init");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata = std::fs::canonicalize(root.path().join(".git")).unwrap();
+    let (roots, controls) = super::git_roots(root.path()).unwrap();
+    assert_eq!(roots, vec![metadata.clone(), metadata.clone()]);
+    let expected: Vec<_> = [
+        "config",
+        "config.worktree",
+        "hooks",
+        "commondir",
+        "gitdir",
+        "info/attributes",
+    ]
+    .into_iter()
+    .map(|name| metadata.join(name))
+    .collect();
+    assert_eq!(
+        controls,
+        expected
+            .iter()
+            .chain(&expected)
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+}
+
 #[cfg(target_os = "macos")]
 mod native {
     use super::super::*;
