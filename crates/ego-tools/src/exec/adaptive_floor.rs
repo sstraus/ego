@@ -13,6 +13,7 @@ pub(in crate::exec) const METADATA_MODULE_TRANSIENT: &str =
     "/modules/.+/(rebase-merge|rebase-apply|sequencer|objects/[^/]+|refs/.+|logs/.+)$";
 pub(in crate::exec) const ENV: &str = "(^|/)[.]env[^/]*(/|$)";
 
+#[cfg(any(target_os = "macos", test))]
 pub(in crate::exec) fn rooted_pattern(root: &Path, suffix: &str) -> String {
     format!("^{}{suffix}", regex::escape(&root.to_string_lossy()))
 }
@@ -34,27 +35,98 @@ pub(in crate::exec) fn metadata_roots(
     })
 }
 
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::exec) static COMPILATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn compile(pattern: &str) -> regex::Regex {
+    #[cfg(test)]
+    COMPILATIONS.with(|count| count.set(count.get() + 1));
+    regex::Regex::new(pattern).expect("fixed floor pattern")
+}
+
 pub(in crate::exec) fn blocks(path: &Path, policy: &RunConfinement) -> bool {
     let Some(perimeter) = policy.adaptive_perimeter() else {
         return false;
     };
+    static GIT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| compile(GIT_ENTRY));
+    static ENVIRONMENT: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| compile(ENV));
+    static CONTROL: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| compile(&format!("^{METADATA_CONTROL}")));
+    static BOUNDARY: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| compile(&format!("^{METADATA_BOUNDARY}")));
+    static TRANSIENT: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| compile(&format!("^{METADATA_MODULE_TRANSIENT}")));
     let text = path.to_string_lossy();
-    let matches = |pattern: &str| {
-        regex::Regex::new(pattern)
-            .expect("fixed floor pattern")
-            .is_match(&text)
+    // Match the captured root as literal text; only its fixed suffix is regex.
+    // This is equivalent to rooted_pattern without compiling host paths.
+    let rooted_matches = |root: &Path, pattern: &regex::Regex| {
+        text.strip_prefix(root.to_string_lossy().as_ref())
+            .is_some_and(|suffix| pattern.is_match(suffix))
     };
     perimeter
         .credentials
         .iter()
         .chain(&perimeter.controls)
         .any(|floor| path.starts_with(floor.as_path()))
-        || (matches(GIT_ENTRY) && !path.is_dir())
-        || metadata_roots(perimeter).any(|root| matches(&rooted_pattern(root, METADATA_CONTROL)))
+        || (GIT.is_match(&text) && !path.is_dir())
+        || metadata_roots(perimeter).any(|root| rooted_matches(root, &CONTROL))
         || (path.is_dir()
-            && metadata_roots(perimeter).any(|root| {
-                matches(&rooted_pattern(root, METADATA_BOUNDARY))
-                    && !matches(&rooted_pattern(root, METADATA_MODULE_TRANSIENT))
-            }))
-        || (!path.starts_with(policy.workspace().as_path()) && matches(ENV))
+            && metadata_roots(perimeter)
+                .any(|root| rooted_matches(root, &BOUNDARY) && !rooted_matches(root, &TRANSIENT)))
+        || (!path.starts_with(policy.workspace().as_path()) && ENVIRONMENT.is_match(&text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ego_core::permit::{CanonPath, Confinement};
+
+    // Catches: literal-prefix optimization changes root boundaries or suffix matching.
+    #[test]
+    fn cached_floor_matches_rooted_contract_for_literal_roots_and_transients() {
+        let temporary = tempfile::tempdir().unwrap();
+        let metadata = temporary.path().join("git(a)[b]\"root");
+        let policy = RunConfinement::new(
+            Confinement::Adaptive,
+            false,
+            CanonPath::new(temporary.path()),
+        )
+        .unwrap()
+        .with_adaptive_perimeter(AdaptivePerimeter {
+            home: CanonPath::new(temporary.path()),
+            writable: vec![],
+            credentials: vec![],
+            controls: vec![
+                CanonPath::new(metadata.join("config")),
+                CanonPath::new(metadata.join("hooks")),
+            ],
+        });
+        for (suffix, directory, expected) in [
+            ("/modules/sub/config", false, true),
+            ("/worktrees/peer/hooks/pre-commit", false, true),
+            ("-neighbor/modules/sub/config", false, false),
+            ("/modules/sub", true, true),
+            ("/modules/sub/rebase-merge", true, false),
+            ("/modules/sub/objects/ab", true, false),
+            ("/modules/sub/refs/heads/main", true, false),
+            ("/ordinary", false, false),
+        ] {
+            let path = std::path::PathBuf::from(format!("{}{suffix}", metadata.display()));
+            if directory {
+                std::fs::create_dir_all(&path).unwrap();
+            }
+            let matches = |suffix| {
+                regex::Regex::new(&rooted_pattern(&metadata, suffix))
+                    .unwrap()
+                    .is_match(&path.to_string_lossy())
+            };
+            let oracle = matches(METADATA_CONTROL)
+                || (directory && matches(METADATA_BOUNDARY) && !matches(METADATA_MODULE_TRANSIENT));
+            assert_eq!(oracle, expected, "fixture {suffix}");
+            assert_eq!(blocks(&path, &policy), expected, "floor {suffix}");
+        }
+    }
 }

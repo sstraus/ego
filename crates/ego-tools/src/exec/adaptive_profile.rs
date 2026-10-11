@@ -85,9 +85,12 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
 }
 
 fn rooted_regex(out: &mut String, root: &Path, suffix: &str) -> Result<(), ProfileError> {
-    // Validate host data with the same rules as literal paths. SBPL `#"..."`
-    // is raw: its backslashes reach the regex unchanged, so do not re-escape.
+    // SBPL `#"..."` is raw: regex backslashes must remain unchanged, but a
+    // double quote cannot be represented inside it even with a backslash.
     path_literal(root)?;
+    if root.as_os_str().as_encoded_bytes().contains(&b'"') {
+        return Err(ProfileError::UnrepresentablePath(super::path_label(root)));
+    }
     let pattern = floor::rooted_pattern(root, suffix);
     out.push_str(&format!("  (regex #\"{pattern}\")\n"));
     Ok(())
