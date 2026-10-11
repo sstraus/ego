@@ -58,7 +58,11 @@ fn stdio_child_is_reaped_when_the_run_fails_after_a_call() {
         .arg("--mcp")
         .arg(&format!("@{}", selector.display()))
         .run_pty("ping then fail");
-    assert_ne!(finished.code, Some(0), "{}", finished.stdout);
+    assert!(
+        finished.stdout.contains("HTTP 400"),
+        "the provider failure never surfaced: {}",
+        finished.stdout
+    );
     let events = std::fs::read_to_string(&log).expect("events");
     let pids: Vec<_> = events
         .lines()
