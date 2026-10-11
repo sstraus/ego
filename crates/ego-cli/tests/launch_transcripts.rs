@@ -150,6 +150,19 @@ fn readable(raw: &str) -> String {
         {
             lines.pop();
         }
+        for prefix in ["ego ", "εgo: ego "] {
+            if let Some(identity) = line.strip_prefix(prefix)
+                && let Some((version, model)) = identity.split_once(" · ")
+                && version
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_digit())
+                && !version.contains(char::is_whitespace)
+            {
+                line = format!("{prefix}<version> · {model}");
+                break;
+            }
+        }
         lines.push(line);
     }
     lines
@@ -274,7 +287,7 @@ fn readable_keeps_the_last_complete_trust_modal_frame() {
     let raw = "ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] yes\n";
     assert_eq!(
         readable(raw),
-        "ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] yes\n"
+        "ego <version> · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] yes\n"
     );
 }
 
@@ -311,5 +324,17 @@ fn regenerate() {
         std::fs::write(&path, transcript(case, answer))
             .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
         println!("wrote {}", path.display());
+    }
+}
+
+// Catches: a version-only bump breaks launch golden comparisons.
+#[test]
+fn readable_redacts_version_bumps_only_in_banner_identity() {
+    for version in ["0.1.0", "9.42.17", "10.0.0-rc.2"] {
+        let raw = format!("ego {version} · ollama/qwen3\nanswer cites {version}\n");
+        assert_eq!(
+            readable(&raw),
+            format!("ego <version> · ollama/qwen3\nanswer cites {version}\n")
+        );
     }
 }

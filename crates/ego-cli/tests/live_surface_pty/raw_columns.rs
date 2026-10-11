@@ -46,7 +46,7 @@ fn raw_terminal_startup_resume_and_exit_keep_column_zero() {
     ]));
     let shown = lines.join("\n");
     for needle in [
-        "ego 0.1.0",
+        concat!("ego ", env!("CARGO_PKG_VERSION")),
         "Resume model changed",
         "unsent drafts discarded",
         "To resume: ego resume",
@@ -86,7 +86,10 @@ fn raw_terminal_fresh_launch_keeps_column_zero() {
                 .args(["--model", "ollama/qwen3", "--sandbox", "off"]),
         );
     let shown = lines.join("\n");
-    for needle in ["ego 0.1.0", "unsent drafts discarded"] {
+    for needle in [
+        concat!("ego ", env!("CARGO_PKG_VERSION")),
+        "unsent drafts discarded",
+    ] {
         assert_eq!(
             column_of(&lines, needle),
             0,
