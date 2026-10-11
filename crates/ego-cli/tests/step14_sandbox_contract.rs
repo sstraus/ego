@@ -768,6 +768,9 @@ fn standalone_exec_paths_catches_user_config_root_not_reaching_process_policy() 
                 "ollama/qwen3",
                 "--session-id",
                 support::FIXTURE_SESSION_ID,
+                // macOS defaults to Adaptive, which runs any readable binary; exec_paths gate `workspace`.
+                "--sandbox",
+                "workspace",
                 "--output",
                 "jsonl",
                 "--allow",
