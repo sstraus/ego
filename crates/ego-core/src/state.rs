@@ -696,7 +696,7 @@ pub enum SubagentEvent {
     Requested {
         invocation: SubagentInvocationId,
         task: BlobRef,
-        selections: RunSelections,
+        selections: Box<RunSelections>,
     },
     Spawned {
         invocation: SubagentInvocationId,
@@ -2222,7 +2222,7 @@ impl SessionState {
         self.subagents.push(SubagentEvent::Requested {
             invocation,
             task: task.clone(),
-            selections: selections.clone(),
+            selections: Box::new(selections.clone()),
         });
     }
 
