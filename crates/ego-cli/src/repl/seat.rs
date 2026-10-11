@@ -956,6 +956,8 @@ impl Seat {
         if let SurfaceSender::Pumped(sender) = &output.sender {
             status.lock().expect("surface status lock").transcript = Some(sender.clone());
         }
+        #[cfg(test)]
+        let held_printer = printer.sender();
         let startup_output = printer.receiver().clone();
         let break_signal = Arc::new(AtomicBool::new(false));
         let (input_sender, input) = bounded(CHANNEL_CAPACITY);
@@ -966,6 +968,8 @@ impl Seat {
         let owner = std::thread::Builder::new()
             .name("ego-reedline".to_string())
             .spawn(move || {
+                #[cfg(test)]
+                HELD_PRINTER.with(|slot| *slot.borrow_mut() = Some(held_printer));
                 own_terminal(
                     editor
                         .with_external_printer(printer)
@@ -1952,3 +1956,37 @@ use question::{PermissionWord, parse_permission};
 mod tests;
 
 mod session_picker;
+
+// Only the isolated PTY child arms this seam. The real Seat::new printer and
+// receipt sender are unchanged; the terminal owner cannot drain while held.
+#[cfg(test)]
+thread_local! {
+    static HELD_PRINTER: std::cell::RefCell<Option<Sender<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn hold_permission_printer() {
+    if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_none() {
+        return;
+    }
+    HELD_PRINTER.with(|slot| {
+        let slot = slot.borrow();
+        let sender = slot.as_ref().expect("real live printer");
+        assert_eq!(sender.capacity(), Some(1));
+        sender
+            .try_send("regression_case-ROW\n".to_owned())
+            .expect("empty modal printer");
+    });
+    std::fs::write("printer-held", "bounded(1) full").unwrap();
+}
+
+#[cfg(test)]
+pub(super) fn await_permission_printer_release() {
+    if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_some() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !Path::new("printer-release").exists() {
+            assert!(Instant::now() < deadline, "PTY printer release deadline");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}

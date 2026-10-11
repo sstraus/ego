@@ -977,7 +977,9 @@ fn disconnected_receipt_pump_leaves_an_operator_notice() {
     }));
     question::commit_to_transcript(&status, "Denied run seq 1 3");
     assert_eq!(
-        status.lock().unwrap().notice.as_deref(),
-        Some("Permission receipt could not reach the output pump")
+        Waiting::new(status)
+            .render_prompt_indicator(PromptEditMode::Emacs)
+            .as_ref(),
+        "Permission receipt could not reach the output pump | > "
     );
 }

@@ -370,8 +370,12 @@ pub(super) fn answer_control(
             let _ = sender.send(accepted);
         }
         Reply::Permission(sender, decision, receipt) => {
+            #[cfg(test)]
+            hold_permission_printer();
             commit_to_transcript(surface.status, &receipt);
             let _ = sender.send(decision);
+            #[cfg(test)]
+            await_permission_printer_release();
         }
         Reply::Question(sender, outcome) => {
             let _ = sender.send(outcome);

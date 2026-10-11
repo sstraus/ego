@@ -954,11 +954,27 @@ impl Finished {
     }
 }
 
+// The held-printer library test reuses the isolated provider fixture but
+// supplies its own libtest child. Cargo defines this path only for integration tests.
+fn integration_test_binary() -> &'static str {
+    match option_env!("CARGO_BIN_EXE_ego") {
+        Some(binary) => binary,
+        None => panic!("this fixture must supply its own child program"),
+    }
+}
+
 impl Ego {
     /// Build the real binary command for a PTY test, preserving the same
     /// cleared environment and temporary-directory ownership as `run`.
     pub fn pty_command(&self) -> portable_pty::CommandBuilder {
-        let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_ego"));
+        self.pty_command_with_program(integration_test_binary())
+    }
+
+    pub fn pty_command_with_program(
+        &self,
+        program: impl AsRef<std::ffi::OsStr>,
+    ) -> portable_pty::CommandBuilder {
+        let mut command = portable_pty::CommandBuilder::new(program);
         command.env_clear();
         command.env("HOME", &self.home);
         command.env("EGO_HOME", &self.home);
@@ -1479,7 +1495,7 @@ impl Ego {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ego"));
+        let mut command = Command::new(integration_test_binary());
         // Cleared and rebuilt: a developer with `EGO_MODEL` set would otherwise
         // get different answers from the same test, and a suite whose result
         // depends on the shell that started it proves nothing.
