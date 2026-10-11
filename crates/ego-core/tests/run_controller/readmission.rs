@@ -65,7 +65,20 @@ fn readmission_cases() {
     let offline = RunConfinement::new(Confinement::Workspace, true, root).unwrap();
     let caps = Confinement::Workspace.required_caps();
     let old = observation(&base, "sandbox", caps, "1");
-    let cases = [
+    let mutate = |old: &ExecObservation, field: &str, value: serde_json::Value| {
+        let mut current = serde_json::to_value(old).unwrap();
+        current["policy_digest"] =
+            serde_json::to_value(PolicyDigest::try_from("2".repeat(64)).unwrap()).unwrap();
+        current["policy"][field] = value;
+        serde_json::from_value::<ExecObservation>(current).unwrap()
+    };
+    let root_read = base.clone().with_roots(vec![ProfileRoot::new(
+        CanonPath::new("/extra"),
+        RootAccess::Read,
+    )]);
+    let read_observation = observation(&root_read, "sandbox", caps, "1");
+    let offline_observation = observation(&offline, "sandbox", caps, "1");
+    let mut cases = vec![
         (
             "equal",
             old.clone(),
@@ -85,20 +98,87 @@ fn readmission_cases() {
             true,
         ),
         (
-            "online",
-            observation(
-                &offline,
-                "sandbox",
-                caps.union(ExecCaps::NO_IP_NETWORK),
-                "1",
+            "root access only",
+            read_observation.clone(),
+            mutate(
+                &read_observation,
+                "roots",
+                serde_json::to_value(wider.roots()).unwrap(),
             ),
-            observation(&base, "sandbox", caps, "2"),
             true,
         ),
         (
-            "weaker backend",
+            "workspace only",
             old.clone(),
-            observation(&base, "null", ExecCaps::empty(), "2"),
+            mutate(
+                &old,
+                "workspace",
+                serde_json::to_value(CanonPath::new("/other-workspace")).unwrap(),
+            ),
+            true,
+        ),
+        (
+            "exec paths only",
+            old.clone(),
+            mutate(
+                &old,
+                "exec_paths",
+                serde_json::to_value(vec![CanonPath::new("/extra-exec")]).unwrap(),
+            ),
+            true,
+        ),
+        (
+            "runtime roots only",
+            old.clone(),
+            mutate(
+                &old,
+                "runtime_roots",
+                serde_json::to_value(vec![CanonPath::new("/extra-runtime")]).unwrap(),
+            ),
+            true,
+        ),
+        (
+            "adaptive only",
+            old.clone(),
+            mutate(
+                &old,
+                "adaptive",
+                serde_json::to_value(ego_core::permit::AdaptivePerimeter {
+                    home: CanonPath::new("/home"),
+                    writable: vec![],
+                    credentials: vec![],
+                    controls: vec![],
+                })
+                .unwrap(),
+            ),
+            true,
+        ),
+        (
+            "level only",
+            old.clone(),
+            mutate(
+                &old,
+                "level",
+                serde_json::to_value(Confinement::Off).unwrap(),
+            ),
+            true,
+        ),
+        (
+            "offline only",
+            offline_observation.clone(),
+            mutate(&offline_observation, "offline", serde_json::json!(false)),
+            true,
+        ),
+        (
+            "backend only",
+            old.clone(),
+            observation(&base, "null", caps, "2"),
+            true,
+        ),
+        (
+            "caps only",
+            old.clone(),
+            observation(&base, "sandbox", ExecCaps::empty(), "2"),
             true,
         ),
         (
@@ -108,6 +188,19 @@ fn readmission_cases() {
             true,
         ),
     ];
+    for field in ["exec_paths", "runtime_roots"] {
+        let with_root = mutate(
+            &old,
+            field,
+            serde_json::to_value(vec![CanonPath::new("/extra")]).unwrap(),
+        );
+        let child = mutate(
+            &with_root,
+            field,
+            serde_json::to_value(vec![CanonPath::new("/extra/child")]).unwrap(),
+        );
+        cases.push((field, with_root, child, false));
+    }
     for (name, admitted, observed, asks) in cases {
         for allow in [true, false] {
             let store = Arc::new(RecordingSessionStore::default());
