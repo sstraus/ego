@@ -34,6 +34,23 @@ pub fn admit_confinement(
     let mut writable = vec![cargo.clone(), rustup, temporary];
     writable.extend(mbx);
     writable.extend(env("CARGO_TARGET_DIR"));
+    // pnpm and npm treat an empty variable as unset. Only the content caches
+    // open: pnpm's home holds its own bin and installation, and npm's `_npx`
+    // holds packages the host later runs unconfined.
+    let set = |key| env(key).filter(|path| !path.as_os_str().is_empty());
+    let pnpm = set("PNPM_HOME")
+        .or_else(|| set("XDG_DATA_HOME").map(|data| data.join("pnpm")))
+        .unwrap_or_else(|| home.join("Library/pnpm"));
+    let caches = set("XDG_CACHE_HOME").unwrap_or_else(|| home.join("Library/Caches"));
+    let npm = set("npm_config_cache")
+        .or_else(|| set("NPM_CONFIG_CACHE"))
+        .unwrap_or_else(|| home.join(".npm"));
+    writable.extend([
+        pnpm.join("store"),
+        caches.join("pnpm"),
+        npm.join("_cacache"),
+        npm.join("_logs"),
+    ]);
     let (git, controls) = git_roots(workspace.as_path())?;
     writable.extend(git);
     let mut credentials = [

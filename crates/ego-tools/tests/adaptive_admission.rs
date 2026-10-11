@@ -4,15 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
 
-use ego_core::event::id::SessionId;
-use ego_core::permit::{CanonPath, Confinement, EnvPolicy, SpawnSpec};
-use ego_core::turn::CancelToken;
-use ego_tools::exec::{
-    ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts, SessionEvidenceStore,
-    admit_confinement,
-};
+use ego_core::permit::{CanonPath, Confinement};
+use ego_tools::exec::admit_confinement;
 
 fn isolated(name: &str) -> Option<PathBuf> {
     if std::env::var("EGO_ADMISSION_CASE").as_deref() == Ok(name) {
@@ -46,6 +40,11 @@ fn isolated(name: &str) -> Option<PathBuf> {
         .env("EGO_HOME", root.path().join("ego"))
         .env("GH_CONFIG_DIR", root.path().join("github"))
         .env_remove("CARGO_TARGET_DIR")
+        .env_remove("PNPM_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("npm_config_cache")
+        .env_remove("NPM_CONFIG_CACHE")
         .output()
         .unwrap();
     assert!(
@@ -76,12 +75,17 @@ fn git_at(root: &Path, args: &[&std::ffi::OsStr]) {
     assert!(output.status.success(), "{output:?}");
 }
 
+#[path = "support/adaptive_exec.rs"]
+mod adaptive_exec;
+use adaptive_exec::{execute, execute_with_grants};
 #[path = "support/adaptive_grants.rs"]
 mod adaptive_grants;
 #[path = "support/adaptive_git_controls.rs"]
 mod git_controls;
 #[path = "support/adaptive_git_layouts.rs"]
 mod git_layouts;
+#[path = "support/adaptive_js_caches.rs"]
+mod js_caches;
 
 // Catches: the outside probe uses only the workspace parent even when that
 // parent is host-unwritable.
@@ -110,51 +114,6 @@ fn adaptive_probe_uses_safe_outside_location_for_locked_workspace() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(result.unwrap().is_ok());
     assert!(workspace.join("created").is_file());
-}
-
-fn execute(
-    policy: ego_core::permit::RunConfinement,
-    root: &Path,
-    argv: Vec<std::ffi::OsString>,
-) -> Result<ego_core::permit::ToolResult, ego_core::permit::ProcessError> {
-    execute_with_grants(policy, root, argv, None)
-}
-
-fn execute_with_grants(
-    policy: ego_core::permit::RunConfinement,
-    root: &Path,
-    argv: Vec<std::ffi::OsString>,
-    grants: Option<Arc<dyn ego_core::permit::SandboxGrantPort>>,
-) -> Result<ego_core::permit::ToolResult, ego_core::permit::ProcessError> {
-    let evidence =
-        SessionEvidenceStore::open(root.join("evidence"), SessionId::new(), 1024 * 1024).unwrap();
-    let spec = SpawnSpec::new(
-        argv,
-        Some(policy.workspace().clone()),
-        Some(Duration::from_secs(10)),
-        EnvPolicy::Inherited,
-    )
-    .unwrap();
-    let mut config = ExecRunConfig::new(
-        policy,
-        evidence,
-        CancelToken::new(),
-        ExecLimits::default(),
-        HttpCallTimeout::default(),
-        None,
-        Arc::new(ego_tools::http::SystemResolver::new()),
-    );
-    if let Some(grants) = grants {
-        config = config.with_sandbox_grants(grants);
-    }
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            let (ports, _, _) = RunEffectPorts::for_run(config).await.unwrap();
-            ports.process().execute(&spec).await
-        })
 }
 
 // Catches: production admission omits validation and opens broad or dangling operator roots.

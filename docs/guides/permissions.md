@@ -120,8 +120,12 @@ required. Adaptive
 currently requires macOS Seatbelt and successful native capability probes;
 explicit adaptive selections on unsupported platforms fail admission with explicit alternatives. It captures
 operator `CARGO_HOME`, `RUSTUP_HOME`, trusted mbx `cache_dir`, validated git common
-and linked-worktree metadata, `TMPDIR`, and an operator `CARGO_TARGET_DIR` before
-commands. Cargo/rustup defaults apply when their environment variables are absent.
+and linked-worktree metadata, `TMPDIR`, an operator `CARGO_TARGET_DIR`, the pnpm
+store (`PNPM_HOME`, `XDG_DATA_HOME/pnpm` or `~/Library/pnpm`, plus `/store`), the
+pnpm cache (`XDG_CACHE_HOME` or `~/Library/Caches`, plus `/pnpm`) and the npm
+`_cacache` and `_logs` (`npm_config_cache` or `~/.npm`) before commands.
+Cargo/rustup defaults apply when their environment variables are absent. The pnpm
+home, its `bin` and npm `_npx` stay read-only: the host runs their code later.
 Those roots appear as `derived` in perimeter inspection, with no per-cache judge.
 Configured ceilings and readonly roots remain binding. Shared-cache writes are
 intentional. Workspace and derived toolchain/target executables remain runnable.
