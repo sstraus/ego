@@ -66,7 +66,7 @@ pub struct InvocationDigest(String);
 impl InvocationDigest {
     /// Hash canonical invocation bytes into the permission grammar's digest form.
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self(format!("sha256:{:x}", Sha256::digest(bytes)))
+        Self(format!("sha256:{}", crate::digest::sha256_hex(bytes)))
     }
 
     pub fn parse(value: &str) -> Result<Self, ForeignValueError> {

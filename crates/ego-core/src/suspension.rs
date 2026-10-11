@@ -623,13 +623,7 @@ fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
 }
 
 fn fingerprint_text(fingerprint: &[u8; 32]) -> String {
-    let mut text = String::with_capacity(71);
-    text.push_str("sha256:");
-    for byte in fingerprint {
-        use std::fmt::Write as _;
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
+    format!("sha256:{}", crate::digest::lower_hex(fingerprint))
 }
 
 impl fmt::Debug for ResumeGrant {

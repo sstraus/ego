@@ -16,10 +16,12 @@ use sha2::{Digest, Sha256};
 
 /// The lowercase hex SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    lower_hex(&Sha256::digest(bytes))
+}
+
+/// Encode digest bytes without hashing them again.
+pub fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Whether `value` is the one canonical spelling of a SHA-256 digest.
@@ -77,6 +79,18 @@ mod tests {
         assert_eq!(
             hex,
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+    }
+
+    // Catches: a shared encoder rehashes finalized bytes or changes persisted spelling.
+    #[test]
+    fn streamed_sha256_keeps_the_published_abc_vector() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"a");
+        hasher.update(b"bc");
+        assert_eq!(
+            lower_hex(&hasher.finalize()),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 
