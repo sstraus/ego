@@ -930,3 +930,53 @@ fn startup_printer_rows_end_in_one_crlf_and_keep_their_bytes() {
         assert_eq!(String::from_utf8(written).unwrap(), expected, "{message:?}");
     }
 }
+
+// Catches: owner-thread receipt waits on the full bounded printer before decision delivery.
+#[test]
+fn permission_receipt_does_not_wait_for_full_printer_queue() {
+    let (sender, receiver) = bounded(1);
+    sender.send("held pump row".to_owned()).unwrap();
+    let cancel = CancelToken::new();
+    let (output, pump) = SurfaceOutput::pumped(sender, cancel, Arc::new(AtomicBool::new(false)));
+    let SurfaceSender::Pumped(transcript) = &output.sender else {
+        unreachable!()
+    };
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        transcript: Some(transcript.clone()),
+        ..SurfaceStatus::default()
+    }));
+    let (done, received) = bounded(1);
+    let owner = std::thread::spawn(move || {
+        question::commit_to_transcript(&status, "Allowed run seq 1 3");
+        done.send(()).unwrap();
+    });
+    let completed = received
+        .recv_timeout(std::time::Duration::from_millis(250))
+        .is_ok();
+    // Always release and join the owner, including RED, so no test thread leaks.
+    assert_eq!(receiver.recv().unwrap(), "held pump row");
+    assert_eq!(receiver.recv().unwrap(), "Allowed run seq 1 3\n");
+    owner.join().unwrap();
+    drop(output);
+    pump.join().unwrap();
+    assert!(
+        completed,
+        "receipt waited for the printer consumer before decision delivery"
+    );
+}
+
+// Catches: a disconnected pump silently discards the permission receipt.
+#[test]
+fn disconnected_receipt_pump_leaves_an_operator_notice() {
+    let (sender, receiver) = crossbeam::channel::unbounded();
+    drop(receiver);
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        transcript: Some(sender),
+        ..SurfaceStatus::default()
+    }));
+    question::commit_to_transcript(&status, "Denied run seq 1 3");
+    assert_eq!(
+        status.lock().unwrap().notice.as_deref(),
+        Some("Permission receipt could not reach the output pump")
+    );
+}
