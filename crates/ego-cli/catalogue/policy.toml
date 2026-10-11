@@ -16,7 +16,8 @@
 # - `exclude`: a model released on or after the floor that ego must not list, with
 #   the reason. The generator refuses a model whose reasoning controls are not an
 #   effort list, so such a model must be named here.
-# - `ids`: an explicit list, for a row the snapshot does not describe on its own.
+# - `drop_efforts`: effort levels the provider's backend does not offer although the
+#   snapshot row lists them (a subscription backend served from an API row).
 #
 # ## What may be written here
 #
@@ -62,15 +63,18 @@ max_images = 100
 
 # ---------------------------------------------------------------------------
 # openai-codex. The ChatGPT subscription serves the GPT-6 models the API serves.
-# The id list is the GPT-6 set pi.dev publishes for `openai-codex` on 2026-10-11
-# (cross-check only; the facts come from the openai snapshot). The context is the
+# The GPT-6 floor selects the set pi.dev publishes for `openai-codex` on 2026-10-11
+# (cross-check only; the facts come from the openai snapshot). The API row lists
+# `none`; the authenticated Codex models cache (2026-09-26) lists low..max for
+# gpt-6-sol, so `off` is dropped. The context is the
 # authenticated Codex cache value, 272,000
 # (ARCHITECTURE.md),
 # not the API's 1,050,000. Default efforts from the authenticated Codex models
 # cache: gpt-6-sol medium (2026-09-26), gpt-6.1-sol low (2026-09-29).
 [provider.openai-codex]
 models_dev = "openai"
-ids = ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"]
+floor = "2026-09-04"
+drop_efforts = ["off"]
 context_override = 272000
 
 [provider.openai-codex.default_effort]

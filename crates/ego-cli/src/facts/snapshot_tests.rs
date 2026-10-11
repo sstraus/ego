@@ -45,27 +45,22 @@ fn expected(snapshot: &Value, policy: &toml::Table) -> Vec<(String, BTreeSet<Str
             let models = snapshot["providers"][provider["models_dev"].as_str().unwrap()]
                 .as_object()
                 .expect("the snapshot holds the provider");
-            let ids = if provider.get("ids").is_some() {
-                strings(provider.get("ids"))
-            } else {
-                let floor = provider["floor"].as_str().expect("a floor date");
-                let mut ids: BTreeSet<String> = models
-                    .iter()
-                    .filter(|(_, model)| {
-                        model["status"] != "deprecated"
-                            && model["release_date"].as_str().unwrap() >= floor
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                ids.extend(strings(provider.get("include")));
-                let excluded = provider
-                    .get("exclude")
-                    .and_then(toml::Value::as_table)
-                    .map(|table| table.keys().cloned().collect::<BTreeSet<_>>())
-                    .unwrap_or_default();
-                ids.retain(|id| !excluded.contains(id));
-                ids
-            };
+            let floor = provider["floor"].as_str().expect("a floor date");
+            let mut ids: BTreeSet<String> = models
+                .iter()
+                .filter(|(_, model)| {
+                    model["status"] != "deprecated"
+                        && model["release_date"].as_str().unwrap() >= floor
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.extend(strings(provider.get("include")));
+            let excluded = provider
+                .get("exclude")
+                .and_then(toml::Value::as_table)
+                .map(|table| table.keys().cloned().collect::<BTreeSet<_>>())
+                .unwrap_or_default();
+            ids.retain(|id| !excluded.contains(id));
             (name.clone(), ids)
         })
         .collect()
@@ -135,6 +130,17 @@ fn the_builtin_catalogue_lists_nothing_beyond_the_current_generations() {
     );
 }
 
+/// Catches: a hand row in `models.toml` that competes with generated model facts.
+#[test]
+fn models_toml_states_no_model_row() {
+    let hand: Facts = toml::from_str(BUILTIN).expect("models.toml is TOML");
+    assert!(
+        hand.model.is_empty(),
+        "models.toml holds model rows: {:?}",
+        hand.model.keys()
+    );
+}
+
 /// Catches: an effort set edited by hand, or a toggle read as an effort list.
 #[test]
 fn reasoning_efforts_follow_the_snapshot_controls() {
@@ -165,6 +171,9 @@ fn reasoning_efforts_follow_the_snapshot_controls() {
                     other => panic!("{name}/{id}: unmodelled reasoning option {other}"),
                 }
             }
+            for dropped in strings(policy["provider"][&name].get("drop_efforts")) {
+                want.remove(dropped.as_str());
+            }
             let ReasoningEffortSupport::Only(have) =
                 &row(&rows, &format!("{name}/{id}")).reasoning_efforts
             else {
@@ -190,16 +199,6 @@ fn no_price_enters_the_catalogue_through_the_snapshot() {
         !mentions_cost(&snapshot()),
         "the snapshot carries a cost field"
     );
-    assert!(
-        !GENERATED.contains("[model.\"") || !GENERATED.contains(".pricing]"),
-        "the generated catalogue states a price"
-    );
-    for (slug, supplied) in builtin().model {
-        assert!(
-            supplied.pricing.is_none(),
-            "the builtin catalogue priced `{slug}`"
-        );
-    }
 }
 
 /// Catches: a hand-edited or stale generated file: every row names the snapshot

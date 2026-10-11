@@ -79,6 +79,7 @@ jobs:
           fi
 
       - run: just fmt-check
+      - run: just catalogue-check
       - run: just lint
       - run: just test
 

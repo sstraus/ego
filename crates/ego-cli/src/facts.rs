@@ -227,12 +227,7 @@ fn builtin() -> Facts {
         .expect("the compiled-in catalogue is valid TOML this build controls");
     let generated: Facts = toml::from_str(BUILTIN_GENERATED)
         .expect("the generated catalogue is valid TOML this build controls");
-    for (slug, row) in generated.model {
-        assert!(
-            facts.model.insert(slug.clone(), row).is_none(),
-            "`{slug}` is stated by both models.toml and models.generated.toml"
-        );
-    }
+    facts.model.extend(generated.model);
     facts
 }
 
