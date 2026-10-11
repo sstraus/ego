@@ -64,7 +64,7 @@ mod native {
             .unwrap()
             .with_adaptive_perimeter(perimeter);
         let evidence =
-            SessionEvidenceStore::open(&base.join("evidence"), SessionId::new(), 1024 * 1024)
+            SessionEvidenceStore::open(base.join("evidence"), SessionId::new(), 1024 * 1024)
                 .unwrap();
         let config = ExecRunConfig::new(
             policy.clone(),
