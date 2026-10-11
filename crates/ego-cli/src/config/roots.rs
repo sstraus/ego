@@ -42,6 +42,42 @@ pub(super) fn list(
     Ok(())
 }
 
+pub(super) fn receipt(
+    result: UserConfigMutationResult,
+    out: &Stdout,
+) -> Result<(), RunTermination> {
+    let UserConfigMutationFacts::Root {
+        path,
+        access: selected,
+    } = result.facts
+    else {
+        return Err(RunTermination::Failed {
+            message: "root mutation returned unrelated transaction facts".into(),
+        });
+    };
+    let action = if !result.changed {
+        "Root unchanged"
+    } else if selected.is_some() {
+        "Saved root"
+    } else {
+        "Removed root"
+    };
+    let permission = selected
+        .map(|selected| format!(" ({})", selected.as_str()))
+        .unwrap_or_default();
+    out.line(&format!(
+        "{action}: {}{permission} in {}.",
+        escape_field(&path.display().to_string()),
+        user_target(&result.target)
+    ));
+    if let UserConfigPublication::PublishedDurabilityUncertain { diagnostic } = result.publication {
+        output::note(&format!(
+            "Root was saved, but durability could not be confirmed: {diagnostic}"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,40 +122,4 @@ mod tests {
             matches!(result, Err(RunTermination::Failed { message }) if message.contains("roots"))
         );
     }
-}
-
-pub(super) fn receipt(
-    result: UserConfigMutationResult,
-    out: &Stdout,
-) -> Result<(), RunTermination> {
-    let UserConfigMutationFacts::Root {
-        path,
-        access: selected,
-    } = result.facts
-    else {
-        return Err(RunTermination::Failed {
-            message: "root mutation returned unrelated transaction facts".into(),
-        });
-    };
-    let action = if !result.changed {
-        "Root unchanged"
-    } else if selected.is_some() {
-        "Saved root"
-    } else {
-        "Removed root"
-    };
-    let permission = selected
-        .map(|selected| format!(" ({})", selected.as_str()))
-        .unwrap_or_default();
-    out.line(&format!(
-        "{action}: {}{permission} in {}.",
-        escape_field(&path.display().to_string()),
-        user_target(&result.target)
-    ));
-    if let UserConfigPublication::PublishedDurabilityUncertain { diagnostic } = result.publication {
-        output::note(&format!(
-            "Root was saved, but durability could not be confirmed: {diagnostic}"
-        ));
-    }
-    Ok(())
 }
