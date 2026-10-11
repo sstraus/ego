@@ -1,5 +1,7 @@
 //! Critic regressions for regression case: actual filesystem aliases of control paths.
 
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 
 use ego_core::config::rule_management::{RuleManagement, RuleOutcome};
