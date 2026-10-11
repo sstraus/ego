@@ -2,7 +2,8 @@
 
 use super::CanonPath;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdaptivePerimeter {
     pub home: CanonPath,
     pub writable: Vec<CanonPath>,

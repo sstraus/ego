@@ -29,6 +29,9 @@ use ego_core::run::{
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
+#[path = "run_controller/readmission.rs"]
+mod readmission;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StoreFault {
     Reject,
@@ -195,6 +198,7 @@ enum ExecutorCall {
 }
 
 struct ScriptedRunExecutor {
+    execution_observation: Mutex<Option<ego_core::permit::ExecObservation>>,
     calls: Mutex<Vec<ExecutorCall>>,
     attachments: Mutex<VecDeque<Result<RunHandle, RunExecutorError>>>,
     recoveries: Mutex<VecDeque<Result<ego_core::run::RecoveryEvidence, RunExecutorError>>>,
@@ -252,6 +256,7 @@ impl Default for ScriptedRunExecutor {
 impl ScriptedRunExecutor {
     fn with_sequence(sequence: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
+            execution_observation: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             attachments: Mutex::new(VecDeque::new()),
             recoveries: Mutex::new(VecDeque::new()),
@@ -409,6 +414,36 @@ impl ScriptedRunExecutor {
 
 impl RunExecutor for ScriptedRunExecutor {
     type Prepared = PreparedToken;
+
+    fn request_execution_policy_permission<'a>(
+        &'a self,
+        _prepared: &'a mut Self::Prepared,
+        question: ego_core::permit::PermissionRequest,
+        bindings: &'a RunExecutionBindings,
+    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
+        Box::pin(async move {
+            let Some(human) = bindings.human() else {
+                return Ok(false);
+            };
+            Ok(matches!(
+                human
+                    .decide(ego_core::event::id::ItemId::new(), &question)
+                    .await,
+                ego_core::permit::PermissionDecision::Allow
+            ))
+        })
+    }
+
+    fn execution_observation<'a>(
+        &'a self,
+        _prepared: &'a mut Self::Prepared,
+    ) -> BoxFuture<'a, Result<Option<ego_core::permit::ExecObservation>, RunExecutorError>> {
+        Box::pin(future::ready(Ok(self
+            .execution_observation
+            .lock()
+            .unwrap()
+            .clone())))
+    }
 
     fn admit_run_context<'a>(
         &'a self,

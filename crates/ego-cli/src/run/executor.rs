@@ -829,6 +829,91 @@ impl CliRunExecutor {
 impl RunExecutor for CliRunExecutor {
     type Prepared = CliPrepared;
 
+    fn request_execution_policy_permission<'a>(
+        &'a self,
+        prepared: &'a mut Self::Prepared,
+        question: ego_core::permit::PermissionRequest,
+        bindings: &'a RunExecutionBindings,
+    ) -> futures::future::BoxFuture<'a, Result<bool, RunExecutorError>> {
+        Box::pin(async move {
+            let Some(human) = bindings.human() else {
+                return Ok(false);
+            };
+            let clock = SystemClock;
+            let opened = session::open(prepared.store.as_ref(), &prepared.session_id, &clock)
+                .map_err(|error| RunExecutorError::new(error.to_string()))?;
+            let mut journal = Journal::new(
+                prepared.session_id,
+                &opened.writer,
+                &clock,
+                &ego_core::sink::NullSink,
+                ego_core::event::id::Producer::Main,
+                opened.state,
+            );
+            let turn = ego_core::event::id::TurnId::new();
+            let item = ego_core::event::id::ItemId::new();
+            let request_event = journal
+                .append(
+                    turn,
+                    Some(item),
+                    None,
+                    ego_core::event::domain::EventKind::PermissionRequested {
+                        tool: question.tool().to_owned(),
+                        escalation: question.why().clone(),
+                    },
+                )
+                .map_err(|error| RunExecutorError::new(error.to_string()))?;
+            let allowed = matches!(
+                human.decide(item, &question).await,
+                ego_core::permit::PermissionDecision::Allow
+            );
+            journal
+                .append(
+                    turn,
+                    Some(item),
+                    Some(request_event),
+                    ego_core::event::domain::EventKind::PermissionDecided {
+                        allowed: Some(allowed),
+                        by: Some(ego_core::permit::Authority::Party),
+                        reason: Some(question.to_string()),
+                    },
+                )
+                .map_err(|error| RunExecutorError::new(error.to_string()))?;
+            Ok(allowed)
+        })
+    }
+
+    fn execution_observation<'a>(
+        &'a self,
+        prepared: &'a mut Self::Prepared,
+    ) -> futures::future::BoxFuture<'a, Result<Option<ExecObservation>, RunExecutorError>> {
+        Box::pin(async move {
+            if prepared.admitted_sandbox_observation.is_none() {
+                return Ok(None);
+            }
+            let opened = session::open(prepared.store.as_ref(), &prepared.session_id, &SystemClock)
+                .map_err(|error| RunExecutorError::new(error.to_string()))?;
+            let evidence = opened
+                .writer
+                .evidence_store(EVIDENCE_CAP)
+                .map_err(|error| RunExecutorError::new(error.to_string()))?;
+            let config = ego_tools::exec::ExecRunConfig::new(
+                prepared.confinement.clone(),
+                evidence,
+                CancelToken::new(),
+                ego_tools::exec::ExecLimits::default(),
+                ego_tools::exec::HttpCallTimeout::default(),
+                prepared.run_deadline,
+                Arc::new(ego_tools::http::SystemResolver::new()),
+            );
+            let (observed, _) = RunEffectPorts::observe(&config)
+                .await
+                .map_err(|error| RunExecutorError::new(error.to_string()))?;
+            prepared.admitted_sandbox_observation = Some(observed.clone());
+            Ok(Some(observed))
+        })
+    }
+
     fn prepare<'a>(
         &'a self,
         request: &'a RunPreparation,
