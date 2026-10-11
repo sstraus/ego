@@ -14,7 +14,20 @@ The permitted local delta is intentionally narrow:
 
 - position external output from the painter's tracked prompt anchor instead of
   estimating rows from buffer bytes or display-width division;
-- add regression coverage for narrow, combining, wide, and zero-width cases.
+- add regression coverage for narrow, combining, wide, and zero-width cases;
+- reuse a suspended prompt's rows on resume unless the cursor is on the bottom
+  row (regression case). Upstream nushell/reedline#1130 makes a new prompt whenever
+  the prompt range touches the row above the bottom; that also catches a flush
+  prompt with an empty row below it, and the resume then leaves the old frame
+  in view. Only a cursor on the bottom row is ambiguous after a scroll, so only
+  that case makes a new prompt;
+- add `Reedline::erase_last_prompt`, which erases the prompt and buffer that
+  the last `read_line` left on screen so the next prompt starts on its first
+  row. The painter records the rows, the cursor position and the terminal size
+  at the return (`PromptFootprint`), and erases nothing when the size or the
+  cursor no longer match. regression case uses it to replace an answered question
+  with one transcript row; the API carries no εgo policy and is written to be
+  proposed upstream.
 
 Do not add εgo policy, DTOs, input handling, or rendering to this crate. The
 decision and replacement condition are recorded in

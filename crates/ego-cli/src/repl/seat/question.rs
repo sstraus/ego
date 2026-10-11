@@ -1,5 +1,5 @@
 use super::edit_mode::PICKER_KEYS;
-use super::permission_modal::{compact_prompt, details_prompt};
+use super::permission_modal::{compact_prompt, details_prompt, settled_receipt};
 use super::*;
 use crate::render::osc::State;
 
@@ -157,7 +157,7 @@ pub(super) fn answer_control(
         Permission(
             oneshot::Sender<PermissionDecision>,
             PermissionDecision,
-            Option<String>,
+            String,
         ),
         Question(oneshot::Sender<QuestionOutcome>, QuestionOutcome),
     }
@@ -271,7 +271,7 @@ pub(super) fn answer_control(
             });
             let mut notice = None;
             let decision = loop {
-                match modal_line(editor, surface, &prompt) {
+                match permission_line(editor, surface, &prompt) {
                     // The keys: `n` asks what to do instead; typed words below
                     // are the plain prompt and stay a bare refusal.
                     Line::HostCommand(HostCommand::PermissionDecision(decision)) => {
@@ -315,8 +315,9 @@ pub(super) fn answer_control(
                 }
             };
             tell_host(surface.status, |osc, _| osc.state(State::Busy));
+            let receipt = settled_receipt(&request, &decision, notice.as_deref());
             (
-                Reply::Permission(reply, decision, notice),
+                Reply::Permission(reply, decision, receipt),
                 EditPhase::Busy,
                 true,
             )
@@ -368,10 +369,8 @@ pub(super) fn answer_control(
         Reply::WindowsUnconfined(sender, accepted) => {
             let _ = sender.send(accepted);
         }
-        Reply::Permission(sender, decision, notice) => {
-            if let Some(receipt) = notice {
-                commit_to_transcript(surface.status, &receipt);
-            }
+        Reply::Permission(sender, decision, receipt) => {
+            commit_to_transcript(surface.status, &receipt);
             let _ = sender.send(decision);
         }
         Reply::Question(sender, outcome) => {
@@ -748,6 +747,25 @@ fn parse_question_answer(
     Ok(answer)
 }
 
+/// One read of the approval modal, whose prompt is retired as soon as it
+/// returns: an answered approval must not keep showing answer keys, and the
+/// next prompt (a follow-up question, the next approval or the composer)
+/// starts on the same row. Its outcome is committed as one receipt row.
+///
+/// Nothing writes between the return and the erase, which is what lets
+/// Reedline find the rows it painted. When it cannot (a resize while no read
+/// was active), the prompt stays on screen above the receipt: a stale block is
+/// preferable to erasing rows that may hold the transcript.
+fn permission_line(
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
+    prompt: &dyn Prompt,
+) -> Line {
+    let line = modal_line(editor, surface, prompt);
+    let _ = editor.erase_last_prompt();
+    line
+}
+
 fn modal_line(editor: &mut Reedline, surface: &mut ModalSurface<'_>, prompt: &dyn Prompt) -> Line {
     surface_line(
         editor,
@@ -959,7 +977,7 @@ fn prefilled_modal_line(
         EditCommand::Clear,
         EditCommand::InsertString(value.to_owned()),
     ]);
-    modal_line(
+    permission_line(
         editor,
         surface,
         &Question::new(prompt.to_owned(), Arc::clone(surface.status)),
@@ -1322,7 +1340,7 @@ fn decline(editor: &mut Reedline, surface: &mut ModalSurface<'_>) -> PermissionD
         "What should it do instead? (Enter alone just says no) ".to_owned(),
         Arc::clone(surface.status),
     );
-    match modal_line(editor, surface, &prompt) {
+    match permission_line(editor, surface, &prompt) {
         Line::Submitted(text) if !text.trim().is_empty() => {
             PermissionDecision::DenyWithInstruction {
                 instruction: text.trim().to_owned(),
