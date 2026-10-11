@@ -1,5 +1,6 @@
 mod support;
 
+#[cfg(unix)]
 use support::{Ego, Plan, Stub};
 
 #[cfg(unix)]
