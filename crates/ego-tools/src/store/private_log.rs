@@ -3,9 +3,9 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
-use std::time::SystemTime;
 #[cfg(unix)]
 use std::time::Duration;
+use std::time::SystemTime;
 
 use super::io::PrivateLogWriter;
 
