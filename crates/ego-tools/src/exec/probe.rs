@@ -177,6 +177,7 @@ async fn measure_cached(
                     evidence.clone(),
                     cancel.clone(),
                     limits,
+                    local_nonloopback(),
                 )
                 .await
             {
@@ -412,9 +413,8 @@ async fn probe_offline(
     evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
+    nonloopback: Option<std::net::IpAddr>,
 ) -> bool {
-    use std::net::{TcpListener, UdpSocket};
-
     let network_suite = |name: &'static str| ProbeSuite {
         name,
         cwd,
@@ -432,24 +432,28 @@ async fn probe_offline(
     {
         return false;
     }
-    let Some(nonloopback) = local_nonloopback() else {
-        return false;
+    let Some(nonloopback) = nonloopback else {
+        return record_control_failure(
+            &evidence,
+            "offline.nonloopback.control".into(),
+            cwd.as_path(),
+            "no non-loopback route to bind a probe listener".into(),
+        );
     };
-    let Ok(tcp_loopback) = TcpListener::bind(("127.0.0.1", 0)) else {
-        return false;
-    };
-    let Ok(udp_loopback) = UdpSocket::bind(("127.0.0.1", 0)) else {
-        return false;
-    };
-    let Ok(tcp_nonloopback) = TcpListener::bind((nonloopback, 0)) else {
-        return false;
-    };
-    let Ok(udp_nonloopback) = UdpSocket::bind((nonloopback, 0)) else {
-        return false;
+    let sockets = match bind_offline_sockets(nonloopback) {
+        Ok(sockets) => sockets,
+        Err((name, error)) => {
+            return record_control_failure(
+                &evidence,
+                format!("offline.{name}.control"),
+                cwd.as_path(),
+                format!("bind failed: {error}"),
+            );
+        }
     };
     let baseline: Arc<dyn Backend> = Arc::new(super::null::NullBackend);
     paired_tcp(
-        &tcp_loopback,
+        &sockets.tcp_loopback,
         backend.clone(),
         baseline.clone(),
         evidence.clone(),
@@ -459,7 +463,7 @@ async fn probe_offline(
     )
     .await
         && paired_udp(
-            &udp_loopback,
+            &sockets.udp_loopback,
             backend.clone(),
             baseline.clone(),
             evidence.clone(),
@@ -469,7 +473,7 @@ async fn probe_offline(
         )
         .await
         && paired_tcp(
-            &tcp_nonloopback,
+            &sockets.tcp_nonloopback,
             backend.clone(),
             baseline.clone(),
             evidence.clone(),
@@ -479,7 +483,7 @@ async fn probe_offline(
         )
         .await
         && paired_udp(
-            &udp_nonloopback,
+            &sockets.udp_nonloopback,
             backend,
             baseline,
             evidence,
@@ -488,6 +492,44 @@ async fn probe_offline(
             &network_suite("offline.udp-nonloopback"),
         )
         .await
+}
+
+struct OfflineSockets {
+    tcp_loopback: std::net::TcpListener,
+    udp_loopback: std::net::UdpSocket,
+    tcp_nonloopback: std::net::TcpListener,
+    udp_nonloopback: std::net::UdpSocket,
+}
+
+/// Binds the four receivers, naming the first that fails.
+fn bind_offline_sockets(
+    nonloopback: std::net::IpAddr,
+) -> Result<OfflineSockets, (&'static str, std::io::Error)> {
+    use std::net::{TcpListener, UdpSocket};
+
+    Ok(OfflineSockets {
+        tcp_loopback: TcpListener::bind(("127.0.0.1", 0)).map_err(|e| ("tcp-loopback", e))?,
+        udp_loopback: UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| ("udp-loopback", e))?,
+        tcp_nonloopback: TcpListener::bind((nonloopback, 0)).map_err(|e| ("tcp-nonloopback", e))?,
+        udp_nonloopback: UdpSocket::bind((nonloopback, 0)).map_err(|e| ("udp-nonloopback", e))?,
+    })
+}
+
+/// Records why the unconfined half of the offline probe could not run, so a
+/// refusal and the transcript name the host cause instead of staying silent.
+fn record_control_failure(
+    evidence: &ProbeEvidence,
+    suite: String,
+    root: &std::path::Path,
+    reason: String,
+) -> bool {
+    evidence.log.record(ProbeRecord {
+        suite,
+        root: root.to_path_buf(),
+        argv: Vec::new(),
+        outcome: reason,
+    });
+    false
 }
 
 fn local_nonloopback() -> Option<std::net::IpAddr> {
@@ -509,11 +551,24 @@ async fn paired_tcp(
     use std::io::Read as _;
 
     let control = suite.control_name();
-    let Ok(endpoint) = listener.local_addr() else {
-        return false;
+    let endpoint = match listener.local_addr() {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return record_control_failure(
+                &evidence,
+                control,
+                suite.root,
+                format!("listener address unavailable: {error}"),
+            );
+        }
     };
-    if listener.set_nonblocking(true).is_err() {
-        return false;
+    if let Err(error) = listener.set_nonblocking(true) {
+        return record_control_failure(
+            &evidence,
+            control,
+            suite.root,
+            format!("listener configuration failed: {error}"),
+        );
     }
     let sentinel = sentinel(endpoint);
     let receiver_failure = |reason: String| {
@@ -605,8 +660,16 @@ async fn paired_udp(
     suite: &ProbeSuite<'_>,
 ) -> bool {
     let control = suite.control_name();
-    let Ok(endpoint) = socket.local_addr() else {
-        return false;
+    let endpoint = match socket.local_addr() {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return record_control_failure(
+                &evidence,
+                control,
+                suite.root,
+                format!("socket address unavailable: {error}"),
+            );
+        }
     };
     let sentinel = sentinel(endpoint);
     let receiver_failure = |reason: String| {
@@ -1402,8 +1465,55 @@ mod tests {
             evidence,
             ego_core::turn::CancelToken::new(),
             crate::exec::ExecLimits::default(),
+            super::local_nonloopback(),
         ));
         assert!(!denied, "a wrapper failure cannot prove offline");
+    }
+
+    // Catches: probe_offline returns false with no record when there is no
+    // non-loopback route, so the refusal names no cause.
+    #[test]
+    fn offline_records_why_it_stops_without_a_non_loopback_route() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+        let evidence = super::probe_evidence().expect("evidence");
+        let denied = futures::executor::block_on(super::probe_offline(
+            Arc::new(super::super::null::NullBackend),
+            &cwd,
+            evidence.clone(),
+            ego_core::turn::CancelToken::new(),
+            crate::exec::ExecLimits::default(),
+            None,
+        ));
+        assert!(!denied);
+        assert_eq!(
+            evidence.log.host_control_failure().as_deref(),
+            Some("offline.nonloopback.control: no non-loopback route to bind a probe listener")
+        );
+    }
+
+    // Catches: a failed bind returns false with no record, or names the wrong socket.
+    #[test]
+    fn offline_records_which_bind_failed() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+        let evidence = super::probe_evidence().expect("evidence");
+        // 192.0.2.1 is TEST-NET-1: no local interface owns it, so binding fails.
+        let unowned: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let denied = futures::executor::block_on(super::probe_offline(
+            Arc::new(super::super::null::NullBackend),
+            &cwd,
+            evidence.clone(),
+            ego_core::turn::CancelToken::new(),
+            crate::exec::ExecLimits::default(),
+            Some(unowned),
+        ));
+        assert!(!denied);
+        let failure = evidence.log.host_control_failure().expect("a record");
+        assert!(
+            failure.starts_with("offline.tcp-nonloopback.control: bind failed: "),
+            "{failure}"
+        );
     }
 
     struct CacheBackend {

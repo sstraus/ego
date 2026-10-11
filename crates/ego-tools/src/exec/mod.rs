@@ -1067,12 +1067,12 @@ mod tests {
         );
     }
 
-    // Catches: a confined probe that connected is reported as a host failure.
+    // Catches: a failed confined probe is reported as a host control failure.
     #[test]
     fn a_confined_offline_failure_is_not_a_host_control_failure() {
         let log = transcript(&[
             ("offline.tcp-loopback.control", "ok"),
-            ("offline.tcp-loopback", "ok"),
+            ("offline.tcp-loopback", "exit 1"),
         ]);
 
         assert_eq!(log.host_control_failure(), None);
