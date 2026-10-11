@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::orchestrator::bounded_line;
 
@@ -56,7 +55,7 @@ pub fn classify(text: &str) -> Salience {
 
 /// Content identity is shared by result-file and mailbox representations.
 pub fn content_id(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.trim().as_bytes()))
+    crate::digest::sha256_hex(text.trim().as_bytes())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

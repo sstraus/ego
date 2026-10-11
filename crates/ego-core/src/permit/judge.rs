@@ -1,5 +1,6 @@
 //! Bounded action-evidence request and strict response decoder for the auto-mode judge.
 
+use crate::digest::sha256_hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -441,13 +442,13 @@ impl From<&Op> for CanonicalOp {
             Op::List { root, pattern } => Self::List {
                 root: root.to_string(),
                 pattern_bytes: pattern.len(),
-                pattern_sha256: digest(pattern.as_bytes()),
+                pattern_sha256: sha256_hex(pattern.as_bytes()),
                 pattern: bounded_text(&super::shell::redact_atom(pattern), 2048),
             },
             Op::Search { root, query } => Self::Search {
                 root: root.to_string(),
                 query_bytes: query.len(),
-                query_sha256: digest(query.as_bytes()),
+                query_sha256: sha256_hex(query.as_bytes()),
                 query: bounded_text(&super::shell::redact_atom(query), 2048),
             },
             Op::Write { path, change } => Self::Write {
@@ -460,7 +461,7 @@ impl From<&Op> for CanonicalOp {
                     .iter()
                     .map(|argument| CanonicalArgument {
                         bytes: argument.as_encoded_bytes().len(),
-                        sha256: digest(argument.as_encoded_bytes()),
+                        sha256: sha256_hex(argument.as_encoded_bytes()),
                     })
                     .collect(),
                 cwd: spec.cwd().map(ToString::to_string),
@@ -524,16 +525,16 @@ impl From<&Change> for CanonicalChange {
         match change {
             Change::Whole(bytes) => Self::Whole {
                 bytes: bytes.len(),
-                sha256: digest(bytes),
+                sha256: sha256_hex(bytes),
             },
             Change::Replace {
                 old_string,
                 new_string,
             } => Self::Replace {
                 old_bytes: old_string.len(),
-                old_sha256: digest(old_string.as_bytes()),
+                old_sha256: sha256_hex(old_string.as_bytes()),
                 new_bytes: new_string.len(),
-                new_sha256: digest(new_string.as_bytes()),
+                new_sha256: sha256_hex(new_string.as_bytes()),
             },
         }
     }
@@ -580,16 +581,6 @@ impl From<&Escalation> for CanonicalEscalation {
             path: escalation.subject().to_string(),
         }
     }
-}
-
-fn digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing into a String cannot fail");
-    }
-    encoded
 }
 
 #[derive(Deserialize)]

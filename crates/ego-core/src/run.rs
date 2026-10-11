@@ -34,7 +34,6 @@ use std::task::{Context, Poll, Waker};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::Digest;
 use uuid::Uuid;
 
 use crate::budget::SharedBudgetGate;
@@ -455,7 +454,7 @@ impl RequestDigest {
     /// same invalid digest an empty string would be.
     pub fn of(body: &impl Serialize) -> Result<Self, RunError> {
         let bytes = serde_json::to_vec(body).map_err(|_| RunError::InvalidRequestDigest)?;
-        Self::parse(&format!("{:x}", sha2::Sha256::digest(bytes)))
+        Self::parse(&crate::digest::sha256_hex(&bytes))
     }
 
     pub fn as_str(&self) -> &str {
