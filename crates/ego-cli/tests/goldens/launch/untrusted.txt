@@ -1,5 +1,5 @@
 # untrusted: first launch
-ego 0.1.0 · ollama/qwen3
+ego <version> · ollama/qwen3
 Project files offered for trust:
 - <workspace>/AGENTS.md
 Yes: load project instructions, configuration, skills, hooks and MCP server declarations.
@@ -7,7 +7,7 @@ No: continue without project files.
 Trust project files in <workspace>? [y/N] no
 εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
 εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
-εgo: ego 0.1.0 · ollama/qwen3
+εgo: ego <version> · ollama/qwen3
 mode default (default) · sandbox off (flags)
 Ctrl+B backgrounds · Esc interrupts · Enter queues · Up recalls
 Ctrl+Enter steers · Ctrl+S draft · Option+P models · /help
@@ -19,7 +19,7 @@ a launch transcript
 # untrusted: next launch
 εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
 εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
-εgo: ego 0.1.0 · ollama/qwen3
+εgo: ego <version> · ollama/qwen3
 mode default (default) · sandbox off (flags)
 Ctrl+B backgrounds · Esc interrupts · Enter queues · Up recalls
 Ctrl+Enter steers · Ctrl+S draft · Option+P models · /help
