@@ -172,13 +172,6 @@ impl BuiltInFlow {
         }
     }
 
-    pub fn device_authorization_request_with_pkce(
-        self,
-        _challenge: &str,
-    ) -> Result<HttpRequest, FlowError> {
-        self.device_authorization_request()
-    }
-
     pub fn authorization_url(
         self,
         redirect_uri: &str,
@@ -329,14 +322,6 @@ impl BuiltInFlow {
                 ("device_code", device_code),
             ],
         )
-    }
-
-    pub fn device_poll_request_with_pkce(
-        self,
-        device_code: &str,
-        _verifier: &str,
-    ) -> Result<HttpRequest, FlowError> {
-        self.device_poll_request(device_code, None)
     }
 
     pub fn login_request(self, grant: LoginGrant<'_>) -> Result<HttpRequest, FlowError> {

@@ -866,14 +866,6 @@ impl McpRegistryCapture {
         &self.inner.tools
     }
 
-    pub fn context_source(&self) -> Arc<dyn ContextSource> {
-        Arc::clone(&self.inner.contexts) as Arc<dyn ContextSource>
-    }
-
-    pub fn context_operations(&self) -> &[McpCapturedContextOperation] {
-        self.inner.contexts.operations()
-    }
-
     pub fn servers(&self) -> &[McpCapturedServer] {
         &self.inner.servers
     }
@@ -1587,10 +1579,6 @@ impl McpRegistryRuntime {
 
     pub fn controller(&self) -> &Arc<McpRegistryController> {
         &self.controller
-    }
-
-    pub fn continuation_owner(&self) -> &Arc<McpContinuationOwner> {
-        &self.continuations
     }
 }
 

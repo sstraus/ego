@@ -48,11 +48,6 @@ pub fn tools(socket: Option<&std::ffi::OsStr>, home: &Path) -> Vec<Arc<dyn Tool>
         .collect()
 }
 
-/// Bind the operator's environment once when composing the native catalogue.
-pub fn tools_from_environment() -> Vec<Arc<dyn Tool>> {
-    tools_from_environment_with_mode(ego_core::orchestrator::Mode::Observe)
-}
-
 pub fn tools_from_environment_with_mode(mode: ego_core::orchestrator::Mode) -> Vec<Arc<dyn Tool>> {
     let Some(home) = std::env::var_os("HOME") else {
         return Vec::new();
