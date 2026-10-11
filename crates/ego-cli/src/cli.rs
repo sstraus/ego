@@ -1482,15 +1482,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                     } => ConfigAction::Root {
                         target: config_target(profile)?,
                         path,
-                        access: Some(match access.as_str() {
-                            "read" => ego_core::permit::RootAccess::Read,
-                            "read-write" => ego_core::permit::RootAccess::ReadWrite,
-                            _ => {
-                                return Err(UsageError(
-                                    "roots access must be read or read-write".into(),
-                                ));
-                            }
-                        }),
+                        access: Some(access.0),
                     },
                     RootsSubcommand::Rm { profile, path } => ConfigAction::Root {
                         target: config_target(profile)?,
@@ -2001,5 +1993,22 @@ mod overview_red {
                 "`{name}` has no description: {row:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod root_access_mapping_tests {
+    use super::*;
+
+    /// Catches canonical root spellings drifting from the accepted CLI values.
+    #[test]
+    fn root_access_spellings_and_clap_values_agree() {
+        use ego_core::permit::RootAccess;
+        for (access, spelling) in [(RootAccess::Read, "read"), (RootAccess::ReadWrite, "read-write")] {
+            assert_eq!(access.as_str(), spelling);
+            let parsed = RootsCommand::try_parse_from(["roots", "add", "--access", spelling, "/tmp/root"]);
+            assert!(parsed.is_ok(), "{spelling} must be accepted");
+        }
+        assert!(RootsCommand::try_parse_from(["roots", "add", "--access", "write", "/tmp/root"]).is_err());
     }
 }

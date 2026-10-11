@@ -19,6 +19,15 @@ pub enum RootAccess {
     ReadWrite,
 }
 
+impl RootAccess {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::ReadWrite => "read-write",
+        }
+    }
+}
+
 /// One root as written in a profile: a path, before resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

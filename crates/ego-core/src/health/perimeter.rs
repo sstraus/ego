@@ -156,10 +156,7 @@ impl Perimeter {
             lines.push(format!(
                 "  root\t{}\t{}\t{}",
                 display_path(&root.path),
-                match root.access {
-                    RootAccess::Read => "read",
-                    RootAccess::ReadWrite => "read-write",
-                },
+                root.access.as_str(),
                 root.source
             ));
         }
