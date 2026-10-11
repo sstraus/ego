@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ego_core::orchestrator::{Brief, ChildLine, Filter, Orchestrator, bounded_line};
+use ego_core::orchestrator::{Brief, ChildLine, Filter, bounded_line};
 use ego_core::permit::{
     CanonPath, EnvPolicy, FsError, GuardedIo, IoDenied, Op, PrepareCtx, PreparedCall, SpawnSpec,
     StreamProvenance, Tool, ToolError, ToolOutputProvenance, ToolResult, Typed, TypedTool,
@@ -218,7 +218,7 @@ pub struct TuicOrchestrator<'a, 'io> {
     unread: Option<&'a SpawnSpec>,
 }
 
-impl Orchestrator for TuicOrchestrator<'_, '_> {
+impl TuicOrchestrator<'_, '_> {
     fn status<'a>(&'a self, filter: &'a Filter) -> BoxFuture<'a, Result<Vec<ChildLine>, String>> {
         Box::pin(async move {
             let sessions = stdout(

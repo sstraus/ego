@@ -1,6 +1,5 @@
 //! Orchestration contracts; the OS adapter owns external effects.
 
-use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -91,16 +90,6 @@ impl ChildLine {
 pub struct Brief {
     pub children: Vec<ChildLine>,
     pub unread_results: Vec<String>,
-}
-
-/// The coordinator's external effect boundary, bound to admitted operations.
-pub trait Orchestrator: Send + Sync {
-    /// Execute an admitted active request; read-only adapters refuse it.
-    fn active<'a>(&'a self) -> BoxFuture<'a, Result<String, String>> {
-        Box::pin(async { Err("active orchestration is unavailable".into()) })
-    }
-    fn status<'a>(&'a self, filter: &'a Filter) -> BoxFuture<'a, Result<Vec<ChildLine>, String>>;
-    fn brief<'a>(&'a self, filter: &'a Filter) -> BoxFuture<'a, Result<Brief, String>>;
 }
 
 /// Keep one terminal-safe row inside the plan's UTF-8 byte budget.
