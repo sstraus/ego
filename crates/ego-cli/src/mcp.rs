@@ -107,19 +107,7 @@ async fn add(
     out: &Stdout,
     controller: &Arc<McpRegistryController>,
 ) -> Result<(), RunTermination> {
-    let before = management_config()?;
-    let target = before.selected_user_target();
-    let result = publish(
-        &before,
-        UserConfigMutation::McpSet {
-            target: target.clone(),
-            name: name.clone(),
-            expected_user_entry: before.user_entry(&target, name).cloned(),
-            server: server.clone(),
-        },
-    )?;
-    let publication = result.publication;
-    let after = resolve_after_publication(&publication)?;
+    let (after, publication) = publish_add(name, server)?;
     let status = reconcile(
         &after,
         controller,
@@ -134,6 +122,41 @@ async fn add(
         server_status_text(&status, name)
     ));
     Ok(())
+}
+
+/// Publish through the same typed transaction used by the CLI and TUI.
+pub(crate) fn publish_add(
+    name: &McpServerName,
+    server: &McpServerConfig,
+) -> Result<(McpManagementConfig, UserConfigPublication), RunTermination> {
+    let before = management_config()?;
+    let target = before.selected_user_target();
+    let result = publish(
+        &before,
+        UserConfigMutation::McpSet {
+            target: target.clone(),
+            name: name.clone(),
+            expected_user_entry: before.user_entry(&target, name).cloned(),
+            server: server.clone(),
+        },
+    )?;
+    let publication = result.publication;
+    let after = resolve_after_publication(&publication)?;
+    Ok((after, publication))
+}
+
+pub(crate) fn repl_add_args(arguments: &str) -> Result<McpArgs, UsageError> {
+    let mut tokens = vec!["ego".into(), "mcp".into()];
+    tokens.extend(shell_words::split(arguments).map_err(|error| UsageError(error.to_string()))?);
+    match crate::cli::parse(tokens)? {
+        crate::cli::Invocation::Mcp(args) if matches!(args.action, McpAction::Add { .. }) => {
+            Ok(*args)
+        }
+        _ => Err(UsageError(
+            "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]"
+                .into(),
+        )),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -362,7 +385,7 @@ fn server_status_text(status: &McpRegistryStatus, name: &McpServerName) -> &'sta
         .unwrap_or("absent")
 }
 
-fn server_state_text(state: McpServerState) -> &'static str {
+pub(crate) fn server_state_text(state: McpServerState) -> &'static str {
     match state {
         McpServerState::Admitted => "admitted",
         McpServerState::Degraded => "degraded",
@@ -685,4 +708,108 @@ impl ConfigurationReport {
             },
         }
     }
+}
+
+/// Session-local admission changes do not mutate configured enablement.
+pub(crate) async fn session_command(
+    arguments: &str,
+    controller: &Arc<McpRegistryController>,
+    configured: &mut Vec<(McpServerName, McpServerConfig, McpConfigProvenance)>,
+    disabled: &mut std::collections::BTreeSet<McpServerName>,
+) -> Result<String, RunTermination> {
+    if arguments.is_empty() {
+        let status = controller.status();
+        if configured.is_empty() {
+            return Ok("mcp: no configured servers".into());
+        }
+        return Ok(configured
+            .iter()
+            .map(|(name, _, _)| {
+                format!(
+                    "{name}\t{}",
+                    if disabled.contains(name) {
+                        "off (session)"
+                    } else {
+                        server_status_text(&status, name)
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    let (name, candidates, turning_off) = if let Some(raw) = arguments.strip_prefix("toggle ") {
+        let name = raw
+            .trim()
+            .parse::<McpServerName>()
+            .map_err(|error| usage(UsageError(error.to_string())))?;
+        let entry = configured
+            .iter()
+            .find(|(candidate, _, _)| *candidate == name)
+            .cloned()
+            .ok_or_else(|| usage(UsageError(format!("MCP server `{name}` is not configured"))))?;
+        let off = !disabled.contains(&name);
+        (
+            name,
+            if off {
+                Vec::new()
+            } else {
+                ego_tools::mcp::materialize_admissions(vec![entry])
+            },
+            off,
+        )
+    } else {
+        let args = repl_add_args(arguments).map_err(usage)?;
+        let McpAction::Add { name, server } = args.action else {
+            unreachable!()
+        };
+        let (after, _) = publish_add(&name, &server)?;
+        let ResolvedMcpEntry::Configured {
+            server, provenance, ..
+        } = after.effective.mcp.entries().get(&name).ok_or_else(|| {
+            usage(UsageError(
+                "added server is masked by effective configuration".into(),
+            ))
+        })?
+        else {
+            return Err(usage(UsageError(
+                "added server is masked by effective configuration".into(),
+            )));
+        };
+        let entry = (name.clone(), server.clone(), provenance.clone());
+        configured.retain(|(candidate, _, _)| *candidate != name);
+        configured.push(entry.clone());
+        configured.sort_by(|left, right| left.0.cmp(&right.0));
+        (
+            name,
+            ego_tools::mcp::materialize_admissions(vec![entry]),
+            false,
+        )
+    };
+    let refresh = McpRegistryRefresh::new(
+        candidates,
+        RegistryTrigger::ConfigChanged,
+        RegistryScope::Server(name.clone()),
+    )
+    .map_err(|error| RunTermination::Failed {
+        message: error.to_string(),
+    })?;
+    controller
+        .reconcile(refresh)
+        .await
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
+    if turning_off {
+        disabled.insert(name.clone());
+    } else {
+        disabled.remove(&name);
+    }
+    Ok(format!(
+        "mcp: {name} {}",
+        if turning_off {
+            "off (session)"
+        } else {
+            server_status_text(&controller.status(), &name)
+        }
+    ))
 }

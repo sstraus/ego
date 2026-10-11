@@ -5635,7 +5635,7 @@ fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
         &reader,
         &mut output,
         refusal_start,
-        "ego mcp add NAME",
+        "MCP control failed:",
         &stub,
         1,
     );
@@ -9331,4 +9331,160 @@ fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
     }
     assert!(!session.ego.workspace_path().join("survived").exists());
     session.finish();
+}
+
+const SESSION_MCP_SERVER: &str = r#"
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "server/discover":
+        result = {
+            "resultType": "complete",
+            "supportedVersions": ["2026-07-28"],
+            "capabilities": {"tools": {"listChanged": False}},
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "auto", "version": "1"}},
+        }
+    else:
+        result = {
+            "resultType": "complete",
+            "tools": [
+                {
+                    "name": "search_tools",
+                    "description": "Find a tool",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            "nextCursor": None,
+            "ttlMs": 0,
+            "cacheScope": "private",
+        }
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"#;
+
+// Catches: toggling persisting configuration or leaving the provider tool catalogue unchanged.
+#[test]
+fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("MCP-OFF-REQUEST")),
+            Reply::Sse(text("MCP-ON-REQUEST")),
+        ],
+        ..Plan::default()
+    });
+    let ego =
+        Ego::against(&stub)
+            .conversing()
+            .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
+    let server = ego.file("session-server.py", SESSION_MCP_SERVER);
+    ego.file("AGENTS.md", "# session MCP fixture\n");
+    let original = format!(
+        "[mcp.servers.auto]\ntransport='stdio'\ncommand='/usr/bin/python3'\nargs=[{:?}]\n",
+        server.display().to_string()
+    );
+    let config_path = ego.home_file("config.toml", &original);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), responder);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("flush");
+    until(&reader, &mut output, b"/help");
+    let list_start = output.len();
+    input.write_all(b"/mcp\r").expect("list");
+    input.flush().expect("flush");
+    until_normalized(&reader, &mut output, list_start, "admitted");
+    let off_start = output.len();
+    input.write_all(b"/mcp toggle auto\r").expect("toggle off");
+    input.flush().expect("flush");
+    until_normalized(&reader, &mut output, off_start, "auto off (session)");
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config"),
+        original
+    );
+    input.write_all(b"first with mcp off\r").expect("prompt");
+    input.flush().expect("flush");
+    until(&reader, &mut output, b"MCP-OFF-REQUEST");
+    until_prompt_from(&reader, &mut output, off_start);
+    let on_start = output.len();
+    input.write_all(b"/mcp toggle auto\r").expect("toggle on");
+    input.flush().expect("flush");
+    until_normalized(&reader, &mut output, on_start, "auto admitted");
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config"),
+        original
+    );
+    input.write_all(b"second with mcp on\r").expect("prompt");
+    input.flush().expect("flush");
+    until(&reader, &mut output, b"MCP-ON-REQUEST");
+    until_prompt_from(&reader, &mut output, on_start);
+    let add_start = output.len();
+    let added_server = ego.file(
+        "added-server.py",
+        &SESSION_MCP_SERVER.replace("search_tools", "added_search"),
+    );
+    let add = format!(
+        "add added --stdio -- /usr/bin/python3 {}",
+        shell_words::quote(added_server.to_str().expect("path"))
+    );
+    input
+        .write_all(format!("/mcp {add}\r").as_bytes())
+        .expect("add");
+    input.flush().expect("flush");
+    until_normalized(&reader, &mut output, add_start, "added admitted");
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("flush");
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader");
+    writer_join.join().expect("writer");
+    let published: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("config")).expect("TOML");
+    let cli = shell_words::split(&add)
+        .expect("argv")
+        .iter()
+        .fold(Ego::against(&stub).subcommand("mcp"), |cli, arg| {
+            cli.arg(arg)
+        });
+    let cli_config = cli.home_path().join("config.toml");
+    let finished = cli.run();
+    assert_eq!(finished.code, Some(0), "{finished:?}");
+    let cli_published: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&cli_config).expect("CLI config")).expect("TOML");
+    assert_eq!(
+        published["mcp"]["servers"]["added"],
+        cli_published["mcp"]["servers"]["added"]
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2);
+    let offers = |generation: &serde_json::Value| {
+        generation["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool["function"]["name"] == "search_tools")
+        })
+    };
+    assert!(!offers(&generations[0]), "off server still offered tools");
+    assert!(offers(&generations[1]), "enabled server tools are absent");
 }

@@ -1064,6 +1064,7 @@ impl Seat {
                     Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Tasks(arguments) => Line::HostCommand(HostCommand::Tasks(arguments)),
+                    Dispatch::Mcp(arguments) => Line::HostCommand(HostCommand::Mcp(arguments)),
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
                     }

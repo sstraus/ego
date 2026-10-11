@@ -95,7 +95,7 @@ pub(super) async fn drive_execution<S: EventSink>(
     let ScopedInvocation {
         mcp_scope: _mcp_scope,
         mcp_runtime,
-        mcp_registry: _,
+        mcp_registry,
         artifact_store,
         jsonl_store,
         session_id: _,
@@ -146,6 +146,29 @@ pub(super) async fn drive_execution<S: EventSink>(
         resume,
     } = activated;
     let mcp_runtime = Arc::clone(mcp_runtime);
+    let mut session_mcp = effective
+        .mcp
+        .entries()
+        .iter()
+        .filter_map(|(name, entry)| match entry {
+            ego_core::config::ResolvedMcpEntry::Configured {
+                server, provenance, ..
+            } => Some((name.clone(), server.clone(), provenance.clone())),
+            ego_core::config::ResolvedMcpEntry::Tombstone { .. } => None,
+        })
+        .collect();
+    let mut disabled_mcp = effective
+        .mcp
+        .entries()
+        .iter()
+        .filter_map(|(name, entry)| {
+            (matches!(
+                entry,
+                ego_core::config::ResolvedMcpEntry::Configured { enabled: false, .. }
+            ) && mcp_registry.status().server(name).is_none())
+            .then(|| name.clone())
+        })
+        .collect();
     let clock = *clock;
     let sink = &sink;
 
@@ -1248,6 +1271,25 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             skill_profile_layers.as_deref().unwrap_or_default(),
                                             &perimeter,
                                         ));
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Mcp(arguments)) => {
+                                        {
+                                            let controller = mcp_registry;
+                                            let result = crate::mcp::session_command(
+                                                &arguments,
+                                                controller,
+                                                &mut session_mcp,
+                                                &mut disabled_mcp,
+                                            )
+                                            .await;
+                                            match result {
+                                                Ok(receipt) => diagnostics.note(&receipt),
+                                                Err(error) => diagnostics.note(&format!(
+                                                    "MCP control failed: {error:?}"
+                                                )),
+                                            }
+                                        }
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Config(
