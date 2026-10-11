@@ -1844,6 +1844,10 @@ fn own_terminal(
                     continue;
                 }
                 Ok(request) => {
+                    // The composer stepped aside for this request: whatever
+                    // asks next paints on its rows instead of below them, and
+                    // the composer returns there afterwards with its draft.
+                    let _ = editor.erase_last_prompt();
                     let mut surface = ModalSurface {
                         phase: &phase,
                         status: &status,

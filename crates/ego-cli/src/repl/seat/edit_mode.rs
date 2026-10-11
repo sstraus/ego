@@ -103,9 +103,12 @@ impl EditMode for SurfaceEditMode {
                 self.status.lock().expect("surface status lock").origin =
                     InputOrigin::BracketedPaste;
             }
-            Event::Resize(width, _) => {
+            // Every phase, a modal included, tells the painter: a prompt
+            // painted with the old width wraps, and is erased, on wrong rows.
+            Event::Resize(width, height) => {
                 self.status.lock().expect("surface status lock").width = usize::from(*width);
                 repaint_status(&self.status);
+                return ReedlineEvent::Resize(*width, *height);
             }
             _ => {}
         }
@@ -161,7 +164,6 @@ impl EditMode for SurfaceEditMode {
                 {
                     key("escape")
                 }
-                Event::Resize(_, _) => ReedlineEvent::None,
                 _ => ReedlineEvent::None,
             };
         }
@@ -192,7 +194,6 @@ impl EditMode for SurfaceEditMode {
                 {
                     queued("escape")
                 }
-                Event::Resize(_, _) => ReedlineEvent::None,
                 _ => ReedlineEvent::None,
             };
         }
@@ -218,7 +219,6 @@ impl EditMode for SurfaceEditMode {
                 {
                     ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.to_string())
                 }
-                Event::Resize(_, _) | Event::Paste(_) => ReedlineEvent::None,
                 _ => ReedlineEvent::None,
             };
         }
