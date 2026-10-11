@@ -14,7 +14,7 @@ use ego_core::turn::CancelToken;
 use ego_core::turn::McpRegistryJournal;
 use ego_mcp::{
     MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT, McpDuplexEffectsFactory,
-    McpHttpEffects, McpRegistryController, McpRegistryRuntime,
+    McpHttpEffects, McpRegistryController, McpRegistryRuntime, McpStdioSession,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::credentials::{OsGenerationPolicyCaptureStore, OsResumeKey};
@@ -209,12 +209,14 @@ impl std::fmt::Display for McpProcessScopeError {
 pub struct McpProcessScope {
     _effects: CommandHttpScope,
     runtime: Arc<McpRegistryRuntime>,
+    /// Present for a run: its stdio servers keep one child across tool calls.
+    stdio: Option<Arc<McpStdioSession>>,
 }
 
 impl McpProcessScope {
     pub async fn online(cancel: CancelToken) -> Result<Self, String> {
         let effects = CommandHttpScope::online(cancel).await?;
-        Self::from_effects(effects)
+        Self::from_effects(effects, false)
     }
 
     pub(crate) async fn for_run(
@@ -223,10 +225,10 @@ impl McpProcessScope {
         run_deadline: Option<Instant>,
     ) -> Result<Self, McpProcessScopeError> {
         let effects = CommandHttpScope::confined(confinement, cancel, run_deadline, None).await?;
-        Self::from_effects(effects).map_err(McpProcessScopeError::Setup)
+        Self::from_effects(effects, true).map_err(McpProcessScopeError::Setup)
     }
 
-    fn from_effects(effects: CommandHttpScope) -> Result<Self, String> {
+    fn from_effects(effects: CommandHttpScope, retain_stdio: bool) -> Result<Self, String> {
         let root = crate::config::ego_home()
             .ok_or_else(|| "MCP needs EGO_HOME or HOME for its machine journals".to_owned())?
             .join("mcp");
@@ -238,9 +240,27 @@ impl McpProcessScope {
             })?) as Arc<dyn ContinuationJournal>;
         let http = Arc::new(RunMcpHttpEffects::new(Arc::clone(effects.ports())))
             as Arc<dyn McpHttpEffects>;
-        let stdio = Arc::new(RunMcpDuplexEffectsFactory::new(
+        let one_shot = Arc::new(RunMcpDuplexEffectsFactory::new(
             effects.ports().duplex_handle(),
-        )) as Arc<dyn McpDuplexEffectsFactory>;
+        ));
+        // A stdio server may bind state to its process (tuic-bridge holds the
+        // peer registration), so a run keeps one child per server like an ACP session.
+        let process = effects.ports().process_handle();
+        let session = process
+            .confinement()
+            .filter(|_| retain_stdio)
+            .map(|confinement| {
+                McpStdioSession::new(
+                    SessionId::new(),
+                    one_shot.clone(),
+                    process.clone(),
+                    confinement,
+                )
+            });
+        let stdio = match &session {
+            Some(session) => session.clone() as Arc<dyn McpDuplexEffectsFactory>,
+            None => one_shot as Arc<dyn McpDuplexEffectsFactory>,
+        };
         let runtime = Arc::new(
             McpRegistryRuntime::new(
                 journal,
@@ -258,7 +278,15 @@ impl McpProcessScope {
         Ok(Self {
             _effects: effects,
             runtime,
+            stdio: session,
         })
+    }
+
+    /// Reap every retained stdio child before the run's effect scope goes away.
+    pub async fn close(&self) {
+        if let Some(stdio) = &self.stdio {
+            stdio.close().await;
+        }
     }
 
     pub fn runtime(&self) -> &Arc<McpRegistryRuntime> {
