@@ -149,7 +149,8 @@ fn refused_configured_server_is_reported_once_and_the_session_continues() {
     let finished = run_with_remote_server(&[]);
     assert_eq!(finished.code, Some(0), "{finished:?}");
     assert!(finished.stdout.contains("REMOTE-COMPLETE"), "{finished:?}");
-    let notice = "MCP server `remote` not attached: MCP HTTP server `remote` requires --sandbox off";
+    let notice =
+        "MCP server `remote` not attached: MCP HTTP server `remote` requires --sandbox off";
     assert_eq!(finished.stderr.matches(notice).count(), 1, "{finished:?}");
 }
 
