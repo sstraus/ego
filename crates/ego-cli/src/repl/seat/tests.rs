@@ -919,3 +919,22 @@ fn a_modal_that_outlived_its_turn_does_not_move_the_next_turn_into_the_future() 
         "only the overlap with the running turn counts as its modal wait"
     );
 }
+
+// Catches: a blanket LF-to-CRLF replacement doubling the CR of a row that
+// already ends in CRLF, or rewriting bytes inside a control sequence.
+#[test]
+fn startup_printer_rows_end_in_one_crlf_and_keep_their_bytes() {
+    let cases = [
+        ("header\n", "header\r\n"),
+        ("already\r\n", "already\r\n"),
+        ("one\ntwo\n", "one\r\ntwo\r\n"),
+        ("\x1b[1mbold\x1b[0m\n", "\x1b[1mbold\x1b[0m\r\n"),
+        ("unterminated", "unterminated\r\n"),
+        ("", ""),
+    ];
+    for (message, expected) in cases {
+        let mut written = Vec::new();
+        write_printer_message(&mut written, message).expect("a Vec accepts writes");
+        assert_eq!(String::from_utf8(written).unwrap(), expected, "{message:?}");
+    }
+}
