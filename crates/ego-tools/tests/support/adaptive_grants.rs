@@ -109,9 +109,9 @@ fn adaptive_floor_denials_never_offer_an_ineffective_grant() {
 // offers a place too broad to grant, such as the home directory.
 #[test]
 fn adaptive_unanchored_write_refusal_names_the_exact_roots_command() {
-    let Some(root) =
-        isolated("adaptive_grants::adaptive_unanchored_write_refusal_names_the_exact_roots_command")
-    else {
+    let Some(root) = isolated(
+        "adaptive_grants::adaptive_unanchored_write_refusal_names_the_exact_roots_command",
+    ) else {
         return;
     };
     let cache = root.join("outside/cache");
@@ -136,7 +136,10 @@ fn adaptive_unanchored_write_refusal_names_the_exact_roots_command() {
             Some(seat.clone()),
         );
         let Err(ProcessError::Exit { result, .. }) = result else {
-            panic!("expected native refusal for {}: {result:?}", target.display());
+            panic!(
+                "expected native refusal for {}: {result:?}",
+                target.display()
+            );
         };
         assert!(seat.0.lock().unwrap().is_empty(), "unanchored path asked");
         let note = result
