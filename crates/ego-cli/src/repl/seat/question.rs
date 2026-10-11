@@ -370,8 +370,12 @@ pub(super) fn answer_control(
             let _ = sender.send(accepted);
         }
         Reply::Permission(sender, decision, receipt) => {
+            #[cfg(test)]
+            hold_permission_printer();
             commit_to_transcript(surface.status, &receipt);
             let _ = sender.send(decision);
+            #[cfg(test)]
+            await_permission_printer_release();
         }
         Reply::Question(sender, outcome) => {
             let _ = sender.send(outcome);
@@ -1350,15 +1354,20 @@ fn decline(editor: &mut Reedline, surface: &mut ModalSurface<'_>) -> PermissionD
     }
 }
 
-/// One row into the transcript, through the same printer the run output uses.
-fn commit_to_transcript(status: &SharedStatus, row: &str) {
+/// One row into the existing output pump; only the pump waits on Reedline.
+pub(super) fn commit_to_transcript(status: &SharedStatus, row: &str) {
     let transcript = status
         .lock()
         .expect("surface status lock")
         .transcript
         .clone();
-    if let Some(transcript) = transcript {
-        let _ = transcript.send(format!("{row}\n"));
+    if let Some(transcript) = transcript
+        && transcript
+            .send(SurfaceMessage::Row(format!("{row}\n")))
+            .is_err()
+    {
+        status.lock().expect("surface status lock").notice =
+            Some("Permission receipt could not reach the output pump".to_owned());
     }
 }
 

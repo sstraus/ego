@@ -916,3 +916,7 @@ pub(super) async fn run_with_registry<S: EventSink>(
         Err(refusal) => Ended::refused(refusal),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/live_surface_pty/held_permission_receipt.rs"]
+mod held_permission_receipt;
