@@ -527,6 +527,7 @@ fn banner_hints_list_the_hinted_keys_and_fit_without_dropping_one() {
         for item in [
             "Esc interrupts",
             "Enter queues",
+            "Ctrl+Enter steers",
             "Ctrl+S draft",
             "Option+P models",
             "/help",

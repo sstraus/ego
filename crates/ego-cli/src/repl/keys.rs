@@ -21,6 +21,8 @@ pub(super) enum Intercept {
     Draft,
     /// Submit the live composer through the durable coordinator.
     SubmitBusy,
+    /// Submit the live composer and expedite it, interrupting the running turn.
+    SteerBusy,
     /// Expedite the durable pending-steer prefix.
     Interrupt,
     Background,
@@ -49,6 +51,8 @@ pub(super) fn intercept(code: KeyCode, modifiers: KeyModifiers) -> Intercept {
         Intercept::ClipboardImage
     } else if pressed_s && only_control {
         Intercept::Draft
+    } else if code == KeyCode::Enter && only_control {
+        Intercept::SteerBusy
     } else if code == KeyCode::Enter && modifiers.is_empty() {
         Intercept::SubmitBusy
     } else if code == KeyCode::Esc && modifiers.is_empty() {
@@ -61,6 +65,24 @@ pub(super) fn intercept(code: KeyCode, modifiers: KeyModifiers) -> Intercept {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches: Ctrl+Enter submitting like plain Enter, or plain Enter and
+    // Shift+Enter turning into a steer.
+    #[test]
+    fn ctrl_enter_steers_and_plain_or_shift_enter_do_not() {
+        assert_eq!(
+            intercept(KeyCode::Enter, KeyModifiers::CONTROL),
+            Intercept::SteerBusy
+        );
+        assert_eq!(
+            intercept(KeyCode::Enter, KeyModifiers::NONE),
+            Intercept::SubmitBusy
+        );
+        assert_eq!(
+            intercept(KeyCode::Enter, KeyModifiers::SHIFT),
+            Intercept::Editor
+        );
+    }
 
     // Catches: Ctrl+B falls through to cursor movement or swallows Alt+B.
     #[test]
@@ -161,7 +183,7 @@ mod tests {
 
     #[test]
     fn nothing_that_is_not_a_character_is_taken() {
-        for code in [KeyCode::Enter, KeyCode::Tab, KeyCode::Esc, KeyCode::Up] {
+        for code in [KeyCode::Tab, KeyCode::Esc, KeyCode::Up] {
             assert_eq!(
                 intercept(code, KeyModifiers::CONTROL),
                 Intercept::Editor,

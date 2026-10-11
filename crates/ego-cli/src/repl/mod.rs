@@ -34,6 +34,7 @@ use reedline::Signal;
 
 pub(super) const DRAFT_COMMAND: &str = "ego:draft";
 pub(super) const BUSY_SUBMIT_COMMAND: &str = "ego:busy-submit";
+pub(super) const BUSY_STEER_COMMAND: &str = "ego:busy-steer";
 pub(super) const BACKGROUND_COMMAND: &str = "ego:background";
 const INTERRUPT_COMMAND: &str = "ego:interrupt";
 pub(super) const PASTE_PATH_COMMAND: &str = "ego:paste-path:";
@@ -66,6 +67,7 @@ pub enum HostCommand {
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
     BusySubmit,
+    BusySteer,
     Interrupt,
     ModalEscape,
     ModelPicker(String),
@@ -83,6 +85,9 @@ impl HostCommand {
         }
         if command == BUSY_SUBMIT_COMMAND {
             return Some(Self::BusySubmit);
+        }
+        if command == BUSY_STEER_COMMAND {
+            return Some(Self::BusySteer);
         }
         if command == BACKGROUND_COMMAND {
             return Some(Self::Background);

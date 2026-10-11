@@ -540,6 +540,11 @@ impl ActionRegistry {
             "While a turn is running, queue the line for the next safe boundary",
         ))
         .with_binding(KeyBinding::new(
+            "Ctrl+Enter",
+            "steers",
+            "While a turn is running, send the line now: interrupt and deliver it first",
+        ))
+        .with_binding(KeyBinding::new(
             "Ctrl+S",
             "draft",
             "Save the composer draft, or restore the last saved one",
