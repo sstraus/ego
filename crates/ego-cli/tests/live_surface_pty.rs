@@ -2989,40 +2989,6 @@ fn drain(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
     }
 }
 
-/// Waits until an idle composer row (`>` alone) stands below the row showing
-/// `marker`. A screen that lacks the streaming prompt is not enough: while the
-/// reply prints, the prompt is briefly erased, so only the idle composer proves
-/// the turn-end redraw arrived. A screen that never settles is left for the
-/// caller's own assertion to report.
-fn until_idle_composer_below(
-    receiver: &mpsc::Receiver<Vec<u8>>,
-    output: &mut Vec<u8>,
-    rows: u16,
-    cols: u16,
-    marker: &str,
-) {
-    let deadline = Instant::now() + PROGRESS_DEADLINE;
-    loop {
-        let mut screen = vt100::Parser::new(rows, cols, 0);
-        screen.process(output);
-        let contents = screen.screen().contents();
-        let after: Vec<_> = contents
-            .lines()
-            .skip_while(|line| !line.contains(marker))
-            .collect();
-        let settled = after.iter().any(|line| line.trim_end() == ">")
-            && !after.iter().any(|line| line.contains("Esc to interrupt"));
-        if settled {
-            return;
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match receiver.recv_timeout(remaining) {
-            Ok(chunk) => output.extend(chunk),
-            Err(_) => return,
-        }
-    }
-}
-
 /// A raw PTY read may have already received a complete redraw while its reader
 /// thread still holds the chunk. A key assertion begins only after that queue
 /// is quiet, so an old marker cannot satisfy a later-key expectation.
