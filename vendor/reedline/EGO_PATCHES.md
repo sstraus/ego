@@ -14,7 +14,14 @@ The permitted local delta is intentionally narrow:
 
 - position external output from the painter's tracked prompt anchor instead of
   estimating rows from buffer bytes or display-width division;
-- add regression coverage for narrow, combining, wide, and zero-width cases.
+- add regression coverage for narrow, combining, wide, and zero-width cases;
+- add `Reedline::erase_last_prompt`, which erases the prompt and buffer that
+  the last `read_line` left on screen so the next prompt starts on its first
+  row. The painter records the rows, the cursor position and the terminal size
+  at the return (`PromptFootprint`), and erases nothing when the size or the
+  cursor no longer match. regression case uses it to replace an answered question
+  with one transcript row; the API carries no εgo policy and is written to be
+  proposed upstream.
 
 Do not add εgo policy, DTOs, input handling, or rendering to this crate. The
 decision and replacement condition are recorded in

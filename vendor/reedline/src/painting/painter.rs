@@ -161,6 +161,31 @@ pub struct PainterSuspendedState {
     bottom_row: u16,
 }
 
+/// Where a finished prompt sits once `read_line` has returned, and where that
+/// return left the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptFootprint {
+    /// First row the prompt occupies.
+    start_row: u16,
+    /// Rows the cursor can be on while nothing else has written.
+    cursor_rows: RangeInclusive<u16>,
+    /// Column the cursor is on, when the return left it at a known one.
+    cursor_column: Option<u16>,
+    /// Terminal size the prompt was painted for.
+    screen: (u16, u16),
+}
+
+impl PromptFootprint {
+    /// The row to erase from, if the screen and the cursor are still where
+    /// the return left them.
+    fn erasable_from(&self, (column, row): (u16, u16), screen: (u16, u16)) -> Option<u16> {
+        (screen == self.screen
+            && self.cursor_rows.contains(&row)
+            && self.cursor_column.is_none_or(|expected| expected == column))
+        .then_some(self.start_row)
+    }
+}
+
 /// Screen bounds of the right prompt when it is visible.
 #[derive(Debug, Clone, Copy)]
 pub struct RightPromptBounds {
@@ -459,6 +484,55 @@ impl Painter {
             previous_prompt_rows_range: start_row..=final_row,
             bottom_row: self.screen_height().saturating_sub(1),
         }
+    }
+
+    /// The footprint of a prompt left painted in place by a suspension.
+    pub(crate) fn footprint_in_place(&self) -> PromptFootprint {
+        let start_row = self.prompt_start_row.last_known_row();
+        PromptFootprint {
+            start_row,
+            cursor_rows: start_row..=self.last_prompt_row(start_row),
+            cursor_column: None,
+            screen: self.terminal_size,
+        }
+    }
+
+    /// The footprint a prompt will have after [`Painter::move_cursor_to_end`].
+    /// Call it before that move: its line feed scrolls the screen by one row
+    /// when the prompt ends on the bottom row.
+    pub(crate) fn footprint_after_end(&self) -> PromptFootprint {
+        let start_row = self.prompt_start_row.last_known_row();
+        let last_row = self.last_prompt_row(start_row);
+        let bottom_row = self.screen_height().saturating_sub(1);
+        let (start_row, cursor_row) = if last_row == bottom_row {
+            (start_row.saturating_sub(1), bottom_row)
+        } else {
+            (start_row, last_row + 1)
+        };
+        PromptFootprint {
+            start_row,
+            cursor_rows: cursor_row..=cursor_row,
+            cursor_column: Some(0),
+            screen: self.terminal_size,
+        }
+    }
+
+    fn last_prompt_row(&self, start_row: u16) -> u16 {
+        start_row
+            .saturating_add(self.last_required_lines.max(1) - 1)
+            .min(self.screen_height().saturating_sub(1))
+    }
+
+    /// Erase a finished prompt when the screen and the cursor are still where
+    /// its return left them, leaving the cursor on its first row.
+    pub(crate) fn erase_footprint(&mut self, footprint: &PromptFootprint) -> Result<bool> {
+        let Some(row) = footprint.erasable_from(cursor::position()?, terminal::size()?) else {
+            return Ok(false);
+        };
+        self.stdout.queue(MoveTo(0, row))?;
+        self.stdout.queue(Clear(ClearType::FromCursorDown))?;
+        self.stdout.flush()?;
+        Ok(true)
     }
 
     /// Sets the prompt origin position and screen size for a new line editor
@@ -1499,6 +1573,53 @@ mod tests {
             reused,
             "{selected:?}"
         );
+    }
+
+    // A suspended prompt is erasable from its first row while the cursor is
+    // still inside it; a resize or a cursor above it means something moved
+    // the screen, so nothing may be erased.
+    #[rstest]
+    #[case::cursor_inside(5, 2, (2, 6), (80, 8), Some(5))]
+    #[case::cursor_on_bottom_row_of_a_flush_prompt(6, 2, (2, 7), (80, 8), Some(6))]
+    #[case::cursor_above_the_prompt(5, 2, (0, 4), (80, 8), None)]
+    #[case::resized(5, 2, (2, 6), (60, 8), None)]
+    fn test_suspended_footprint_erases_only_where_it_was_left(
+        #[case] start_row: u16,
+        #[case] required_lines: u16,
+        #[case] cursor: (u16, u16),
+        #[case] screen: (u16, u16),
+        #[case] erasable: Option<u16>,
+    ) {
+        let mut painter = Painter::new(W::sink());
+        painter.handle_resize(80, 8); // rows 0..=7
+        painter.prompt_start_row.mark_verified(start_row);
+        painter.last_required_lines = required_lines;
+
+        let footprint = painter.footprint_in_place();
+        assert_eq!(footprint.erasable_from(cursor, screen), erasable);
+    }
+
+    // A returned prompt leaves the cursor at column 0 below its last row; one
+    // that ended on the bottom row scrolled up by the line feed, so its first
+    // row moved up with it.
+    #[rstest]
+    #[case::room_below(2, 2, (0, 4), Some(2))]
+    #[case::ended_on_the_bottom_row(6, 2, (0, 7), Some(5))]
+    #[case::cursor_not_at_column_zero(2, 2, (3, 4), None)]
+    #[case::cursor_moved_on(2, 2, (0, 5), None)]
+    fn test_returned_footprint_follows_the_final_line_feed(
+        #[case] start_row: u16,
+        #[case] required_lines: u16,
+        #[case] cursor: (u16, u16),
+        #[case] erasable: Option<u16>,
+    ) {
+        let mut painter = Painter::new(W::sink());
+        painter.handle_resize(80, 8); // rows 0..=7
+        painter.prompt_start_row.mark_verified(start_row);
+        painter.last_required_lines = required_lines;
+
+        let footprint = painter.footprint_after_end();
+        assert_eq!(footprint.erasable_from(cursor, (80, 8)), erasable);
     }
 
     fn base_snapshot() -> RenderSnapshot {

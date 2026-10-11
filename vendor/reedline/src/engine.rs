@@ -27,7 +27,9 @@ use {
             FileBackedHistory, History, HistoryCursor, HistoryItem, HistoryItemId,
             HistoryNavigationQuery, HistorySessionId, SearchDirection, SearchQuery,
         },
-        painting::{Painter, PainterSuspendedState, PromptLines, RenderSnapshot, W},
+        painting::{
+            Painter, PainterSuspendedState, PromptFootprint, PromptLines, RenderSnapshot, W,
+        },
         prompt::{PromptEditMode, PromptHistorySearchStatus},
         result::{ReedlineError, ReedlineErrorVariants},
         terminal_extensions::{
@@ -149,6 +151,9 @@ pub struct Reedline {
     // State of the painter after a `ReedlineEvent::ExecuteHostCommand` was requested, used after
     // execution to decide if we can re-use the previous prompt or paint a new one.
     suspended_state: Option<PainterSuspendedState>,
+
+    // Where the last `read_line` left its prompt, until anything repaints.
+    last_prompt: Option<PromptFootprint>,
     last_render_snapshot: Option<RenderSnapshot>,
 
     // Validator
@@ -360,6 +365,7 @@ impl Reedline {
             history_cursor_on_excluded: false,
             input_mode: InputMode::Regular,
             suspended_state: None,
+            last_prompt: None,
             last_render_snapshot: None,
             painter,
             transient_prompt: None,
@@ -932,10 +938,31 @@ impl Reedline {
     /// The host calls this after acknowledging a suspended buffer; it does
     /// not submit that input to the host a second time.
     pub fn accept_buffer(&mut self, prompt: &dyn Prompt) -> Result<()> {
+        self.last_prompt = None;
         self.submit_buffer(prompt)?;
         self.painter.move_cursor_to_end()?;
         self.suspended_state = None;
         Ok(())
+    }
+
+    /// Erase the prompt and buffer the last [`Reedline::read_line`] left on
+    /// screen, so the next prompt starts on its first row.
+    ///
+    /// For a host that replaces a finished prompt with its own output, such as
+    /// a settled question. Call it before anything else writes to the
+    /// terminal: the rows are where Reedline painted them only while nothing
+    /// else has moved the screen. Returns `false`, writing nothing, when there
+    /// is no such prompt, the terminal was resized, or the cursor is not where
+    /// the return left it.
+    pub fn erase_last_prompt(&mut self) -> Result<bool> {
+        let Some(footprint) = self.last_prompt.take() else {
+            return Ok(false);
+        };
+        let erased = self.painter.erase_footprint(&footprint)?;
+        if erased {
+            self.suspended_state = None;
+        }
+        Ok(erased)
     }
 
     /// Writes `msg` to the terminal with a following carriage return and newline
@@ -993,6 +1020,7 @@ impl Reedline {
     /// Helper implementing the logic for [`Reedline::read_line()`] to be wrapped
     /// in a `raw_mode` context.
     fn read_line_helper(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
+        self.last_prompt = None;
         self.painter
             .initialize_prompt_position(self.suspended_state.as_ref())?;
         if self.suspended_state.is_some() {
@@ -1025,6 +1053,7 @@ impl Reedline {
                     self.input_mode = InputMode::Regular;
                     self.last_render_snapshot = None;
                     self.suspended_state = Some(self.painter.state_before_suspension());
+                    self.last_prompt = Some(self.painter.footprint_in_place());
                     self.editor.reset_undo_stack();
                     return Ok(Signal::ExternalBreak(buffer));
                 }
@@ -1262,7 +1291,10 @@ impl Reedline {
                     if self.suspended_state.is_none() {
                         // We are about to quit the editor, move the cursor below the input
                         // area, for external commands or new read_line call
+                        self.last_prompt = Some(self.painter.footprint_after_end());
                         self.painter.move_cursor_to_end()?;
+                    } else {
+                        self.last_prompt = Some(self.painter.footprint_in_place());
                     }
                     return Ok(ControlFlow::Break(signal));
                 }
