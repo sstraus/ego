@@ -1,43 +1,12 @@
-use ego_core::config::{Mode, ModelRef};
-use ego_core::permit::judge::{JudgeConfig, JudgeInput, JudgeRecentCall, JudgeTaskContext};
-use ego_core::permit::{
-    CanonPath, Classification, Confinement, EnvPolicy, ExecCaps, Op, PolicyEngine, PreparedCall,
-    RunConfinement, SpawnSpec,
-};
+mod support;
+use ego_core::permit::judge::{JudgeRecentCall, JudgeTaskContext};
 
 fn request_text(argv: &[String]) -> String {
     request_with_context(argv, &JudgeTaskContext::default())
 }
 
 fn request_with_context(argv: &[String], context: &JudgeTaskContext) -> String {
-    let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Auto, Default::default());
-    let call = PreparedCall::new(
-        "exec",
-        Op::Spawn {
-            spec: SpawnSpec::new(
-                argv.iter().map(Into::into).collect(),
-                Some(CanonPath::new("/ws")),
-                None,
-                EnvPolicy::Inherited,
-            )
-            .unwrap(),
-        },
-    );
-    let Classification::Ask(pending) = policy.classify(call.clone()) else {
-        panic!("curl must ask");
-    };
-    let input = JudgeInput::new(
-        &call,
-        &RunConfinement::new(Confinement::Workspace, false, CanonPath::new("/ws")).unwrap(),
-        ExecCaps::empty(),
-        pending.request().why(),
-    );
-    let config = JudgeConfig {
-        identity: ModelRef("openrouter/example/judge".into()),
-        request_model: "example/judge".into(),
-        max_output_tokens: Some(512),
-    };
-    let request = input.request_with_context(&config, context, None);
+    let request = support::judge_request(&support::judge_call(argv), context);
     serde_json::to_string(&request.messages).unwrap()
 }
 
