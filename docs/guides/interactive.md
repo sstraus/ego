@@ -32,7 +32,9 @@ new prompt epoch when source work is idle.
 ## Input while work is running
 
 The live composer preserves drafts and queues accepted prompts. Steering and
-ordinary queued prompts are distinct. Local inspection and model-picker actions
+ordinary queued prompts are distinct. Up on an empty busy composer withdraws
+the last queued text for editing. Enter queues the edited text again. Withdrawal
+is durable, so resume does not deliver the old text. Local inspection and model-picker actions
 can remain responsive during streaming; model changes take effect at a generation
 boundary, never by mutating an already-sent request.
 

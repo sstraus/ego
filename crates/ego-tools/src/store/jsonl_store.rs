@@ -1603,6 +1603,7 @@ impl JsonlStore {
             ev.kind,
             EventKind::PromptQueued { .. }
                 | EventKind::PromptDeliveryExpedited { .. }
+                | EventKind::PromptRetracted { .. }
                 | EventKind::UserPrompt {
                     queued_prompt: Some(_),
                     ..

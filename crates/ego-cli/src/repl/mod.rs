@@ -34,6 +34,7 @@ use reedline::Signal;
 
 pub(super) const DRAFT_COMMAND: &str = "ego:draft";
 pub(super) const BUSY_SUBMIT_COMMAND: &str = "ego:busy-submit";
+pub(super) const BUSY_RECALL_COMMAND: &str = "ego:busy-recall";
 pub(super) const BUSY_STEER_COMMAND: &str = "ego:busy-steer";
 pub(super) const BACKGROUND_COMMAND: &str = "ego:background";
 const INTERRUPT_COMMAND: &str = "ego:interrupt";
@@ -68,6 +69,7 @@ pub enum HostCommand {
     Draft,
     BusySubmit,
     BusySteer,
+    BusyRecall,
     Interrupt,
     ModalEscape,
     ModelPicker(String),
@@ -85,6 +87,9 @@ impl HostCommand {
         }
         if command == BUSY_SUBMIT_COMMAND {
             return Some(Self::BusySubmit);
+        }
+        if command == BUSY_RECALL_COMMAND {
+            return Some(Self::BusyRecall);
         }
         if command == BUSY_STEER_COMMAND {
             return Some(Self::BusySteer);

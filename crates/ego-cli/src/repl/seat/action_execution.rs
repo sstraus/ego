@@ -356,6 +356,26 @@ pub(super) fn surface_line(
                 drop(current);
                 repaint_status(status);
             }
+            HostCommand::BusyRecall => {
+                match futures::executor::block_on(ingress.recall()) {
+                    Ok(Some((text, queue))) => {
+                        editor.run_edit_commands(&[EditCommand::InsertString(text)]);
+                        let mut current = status.lock().expect("surface status lock");
+                        current.queue = queue;
+                        current.origin = InputOrigin::Typed;
+                        current.notice = None;
+                        if let Some(snapshot) = current.snapshot.as_mut() {
+                            snapshot.set_queue(queue);
+                        }
+                    }
+                    Ok(None) | Err(ego_core::turn::ControlError::Closed) => {}
+                    Err(error) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some(error.to_string());
+                    }
+                }
+                repaint_status(status);
+            }
             HostCommand::BusySubmit | HostCommand::BusySteer => {
                 let steer = command == HostCommand::BusySteer;
                 let buffer = editor.current_buffer_contents().to_string();

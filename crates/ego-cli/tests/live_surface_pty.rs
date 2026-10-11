@@ -4058,6 +4058,143 @@ fn live_surface_ctrl_enter_steers_a_busy_turn_once() {
     );
 }
 
+// Catches: Ctrl+Enter on a busy composer inserting a newline or queueing behind
+// the turn, instead of the one durable expedite Esc uses, and a second delivery.
+#[test]
+fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
+    let steer = "original queued text";
+    let edited = "edited queued text";
+    let (initial, initial_gate) = gated_paced_line("STREAMED-BEFORE-STEER");
+    let stub = Stub::start(Plan {
+        completions: vec![initial, Reply::Sse(text("STEER-RECEIVED"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"STREAMED-BEFORE-STEER");
+
+    let steer_start = output.len();
+    input.write_all(steer.as_bytes()).expect("steer text");
+    input.write_all(b"\r").expect("queue Enter");
+    input.flush().expect("Ctrl+Enter flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        steer_start,
+        "Messages to be submitted after next tool call",
+    );
+    let recall_start = output.len();
+    input.write_all(b"\x1b[A").expect("recall Up");
+    input.flush().expect("recall flush");
+    until_normalized(&reader, &mut output, recall_start, steer);
+    let events_path = ego
+        .home_path()
+        .join("sessions")
+        .join(support::FIXTURE_SESSION_ID)
+        .join("events.jsonl");
+    let recalled_events = std::fs::read_to_string(&events_path)
+        .expect("queue recall persisted before restoring text");
+    let mut state = ego_core::state::SessionState::default();
+    for line in recalled_events.lines() {
+        let envelope: serde_json::Value = serde_json::from_str(line).expect("event envelope");
+        if envelope["payload"]["event"].is_null() {
+            continue;
+        }
+        let event: ego_core::event::domain::DomainEvent =
+            serde_json::from_value(envelope["payload"]["event"].clone()).expect("domain event");
+        state.apply(&event);
+    }
+    assert_eq!(
+        state.queue_status(),
+        ego_core::state::QueueStatus::default(),
+        "recall removes the pending prompt before Enter"
+    );
+    input.write_all(b"\x15").expect("clear recalled draft");
+    input.write_all(edited.as_bytes()).expect("edit draft");
+    input.write_all(b"\r").expect("requeue Enter");
+    input.flush().expect("requeue flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        recall_start,
+        "Messages to be submitted after next tool call",
+    );
+    initial_gate.release();
+    until(&reader, &mut output, b"STEER-RECEIVED");
+    until_prompt_from(&reader, &mut output, steer_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        2,
+        "one interrupted turn, one steered turn"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, steer))
+            .collect::<Vec<_>>(),
+        vec![0, 0],
+        "withdrawn text never reaches the provider"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, edited))
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    let events = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("durable session");
+    assert_eq!(
+        events.matches("PromptRetracted").count(),
+        1,
+        "withdrawal is durable"
+    );
+}
+
 #[test]
 fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() {
     // A real Ollama /api/tags response includes embedding-only rows. The
@@ -7870,6 +8007,7 @@ fn the_banner_lists_the_keys_at_120_80_60_and_40_columns() {
                 "Esc interrupts",
                 "Enter queues",
                 "Ctrl+Enter steers",
+                "Up recalls",
                 "Ctrl+S draft",
                 "Option+P models",
                 "/help",

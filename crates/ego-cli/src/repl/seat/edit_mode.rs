@@ -266,6 +266,23 @@ impl EditMode for SurfaceEditMode {
                     .unwrap_or_default();
                 return ReedlineEvent::ExecuteHostCommand(format!("{ACTION_COMMAND}{name}"));
             }
+            if key.code == KeyCode::Up
+                && key.modifiers.is_empty()
+                && self.phase.get() == EditPhase::Busy
+                && {
+                    let status = self.status.lock().expect("surface status lock");
+                    status.queue.pending_steers + status.queue.queued > 0
+                }
+            {
+                let fallback = match ReedlineRawEvent::try_from(raw.clone()) {
+                    Ok(event) => self.editor.parse_event(event),
+                    Err(()) => ReedlineEvent::None,
+                };
+                return ReedlineEvent::UntilFound(vec![
+                    ReedlineEvent::ExecuteHostCommandIfEmpty(BUSY_RECALL_COMMAND.to_owned()),
+                    fallback,
+                ]);
+            }
             match intercept(key.code, key.modifiers) {
                 Intercept::ClipboardImage => {
                     self.asked_for_image.store(true, Ordering::Relaxed);

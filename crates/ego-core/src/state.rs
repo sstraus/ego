@@ -1858,6 +1858,16 @@ impl SessionState {
                 self.accept_prompt(ev, *id, text, images)
             }
             EventKind::PromptDeliveryExpedited { through } => self.expedite_prompt(*through),
+            EventKind::PromptRetracted { id } => {
+                if self
+                    .unacknowledged_prompts()
+                    .last()
+                    .map(|prompt| prompt.id())
+                    == Some(*id)
+                {
+                    self.queued_prompt_ledger.retain(|prompt| prompt.id != *id);
+                }
+            }
             EventKind::UserPrompt {
                 text,
                 images,
