@@ -109,7 +109,9 @@ impl UserConfigMutation {
                 server,
                 ..
             } => {
-                if let Some(McpLayerEntry::Server(expected)) = expected_user_entry {
+                if let Some(McpLayerEntry::Server(expected) | McpLayerEntry::Disabled(expected)) =
+                    expected_user_entry
+                {
                     expected
                         .validate()
                         .map_err(|error| UserConfigError::new(error.to_string()))?;
@@ -119,7 +121,7 @@ impl UserConfigMutation {
                     .map_err(|error| UserConfigError::new(error.to_string()))
             }
             Self::McpDeleteUserEntry {
-                expected_entry: McpLayerEntry::Server(server),
+                expected_entry: McpLayerEntry::Server(server) | McpLayerEntry::Disabled(server),
                 ..
             } => server
                 .validate()

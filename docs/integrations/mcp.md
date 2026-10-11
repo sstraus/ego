@@ -11,8 +11,13 @@ Use `ego mcp add` to store one complete stdio or HTTP server declaration;
 entry. `ego mcp ls` shows configuration and admitted state; `ego mcp reload`
 reconciles current configuration. These operations do not silently log in.
 
-Run with `--mcp NAME` to attach a named effective server or `--mcp @FILE` for a
-strict invocation-scoped JSON server. A file entry is one complete server, not a
+Every enabled effective server attaches at session start, as in Claude Code and
+Codex; no flag is needed. Set `enabled = false` in a server entry to keep it
+configured but detached. `--mcp NAME` selects an effective server explicitly,
+including a disabled one; `--mcp @FILE` adds a strict invocation-scoped JSON
+server. A server that admission refuses (for example an HTTP server outside
+`--sandbox off`) or that fails to start is reported once with its cause and the
+session continues; the same refusal for an explicit `--mcp` is a usage error. A file entry is one complete server, not a
 second configuration hierarchy. See [configuration](../reference/configuration.md)
 for every field/default. HTTP OAuth uses `ego mcp login NAME` with the product's
 CIMD binding; credentials are stored privately under the existing authority.

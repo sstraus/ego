@@ -60,7 +60,7 @@ higher or lower layer supplies a value.
 | `profile.NAME` | Profile table | No selected profile without `--profile`/`EGO_PROFILE` |
 | `auth.PROVIDER` | Credential-command/identity-header table | No override |
 | `ui.statusline.segments` | Ordered array of supported segment names | Built-in order below; `[]` disables the row |
-| `mcp.servers.NAME` | Complete tagged server entry or tombstone | No configured external server |
+| `mcp.servers.NAME` | Complete tagged server entry (optional `enabled = false` detaches it from session start) or tombstone | No configured external server |
 | `hooks` | Ordered array of hook entries | Empty contribution; hooks combine across admitted sources |
 
 `permissions` is a whole-block override, not a merge of individual lists.

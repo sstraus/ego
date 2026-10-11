@@ -347,6 +347,9 @@ pub struct McpLayer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpLayerEntry {
     Server(McpServerConfig),
+    /// A complete server kept in configuration but not attached at session
+    /// start (`enabled = false`). An explicit `--mcp NAME` still selects it.
+    Disabled(McpServerConfig),
     Tombstone,
 }
 
@@ -589,6 +592,12 @@ struct McpStdioWire {
     cwd: Option<PathBuf>,
     #[serde(default)]
     inherit_env: Vec<McpEnvironmentName>,
+    #[serde(default = "enabled_by_default")]
+    enabled: bool,
+}
+
+const fn enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -606,6 +615,8 @@ struct McpHttpWire {
     auth: McpHttpAuth,
     #[serde(default)]
     allow_insecure_loopback: bool,
+    #[serde(default = "enabled_by_default")]
+    enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -635,17 +646,25 @@ impl McpEntryWire {
                 let _ = wire.transport;
                 McpStdioConfig::new(wire.command, wire.args, wire.cwd, wire.inherit_env)
                     .map(McpServerConfig::Stdio)
-                    .map(McpLayerEntry::Server)
+                    .map(|server| layer_entry(server, wire.enabled))
             }
             Self::Http(wire) => {
                 let _ = wire.transport;
                 McpHttpConfig::new(wire.url, wire.auth, wire.allow_insecure_loopback)
                     .map(McpServerConfig::Http)
-                    .map(McpLayerEntry::Server)
+                    .map(|server| layer_entry(server, wire.enabled))
             }
             Self::Tombstone(wire) if wire.removed => Ok(McpLayerEntry::Tombstone),
             Self::Tombstone(_) => Err(McpValueError::new("MCP tombstone requires removed = true")),
         }
+    }
+}
+
+fn layer_entry(server: McpServerConfig, enabled: bool) -> McpLayerEntry {
+    if enabled {
+        McpLayerEntry::Server(server)
+    } else {
+        McpLayerEntry::Disabled(server)
     }
 }
 
@@ -670,6 +689,9 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             .map_err(serde::de::Error::custom)?
         {
             McpLayerEntry::Server(server) => Ok(server),
+            McpLayerEntry::Disabled(_) => Err(serde::de::Error::custom(
+                "an invocation-scoped MCP server cannot be disabled",
+            )),
             McpLayerEntry::Tombstone => Err(serde::de::Error::custom(
                 "an invocation-scoped MCP server cannot be a tombstone",
             )),

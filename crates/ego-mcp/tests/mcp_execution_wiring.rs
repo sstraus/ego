@@ -192,7 +192,9 @@ fn materialize_admissions(
         .entries()
         .iter()
         .filter_map(|(name, entry)| match entry {
-            ResolvedMcpEntry::Configured { server, provenance } => {
+            ResolvedMcpEntry::Configured {
+                server, provenance, ..
+            } => {
                 let material = match server {
                     McpServerConfig::Stdio(_) => McpTransportMaterial::stdio(Vec::new()),
                     McpServerConfig::Http(_) => McpTransportMaterial::http(Vec::new()),

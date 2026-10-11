@@ -111,7 +111,7 @@ Options:
       --timeout <TIMEOUT>
           Wall clock, e.g. '90s' or '10m'
       --mcp <NAME|@FILE>
-          Attach a named effective or strict invocation-scoped JSON MCP server
+          Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
       --mode <MODE>
           Permission mode: plan|default|auto|edits|yolo
       --plan
@@ -203,7 +203,7 @@ Options:
       --timeout <TIMEOUT>
           Wall clock, e.g. '90s' or '10m'
       --mcp <NAME|@FILE>
-          Attach a named effective or strict invocation-scoped JSON MCP server
+          Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
       --mode <MODE>
           Permission mode: plan|default|auto|edits|yolo
       --plan

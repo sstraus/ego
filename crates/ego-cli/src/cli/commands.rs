@@ -736,7 +736,7 @@ pub(super) struct Flags {
     #[arg(long)]
     pub(super) timeout: Option<String>,
 
-    /// Attach a named effective or strict invocation-scoped JSON MCP server.
+    /// Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server.
     #[arg(
         long,
         value_name = "NAME|@FILE",

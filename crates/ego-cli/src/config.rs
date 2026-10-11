@@ -1040,9 +1040,9 @@ pub(crate) fn selected_mcp(
     for selector in &args.mcp {
         let (name, server, provenance) = match selector {
             McpSelector::Named(name) => match effective.mcp.entry(name) {
-                Some(ResolvedMcpEntry::Configured { server, provenance }) => {
-                    (name.clone(), server.clone(), provenance.clone())
-                }
+                Some(ResolvedMcpEntry::Configured {
+                    server, provenance, ..
+                }) => (name.clone(), server.clone(), provenance.clone()),
                 Some(ResolvedMcpEntry::Tombstone { provenance }) => {
                     return Err(UsageError(format!(
                         "MCP server `{name}` is masked by {}",
@@ -1098,7 +1098,9 @@ pub(crate) fn selected_mcp(
     Ok(selected)
 }
 
-/// Canonical configured entries from an already resolved effective view.
+/// Canonical enabled entries from an already resolved effective view: the
+/// servers attached at session start. A server marked `enabled = false` stays
+/// configured but is attached only by an explicit selection.
 /// OS-owned live materialization happens in `ego-tools`.
 pub(crate) fn configured_mcp(
     effective: &Effective,
@@ -1108,10 +1110,13 @@ pub(crate) fn configured_mcp(
         .entries()
         .iter()
         .filter_map(|(name, entry)| match entry {
-            ResolvedMcpEntry::Configured { server, provenance } => {
-                Some((name.clone(), server.clone(), provenance.clone()))
-            }
-            ResolvedMcpEntry::Tombstone { .. } => None,
+            ResolvedMcpEntry::Configured {
+                server,
+                provenance,
+                enabled: true,
+            } => Some((name.clone(), server.clone(), provenance.clone())),
+            ResolvedMcpEntry::Configured { enabled: false, .. }
+            | ResolvedMcpEntry::Tombstone { .. } => None,
         })
         .collect()
 }

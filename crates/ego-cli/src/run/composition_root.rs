@@ -755,10 +755,17 @@ pub(super) async fn execution_preflight(
     if args.answers.is_empty() {
         select_startup_model(args, &mut settings, driver, cancel, diagnostics).await?;
     }
-    let selected_mcp =
-        config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
-    admit_mcp_transports(&settings.confinement, &selected_mcp).map_err(usage)?;
-    let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
+    let attachment = attach_mcp(
+        args,
+        &settings.effective,
+        &settings.confinement,
+        &settings.cwd,
+    )
+    .map_err(usage)?;
+    if !args.quiet {
+        note_refused_mcp(diagnostics, &attachment.refused);
+    }
+    let selected_mcp = ego_tools::mcp::materialize_admissions(attachment.attached);
     let refresh = ego_mcp::McpRegistryRefresh::new(
         selected_mcp,
         ego_mcp::RegistryTrigger::ConfigChanged,
@@ -861,4 +868,49 @@ pub(super) fn admit_mcp_transports(
         }
     }
     Ok(())
+}
+
+pub(super) type McpSelection = Vec<(McpServerName, McpServerConfig, McpConfigProvenance)>;
+
+/// The servers a session attaches: every explicit `--mcp` selection plus every
+/// enabled configured server. Both pass `admit_mcp_transports`. An explicit
+/// refusal is a usage error; a refused configured server is returned in
+/// `refused` with its cause so the session continues without it.
+pub(super) struct McpAttachment {
+    pub(super) attached: McpSelection,
+    pub(super) refused: Vec<(McpServerName, UsageError)>,
+}
+
+pub(super) fn attach_mcp(
+    args: &Args,
+    effective: &Effective,
+    confinement: &RunConfinement,
+    cwd: &Path,
+) -> Result<McpAttachment, UsageError> {
+    let mut attached = config::selected_mcp(args, effective, cwd)?;
+    admit_mcp_transports(confinement, &attached)?;
+    let mut refused = Vec::new();
+    for entry in config::configured_mcp(effective) {
+        if attached.iter().any(|(name, _, _)| name == &entry.0) {
+            continue;
+        }
+        match admit_mcp_transports(confinement, std::slice::from_ref(&entry)) {
+            Ok(()) => attached.push(entry),
+            Err(error) => refused.push((entry.0, error)),
+        }
+    }
+    attached.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(McpAttachment { attached, refused })
+}
+
+/// Tell the user once why a configured server did not start.
+pub(super) fn note_refused_mcp(
+    diagnostics: &dyn Diagnostics,
+    refused: &[(McpServerName, UsageError)],
+) {
+    for (name, error) in refused {
+        diagnostics.note(&format!(
+            "MCP server `{name}` not attached: {error}. Inspect with ego mcp ls."
+        ));
+    }
 }
