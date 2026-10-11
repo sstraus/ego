@@ -52,17 +52,7 @@ fn composer_newline_contract(draft: &[u8]) {
         "--mode",
         "yolo",
     ]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -91,11 +81,7 @@ fn composer_newline_contract(draft: &[u8]) {
     }
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader");
-    writer_join.join().expect("writer");
+    let status = session.quit(input);
     assert!(status.success(), "REPL exit: {status:?}");
     assert_eq!(
         requests_before_cr, 0,
@@ -138,17 +124,7 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
         "--mode",
         "yolo",
     ]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -198,11 +174,7 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
     let completion = std::fs::read_to_string(&completed).ok();
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     assert!(status.success(), "REPL exit: {status:?}");
     assert_eq!(
         completion.as_deref(),
@@ -245,17 +217,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
         "--mode",
         "yolo",
     ]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -330,11 +292,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     until_normalized(&reader, &mut output, mark, "Ctrl+B");
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     assert!(status.success(), "REPL exit: {status:?}");
     assert_eq!(
         completion.as_deref(),
@@ -396,17 +354,7 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
         "--mode",
         "yolo",
     ]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -440,11 +388,7 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     let next_output = normalized(&output[next..]);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     assert!(status.success(), "REPL exit: {status:?}");
     assert!(
         launch_history.contains("exited code 0") && launch_history.contains("REGRESSION-MARKER"),
@@ -534,17 +478,7 @@ fn repeated_cross_root_resume_preserves_relative_session_store() {
         "--session-dir",
         "critic-sessions",
     ]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -591,11 +525,7 @@ fn repeated_cross_root_resume_preserves_relative_session_store() {
     drain_until_quiet(&reader, &mut output);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     assert!(status.success(), "{}", normalized(&output));
     assert!(
         !root_b.join("critic-sessions").exists(),
@@ -735,17 +665,7 @@ fn across_root_picker_contract(case: &str) {
         "--allow",
         "read(**)",
     ]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 30,
-            cols: 140,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 30, 140, None);
     let mut output = Vec::new();
     let start = if case == "list" {
         0
@@ -836,11 +756,7 @@ fn across_root_picker_contract(case: &str) {
         input.write_all(b"/quit\r").unwrap();
         input.flush().unwrap();
     }
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     assert!(status.success(), "{}", normalized(&output));
 }
 
@@ -960,17 +876,7 @@ fn resume_replay_contract(turns: usize, unrenderable: bool) {
         .subcommand("resume")
         .arg(support::FIXTURE_SESSION_ID)
         .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -1018,11 +924,7 @@ fn resume_replay_contract(turns: usize, unrenderable: bool) {
     );
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     assert!(status.success(), "{shown}");
 }
 
@@ -1116,17 +1018,7 @@ fn sessions_picker_contract(populated: bool) {
         .conversing()
         .args(["--model", "ollama/qwen3", "--sandbox", "off"])
         .env("TZ", "Pacific/Honolulu");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-    let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -1173,11 +1065,7 @@ fn sessions_picker_contract(populated: bool) {
     drain_until_quiet(&reader, &mut output);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     assert!(status.success(), "{}", normalized(&output));
 }
 
@@ -1226,17 +1114,7 @@ fn successor_accepts_next_turn(action: &str) {
         "--sandbox",
         "off",
     ]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -1331,11 +1209,7 @@ fn successor_accepts_next_turn(action: &str) {
     }
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     if !failing {
         assert!(status.success(), "successor process failed: {status:?}");
     }
@@ -1365,20 +1239,7 @@ fn successor_accepts_next_turn(action: &str) {
         "--sandbox",
         "off",
     ]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("resume pty");
-    let child = pair
-        .slave
-        .spawn_command(resumed.pty_command())
-        .expect("resume");
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().unwrap());
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().unwrap(), dsr);
+    let (session, mut input, reader) = PtySession::start(&resumed, 24, 100, None);
     let mut output = Vec::new();
     // Trust was remembered by the first process; resume must reach input
     // without either a trust question or a model picker.
@@ -1391,11 +1252,7 @@ fn successor_accepts_next_turn(action: &str) {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     assert!(status.success(), "resume failed: {status:?}");
 }
 
@@ -1600,22 +1457,7 @@ fn image_paste_path_stages_a_chip_and_sends_image_with_next_turn() {
     ego.file("AGENTS.md", "# image paste fixture\n");
     let image_path = ego.file("sample.png", "");
     std::fs::write(&image_path, support::PNG_1X1).expect("write image fixture");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -1639,11 +1481,7 @@ fn image_paste_path_stages_a_chip_and_sends_image_with_next_turn() {
     until_prompt_from(&reader, &mut output, quit_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
         staged.contains("[image: sample.png]"),
@@ -1690,22 +1528,7 @@ fn a_turn_in_a_tuic_pane_tells_tuic_its_title_intent_busy_and_idle() {
         &support::vision_model_facts(support::READS_PICTURES),
     );
     ego.file("AGENTS.md", "# signal fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -1727,11 +1550,7 @@ fn a_turn_in_a_tuic_pane_tells_tuic_its_title_intent_busy_and_idle() {
     );
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     let turn = String::from_utf8_lossy(&output[turn_start..]).into_owned();
     for expected in [
@@ -1770,22 +1589,7 @@ fn image_paste_chip_can_be_removed_before_submission() {
     ego.file("AGENTS.md", "# image paste fixture\n");
     let image_path = ego.file("remove.png", "");
     std::fs::write(&image_path, support::PNG_1X1).expect("write image fixture");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -1813,11 +1617,7 @@ fn image_paste_chip_can_be_removed_before_submission() {
     until_prompt_from(&reader, &mut output, quit_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
         !after_removal.contains("[image: remove.png]"),
@@ -1861,22 +1661,7 @@ fn image_paste_refuses_unsupported_model_before_reading_image() {
     std::fs::write(&image_path, support::PNG_1X1).expect("write image fixture");
     std::fs::set_permissions(&image_path, std::fs::Permissions::from_mode(0o000))
         .expect("make image unreadable");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -1904,11 +1689,7 @@ fn image_paste_refuses_unsupported_model_before_reading_image() {
     let result = normalized(&output[paste_start..]);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     std::fs::set_permissions(&image_path, std::fs::Permissions::from_mode(0o600))
         .expect("restore image permissions");
     assert!(status.success(), "interactive process failed: {status:?}");
@@ -1952,22 +1733,7 @@ fn image_paste_missing_or_non_image_path_stays_as_text() {
     ego.file("AGENTS.md", "# image paste fixture\n");
     let notes_path = ego.file("notes.txt", "plain notes, not an image");
     let missing_path = notes_path.with_file_name("does-not-exist.png");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -1990,11 +1756,7 @@ fn image_paste_missing_or_non_image_path_stays_as_text() {
     until_prompt_from(&reader, &mut output, quit_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
         !staged.contains("[image:"),
@@ -2041,22 +1803,7 @@ fn image_paste_disguised_extension_content_stays_as_text() {
     let disguised_path = ego.file("disguised.png", "");
     std::fs::write(&disguised_path, b"not an image, just bytes named .png")
         .expect("write disguised fixture");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -2077,11 +1824,7 @@ fn image_paste_disguised_extension_content_stays_as_text() {
     until_prompt_from(&reader, &mut output, quit_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
         !staged.contains("[image:"),
@@ -2131,22 +1874,7 @@ fn image_paste_oversize_path_is_refused_with_its_size() {
     let mut oversize = support::PNG_1X1.to_vec();
     oversize.resize(65536 + 1, 0_u8);
     std::fs::write(&image_path, &oversize).expect("write oversize fixture");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -2163,11 +1891,7 @@ fn image_paste_oversize_path_is_refused_with_its_size() {
     let result = normalized(&output[paste_start..]);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
         result.contains("65537") && result.contains("65536"),
@@ -2214,22 +1938,7 @@ fn image_paste_aggregate_over_cap_refuses_the_turn_and_keeps_the_session() {
     let second = ego.file("second.png", "");
     std::fs::write(&first, &half).expect("write first fixture");
     std::fs::write(&second, &half).expect("write second fixture");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -2255,11 +1964,7 @@ fn image_paste_aggregate_over_cap_refuses_the_turn_and_keeps_the_session() {
     until_prompt_from(&reader, &mut output, refused_at);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(
         status.success(),
         "the refusal ended the session instead of the turn: {status:?}"
@@ -2336,22 +2041,7 @@ fn image_paste_clipboard_png_stages_and_reaches_next_turn() {
         &support::vision_model_facts(support::READS_PICTURES),
     );
     ego.file("AGENTS.md", "# clipboard fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -2382,11 +2072,7 @@ fn image_paste_clipboard_png_stages_and_reaches_next_turn() {
     until_prompt_from(&reader, &mut output, quit_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
         staged.contains("[image: clipboard]"),
@@ -2477,22 +2163,7 @@ fn image_paste_clipboard_tiff_stages_and_reaches_next_turn() {
         &support::vision_model_facts(support::READS_PICTURES),
     );
     ego.file("AGENTS.md", "# clipboard tiff fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -2523,11 +2194,7 @@ fn image_paste_clipboard_tiff_stages_and_reaches_next_turn() {
     until_prompt_from(&reader, &mut output, quit_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
         staged.contains("[image: clipboard]"),
@@ -2612,22 +2279,7 @@ fn image_paste_clipboard_text_only_leaves_ordinary_paste_unchanged() {
         &support::vision_model_facts(support::READS_PICTURES),
     );
     ego.file("AGENTS.md", "# clipboard text fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     drain(&reader, &mut output);
@@ -2647,11 +2299,7 @@ fn image_paste_clipboard_text_only_leaves_ordinary_paste_unchanged() {
     until_prompt_from(&reader, &mut output, quit_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
         !staged.contains("[image:"),
@@ -2712,6 +2360,60 @@ impl Write for PtyWriter {
         self.sender
             .send(WriteRequest::Flush)
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY writer stopped"))
+    }
+}
+
+/// Own the process and terminal threads while each test drives its scenario.
+struct PtySession {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    pair: portable_pty::PtyPair,
+    reader_join: thread::JoinHandle<()>,
+    writer_join: thread::JoinHandle<()>,
+}
+
+impl PtySession {
+    fn start(
+        ego: &Ego,
+        rows: u16,
+        cols: u16,
+        screen: Option<(u16, u16)>,
+    ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty");
+        let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+        let (input, responder, writer_join) =
+            writer_owner(pair.master.take_writer().expect("writer"));
+        let (reader, reader_join) = stream_with_screen(
+            pair.master.try_clone_reader().expect("reader"),
+            responder,
+            screen,
+        );
+        (
+            Self {
+                child,
+                pair,
+                reader_join,
+                writer_join,
+            },
+            input,
+            reader,
+        )
+    }
+
+    /// Reap after the scenario sends its exit key, preserving the exit status.
+    fn quit(self, input: PtyWriter) -> ExitStatus {
+        let status = bounded_exit(self.child);
+        drop(input);
+        drop(self.pair);
+        self.reader_join.join().expect("reader thread");
+        self.writer_join.join().expect("writer thread");
+        status
     }
 }
 
@@ -3778,22 +3480,7 @@ fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {
     let release = ego.home_path().join("tool-release");
     let ego = ego.env("PATH", &path).env("TERM", "xterm-256color");
 
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -3834,12 +3521,8 @@ fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {
     until_prompt_from(&reader, &mut output, clear_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
     assert!(
         progress.contains("Working "),
         "no elapsed progress while the tool ran: {progress:?}"
@@ -3875,22 +3558,7 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     // has to hold something worth asking about. An empty checkout is asked
     // nothing at all.
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
@@ -3948,12 +3616,8 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     until_prompt_from(&reader, &mut output, second_esc_start);
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
 
     let generations = stub.generations();
     assert_eq!(
@@ -4001,22 +3665,7 @@ fn live_surface_ctrl_enter_steers_a_busy_turn_once() {
         "off",
     ]);
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
@@ -4035,12 +3684,8 @@ fn live_surface_ctrl_enter_steers_a_busy_turn_once() {
     until_prompt_from(&reader, &mut output, steer_start);
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
 
     let generations = stub.generations();
     assert_eq!(
@@ -4078,22 +3723,7 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
         "off",
     ]);
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
@@ -4153,12 +3783,8 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
     until_prompt_from(&reader, &mut output, steer_start);
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
 
     let generations = stub.generations();
     assert_eq!(generations.len(), 2, "the initial turn and one queued turn");
@@ -4211,22 +3837,7 @@ fn live_surface_recalled_pasted_slash_text_is_not_reinterpreted_as_a_command() {
         "off",
     ]);
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
@@ -4266,12 +3877,8 @@ fn live_surface_recalled_pasted_slash_text_is_not_reinterpreted_as_a_command() {
     until_prompt_from(&reader, &mut output, steer_start);
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
 
     let generations = stub.generations();
     assert_eq!(
@@ -4544,22 +4151,7 @@ fn model_picker_title_remains_visible_in_a_short_terminal() {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 8,
-            cols: 40,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 8, 40, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -4608,11 +4200,7 @@ fn model_picker_title_remains_visible_in_a_short_terminal() {
     until_prompt_from(&reader, &mut output, prompt_start);
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
+    assert!(session.quit(input).success());
     assert!(
         normalized(&output).contains("Option+P models"),
         "startup banner must advertise the model picker key: {:?}",
@@ -4642,23 +4230,7 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((24, 80)),
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -4720,11 +4292,7 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    assert!(session.quit(input).success());
 }
 
 #[test]
@@ -4749,23 +4317,7 @@ fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 40,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((24, 40)),
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 40, Some((24, 40)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -4807,11 +4359,7 @@ fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    assert!(session.quit(input).success());
 }
 
 #[test]
@@ -4833,23 +4381,7 @@ fn streamed_reply_keeps_one_working_line_below_the_partial_text() {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((24, 80)),
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -4886,11 +4418,7 @@ fn streamed_reply_keeps_one_working_line_below_the_partial_text() {
     until_prompt_from(&reader, &mut output, finish_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    assert!(session.quit(input).success());
 }
 
 #[test]
@@ -4915,23 +4443,7 @@ fn cancelling_before_reply_clears_the_thinking_row() {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((24, 80)),
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -4964,16 +4476,12 @@ fn cancelling_before_reply_clears_the_thinking_row() {
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert_eq!(
         status.exit_code(),
         130,
         "cancel exit: {status:?}; screen: {visible:?}"
     );
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
 }
 
 /// catches: an Esc that stops a turn without a word in the transcript, and a
@@ -5000,23 +4508,7 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 40,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((40, 100)),
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -5046,11 +4538,7 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    session.quit(input);
 }
 
 /// Catches: cancelling an unmetered stream marks known session cost unknown and hides its status cell.
@@ -5075,23 +4563,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 40,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((40, 100)),
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -5180,17 +4652,13 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
     until_normalized(&reader, &mut output, quit_start, "unsent drafts discarded;");
-    bounded_exit(child);
+    session.quit(input);
     drain(&reader, &mut output);
     assert!(
         normalized(&output[quit_start..]).contains("unsent drafts discarded;"),
         "/quit must be accepted before the process exits: {:?}",
         normalized(&output[quit_start..]),
     );
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
 }
 
 /// catches: Esc on a running tool leaving no tool row and no receipt, and its
@@ -5232,23 +4700,7 @@ fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
     let started = ego.home_path().join("tool-started");
     let ego = ego.env("PATH", &path).env("TERM", "xterm-256color");
 
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 40,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((40, 100)),
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -5291,11 +4743,7 @@ fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    session.quit(input);
     let log = std::fs::read_to_string(
         ego.home_path()
             .join("sessions")
@@ -5355,22 +4803,7 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     let release = ego.home_path().join("tool-release");
     let ego = ego.env("PATH", &path).env("TERM", "xterm-256color");
 
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -5400,11 +4833,7 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     until(&reader, &mut output, b"SLOW-TOOL-DONE");
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    session.quit(input);
 
     let counted: Vec<u64> = after_allow
         .split("Working ")
@@ -5443,23 +4872,7 @@ fn esc_on_the_permission_modal_denies_the_call_and_leaves_one_receipt() {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 40,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((40, 100)),
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -5486,11 +4899,7 @@ fn esc_on_the_permission_modal_denies_the_call_and_leaves_one_receipt() {
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    session.quit(input);
 }
 
 #[test]
@@ -5562,21 +4971,7 @@ fn rapid_follow_ups_after_a_reply_are_durable_once_in_typed_order() {
         "critic first",
     ]);
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let trust_start = output.len();
@@ -5596,11 +4991,7 @@ fn rapid_follow_ups_after_a_reply_are_durable_once_in_typed_order() {
     until_post_trust_prompt(&reader, &mut output, follow_up_start);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
         !normalized(&output).contains("the interactive turn coordinator is closed"),
@@ -5967,21 +5358,7 @@ fn regression_case_terminal(provider_refuses: bool) {
             .replace("default_reasoning_effort = \"off\"\n", ""),
     );
     ego.file("AGENTS.md", "# effort picker fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 120,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 120, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust");
@@ -6010,11 +5387,7 @@ fn regression_case_terminal(provider_refuses: bool) {
     let quit_start = output.len();
     input.write_all(b"\x04").expect("EOF");
     input.flush().expect("EOF flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader");
-    writer_join.join().expect("writer");
+    let status = session.quit(input);
     drain(&reader, &mut output);
     assert!(status.success(), "interactive exit: {status:?}");
     let after_quit = normalized(&output[quit_start..]);
@@ -6080,21 +5453,7 @@ fn startup_picker_escape_exits_without_saving_a_model() {
         .args(["--sandbox", "off"])
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 40,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 40, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -6103,12 +5462,8 @@ fn startup_picker_escape_exits_without_saving_a_model() {
     drain_until_quiet(&reader, &mut output);
     input.write_all(b"\x1b").expect("startup Escape");
     input.flush().expect("startup Escape flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert_eq!(status.exit_code(), 130, "Escape must cancel startup");
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
     assert!(stub.generations().is_empty());
     assert!(!ego.home_path().join("config.toml").exists());
 }
@@ -6137,25 +5492,7 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
         .args(["--sandbox", "off"])
         .env("OPENAI_API_KEY", "fixture-openai-key")
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair
-        .slave
-        .spawn_command(first.pty_command())
-        .expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&first, rows, cols, None);
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
@@ -6222,40 +5559,18 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
 
     input.write_all(b"\x04").expect("first EOF");
     input.flush().expect("first EOF flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert!(
         status.success(),
         "first interactive process failed: {status:?}"
     );
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("first reader thread panicked");
-    writer_join.join().expect("first writer thread panicked");
 
     let second = Ego::at(home.path(), workspace.path(), Some(&stub))
         .conversing()
         .args(["--sandbox", "off"])
         .env("OPENAI_API_KEY", "fixture-openai-key")
         .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("second pty");
-    let child = pair
-        .slave
-        .spawn_command(second.pty_command())
-        .expect("second spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("second writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("second reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&second, rows, cols, None);
     let mut output = Vec::new();
 
     let restart_start = 0;
@@ -6268,15 +5583,11 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
 
     input.write_all(b"\x04").expect("second EOF");
     input.flush().expect("second EOF flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert!(
         status.success(),
         "second interactive process failed: {status:?}"
     );
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("second reader thread panicked");
-    writer_join.join().expect("second writer thread panicked");
 }
 
 #[test]
@@ -6396,21 +5707,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "off",
     ]);
     ego.file("AGENTS.md", "# registered action PTY fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 40,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 80, None);
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
@@ -6502,7 +5799,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     let quit_start = output.len();
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     drain(&reader, &mut output);
     assert!(
@@ -6531,10 +5828,6 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         messages.iter().all(|message| message["role"] != "user"),
         "slash commands must not become chat prompts"
     );
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
 }
 
 /// Drive one interactive session, optionally through one answered turn, quit it
@@ -6558,21 +5851,7 @@ fn quit_session(turn: Option<&str>) -> (String, Ego) {
         "off",
     ]);
     ego.file("AGENTS.md", "# resume hint fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let trust_start = output.len();
@@ -6591,12 +5870,8 @@ fn quit_session(turn: Option<&str>) -> (String, Ego) {
     let quit_start = output.len();
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     drain(&reader, &mut output);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
     assert!(status.success(), "interactive process failed: {status:?}");
     (normalized(&output[quit_start..]), ego)
 }
@@ -6642,22 +5917,7 @@ fn fork_after_a_turn() -> String {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# fork receipt fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: ROWS,
-            cols: COLS,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((ROWS, COLS)),
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, ROWS, COLS, Some((ROWS, COLS)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let trust_start = output.len();
@@ -6678,11 +5938,7 @@ fn fork_after_a_turn() -> String {
     let receipt = normalized(&output[fork_start..]);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    assert!(session.quit(input).success());
     receipt
 }
 
@@ -6767,22 +6023,7 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
         .args(["--model", "ollama/qwen3", "--sandbox", "off"])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# fork status fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: ROWS,
-            cols: COLS,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((ROWS, COLS)),
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, ROWS, COLS, Some((ROWS, COLS)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let trust_start = output.len();
@@ -6799,11 +6040,7 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
     let after = screen_rows(&output, ROWS, COLS);
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    assert!(session.quit(input).success());
     let status = |rows: &[String]| {
         rows.iter()
             .find(|row| row.contains("ctx"))
@@ -6984,22 +6221,7 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     // has to hold something worth asking about. An empty checkout is asked
     // nothing at all.
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
@@ -7096,12 +6318,8 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
 
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
 }
 
 /// The terminal rows, read back through an emulator `cols` wide.
@@ -7147,22 +6365,7 @@ fn question_session(
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# question fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: ROWS,
-            cols: COLS,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((ROWS, COLS)),
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, ROWS, COLS, Some((ROWS, COLS)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -7180,11 +6383,7 @@ fn question_session(
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    assert!(session.quit(input).success());
     (stub.generations(), after_turn)
 }
 
@@ -7485,22 +6684,7 @@ fn tool_turn_with_completions(
         ego.file(name, contents);
     }
     let rows = 70;
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((rows, cols)),
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, rows, cols, Some((rows, cols)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -7601,7 +6785,7 @@ fn tool_turn_with_completions(
 
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     if cancel_children {
         assert_eq!(
             status.exit_code(),
@@ -7611,10 +6795,6 @@ fn tool_turn_with_completions(
     } else {
         assert!(status.success());
     }
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
     ToolTurnScreens {
         after_turn,
         after_expand,
@@ -7853,22 +7033,8 @@ fn picker_session(cols: u16, drive: impl FnOnce(&mut Term<'_>, &Stub)) {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# picker fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: PICKER_ROWS,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((PICKER_ROWS, cols)),
-    );
+    let (session, mut input, reader) =
+        PtySession::start(&ego, PICKER_ROWS, cols, Some((PICKER_ROWS, cols)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -7886,11 +7052,7 @@ fn picker_session(cols: u16, drive: impl FnOnce(&mut Term<'_>, &Stub)) {
     );
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread");
-    writer_join.join().expect("writer thread");
+    assert!(session.quit(input).success());
 }
 
 /// The picker's own rows: everything below its heading.
@@ -8143,23 +7305,7 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
         "off",
     ]);
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 40,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream_with_screen(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-        Some((40, 100)),
-    );
-    let mut input = input;
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
     let mut output = Vec::new();
 
     until(&reader, &mut output, b"Trust project files");
@@ -8194,13 +7340,9 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     );
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit flush");
-    let status = bounded_exit(child);
+    let status = session.quit(input);
     // A refused permission ends the session with exit 3 by design.
     assert_eq!(status.exit_code(), 3, "unexpected exit: {status:?}");
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
 }
 
 const MODAL_ROWS: u16 = 40;
@@ -8947,21 +8089,7 @@ fn ctrl_z_reports_that_windows_cannot_suspend_it() {
         "off",
     ]);
     ego.file("AGENTS.md", "# suspend fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -8977,11 +8105,7 @@ fn ctrl_z_reports_that_windows_cannot_suspend_it() {
     );
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
+    assert!(session.quit(input).success());
 }
 
 // Catches: startup effort navigation or session-only selection publishes defaults before Enter.
@@ -9002,21 +8126,7 @@ fn regression_startup_effort_navigation_and_escape_preserve_existing_config() {
     let original = "# Keep operator settings intact until confirmation.\nmode = \"default\"\n";
     ego.home_file("config.toml", original);
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -9035,11 +8145,7 @@ fn regression_startup_effort_navigation_and_escape_preserve_existing_config() {
     assert!(stub.generations().is_empty());
     input.write_all(b"\x1b").expect("cancel reasoning");
     input.flush().expect("cancel flush");
-    assert_eq!(bounded_exit(child).exit_code(), 130);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader thread panicked");
-    writer_join.join().expect("writer thread panicked");
+    assert_eq!(session.quit(input).exit_code(), 130);
     assert_eq!(
         std::fs::read_to_string(ego.home_path().join("config.toml")).expect("preserved config"),
         original
@@ -9075,21 +8181,7 @@ fn regression_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
             .replace("default_reasoning_effort = \"off\"\n", ""),
     );
     ego.file("AGENTS.md", "# effort picker fixture\n");
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 120,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr_responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(
-        pair.master.try_clone_reader().expect("reader"),
-        dsr_responder,
-    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 120, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust");
@@ -9109,11 +8201,7 @@ fn regression_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
     let quit_start = output.len();
     input.write_all(b"\x04").expect("EOF");
     input.flush().expect("EOF flush");
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader");
-    writer_join.join().expect("writer");
+    let status = session.quit(input);
     drain(&reader, &mut output);
     assert!(status.success(), "interactive exit: {status:?}");
     let after_quit = normalized(&output[quit_start..]);
@@ -9188,17 +8276,7 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
         "--sandbox",
         "off",
     ]);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, dsr, writer_join) = writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -9230,11 +8308,7 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
     let receipt = normalized(&output[start..]);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
-    let status = bounded_exit(child);
-    drop(input);
-    drop(pair);
-    reader_join.join().unwrap();
-    writer_join.join().unwrap();
+    let status = session.quit(input);
     assert!(status.success(), "successor process failed: {status:?}");
     let listing = places
         .ego(&stub)
@@ -9486,18 +8560,7 @@ fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
         server.display().to_string()
     );
     let config_path = ego.home_file("config.toml", &original);
-    let pair = NativePtySystem::default()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 120,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("pty");
-    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
-    let (mut input, responder, writer_join) =
-        writer_owner(pair.master.take_writer().expect("writer"));
-    let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), responder);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 120, None);
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust");
@@ -9547,11 +8610,7 @@ fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
     until_normalized(&reader, &mut output, add_start, "added admitted");
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("flush");
-    assert!(bounded_exit(child).success());
-    drop(input);
-    drop(pair);
-    reader_join.join().expect("reader");
-    writer_join.join().expect("writer");
+    assert!(session.quit(input).success());
     let published: toml::Value =
         toml::from_str(&std::fs::read_to_string(&config_path).expect("config")).expect("TOML");
     let cli = shell_words::split(&add)
