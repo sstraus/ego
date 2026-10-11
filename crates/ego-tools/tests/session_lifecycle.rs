@@ -307,6 +307,10 @@ fn profile_ceiling_creation_authority_survives_missing_manifest() {
     let profiles = ego_core::store::session_store::SessionProfiles {
         profile: Some("repo".to_owned()),
         ceiling_profile: Some("machine".to_owned()),
+        prompt_options: Some(ego_core::config::SessionPromptOptions {
+            bare: Some(true),
+            ..Default::default()
+        }),
     };
     first
         .publish_session(
