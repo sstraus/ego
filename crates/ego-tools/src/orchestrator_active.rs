@@ -4,9 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use ego_core::orchestrator::{
-    ActiveRequest, Brief, ChildLine, Filter, Mode, Orchestrator, SpawnReceipt,
-};
+use ego_core::orchestrator::{ActiveRequest, Mode, SpawnReceipt};
 use ego_core::permit::{
     GuardedIo, Op, PrepareCtx, PreparedCall, Tool, ToolError, ToolResult, Typed, TypedTool,
 };
@@ -333,13 +331,7 @@ struct ActiveAdapter<'a, 'io> {
     io: &'a dyn GuardedIo<'io>,
     spec: &'a ego_core::permit::SpawnSpec,
 }
-impl Orchestrator for ActiveAdapter<'_, '_> {
-    fn status<'a>(&'a self, _: &'a Filter) -> BoxFuture<'a, Result<Vec<ChildLine>, String>> {
-        Box::pin(async { Err("active adapter has no read projection".into()) })
-    }
-    fn brief<'a>(&'a self, _: &'a Filter) -> BoxFuture<'a, Result<Brief, String>> {
-        Box::pin(async { Err("active adapter has no read projection".into()) })
-    }
+impl ActiveAdapter<'_, '_> {
     fn active<'a>(&'a self) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let output = self.io.exec(self.spec).await.map_err(|e| e.to_string())?;
