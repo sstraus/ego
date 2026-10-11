@@ -242,6 +242,15 @@ pub(super) fn surface_line(
                 Dispatch::Tasks(arguments) => {
                     return (Line::HostCommand(HostCommand::Tasks(arguments)), failed);
                 }
+                Dispatch::Mcp(arguments) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice =
+                            Some("MCP changes are unavailable while a turn is running".into());
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::Mcp(arguments)), failed);
+                }
                 Dispatch::Config(arguments) => {
                     if phase.get() == EditPhase::Busy {
                         status.lock().expect("surface status lock").notice =
@@ -446,6 +455,12 @@ pub(super) fn surface_line(
                         editor.run_edit_commands(&[EditCommand::Clear]);
                         status.lock().expect("surface status lock").origin = InputOrigin::Typed;
                         return (Line::HostCommand(HostCommand::Tasks(arguments)), false);
+                    }
+                    Dispatch::Mcp(_) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some("MCP changes are unavailable while a turn is running".into());
+                        repaint_status(status);
+                        continue;
                     }
                     Dispatch::Config(_) => {
                         status.lock().expect("surface status lock").notice =
@@ -783,6 +798,9 @@ pub(super) fn apply_surface_effect(
             };
             configure_statusline(status, segments);
             return None;
+        }
+        SurfaceActionEffect::Mcp if !busy => {
+            return Some(Line::HostCommand(HostCommand::Mcp(String::new())));
         }
         SurfaceActionEffect::Mcp => {
             let actions = status

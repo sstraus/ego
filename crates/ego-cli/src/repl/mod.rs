@@ -64,6 +64,7 @@ pub enum HostCommand {
     Hooks,
     Config(String),
     Tasks(String),
+    Mcp(String),
     Background,
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
