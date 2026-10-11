@@ -782,8 +782,8 @@ pub(super) enum RootsSubcommand {
     Add {
         #[arg(long)]
         profile: Option<String>,
-        #[arg(long, default_value = "read", value_parser = ["read", "read-write"])]
-        access: String,
+        #[arg(long, default_value = "read", value_enum)]
+        access: RootAccessValue,
         path: PathBuf,
     },
     /// Remove a root by its stored spelling.
@@ -799,4 +799,21 @@ pub(super) enum RootsSubcommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Clap adapter keeps the domain type independent of the CLI framework.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RootAccessValue(pub(super) ego_core::permit::RootAccess);
+
+impl clap::ValueEnum for RootAccessValue {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[
+            Self(ego_core::permit::RootAccess::Read),
+            Self(ego_core::permit::RootAccess::ReadWrite),
+        ]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(self.0.as_str()))
+    }
 }

@@ -2,7 +2,6 @@
 
 use super::*;
 use ego_core::config::ManagedConfigKey;
-use ego_core::permit::RootAccess;
 
 pub(super) fn list(
     store: &impl UserConfigStore,
@@ -30,7 +29,7 @@ pub(super) fn list(
             for root in roots {
                 out.line(&format!(
                     "{}\t{}",
-                    access(root.access),
+                    root.access.as_str(),
                     escape_field(&root.path.display().to_string())
                 ));
             }
@@ -67,7 +66,7 @@ pub(super) fn receipt(
         "Removed root"
     };
     let permission = selected
-        .map(|selected| format!(" ({})", access(selected)))
+        .map(|selected| format!(" ({})", selected.as_str()))
         .unwrap_or_default();
     out.line(&format!(
         "{action}: {}{permission} in {}.",
@@ -80,11 +79,4 @@ pub(super) fn receipt(
         ));
     }
     Ok(())
-}
-
-fn access(access: RootAccess) -> &'static str {
-    match access {
-        RootAccess::Read => "read",
-        RootAccess::ReadWrite => "read-write",
-    }
 }
