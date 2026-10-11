@@ -147,7 +147,7 @@ async fn execute_inner(
                     message: format!("config key `{key}` is absent from the selected user target"),
                 })?;
             if *json {
-                render_json(target, std::iter::once((*key, value)), out)?;
+                render_json(target, std::iter::once((*key, Some(value))), out)?;
             } else {
                 out.line(&value.to_toml());
             }
@@ -160,7 +160,11 @@ async fn execute_inner(
                 .filter_map(|(key, value)| value.map(|value| (key, value)))
                 .collect::<Vec<_>>();
             if *json {
-                render_json(target, values, out)?;
+                render_json(
+                    target,
+                    values.into_iter().map(|(key, value)| (key, Some(value))),
+                    out,
+                )?;
             } else if values.is_empty() {
                 // The ADR fixes an empty text `ls` as empty stdout, so the
                 // explanation goes to the diagnostic channel rather than
@@ -440,20 +444,30 @@ fn store_failure(error: impl std::fmt::Display) -> RunTermination {
 
 fn render_json(
     target: &UserConfigTarget,
-    values: impl IntoIterator<Item = (ego_core::config::ManagedConfigKey, ManagedConfigValue)>,
+    values: impl IntoIterator<
+        Item = (
+            ego_core::config::ManagedConfigKey,
+            Option<ManagedConfigValue>,
+        ),
+    >,
     out: &Stdout,
 ) -> Result<(), RunTermination> {
     let mut rendered = Vec::new();
     for (key, value) in values {
-        let toml = value
-            .to_toml()
-            .parse::<toml::Value>()
-            .map_err(|_| RunTermination::Failed {
-                message: format!("config key `{key}` could not be rendered"),
-            })?;
-        let json = serde_json::to_value(toml).map_err(|error| RunTermination::Failed {
-            message: format!("config key `{key}` could not be rendered: {error}"),
-        })?;
+        let json =
+            match value {
+                Some(value) => {
+                    let toml = value.to_toml().parse::<toml::Value>().map_err(|_| {
+                        RunTermination::Failed {
+                            message: format!("config key `{key}` could not be rendered"),
+                        }
+                    })?;
+                    serde_json::to_value(toml).map_err(|error| RunTermination::Failed {
+                        message: format!("config key `{key}` could not be rendered: {error}"),
+                    })?
+                }
+                None => serde_json::Value::Null,
+            };
         let key = serde_json::to_string(key.as_str()).expect("a string is always valid JSON");
         let value = serde_json::to_string(&json).map_err(|error| RunTermination::Failed {
             message: format!("config value could not be rendered: {error}"),
