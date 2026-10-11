@@ -790,6 +790,7 @@ pub struct Args {
     pub session_dir: Option<PathBuf>,
     pub artifact_dir: Option<PathBuf>,
     pub output: Output,
+    pub(crate) output_explicit: bool,
     pub schema: Option<String>,
     pub schema_retries: u32,
     /// Additional delivery-safe attempts allowed for each model candidate.
@@ -820,6 +821,7 @@ pub struct ResumeAnswer {
 }
 
 mod commands;
+mod resume_seat;
 use commands::*;
 pub use commands::{AuthAction, AuthArgs};
 
@@ -1344,7 +1346,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 all: parsed.all,
                 session_dir: parsed.common.places.session_dir,
                 directory: parsed.common.places.directory,
-                output: parsed.common.output,
+                output: parsed.common.output.unwrap_or(Output::Text),
             }))),
         },
         Some("usage") => match clap_or_answer::<UsageCommand>(&tokens)? {
@@ -1376,7 +1378,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                     at,
                     session_dir: parsed.common.places.session_dir,
                     directory: parsed.common.places.directory,
-                    output: parsed.common.output,
+                    output: parsed.common.output.unwrap_or(Output::Text),
                 })))
             }
         },
@@ -1409,7 +1411,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                     request_id,
                     session_dir: parsed.common.places.session_dir,
                     directory: parsed.common.places.directory,
-                    output: parsed.common.output,
+                    output: parsed.common.output.unwrap_or(Output::Text),
                 })))
             }
         },
@@ -1759,7 +1761,7 @@ fn into_session_metadata_args(
         operation,
         session_dir: command.common.places.session_dir,
         directory: command.common.places.directory,
-        output: command.common.output,
+        output: command.common.output.unwrap_or(Output::Text),
         profile: None,
     })
 }
@@ -1849,7 +1851,8 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         session,
         session_dir: flags.common.places.session_dir,
         artifact_dir: flags.artifact_dir,
-        output: flags.common.output,
+        output: flags.common.output.unwrap_or(Output::Text),
+        output_explicit: flags.common.output.is_some(),
         schema: flags.schema,
         schema_retries: flags.schema_retries,
         retry: flags.retry.unwrap_or(retry_default),

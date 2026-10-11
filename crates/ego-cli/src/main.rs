@@ -14,6 +14,7 @@ use ego_cli::run::{self, Ended};
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::run::RunTermination;
 use ego_core::turn::CancelToken;
+use std::io::IsTerminal;
 
 fn main() -> std::process::ExitCode {
     // Behavioural network probes are hidden child modes, not CLI commands.
@@ -50,6 +51,12 @@ async fn ordinary_main() -> std::process::ExitCode {
     {
         ego_cli::config::capture_profile(args);
     }
+    invocation = invocation.map(|invocation| {
+        invocation.with_terminal(
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )
+    });
     if let Ok(Invocation::SessionMetadata(args)) = &mut invocation {
         ego_cli::config::capture_metadata_profile(args);
     }

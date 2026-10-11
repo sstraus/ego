@@ -98,6 +98,30 @@ Continue a session; no ID = latest in this workspace.
 - `<ID>` — The session to continue. Omit it for the latest in this workspace
 - `<PROMPT>` — The prompt. `-` reads it from stdin
 
+With terminal stdin and stdout, `ego resume ID "next task"` opens the
+interactive seat, submits the task once, and accepts further messages.
+Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file,
+or profile `ci` selects the headless driver. Redirected stdin or stdout
+also selects headless execution. `EGO_PROFILE=ci` has the same effect.
+
+Headless execution never asks for permission: an unresolved approval exits 3.
+Pre-approve only the required operations in trusted CI profile configuration:
+
+```toml
+[profile.ci]
+model = "ollama/qwen3"
+session_dir = "/absolute/ci-sessions"
+artifact_dir = "/absolute/ci-artifacts"
+
+[profile.ci.permissions]
+allow = ["exec(seq 1 3)"]
+```
+
+Pre-create both roots outside the workspace and outside each other.
+Supply a non-interactive provider credential when the model requires one.
+Then run `ego resume ID "next task" --profile ci --instructions ci.md`.
+Allow rules grant policy approval; sandbox and system ceilings still apply.
+
 ## `ego fork`
 
 Fork a session at its tip or after the completed turn containing a message.
