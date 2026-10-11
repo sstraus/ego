@@ -11,6 +11,8 @@ use std::process::{Command, Output};
 struct Fixture {
     home: tempfile::TempDir,
     workspace: tempfile::TempDir,
+    // Adaptive grants the child temp root write access, so it must not contain HOME.
+    temp: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -18,6 +20,7 @@ impl Fixture {
         Self {
             home: tempfile::tempdir().expect("fixture home"),
             workspace: tempfile::tempdir().expect("fixture workspace"),
+            temp: tempfile::tempdir().expect("fixture temp root"),
         }
     }
 
@@ -32,6 +35,7 @@ impl Fixture {
             .env("HOME", self.home.path())
             .env("EGO_HOME", self.home.path())
             .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", self.temp.path())
             .current_dir(self.workspace.path())
             .args(args);
         for (key, value) in env {

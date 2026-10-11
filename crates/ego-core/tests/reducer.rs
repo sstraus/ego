@@ -1391,7 +1391,7 @@ mod reducer {
                 SubagentEvent::Requested {
                     invocation: subagent_invocation,
                     task: blob_ref(12),
-                    selections: RunSelections::empty(),
+                    selections: Box::new(RunSelections::empty()),
                 },
                 SubagentEvent::Spawned {
                     invocation: subagent_invocation,
