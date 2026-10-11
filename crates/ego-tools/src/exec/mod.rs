@@ -258,9 +258,11 @@ impl ProbeLog {
         self.entries()
             .iter()
             .find(|record| {
-                record.suite.starts_with("offline.")
-                    && (record.suite.ends_with(".control")
-                        || record.suite.ends_with(".control.receiver"))
+                (record.suite == "adaptive.setup"
+                    || ((record.suite.starts_with("offline.")
+                        || record.suite.starts_with("adaptive."))
+                        && (record.suite.ends_with(".control")
+                            || record.suite.ends_with(".control.receiver"))))
                     && record.outcome != "ok"
             })
             .map(|record| format!("{}: {}", record.suite, record.outcome))
@@ -1083,6 +1085,22 @@ mod tests {
     fn a_failed_filesystem_control_is_not_an_offline_host_control_failure() {
         let log = transcript(&[("read.control", "exit 1")]);
 
+        assert_eq!(log.host_control_failure(), None);
+    }
+    // Catches: Adaptive host failures are omitted or confined failures are mislabelled.
+    #[test]
+    fn adaptive_setup_and_control_failures_reach_host_diagnostics() {
+        for suite in ["adaptive.setup", "adaptive.write.outside.control"] {
+            let log = transcript(&[(suite, "fixture failed: os error 1")]);
+            assert_eq!(
+                log.host_control_failure(),
+                Some(format!("{suite}: fixture failed: os error 1"))
+            );
+        }
+        let log = transcript(&[
+            ("adaptive.read.credential-floor", "exit 1"),
+            ("adaptive.setup", "ok"),
+        ]);
         assert_eq!(log.host_control_failure(), None);
     }
 }
