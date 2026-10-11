@@ -44,6 +44,15 @@ Enter/Escape until answered and preserve the underlying draft/queue.
 Use the shortcuts shown by this binary's `/help`; terminal Meta/function key
 support differs across platforms.
 
+## MCP servers
+
+`/mcp` lists configured servers with their live state. `/mcp toggle NAME` turns
+one server off or on for this session without changing its configuration.
+`/mcp add NAME --stdio -- COMMAND ARG...` and `/mcp add NAME --http URL` use
+the same typed configuration transaction as `ego mcp add`. Quote arguments
+that contain spaces. MCP changes require an idle turn and use the current
+session confinement; they do not grant new process or network authority.
+
 ## Status and state
 
 The width-aware status row shows selected model/effort/mode, context occupancy,

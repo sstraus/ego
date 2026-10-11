@@ -87,6 +87,7 @@ pub enum Dispatch {
     Hooks,
     Config(String),
     Tasks(String),
+    Mcp(String),
     Prompt,
     Immediate,
     InteractiveIngress,
@@ -478,7 +479,11 @@ impl ActionRegistry {
                 "Inspect effective permission rules",
             )
             .unavailable("the interactive permission controller"),
-            enabled(Mcp, "mcp", "Inspect admitted MCP connections"),
+            enabled(
+                Mcp,
+                "mcp",
+                "List MCP servers, toggle session state, or add a server",
+            ),
             enabled(Sessions, "sessions", "Browse durable sessions").alias("history"),
             enabled(Fork, "fork", "Fork a durable session"),
             enabled(Compact, "compact", "Compact the active context")
@@ -945,9 +950,7 @@ impl ActionRegistry {
                 return if boundary == command.len() {
                     Dispatch::Action(id)
                 } else if id == ActionId::Mcp {
-                    Dispatch::Refused {
-                        reason: "usage: /mcp (inspect only); add servers with `ego mcp add NAME ...`",
-                    }
+                    Dispatch::Mcp(raw_arguments.trim().to_owned())
                 } else {
                     Dispatch::Refused {
                         reason: "this interactive action takes no arguments; use /help for local syntax",
