@@ -1,11 +1,5 @@
 use super::*;
 
-enum PolicyModeChoice {
-    Selected(Mode),
-    Cancelled,
-    Propagate(Line),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PermissionMenuId {
     List,
@@ -40,12 +34,6 @@ pub(super) fn permission_menu() -> [PermissionMenuId; 6] {
     ]
 }
 
-enum PermissionMenuChoice {
-    Selected(PermissionMenuId),
-    Cancelled,
-    Propagate(Line),
-}
-
 enum PermissionField {
     Value(String),
     Cancelled,
@@ -68,93 +56,28 @@ pub(super) fn choose_permission_action(
     busy: bool,
 ) -> Option<Line> {
     let choices = permission_menu();
-    let request = QuestionRequest::new(
-        "Choose permission operation",
-        QuestionMode::Single,
-        choices
-            .iter()
-            .map(|choice| QuestionOption::new(choice.as_str(), choice.as_str()))
-            .collect(),
-        false,
-    );
-    let selector = Arc::new(Mutex::new(Selector::with_options(
-        SelectorKind::Single,
-        request
-            .options
-            .iter()
-            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone())),
-    )));
-    let saved = enter_modal(editor, phase, status);
-    status
-        .lock()
-        .expect("surface status lock")
-        .question_selector = Some(Arc::clone(&selector));
-    repaint_status(status);
-
-    let choice = loop {
-        let prompt = Question::new(
-            question_selector_prompt(&request, &selector),
-            Arc::clone(status),
-        );
-        match queued_selector_line(status)
-            .unwrap_or_else(|| answer(false, editor.read_line(&prompt)))
-        {
-            Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = next_selector_key(status, &command) else {
-                    break PermissionMenuChoice::Cancelled;
-                };
-                let mut selector = selector.lock().expect("permission selector lock");
-                selector.key(key);
-                if key == SelectorKey::Escape {
-                    break PermissionMenuChoice::Cancelled;
-                }
-                if key != SelectorKey::Enter {
-                    drop(selector);
-                    repaint_status(status);
-                    continue;
-                }
-                let Some(SelectorValue::Single(id)) = selector.result() else {
-                    continue;
-                };
-                let Some(choice) = choices
-                    .iter()
-                    .copied()
-                    .find(|choice| choice.as_str() == id.as_str())
-                else {
-                    break PermissionMenuChoice::Cancelled;
-                };
-                break PermissionMenuChoice::Selected(choice);
-            }
-            line @ (Line::Ended | Line::ExternalBreak(_)) => {
-                break PermissionMenuChoice::Propagate(line);
-            }
-            Line::Submitted(_)
-            | Line::Blank
-            | Line::Interrupted
-            | Line::Refused(_)
-            | Line::HostCommand(_) => break PermissionMenuChoice::Cancelled,
-        }
-    };
-    status
-        .lock()
-        .expect("surface status lock")
-        .question_selector = None;
-    leave_modal(
+    let options = choices
+        .iter()
+        .map(|choice| (choice.as_str(), choice.as_str()))
+        .collect::<Vec<_>>();
+    let choice = match select_permission_value(
         editor,
         phase,
         status,
-        saved,
-        if busy {
-            EditPhase::Busy
-        } else {
-            EditPhase::Idle
-        },
-    );
-
-    let choice = match choice {
-        PermissionMenuChoice::Selected(choice) => choice,
-        PermissionMenuChoice::Cancelled => return None,
-        PermissionMenuChoice::Propagate(line) => return Some(line),
+        busy,
+        "Choose permission operation",
+        &options,
+        true,
+        false,
+    ) {
+        PermissionField::Value(id) => {
+            match choices.iter().copied().find(|choice| choice.as_str() == id) {
+                Some(choice) => choice,
+                None => return None,
+            }
+        }
+        PermissionField::Cancelled => return None,
+        PermissionField::Propagate(line) => return Some(line),
     };
     build_permission_request(editor, phase, status, busy, choice)
 }
@@ -208,6 +131,8 @@ fn build_permission_request(
                 busy,
                 "Choose rule effect",
                 &[("allow", "Allow"), ("deny", "Deny")],
+                false,
+                false,
             ) {
                 PermissionField::Value(value) => value,
                 PermissionField::Cancelled => return None,
@@ -331,6 +256,8 @@ fn read_permission_call(
         busy,
         "Choose admitted tool",
         &borrowed,
+        false,
+        false,
     ) {
         PermissionField::Value(value) => value,
         PermissionField::Cancelled => {
@@ -374,6 +301,17 @@ fn read_permission_call(
     PermissionCallField::Value { call, workspace }
 }
 
+fn permission_selector_key(
+    status: &SharedStatus,
+    command: &str,
+    cancel_missing_key: bool,
+) -> Result<Option<SelectorKey>, ()> {
+    match next_selector_key(status, command) {
+        None if cancel_missing_key => Err(()),
+        key => Ok(key),
+    }
+}
+
 fn select_permission_value(
     editor: &mut Reedline,
     phase: &SurfacePhase,
@@ -381,6 +319,8 @@ fn select_permission_value(
     busy: bool,
     prompt: &str,
     choices: &[(&str, &str)],
+    cancel_missing_key: bool,
+    ignore_unexpected_line: bool,
 ) -> PermissionField {
     if choices.is_empty() {
         return PermissionField::Cancelled;
@@ -416,8 +356,10 @@ fn select_permission_value(
             .unwrap_or_else(|| answer(false, editor.read_line(&question)))
         {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = next_selector_key(status, &command) else {
-                    continue;
+                let key = match permission_selector_key(status, &command, cancel_missing_key) {
+                    Ok(Some(key)) => key,
+                    Ok(None) => continue,
+                    Err(()) => break PermissionField::Cancelled,
                 };
                 let mut selector = selector.lock().expect("permission value selector lock");
                 selector.key(key);
@@ -437,11 +379,16 @@ fn select_permission_value(
             line @ (Line::Ended | Line::ExternalBreak(_)) => {
                 break PermissionField::Propagate(line);
             }
-            Line::Submitted(_)
-            | Line::Blank
+            Line::Blank
             | Line::Interrupted
-            | Line::Refused(_)
-            | Line::HostCommand(_) => break PermissionField::Cancelled,
+            | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                break PermissionField::Cancelled;
+            }
+            Line::Submitted(_) | Line::Refused(_) | Line::HostCommand(_) => {
+                if !ignore_unexpected_line {
+                    break PermissionField::Cancelled;
+                }
+            }
         }
     };
     status
@@ -477,96 +424,32 @@ pub(super) fn choose_policy_mode(
 ) -> Option<Line> {
     let mut controller = PolicyControlController::new();
     let modes = controller.mode_options();
-    let request = QuestionRequest::new(
-        "Choose execution mode",
-        QuestionMode::Single,
-        modes
-            .iter()
-            .map(|mode| QuestionOption::new(mode.as_str(), format!("{mode:?}")))
-            .collect(),
-        false,
-    );
-    let selector = Arc::new(Mutex::new(Selector::with_options(
-        SelectorKind::Single,
-        request
-            .options
-            .iter()
-            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone())),
-    )));
-    let saved = enter_modal(editor, phase, status);
-    status
-        .lock()
-        .expect("surface status lock")
-        .question_selector = Some(Arc::clone(&selector));
-    repaint_status(status);
-
-    let choice = loop {
-        let prompt = Question::new(
-            question_selector_prompt(&request, &selector),
-            Arc::clone(status),
-        );
-        match queued_selector_line(status)
-            .unwrap_or_else(|| answer(false, editor.read_line(&prompt)))
-        {
-            Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = next_selector_key(status, &command) else {
-                    break PolicyModeChoice::Cancelled;
-                };
-                let mut selector = selector.lock().expect("policy mode selector lock");
-                selector.key(key);
-                if key == SelectorKey::Escape {
-                    break PolicyModeChoice::Cancelled;
-                }
-                if key != SelectorKey::Enter {
-                    drop(selector);
-                    repaint_status(status);
-                    continue;
-                }
-                let Some(SelectorValue::Single(id)) = selector.result() else {
-                    continue;
-                };
-                let Some(mode) = modes
-                    .iter()
-                    .copied()
-                    .find(|mode| mode.as_str() == id.as_str())
-                else {
-                    break PolicyModeChoice::Cancelled;
-                };
-                break PolicyModeChoice::Selected(mode);
-            }
-            Line::ExternalBreak(buffer) => {
-                break PolicyModeChoice::Propagate(Line::ExternalBreak(buffer));
-            }
-            Line::Submitted(_)
-            | Line::Blank
-            | Line::Interrupted
-            | Line::Ended
-            | Line::Refused(_)
-            | Line::HostCommand(_) => break PolicyModeChoice::Cancelled,
-        }
-    };
-    status
-        .lock()
-        .expect("surface status lock")
-        .question_selector = None;
-    leave_modal(
+    let options = modes
+        .iter()
+        .map(|mode| (mode.as_str(), format!("{mode:?}")))
+        .collect::<Vec<_>>();
+    let borrowed = options
+        .iter()
+        .map(|(id, label)| (*id, label.as_str()))
+        .collect::<Vec<_>>();
+    match select_permission_value(
         editor,
         phase,
         status,
-        saved,
-        if busy {
-            EditPhase::Busy
-        } else {
-            EditPhase::Idle
-        },
-    );
-
-    match choice {
-        PolicyModeChoice::Selected(mode) => controller
-            .select_mode(mode)
+        busy,
+        "Choose execution mode",
+        &borrowed,
+        true,
+        false,
+    ) {
+        PermissionField::Value(id) => modes
+            .iter()
+            .copied()
+            .find(|mode| mode.as_str() == id)
+            .and_then(|mode| controller.select_mode(mode))
             .map(|request| Line::HostCommand(HostCommand::Policy(request))),
-        PolicyModeChoice::Cancelled => None,
-        PolicyModeChoice::Propagate(line) => Some(line),
+        PermissionField::Cancelled | PermissionField::Propagate(Line::Ended) => None,
+        PermissionField::Propagate(line) => Some(line),
     }
 }
 
@@ -668,88 +551,28 @@ pub(super) fn choose_statusline_preset(
     status: &SharedStatus,
     busy: bool,
 ) -> StatuslineChoice {
-    let request = QuestionRequest::new(
-        "Choose status-line setup",
-        QuestionMode::Single,
-        STATUSLINE_PRESETS
-            .iter()
-            .map(|(id, label, _)| QuestionOption::new(*id, *label))
-            .collect(),
-        false,
-    );
-    let selector = Arc::new(Mutex::new(Selector::with_options(
-        SelectorKind::Single,
-        request
-            .options
-            .iter()
-            .map(|option| SelectorOption::new(option.id.clone(), option.label.clone())),
-    )));
-    let saved = enter_modal(editor, phase, status);
-    status
-        .lock()
-        .expect("surface status lock")
-        .question_selector = Some(Arc::clone(&selector));
-    repaint_status(status);
-
-    let choice = loop {
-        let prompt = Question::new(
-            question_selector_prompt(&request, &selector),
-            Arc::clone(status),
-        );
-        match queued_selector_line(status)
-            .unwrap_or_else(|| answer(false, editor.read_line(&prompt)))
-        {
-            Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = next_selector_key(status, &command) else {
-                    continue;
-                };
-                let mut selector = selector.lock().expect("status-line selector lock");
-                selector.key(key);
-                if key == SelectorKey::Escape {
-                    break StatuslineChoice::Cancelled;
-                }
-                if key != SelectorKey::Enter {
-                    drop(selector);
-                    repaint_status(status);
-                    continue;
-                }
-                let Some(SelectorValue::Single(id)) = selector.result() else {
-                    continue;
-                };
-                let Some((_, _, segments)) = STATUSLINE_PRESETS
-                    .iter()
-                    .find(|(preset, _, _)| *preset == id.as_str())
-                else {
-                    continue;
-                };
-                break StatuslineChoice::Selected(segments.to_vec());
-            }
-            Line::Interrupted | Line::Blank => break StatuslineChoice::Cancelled,
-            Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
-                break StatuslineChoice::Cancelled;
-            }
-            line @ (Line::Ended | Line::ExternalBreak(_)) => {
-                break StatuslineChoice::Propagate(line);
-            }
-            Line::Submitted(_) | Line::Refused(_) | Line::HostCommand(_) => {}
-        }
-    };
-    status
-        .lock()
-        .expect("surface status lock")
-        .question_selector = None;
-    leave_modal(
+    let choices = STATUSLINE_PRESETS
+        .iter()
+        .map(|(id, label, _)| (*id, *label))
+        .collect::<Vec<_>>();
+    match select_permission_value(
         editor,
         phase,
         status,
-        saved,
-        if busy {
-            EditPhase::Busy
-        } else {
-            EditPhase::Idle
-        },
-    );
-    choice
+        busy,
+        "Choose status-line setup",
+        &choices,
+        false,
+        true,
+    ) {
+        PermissionField::Value(id) => STATUSLINE_PRESETS
+            .iter()
+            .find(|(preset, _, _)| *preset == id)
+            .map(|(_, _, segments)| StatuslineChoice::Selected(segments.to_vec()))
+            .unwrap_or(StatuslineChoice::Cancelled),
+        PermissionField::Cancelled => StatuslineChoice::Cancelled,
+        PermissionField::Propagate(line) => StatuslineChoice::Propagate(line),
+    }
 }
 
 pub(super) fn configure_statusline(
@@ -799,4 +622,20 @@ pub(super) fn configure_statusline(
         }
     }
     repaint_status(status);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Catches: sharing the selector silently retries a missing action-menu key.
+    #[test]
+    fn action_menu_cancels_when_next_selector_key_returns_none() {
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        assert!(permission_selector_key(&status, "wake", true).is_err());
+        assert!(matches!(
+            permission_selector_key(&status, "wake", false),
+            Ok(None)
+        ));
+    }
 }
