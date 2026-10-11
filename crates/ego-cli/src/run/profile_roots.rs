@@ -4,30 +4,6 @@ use ego_core::config::Effective;
 use ego_core::permit::{CanonPath, PathResolver, ProfileRoot, admit_roots};
 use ego_tools::fs::OsFs;
 
-/// A derived source cannot raise a configured root ceiling.
-pub(crate) fn check_adaptive(
-    effective: &Effective,
-    policy: &ego_core::permit::RunConfinement,
-) -> Result<(), String> {
-    let Some(perimeter) = policy.adaptive_perimeter() else {
-        return Ok(());
-    };
-    let roots = perimeter
-        .writable
-        .iter()
-        .cloned()
-        .map(|path| ProfileRoot::new(path, ego_core::permit::RootAccess::ReadWrite))
-        .collect::<Vec<_>>();
-    ego_core::permit::check_root_ceilings(
-        &roots,
-        &effective.root_ceilings,
-        &perimeter.home,
-        policy.workspace(),
-        &OsFs,
-    )
-    .map_err(|error| error.to_string())
-}
-
 /// Resolve the roots the active profile declared against the real filesystem.
 /// Any refusal is a startup failure: a profile that asks for more reach than
 /// it may have must not quietly run with less.

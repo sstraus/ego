@@ -39,10 +39,10 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     for path in &perimeter.controls {
         subpath(&mut out, path.as_path())?;
     }
+    // Selector files stay protected; a new fixture .git directory is allowed.
     out.push_str(&format!(
-        "  (regex #\"{}\")\n  (regex #\"{}\")\n",
-        floor::GIT_ENTRY,
-        floor::GIT_CONTROL
+        "  (require-all (regex #\"{}\") (require-not (vnode-type DIRECTORY)))\n",
+        floor::GIT_ENTRY
     ));
     // A captured Git root has config and hooks controls even when absent.
     // Cover nested submodules/worktrees beneath separately named metadata too.
@@ -52,11 +52,6 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     out.push_str(")\n(deny file-write-unlink\n");
     // Protect structural boundaries from relocation, while leaving transient
     // operation directories and objects/refs cleanup available to Git.
-    out.push_str(&format!(
-        "  (require-all (regex #\"{}\") (vnode-type DIRECTORY)\n    (require-not (regex #\"{}\")))\n",
-        floor::GIT_BOUNDARY,
-        floor::GIT_MODULE_TRANSIENT
-    ));
     for root in floor::metadata_roots(perimeter) {
         out.push_str("  (require-all\n");
         rooted_regex(&mut out, root, floor::METADATA_BOUNDARY)?;

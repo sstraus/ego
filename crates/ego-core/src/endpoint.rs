@@ -126,12 +126,12 @@ impl Admitted {
 
     /// Narrow the operator's confinement ceiling for this endpoint.
     ///
-    /// A publicly reachable peer may never select unconfined execution. Local
+    /// A publicly reachable peer may select at most Workspace execution. Local
     /// and loopback endpoints add no restriction, and a public endpoint never
     /// weakens an already stricter operator choice.
     pub fn cap_confinement(&self, configured: Confinement) -> Confinement {
         match (self, configured) {
-            (Self::Public(_), Confinement::Off) => Confinement::Workspace,
+            (Self::Public(_), Confinement::Off | Confinement::Adaptive) => Confinement::Workspace,
             _ => configured,
         }
     }

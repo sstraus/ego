@@ -320,3 +320,58 @@ fn acp_profile_ceiling_missing_on_reopen_refuses_instead_of_widening() {
     }
     host.finish();
 }
+
+// Catches: session/new reports strict but the real prompt uses the wider Adaptive launch ceiling.
+#[cfg(target_os = "macos")]
+#[test]
+fn adaptive_launch_preserves_strict_profile_through_acp_prompt() {
+    use ego_core::evidence::{EvidenceLogSource, EvidenceRecord};
+    use ego_tools::store::{JsonlStore, OsIo};
+    for sandbox in ["ro", "workspace"] {
+        let places = Places::new();
+        std::fs::write(places.home_path().join("config.toml"),
+            format!("model='ollama/qwen3'\nthinking='off'\n[profile.strict]\nsandbox='{sandbox}'\nroots=[]")).unwrap();
+        let stub = Stub::start(Plan {
+            completions: vec![Reply::Sse(text("done"))],
+            ..Plan::default()
+        });
+        let mut host = AcpHost::adopt(
+            Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+                .subcommand("acp")
+                .spawn_conversing(),
+        );
+        host.initialize();
+        let opened = host.request(
+            "session/new",
+            serde_json::json!({"cwd": places.workspace_path(), "mcpServers": [],
+            "_meta": {"ego": {"profile": "strict", "trust": "trusted"}}}),
+        );
+        assert_eq!(
+            opened["result"]["_meta"]["ego"]["effective"]["sandbox"], sandbox,
+            "{opened}"
+        );
+        let session = opened["result"]["sessionId"].as_str().unwrap();
+        let reply = host.request(
+            "session/prompt",
+            serde_json::json!({"sessionId": session,
+            "prompt": [{"type": "text", "text": "Hello"}]}),
+        );
+        assert!(reply["result"].is_object(), "{reply}");
+        let records = JsonlStore::new(
+            places.home_path().join("sessions"),
+            places.workspace_path(),
+            Box::new(OsIo),
+        )
+        .evidence_records(&session.parse().unwrap())
+        .unwrap();
+        let level = records
+            .into_iter()
+            .find_map(|record| match record {
+                EvidenceRecord::RunContext(context) => Some(context.execution().confinement()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(level.as_str(), sandbox);
+        host.finish();
+    }
+}

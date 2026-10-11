@@ -453,7 +453,7 @@ impl Confinement {
         }
     }
 
-    /// Picker order. Adaptive and strict levels have incomparable guarantees.
+    /// Admission order, narrowest first; backend guarantees remain level-specific.
     pub const ALL: [Self; 4] = [Self::Ro, Self::Workspace, Self::Adaptive, Self::Off];
 
     /// The one spelling: what `--sandbox` takes, what the config key holds,
@@ -488,14 +488,14 @@ impl Confinement {
     ///
     /// The only question a ceiling is ever asked
     /// (`ARCHITECTURE.md`).
-    /// Adaptive and strict levels are incomparable; only an off ceiling admits
-    /// both, since strict levels do not promise adaptive's credential floors.
+    /// Explicit strict levels narrow Adaptive authority. This orders selections,
+    /// not backend capability guarantees, which are checked separately.
     pub const fn within(self, ceiling: Self) -> bool {
         matches!(
             (self, ceiling),
             (_, Self::Off)
-                | (Self::Ro, Self::Ro | Self::Workspace)
-                | (Self::Workspace, Self::Workspace)
+                | (Self::Ro, Self::Ro | Self::Workspace | Self::Adaptive)
+                | (Self::Workspace, Self::Workspace | Self::Adaptive)
                 | (Self::Adaptive, Self::Adaptive)
         )
     }
@@ -1354,8 +1354,8 @@ mod confinement {
             ((Adaptive, Off), true),
             ((Adaptive, Ro), false),
             ((Adaptive, Workspace), false),
-            ((Ro, Adaptive), false),
-            ((Workspace, Adaptive), false),
+            ((Ro, Adaptive), true),
+            ((Workspace, Adaptive), true),
             ((Off, Adaptive), false),
         ];
         for ((value, ceiling), within) in expected {
@@ -1388,7 +1388,7 @@ mod confinement {
         assert!(
             Confinement::ALL
                 .windows(2)
-                .all(|pair| !pair[1].within(pair[0])),
+                .all(|pair| pair[0].within(pair[1]) && !pair[1].within(pair[0])),
             "the offer is not ordered strongest first: {:?}",
             Confinement::ALL
         );

@@ -831,3 +831,41 @@ fn acp_mode_selection_cannot_raise_system_maximum() {
     assert_eq!(state.mode.current, Some(Mode::Default));
     assert_eq!(state.mode.chosen, None);
 }
+
+// Catches: the default Adaptive ceiling omits strict offers or refuses tightening.
+#[test]
+fn adaptive_ceiling_allows_strict_host_selections_and_never_off() {
+    let seat = ceilinged(false, Confinement::Adaptive);
+    let session = SessionId::new();
+    seat.seed_confinement(
+        session,
+        [
+            Confinement::Ro,
+            Confinement::Workspace,
+            Confinement::Adaptive,
+            Confinement::Off,
+        ]
+        .into_iter()
+        .map(|level| (level, observation(level)))
+        .collect(),
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        seat.state(session).unwrap().sandbox.available,
+        vec![
+            Confinement::Ro,
+            Confinement::Workspace,
+            Confinement::Adaptive
+        ]
+    );
+    for level in [Confinement::Workspace, Confinement::Ro] {
+        seat.stage(session, SessionControlChange::Sandbox(level))
+            .unwrap();
+        assert_eq!(seat.state(session).unwrap().sandbox.current, Some(level));
+    }
+    assert!(
+        seat.stage(session, SessionControlChange::Sandbox(Confinement::Off))
+            .is_err()
+    );
+}

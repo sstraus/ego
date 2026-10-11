@@ -11,7 +11,7 @@ fn address(value: &str) -> SocketAddr {
 }
 
 #[test]
-fn public_endpoints_cap_only_an_unconfined_operator_ceiling() {
+fn public_endpoints_cap_adaptive_and_off_without_widening_strict_choices() {
     let public = Admitted::Public(address("0.0.0.0:8080"));
     assert_eq!(
         public.cap_confinement(Confinement::Off),
@@ -22,6 +22,10 @@ fn public_endpoints_cap_only_an_unconfined_operator_ceiling() {
         Confinement::Workspace
     );
     assert_eq!(public.cap_confinement(Confinement::Ro), Confinement::Ro);
+    assert_eq!(
+        public.cap_confinement(Confinement::Adaptive),
+        Confinement::Workspace
+    );
 }
 
 #[test]
