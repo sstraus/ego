@@ -77,7 +77,7 @@ impl Perimeter {
                 )
                 .collect(),
             sandbox: confinement.level().to_string(),
-            sandbox_source: origin(effective.sandbox_source),
+            sandbox_source: effective.sandbox_provenance.to_string(),
             sandbox_reason: effective
                 .sandbox
                 .is_none()
