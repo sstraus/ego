@@ -2311,3 +2311,136 @@ fn judge_effort_uses_the_lowest_supported_level_and_refuses_unknown_facts() {
         assert_eq!(model::judge_thinking(&capabilities).ok(), expected);
     }
 }
+
+/// Catches: a real Adaptive setup failure reaches the transcript but is omitted
+/// from the CLI refusal, leaving the operator with no setup cause to fix.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn adaptive_setup_failure_is_named_in_the_user_refusal() {
+    let owner = tempdir().expect("adaptive refusal fixture");
+    let blocker = owner.path().join("not-a-directory");
+    std::fs::write(&blocker, "fixture").expect("non-directory probe parent");
+    let confinement = RunConfinement::new(
+        Confinement::Adaptive,
+        false,
+        CanonPath::new(blocker.join("workspace")),
+    )
+    .expect("absolute workspace")
+    .with_adaptive_perimeter(ego_core::permit::AdaptivePerimeter {
+        home: CanonPath::new(&blocker),
+        writable: vec![],
+        credentials: vec![],
+        controls: vec![],
+    });
+    let evidence = SessionEvidenceStore::open(owner.path(), SessionId::new(), 1024 * 1024)
+        .expect("refusal evidence store");
+    let cancel = CancelToken::new();
+    let config = ego_tools::exec::ExecRunConfig::new(
+        confinement.clone(),
+        evidence.clone(),
+        cancel.clone(),
+        ego_tools::exec::ExecLimits::default(),
+        ego_tools::exec::HttpCallTimeout::default(),
+        None,
+        Arc::new(ego_tools::http::SystemResolver::new()),
+    );
+    let missing = match RunEffectPorts::for_run(config).await {
+        Err(ProcessError::MissingCapabilities(missing)) => missing,
+        Err(other) => panic!("expected measured Adaptive refusal, got {other}"),
+        Ok(_) => panic!("non-directory fixture parent admitted Adaptive"),
+    };
+    let cause = missing
+        .host_control_failure()
+        .expect("real measurement recorded its host cause")
+        .to_owned();
+    assert!(
+        cause.contains("adaptive.setup") && cause.contains("os error"),
+        "{cause}"
+    );
+    use ego_core::store::evidence::{EvidenceRead, EvidenceStore};
+    let reference = missing
+        .probe_evidence()
+        .expect("persisted transcript")
+        .clone();
+    let request = EvidenceRead::new(reference.clone(), 0).unwrap();
+    let page = EvidenceStore::read_page(&evidence, &request)
+        .await
+        .expect("read measured evidence");
+    let transcript = String::from_utf8(page.bytes).expect("JSON Lines transcript");
+    let setup = transcript
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|record| record["suite"] == "adaptive.setup")
+        .expect("persisted setup failure");
+    assert_eq!(
+        cause,
+        format!("adaptive.setup: {}", setup["outcome"].as_str().unwrap())
+    );
+    assert!(
+        setup["outcome"]
+            .as_str()
+            .unwrap()
+            .contains("create outside fixture")
+    );
+    let RunTermination::UsageError { message } = process_error_termination(
+        ProcessError::MissingCapabilities(missing),
+        &confinement,
+        &cancel,
+    ) else {
+        panic!("unsupported Adaptive is a usage refusal");
+    };
+    assert!(message.contains(&reference.id.to_string()), "{message}");
+    assert!(
+        !message.contains("firewall") && !message.contains("offline probe"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&cause),
+        "Adaptive refusal omitted the measured setup cause {cause:?}: {message}"
+    );
+}
+
+/// Catches: Adaptive setup/control failures disappear or gain firewall advice
+/// when the missing guarantees include (or exclude) offline confinement.
+#[test]
+fn adaptive_host_failures_are_named_without_offline_listener_advice() {
+    for (offline, failure) in [
+        (
+            false,
+            "adaptive.setup: create outside fixture: Not a directory (os error 20)",
+        ),
+        (
+            false,
+            "adaptive.write-outside.control: remove control fixture: Permission denied (os error 13)",
+        ),
+        (
+            true,
+            "adaptive.setup: create workspace fixture: Not a directory (os error 20)",
+        ),
+    ] {
+        let confinement =
+            RunConfinement::new(Confinement::Adaptive, offline, CanonPath::new("/workspace"))
+                .unwrap();
+        let missing = confinement
+            .requirements()
+            .check(ExecCaps::empty())
+            .expect_err("unmeasured Adaptive is refused")
+            .with_host_control_failure(Some(failure.to_owned()));
+        let RunTermination::UsageError { message } = process_error_termination(
+            ProcessError::MissingCapabilities(missing),
+            &confinement,
+            &CancelToken::new(),
+        ) else {
+            panic!("unmet Adaptive is a usage refusal");
+        };
+        assert!(message.contains(failure), "{message}");
+        assert!(
+            message.contains("Fix the recorded probe cause"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("firewall") && !message.contains("offline probe"),
+            "{message}"
+        );
+    }
+}
