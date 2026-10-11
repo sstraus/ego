@@ -1,3 +1,5 @@
+#[path = "live_surface_pty/raw_columns.rs"]
+mod raw_columns;
 mod support;
 #[path = "live_surface_pty/workspace_trust.rs"]
 mod workspace_trust;
