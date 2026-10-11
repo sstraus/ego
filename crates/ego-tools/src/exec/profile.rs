@@ -238,6 +238,76 @@ mod tests {
         }
     }
 
+    fn adaptive_metadata_input(root: &Path) -> ego_core::permit::AdaptivePerimeter {
+        ego_core::permit::AdaptivePerimeter {
+            home: CanonPath::new("/home"),
+            writable: vec![],
+            credentials: vec![],
+            controls: vec![
+                CanonPath::new(root.join("config")),
+                CanonPath::new(root.join("hooks")),
+            ],
+        }
+    }
+
+    // Catches: a host quote terminates the raw SBPL regex and becomes profile syntax.
+    #[test]
+    fn adaptive_metadata_quote_cannot_terminate_raw_regex() {
+        for root in [
+            "/git/quoted\"root",
+            "/git/a\")(allow file-write* (subpath \"/",
+        ] {
+            let perimeter = adaptive_metadata_input(Path::new(root));
+            let mut input = input(Confinement::Adaptive);
+            input.adaptive = Some(&perimeter);
+            assert!(
+                matches!(
+                    render(&input),
+                    Err(super::ProfileError::UnrepresentablePath(_))
+                ),
+                "quoted metadata root accepted: {root:?}"
+            );
+        }
+    }
+
+    // Catches: rejecting raw-regex quotes also rejects safe quoted literal paths.
+    #[test]
+    fn adaptive_quoted_workspace_remains_a_literal() {
+        let perimeter = adaptive_metadata_input(Path::new("/git/metadata"));
+        let mut input = input(Confinement::Adaptive);
+        input.workspace = Path::new("/work/quoted\"root");
+        input.adaptive = Some(&perimeter);
+        let profile = render(&input).expect("quoted literal workspace");
+        assert!(profile.contains("(subpath \"/work/quoted\\\"root\")"));
+    }
+
+    // Catches: regex metacharacters or backslashes in valid roots break SBPL parsing.
+    #[test]
+    fn adaptive_metadata_regex_paths_are_accepted_by_sandbox_exec() {
+        for root in ["/git/plain", "/git/a(b)[c].+", "/git/back\\slash"] {
+            let perimeter = adaptive_metadata_input(Path::new(root));
+            let mut input = input(Confinement::Adaptive);
+            input.adaptive = Some(&perimeter);
+            let profile = render(&input).expect("representable metadata root");
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, "/usr/bin/true"])
+                .output()
+                .expect("installed macOS sandbox-exec");
+            assert!(output.status.success(), "{root:?}: {output:?}");
+        }
+    }
+
+    // Catches: control bytes or nonabsolute roots reach raw SBPL regex syntax.
+    #[test]
+    fn adaptive_metadata_invalid_paths_are_refused_before_spawn() {
+        for root in ["/git/control\nroot", "relative/git"] {
+            let perimeter = adaptive_metadata_input(Path::new(root));
+            let mut input = input(Confinement::Adaptive);
+            input.adaptive = Some(&perimeter);
+            assert!(render(&input).is_err(), "invalid root accepted: {root:?}");
+        }
+    }
+
     #[test]
     fn workspace_grants_read_and_existence_on_both_writable_roots() {
         assert_eq!(
