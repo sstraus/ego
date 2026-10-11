@@ -1095,3 +1095,29 @@ mod regression_case_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sandbox_ceiling_tests {
+    use super::*;
+    // Catches: a strict child is rejected under Adaptive, or Adaptive escapes a strict parent.
+    #[test]
+    fn adaptive_parent_admits_strict_children_but_strict_parent_rejects_adaptive() {
+        let mut parent =
+            ego_core::config::resolve(&[], ego_core::config::Trust::Trusted, None).unwrap();
+        parent.sandbox = Some(Confinement::Adaptive);
+        let policy =
+            RunConfinement::new(Confinement::Adaptive, false, CanonPath::new("/workspace"))
+                .unwrap();
+        let ceiling = ChildAuthorityCeiling::from_parent(&parent, &policy);
+        for level in [Confinement::Ro, Confinement::Workspace] {
+            let mut child = parent.clone();
+            child.sandbox = Some(level);
+            ceiling.admit(&child, false).unwrap();
+            let strict = ChildAuthorityCeiling::from_parent(
+                &child,
+                &RunConfinement::new(level, false, CanonPath::new("/workspace")).unwrap(),
+            );
+            assert!(strict.admit(&parent, false).is_err());
+        }
+    }
+}

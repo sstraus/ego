@@ -122,3 +122,35 @@ fn profile_ceiling_provenance_names_the_clamp_and_keeps_the_profile() {
     assert_eq!(narrow.sandbox_provenance, kept);
     assert_eq!(kept.to_string(), "user profile narrow selected by env");
 }
+
+// Catches: an Adaptive ceiling silently replaces an explicit strict selection.
+#[test]
+fn adaptive_ceiling_preserves_explicit_strict_sandbox() {
+    use ego_core::config::resolve;
+    for sandbox in ["ro", "workspace"] {
+        let layers = vec![
+            ConfigLayer::parse(
+                Source::User,
+                &format!("sandbox='{sandbox}'\n[profile.machine]\nmode='default'"),
+            )
+            .unwrap(),
+        ];
+        let mut ceiling = resolve(&layers, Trust::Trusted, Some("machine")).unwrap();
+        ceiling.sandbox = Some(Confinement::Adaptive);
+        let effective =
+            resolve_with_profile_ceiling(&layers, Trust::Trusted, None, Some(&ceiling)).unwrap();
+        assert_eq!(effective.sandbox, Some(sandbox.parse().unwrap()));
+        assert!(
+            effective.profile_warnings.is_empty(),
+            "{:?}",
+            effective.profile_warnings
+        );
+        let system = ConfigLayer::parse(Source::System, "sandbox='adaptive'").unwrap();
+        let mut capped = layers.clone();
+        capped.push(system);
+        assert_eq!(
+            resolve(&capped, Trust::Trusted, None).unwrap().sandbox,
+            Some(sandbox.parse().unwrap())
+        );
+    }
+}
