@@ -15,6 +15,9 @@ use ego_tools::exec::{
     admit_confinement,
 };
 
+#[path = "support/reexec.rs"]
+mod reexec;
+
 /// Runs `name` again in a child test process with a task-owned operator
 /// environment. Returns the root inside that child, `None` in the parent.
 fn isolated(name: &str) -> Option<PathBuf> {
@@ -43,12 +46,7 @@ fn isolated(name: &str) -> Option<PathBuf> {
         .env_remove("CARGO_TARGET_DIR")
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    reexec::assert_one_child_test(&output);
     None
 }
 
@@ -223,3 +221,27 @@ fn adaptive_confined_git_can_remove_transient_metadata_directories() {
 
 #[path = "support/adaptive_git_critic_r2.rs"]
 mod r2;
+
+// Catches: a renamed child test silently succeeds without running any tests.
+#[test]
+#[should_panic(expected = "child must pass exactly one test")]
+fn reexec_rejects_missing_child_test() {
+    isolated("regression_case");
+}
+
+// Catches: a stricter child oracle rejects a real single-test run.
+#[test]
+fn reexec_accepts_one_successful_child_test() {
+    isolated("reexec_accepts_one_successful_child_test");
+}
+
+// Catches: child process failure is accepted based on its output alone.
+#[test]
+#[should_panic(expected = "child must pass exactly one test")]
+fn reexec_rejects_failed_child_process() {
+    let output = Command::new(std::env::current_exe().unwrap())
+        .arg("--invalid-libtest-option-for-regression")
+        .output()
+        .unwrap();
+    reexec::assert_one_child_test(&output);
+}
