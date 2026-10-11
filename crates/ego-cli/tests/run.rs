@@ -2910,7 +2910,7 @@ fn a_retired_model_is_refused_by_name_before_anything_is_sent() {
     assert!(
         refused.stderr.contains("claude-3-opus-20240229")
             && refused.stderr.contains("retired")
-            && refused.stderr.contains("claude-opus-4-8"),
+            && refused.stderr.contains("claude-opus-5-5"),
         "the refusal must name the slug, the retirement and the replacement: {}",
         refused.stderr
     );

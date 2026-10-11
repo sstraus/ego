@@ -493,7 +493,7 @@ impl CliGenerationModelSource {
             let preferred = match provider_id {
                 "openai-codex" => Some("openai-codex/codex-auto-review"),
                 "openai" => Some("openai/gpt-6-luna"),
-                "anthropic" => Some("anthropic/claude-haiku-4-5"),
+                "anthropic" => Some("anthropic/claude-haiku-5-5"),
                 _ => None,
             };
             if let Some(preferred) =

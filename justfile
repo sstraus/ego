@@ -19,7 +19,15 @@ default:
     @just --list
 
 # Everything CI checks, cheapest failure first.
-gate: fmt-check lint test
+gate: fmt-check catalogue-check lint test
+
+python := if os() == "windows" { "python" } else { "python3" }
+
+# Needs Python 3.11 for tomllib; the generator uses the standard library only.
+
+# Fail if the builtin model catalogue is not what its generator writes.
+catalogue-check:
+    {{ python }} -B .agents/skills/model-catalogue-refresh/scripts/catalogue.py check
 
 # Rewrite formatting in place.
 fmt:

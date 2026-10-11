@@ -24,12 +24,20 @@ pub(super) fn run_model_picker(
         status.lock().expect("surface status lock").notice = notice;
         repaint_status(status);
     }
+    // The frame is drawn from this row down. Read it once: later frames start at
+    // the same row because the picker never lets one scroll the screen.
+    let start_row = crossterm::cursor::position()
+        .ok()
+        .map(|(column, row)| usize::from(row) + usize::from(column > 0));
     let result = loop {
         let view = picker.lock().expect("model picker lock").view();
         let status_width = status.lock().expect("surface status lock").width;
         let terminal = crossterm::terminal::size().ok();
         let width = picker_width(status_width, terminal.map(|(width, _)| usize::from(width)));
-        let height = terminal.map_or(24, |(_, height)| usize::from(height));
+        let height = picker_height(
+            terminal.map_or(24, |(_, height)| usize::from(height)),
+            start_row,
+        );
         let prompt = Question::new(
             model_picker_prompt(&view, width, height),
             Arc::clone(status),
@@ -88,6 +96,23 @@ fn picker_width(status_width: usize, terminal: Option<usize>) -> usize {
     match status_width {
         0 => terminal.unwrap_or(0),
         width => width,
+    }
+}
+
+/// Rows a frame needs to show its headings, three choices and a hint.
+const MIN_FRAME_ROWS: usize = 8;
+
+/// The rows the picker frame may use. The frame is drawn from `start_row` down,
+/// and reedline starts a new prompt instead of reusing the old one when the
+/// cursor ends on the bottom row, which leaves every earlier frame on screen. A
+/// frame sized to the whole terminal ends there once the rows above it (banner,
+/// status, composer) are counted. When fewer than [`MIN_FRAME_ROWS`] remain
+/// below `start_row` the terminal scrolls whatever the size, so the whole
+/// terminal is used.
+fn picker_height(terminal_rows: usize, start_row: Option<usize>) -> usize {
+    match start_row.map(|row| terminal_rows.saturating_sub(row)) {
+        Some(below) if below >= MIN_FRAME_ROWS => below,
+        _ => terminal_rows,
     }
 }
 
@@ -337,6 +362,25 @@ mod tests {
             assert!(!rendered.contains("MissingCredential"));
             assert!(!rendered.contains("ANTHROPIC_API_KEY"));
         }
+    }
+    /// Catches: a frame sized to the whole terminal while rows above it are
+    /// already used, which ends the frame on the bottom row.
+    #[test]
+    fn the_frame_stops_above_the_bottom_row_of_the_terminal() {
+        assert_eq!(picker_height(40, Some(9)), 31);
+        assert_eq!(picker_height(40, Some(0)), 40);
+        assert_eq!(picker_height(40, None), 40);
+        // Too little room below the start row: the terminal scrolls anyway.
+        assert_eq!(picker_height(8, Some(7)), 8);
+        assert_eq!(picker_height(24, Some(23)), 24);
+        let mut view = view();
+        let row = view.models[0].clone();
+        view.models = std::iter::repeat_n(row, 40).collect();
+        let rendered = model_picker_prompt(&view, 80, picker_height(40, Some(9)));
+        assert!(
+            9 + rendered.lines().count() < 40,
+            "the frame ends on the bottom row:\n{rendered}"
+        );
     }
     #[test]
     fn reasoning_heading_and_controls_fit_narrow_terminals() {

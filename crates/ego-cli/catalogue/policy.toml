@@ -1,0 +1,200 @@
+# Reviewed, hand-kept policy for the generated builtin catalogue.
+#
+# `.agents/skills/model-catalogue-refresh/scripts/catalogue.py generate` reads this
+# file and `upstream/models.dev.json` and writes `models.generated.toml`.
+# maintainer decision 2026-10-11 (regression case): the builtin catalogue lists ONLY the
+# current model generations of each provider. An older model that a vendor still
+# serves is not listed; an operator states it in `models.toml` if needed.
+#
+# ## What "current generation" means
+#
+# - `floor`: the release date of the first model of the current generation. Every
+#   snapshot model of that provider released on or after it, that takes tools,
+#   returns text and is not `deprecated`, is current.
+# - `include`: the newest model of a tier whose latest release predates the floor
+#   (the tier has not been refreshed in the current generation).
+# - `exclude`: a model released on or after the floor that ego must not list, with
+#   the reason. The generator refuses a model whose reasoning controls are not an
+#   effort list, so such a model must be named here.
+# - `drop_efforts`: effort levels the provider's backend does not offer although the
+#   snapshot row lists them (a subscription backend served from an API row).
+#
+# ## What may be written here
+#
+# Only facts a vendor published, each cited. Nothing here states a price. The
+# per-row limits, effort sets and modalities come from the snapshot; `wire` is the
+# provider-level contract the snapshot does not carry. Where a provider's wire
+# facts were not read from a vendor page, `wire` takes the fail-closed value
+# (no parallel tool calls, no cache, no reasoning carry-over, image input unknown).
+
+# ---------------------------------------------------------------------------
+# openai. Current generation: GPT-6 (astra, sol, luna; sol refreshed as 6.1).
+# Wire facts read 2026-09-26 from https://developers.openai.com/api/docs/models,
+# https://developers.openai.com/api/docs/guides/function-calling and
+# https://developers.openai.com/api/docs/guides/images-vision:
+# - `reasoning_carryover = "unsupported"`: the public Responses mapping refuses
+#   ego's opaque reasoning state.
+# - parallel tool calls: "The model may choose to call multiple functions in a
+#   single turn."
+# - `cache = "short"`: cached-input pricing exists; no caller-controlled retention.
+# - images: PNG, JPEG, WEBP, non-animated GIF; "Up to 1,500 images per request",
+#   capped at ego's own MAX_IMAGES_PER_PROMPT of 100. No per-image byte limit.
+# Default efforts: read 2026-09-26 (gpt-6-sol, gpt-6-luna) and 2026-09-29
+# (gpt-6.1-sol) from the model pages; gpt-6-astra states none.
+[provider.openai]
+models_dev = "openai"
+floor = "2026-09-04"
+
+[provider.openai.default_effort]
+"gpt-6-sol" = "medium"
+"gpt-6.1-sol" = "medium"
+"gpt-6-luna" = "medium"
+
+[provider.openai.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[provider.openai.wire.image_input]
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
+# ---------------------------------------------------------------------------
+# openai-codex. The ChatGPT subscription serves the GPT-6 models the API serves.
+# The GPT-6 floor selects the set pi.dev publishes for `openai-codex` on 2026-10-11
+# (cross-check only; the facts come from the openai snapshot). The API row lists
+# `none`; the authenticated Codex models cache (2026-09-26) lists low..max for
+# gpt-6-sol, so `off` is dropped. The context is the
+# authenticated Codex cache value, 272,000
+# (ARCHITECTURE.md),
+# not the API's 1,050,000. Default efforts from the authenticated Codex models
+# cache: gpt-6-sol medium (2026-09-26), gpt-6.1-sol low (2026-09-29).
+[provider.openai-codex]
+models_dev = "openai"
+floor = "2026-09-04"
+drop_efforts = ["off"]
+context_override = 272000
+
+[provider.openai-codex.default_effort]
+"gpt-6-sol" = "medium"
+"gpt-6.1-sol" = "low"
+
+[provider.openai-codex.wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+
+# ---------------------------------------------------------------------------
+# anthropic. Current generation: the newest model of each tier, released from
+# Fable 5.1 (2026-09-01) on: fable-5-1, opus-5-5, sonnet-5-5, haiku-5-5.
+# Wire facts read 2026-09-26 from https://platform.claude.com/docs/en/models/overview,
+# .../build-with-claude/effort and .../build-with-claude/vision:
+# - `reasoning_carryover = "same_provider_only"` with dialect "anthropic-messages":
+#   thinking blocks carry a signature only this provider accepts.
+# - parallel tool use is the default (`tool_choice.disable_parallel_tool_use`).
+# - `cache = "long"`: 1-hour retention beside the 5-minute default.
+# - images: JPEG, PNG, GIF, WebP; 8000x8000 px; 10 MB base64; count capped at 100.
+# Default efforts: fable-5-1 high, opus-5-5 medium (2026-09-26), sonnet-5-5 high
+# (2026-09-30); haiku-5-5 states none.
+[provider.anthropic]
+models_dev = "anthropic"
+floor = "2026-09-01"
+
+[provider.anthropic.default_effort]
+"claude-fable-5-1" = "high"
+"claude-opus-5-5" = "medium"
+"claude-sonnet-5-5" = "high"
+
+[provider.anthropic.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "anthropic-messages"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[provider.anthropic.wire.image_input]
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# ---------------------------------------------------------------------------
+# gemini (models.dev key `google`). Current generation: Gemini 3.8 Flash
+# (2026-09-02) plus the newest Pro and Flash-Lite, which the 3.8 generation has not
+# refreshed. Wire facts read 2026-09-08 from the Gemini 3.8 Flash, function-calling,
+# thinking and Interactions documentation
+# (ARCHITECTURE.md): parallel function calls,
+# signed thought blocks replayed within the provider, short caching, cooperative
+# cancel. Exact image admission limits stay unknown. Preview and live ids are not
+# verified against the `/v1` Interactions surface.
+[provider.gemini]
+models_dev = "google"
+floor = "2026-09-02"
+include = ["gemini-3.1-pro-preview", "gemini-3.5-flash-lite"]
+
+[provider.gemini.default_effort]
+"gemini-3.8-flash" = "medium"
+
+[provider.gemini.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "gemini-interactions"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+# ---------------------------------------------------------------------------
+# github-copilot. Subscription row serving other vendors' models. Current
+# generation: the models of the vendors' current generations released from
+# 2026-09-01 on, plus the newest Kimi and MAI models. No wire fact was read from a
+# GitHub page, so `wire` is fail-closed.
+[provider.github-copilot]
+models_dev = "github-copilot"
+floor = "2026-09-01"
+include = ["kimi-k3", "mai-code-1.1-flash"]
+
+[provider.github-copilot.wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+
+# ---------------------------------------------------------------------------
+# xai-oauth. Current generation: grok-4.7 (2026-09-21), the newest Grok. The models.dev
+# `xai` catalogue is the API-key catalogue; that the subscription serves the same set
+# is not established. `wire` is fail-closed.
+[provider.xai-oauth]
+models_dev = "xai"
+floor = "2026-09-21"
+
+[provider.xai-oauth.wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+
+# ---------------------------------------------------------------------------
+# minimax-oauth (models.dev key `minimax-coding-plan`). Current generation: the
+# MiniMax M3 line (2026-06-01 on). The snapshot drops the coding plan's price
+# fields: models.dev states a literal 0 for them. `wire` is fail-closed.
+[provider.minimax-oauth]
+models_dev = "minimax-coding-plan"
+floor = "2026-06-01"
+
+[provider.minimax-oauth.exclude]
+"MiniMax-M3" = "reasoning control is an on/off toggle; ego cannot state which levels it accepts"
+
+[provider.minimax-oauth.wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
