@@ -758,6 +758,8 @@ pub struct ExecObservation {
     backend: BackendIdentity,
     capabilities: ExecCaps,
     policy_digest: PolicyDigest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy: Option<Box<super::ExecutionPolicy>>,
 }
 
 impl ExecObservation {
@@ -770,11 +772,70 @@ impl ExecObservation {
             backend,
             capabilities,
             policy_digest,
+            policy: None,
         }
     }
 
     pub fn backend(&self) -> &BackendIdentity {
         &self.backend
+    }
+
+    pub fn with_policy(mut self, policy: super::ExecutionPolicy) -> Self {
+        self.policy = Some(Box::new(policy));
+        self
+    }
+
+    pub fn same_measurement(&self, other: &Self) -> bool {
+        self.backend == other.backend
+            && self.capabilities == other.capabilities
+            && self.policy_digest == other.policy_digest
+            && self
+                .policy
+                .as_ref()
+                .zip(other.policy.as_ref())
+                .is_none_or(|(a, b)| a == b)
+    }
+
+    pub fn not_more_permissive_than(&self, old: &Self) -> bool {
+        self.backend == old.backend
+            && self.capabilities.contains(old.capabilities)
+            && self
+                .policy
+                .as_ref()
+                .zip(old.policy.as_ref())
+                .is_some_and(|(current, previous)| current.not_more_permissive_than(previous))
+    }
+
+    pub fn changes_from(&self, old: &Self) -> String {
+        let mut changes = Vec::new();
+        if self.backend != old.backend {
+            changes.push(format!(
+                "backend {}/{} -> {}/{}",
+                old.backend.name(),
+                old.backend.revision(),
+                self.backend.name(),
+                self.backend.revision()
+            ));
+        }
+        if self.capabilities != old.capabilities {
+            changes.push(format!(
+                "backend guarantees [{}] -> [{}]",
+                old.capabilities, self.capabilities
+            ));
+        }
+        if self.policy_digest != old.policy_digest {
+            changes.push("policy digest".to_owned());
+        }
+        match self.policy.as_ref().zip(old.policy.as_ref()) {
+            Some((current, previous)) => changes.extend(current.changes_from(previous)),
+            None => changes.push("historical roots/policy cannot be reconstructed".to_owned()),
+        }
+        format!(
+            "Execution policy changed: {} ({} -> {}).",
+            changes.join(", "),
+            old.policy_digest,
+            self.policy_digest
+        )
     }
 
     pub const fn capabilities(&self) -> ExecCaps {
@@ -811,6 +872,7 @@ impl ExecRequirements {
                 available,
                 missing,
                 probe_evidence: None,
+                host_control_failure: None,
                 backend: None,
             })
         }
@@ -824,6 +886,10 @@ pub struct MissingExecCaps {
     available: ExecCaps,
     missing: ExecCaps,
     probe_evidence: Option<EvidenceRef>,
+    /// The first probe pair whose unconfined half failed, as the transcript
+    /// records it. The sandbox was not what failed there, so the refusal must
+    /// not send the operator to another `--sandbox` level.
+    host_control_failure: Option<String>,
     /// `None` when the refusal was raised before a backend was selected —
     /// which is why it is an option rather than a required field. A refusal
     /// that cannot name a backend says so instead of inventing one.
@@ -852,6 +918,18 @@ impl MissingExecCaps {
     #[must_use]
     pub fn with_probe_evidence(mut self, reference: Option<EvidenceRef>) -> Self {
         self.probe_evidence = reference;
+        self
+    }
+
+    /// The recorded failure of a probe's unconfined host control, when one
+    /// failed: `<suite>: <outcome>`.
+    pub fn host_control_failure(&self) -> Option<&str> {
+        self.host_control_failure.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_host_control_failure(mut self, failure: Option<String>) -> Self {
+        self.host_control_failure = failure;
         self
     }
 
@@ -1199,7 +1277,7 @@ impl fmt::Display for ProcessError {
             Self::MissingCapabilities(missing) => write!(f, "{missing}"),
             Self::ConfinementChanged { admitted, observed } => write!(
                 f,
-                "confinement changed before execution: admitted backend `{}` (revision {}) with capabilities [{}] and policy {}; observed backend `{}` (revision {}) with capabilities [{}] and policy {}; the session must be reinitialized",
+                "confinement changed before execution: admitted backend `{}` (revision {}) with capabilities [{}] and policy {}; observed backend `{}` (revision {}) with capabilities [{}] and policy {}; retry the turn to re-admit the session under the current policy",
                 admitted.backend().name(),
                 admitted.backend().revision(),
                 admitted.capabilities(),

@@ -735,6 +735,8 @@ pub(super) fn admit_windows_unconfined_start(
     };
 
     settings.effective.sandbox = Some(confinement);
+    settings.effective.sandbox_provenance =
+        ego_core::config::SettingProvenance::UnconfinedAcknowledgement;
     settings.confinement = ego_tools::exec::admit_confinement(
         confinement,
         settings.confinement.offline(),

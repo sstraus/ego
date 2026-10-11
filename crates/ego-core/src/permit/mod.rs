@@ -8,6 +8,7 @@ mod adaptive;
 pub mod analysis;
 mod approver;
 mod authority;
+mod execution_policy;
 pub mod fake;
 mod foreign;
 mod fs;
@@ -31,6 +32,7 @@ pub use adaptive::AdaptivePerimeter;
 /// caller could name is one step from a caller that supplies one.
 pub use approver::{Approver, HumanApprover, PermissionDecision, Verdict};
 pub use authority::{Authority, RuleAuthority};
+pub use execution_policy::ExecutionPolicy;
 pub use foreign::{
     CleanupCertainty, DnsResolution, DuplexEnd, DuplexHandle, DuplexSession, DuplexSettlement,
     DuplexSpawner, ForeignToolId, ForeignTransportTarget, ForeignValueError, GuardedHttp, HttpBody,
