@@ -273,8 +273,9 @@ pub(super) fn note(denial: &Denial, confinement: &RunConfinement, outcome: Outco
              allowing the call does not lift it; exec can only reach the workspace, fixed system \
              paths and paths a person allowed, and a refusal after an allowance may come from \
              macOS privacy protection instead; to allow it, run in the workspace or use a \
-             looser --sandbox level",
-            denial.printed
+             looser --sandbox level{}",
+            denial.printed,
+            command::roots_command(&denial.printed, confinement).unwrap_or_default()
         ),
     }
 }

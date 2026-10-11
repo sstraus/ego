@@ -103,3 +103,55 @@ fn adaptive_floor_denials_never_offer_an_ineffective_grant() {
         }
     }
 }
+
+// Catches: a write refused inside a script (N4) only says "use a looser
+// sandbox" and never gives the person the exact root command; or that command
+// offers a place too broad to grant, such as the home directory.
+#[test]
+fn adaptive_unanchored_write_refusal_names_the_exact_roots_command() {
+    let Some(root) =
+        isolated("adaptive_grants::adaptive_unanchored_write_refusal_names_the_exact_roots_command")
+    else {
+        return;
+    };
+    let cache = root.join("outside/cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let cache = std::fs::canonicalize(cache).unwrap();
+    let command = format!(
+        "ego roots add --access read-write {}",
+        cache.to_str().unwrap()
+    );
+    let policy = admit(&root.join("workspace")).unwrap();
+    for (target, expected) in [
+        (cache.join("run.tmp"), Some(command.as_str())),
+        (root.join("home/stray"), None),
+    ] {
+        let seat = Arc::new(Seat::default());
+        // The approved command line never names the path as an argument.
+        let script = format!("exec /usr/bin/touch '{}'", target.display());
+        let result = execute_with_grants(
+            policy.clone(),
+            &root,
+            vec!["/bin/sh".into(), "-c".into(), script.into()],
+            Some(seat.clone()),
+        );
+        let Err(ProcessError::Exit { result, .. }) = result else {
+            panic!("expected native refusal for {}: {result:?}", target.display());
+        };
+        assert!(seat.0.lock().unwrap().is_empty(), "unanchored path asked");
+        let note = result
+            .content
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(note.contains(target.to_str().unwrap()), "{note}");
+        match expected {
+            Some(command) => {
+                assert!(note.contains(command), "{note}");
+                assert!(note.contains("exit and resume"), "{note}");
+            }
+            None => assert!(!note.contains("ego roots add"), "{note}"),
+        }
+    }
+}
