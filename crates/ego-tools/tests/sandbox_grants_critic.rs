@@ -75,18 +75,14 @@ impl SandboxGrantPort for Seat {
         self.granted.lock().unwrap().clone()
     }
 
-    fn ask<'a>(&'a self, request: &'a SandboxGrant) -> BoxFuture<'a, bool> {
+    fn ask<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool> {
+        self.commands.lock().unwrap().push(command.to_owned());
         self.asked.lock().unwrap().push(request.clone());
         let yes = (self.allow)(request);
         if yes {
             self.granted.lock().unwrap().push(request.clone());
         }
         Box::pin(async move { yes })
-    }
-
-    fn ask_for<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool> {
-        self.commands.lock().unwrap().push(command.to_owned());
-        self.ask(request)
     }
 }
 

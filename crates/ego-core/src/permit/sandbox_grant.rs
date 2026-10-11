@@ -73,15 +73,8 @@ pub trait SandboxGrantPort: Send + Sync {
     /// Ask the human whether `request` may be added to the sandbox. `true`
     /// means the port has recorded the grant, and the next [`Self::granted`]
     /// includes it; anything else, including a failed transport, is `false`.
-    fn ask<'a>(&'a self, request: &'a SandboxGrant) -> BoxFuture<'a, bool>;
-
-    /// [`Self::ask`] for a seat that can show the person `command`, the exact
-    /// command line that runs again if they allow. The executor always calls
-    /// this one: the printed path is only evidence, and what the person
-    /// approves is the command that will be re-run.
-    fn ask_for<'a>(&'a self, request: &'a SandboxGrant, _command: &'a str) -> BoxFuture<'a, bool> {
-        self.ask(request)
-    }
+    /// Show `command`, the exact command line that runs again if allowed.
+    fn ask<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool>;
 }
 
 #[cfg(test)]
