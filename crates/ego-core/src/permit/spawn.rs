@@ -872,6 +872,7 @@ impl ExecRequirements {
                 available,
                 missing,
                 probe_evidence: None,
+                host_control_failure: None,
                 backend: None,
             })
         }
@@ -885,6 +886,10 @@ pub struct MissingExecCaps {
     available: ExecCaps,
     missing: ExecCaps,
     probe_evidence: Option<EvidenceRef>,
+    /// The first probe pair whose unconfined half failed, as the transcript
+    /// records it. The sandbox was not what failed there, so the refusal must
+    /// not send the operator to another `--sandbox` level.
+    host_control_failure: Option<String>,
     /// `None` when the refusal was raised before a backend was selected —
     /// which is why it is an option rather than a required field. A refusal
     /// that cannot name a backend says so instead of inventing one.
@@ -913,6 +918,18 @@ impl MissingExecCaps {
     #[must_use]
     pub fn with_probe_evidence(mut self, reference: Option<EvidenceRef>) -> Self {
         self.probe_evidence = reference;
+        self
+    }
+
+    /// The recorded failure of a probe's unconfined host control, when one
+    /// failed: `<suite>: <outcome>`.
+    pub fn host_control_failure(&self) -> Option<&str> {
+        self.host_control_failure.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_host_control_failure(mut self, failure: Option<String>) -> Self {
+        self.host_control_failure = failure;
         self
     }
 

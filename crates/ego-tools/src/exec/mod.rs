@@ -249,6 +249,23 @@ impl ProbeLog {
         self.entries().extend_from_slice(records);
     }
 
+    /// The first probe whose unconfined host control failed, as
+    /// `<suite>: <outcome>`.
+    ///
+    /// A control is the same command run without the backend. When it fails,
+    /// the host rather than the sandbox level decided the measurement.
+    pub(crate) fn host_control_failure(&self) -> Option<String> {
+        self.entries()
+            .iter()
+            .find(|record| {
+                record.suite.starts_with("offline.")
+                    && (record.suite.ends_with(".control")
+                        || record.suite.ends_with(".control.receiver"))
+                    && record.outcome != "ok"
+            })
+            .map(|record| format!("{}: {}", record.suite, record.outcome))
+    }
+
     /// The transcript as one JSON Lines blob, or `None` when nothing ran.
     fn transcript(&self) -> Option<Vec<u8>> {
         let entries = self.entries();
@@ -410,6 +427,7 @@ struct ExecMeasurement {
     backend: Arc<MeasuredBackend>,
     observation: ExecObservation,
     evidence: Option<ego_core::store::evidence::EvidenceRef>,
+    host_control_failure: Option<String>,
 }
 
 impl RunEffectPorts {
@@ -453,6 +471,7 @@ impl RunEffectPorts {
             backend: measured.backend,
             observation,
             evidence: transcript,
+            host_control_failure: measured.probes.host_control_failure(),
         })
     }
 
@@ -512,6 +531,7 @@ impl RunEffectPorts {
                 ProcessError::MissingCapabilities(
                     missing
                         .with_probe_evidence(measured.evidence.clone())
+                        .with_host_control_failure(measured.host_control_failure.clone())
                         .from_backend(measured.observation.backend().clone()),
                 )
             })?;
@@ -999,5 +1019,70 @@ mod tests {
         assert_ne!(empty, one, "empty and nonempty roots need distinct digests");
         assert_ne!(ordered, reversed, "runtime-root order is semantic");
         assert_ne!(ordered, flattened, "root-vector boundaries are semantic");
+    }
+
+    fn transcript(rows: &[(&str, &str)]) -> super::ProbeLog {
+        let log = super::ProbeLog::default();
+        for (suite, outcome) in rows {
+            log.record(super::ProbeRecord {
+                suite: (*suite).to_owned(),
+                root: TEST_ROOT.into(),
+                argv: vec!["ego".to_owned()],
+                outcome: (*outcome).to_owned(),
+            });
+        }
+        log
+    }
+
+    // Catches: a refusal blames the sandbox level when the unconfined host control failed.
+    #[test]
+    fn a_failed_offline_host_control_is_named_from_the_recorded_transcript() {
+        let log = transcript(&[
+            ("offline.tcp-loopback.control", "ok"),
+            ("offline.tcp-loopback", "exit 101"),
+            ("offline.tcp-nonloopback.control", "ok"),
+            (
+                "offline.tcp-nonloopback.control.receiver",
+                "accept failed: Resource temporarily unavailable (os error 35)",
+            ),
+        ]);
+
+        assert_eq!(
+            log.host_control_failure().as_deref(),
+            Some(
+                "offline.tcp-nonloopback.control.receiver: accept failed: \
+                 Resource temporarily unavailable (os error 35)"
+            )
+        );
+    }
+
+    // Catches: a control child that exits non-zero is mistaken for a sandbox failure.
+    #[test]
+    fn a_failed_offline_control_child_is_a_host_control_failure() {
+        let log = transcript(&[("offline.udp-nonloopback.control", "exit 1")]);
+
+        assert_eq!(
+            log.host_control_failure().as_deref(),
+            Some("offline.udp-nonloopback.control: exit 1")
+        );
+    }
+
+    // Catches: a confined probe that connected is reported as a host failure.
+    #[test]
+    fn a_confined_offline_failure_is_not_a_host_control_failure() {
+        let log = transcript(&[
+            ("offline.tcp-loopback.control", "ok"),
+            ("offline.tcp-loopback", "ok"),
+        ]);
+
+        assert_eq!(log.host_control_failure(), None);
+    }
+
+    // Catches: a filesystem control failure is worded as an offline host failure.
+    #[test]
+    fn a_failed_filesystem_control_is_not_an_offline_host_control_failure() {
+        let log = transcript(&[("read.control", "exit 1")]);
+
+        assert_eq!(log.host_control_failure(), None);
     }
 }
