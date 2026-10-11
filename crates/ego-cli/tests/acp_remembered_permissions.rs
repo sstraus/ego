@@ -2,17 +2,12 @@
 
 mod support;
 
-use support::{AcpHost, Ego, Places, Plan, Reply, Stub, text, tool_call};
+use support::{
+    AcpHost, Ego, Places, Plan, Reply, Stub, configure_permission_profile as configure,
+    permission_host as host, text, tool_call,
+};
 
 const PROFILE: &str = "acp";
-
-fn configure(places: &Places) {
-    std::fs::write(
-        places.home_path().join("config.toml"),
-        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"workspace\"\nmode = \"default\"\n",
-    )
-    .expect("isolated profile configuration");
-}
 
 fn stub() -> Stub {
     let call = || Reply::Sse(tool_call("remembered-exec", "exec", r#"{"argv":["ls"]}"#));
@@ -27,15 +22,6 @@ fn stub() -> Stub {
         ],
         ..Plan::default()
     })
-}
-
-fn host(places: &Places, stub: &Stub) -> AcpHost {
-    AcpHost::adopt(
-        Ego::at(places.home_path(), places.workspace_path(), Some(stub))
-            .subcommand("acp")
-            .args(["--profile", PROFILE])
-            .spawn_conversing(),
-    )
 }
 
 fn prompt(host: &mut AcpHost, places: &Places) -> (String, u64) {

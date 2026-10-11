@@ -1,38 +1,11 @@
-use ego_core::config::{Mode, ModelRef};
-use ego_core::permit::judge::{JudgeConfig, JudgeInput};
-use ego_core::permit::{
-    CanonPath, Classification, Confinement, EnvPolicy, ExecCaps, Op, PolicyEngine, PreparedCall,
-    RunConfinement, SpawnSpec,
-};
+mod support;
 
 fn disclosed(argv: &[&str]) -> String {
-    let call = PreparedCall::new(
-        "exec",
-        Op::Spawn {
-            spec: SpawnSpec::new(
-                argv.iter().map(|word| (*word).into()).collect(),
-                Some(CanonPath::new("/ws")),
-                None,
-                EnvPolicy::Inherited,
-            )
-            .unwrap(),
-        },
-    );
-    let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Auto, Default::default());
-    let Classification::Ask(pending) = policy.classify(call.clone()) else {
-        panic!("curl must reach the advisory boundary");
-    };
-    let request = JudgeInput::new(
-        &call,
-        &RunConfinement::new(Confinement::Workspace, false, CanonPath::new("/ws")).unwrap(),
-        ExecCaps::empty(),
-        pending.request().why(),
-    )
-    .request(&JudgeConfig {
-        identity: ModelRef("openrouter/example/judge".into()),
-        request_model: "example/judge".into(),
-        max_output_tokens: Some(512),
-    });
+    let argv = argv
+        .iter()
+        .map(|word| (*word).to_owned())
+        .collect::<Vec<_>>();
+    let request = support::judge_request(&support::judge_call(&argv), &Default::default());
     serde_json::to_string(&request.messages).unwrap()
 }
 

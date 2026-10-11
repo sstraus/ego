@@ -6,18 +6,12 @@
 
 mod support;
 
-use support::{AcpHost, Ego, Places, Plan, Reply, Stub, text, tool_call};
+use support::{
+    AcpHost, Places, Plan, Reply, Stub, configure_permission_profile as configure,
+    permission_host as host, text, tool_call,
+};
 
-const PROFILE: &str = "acp";
 const SECRET: &str = "outside-the-workspace-secret";
-
-fn configure(places: &Places) {
-    std::fs::write(
-        places.home_path().join("config.toml"),
-        "[profile.acp]\nmodel = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"workspace\"\nmode = \"default\"\n",
-    )
-    .expect("isolated profile configuration");
-}
 
 /// A file in a directory of its own, next to neither the workspace nor home.
 fn outside_file() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -35,15 +29,6 @@ fn cat_call(id: &str, file: &std::path::Path) -> Reply {
         "exec",
         &serde_json::json!({"argv": ["/bin/cat", file]}).to_string(),
     ))
-}
-
-fn host(places: &Places, stub: &Stub) -> AcpHost {
-    AcpHost::adopt(
-        Ego::at(places.home_path(), places.workspace_path(), Some(stub))
-            .subcommand("acp")
-            .args(["--profile", PROFILE])
-            .spawn_conversing(),
-    )
 }
 
 fn send_prompt(host: &mut AcpHost, session: &str) -> u64 {

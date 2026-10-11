@@ -1,9 +1,11 @@
+mod support;
+
 use ego_core::config::{Mode, ModelRef};
 use ego_core::permit::analysis::{ExecutableFileIdentity, ExecutionIdentity};
-use ego_core::permit::judge::{JudgeConfig, JudgeInput};
+use ego_core::permit::judge::JudgeConfig;
 use ego_core::permit::{
-    CanonPath, Classification, Confinement, EnvPolicy, ExecCaps, Op, PolicyEngine, PreparedCall,
-    Resolution, RunConfinement, SpawnSpec,
+    CanonPath, Classification, EnvPolicy, ExecCaps, Op, PolicyEngine, PreparedCall, Resolution,
+    SpawnSpec,
 };
 
 fn spec(argv: &[&str], target: &str) -> SpawnSpec {
@@ -67,7 +69,6 @@ fn workspace_cat_inside_trusted_shell_must_not_receive_read_only_permission() {
 // Catches: a real curl bearer-token option is disclosed to a different provider verbatim.
 #[test]
 fn cross_provider_curl_oauth_bearer_token_must_not_leave_machine() {
-    let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Auto, Default::default());
     let call = PreparedCall::new(
         "exec",
         Op::Spawn {
@@ -82,20 +83,7 @@ fn cross_provider_curl_oauth_bearer_token_must_not_leave_machine() {
             ),
         },
     );
-    let Classification::Ask(pending) = policy.classify(call.clone()) else {
-        panic!("curl must reach the advisory boundary");
-    };
-    let input = JudgeInput::new(
-        &call,
-        &RunConfinement::new(Confinement::Workspace, false, CanonPath::new("/ws")).unwrap(),
-        ExecCaps::empty(),
-        pending.request().why(),
-    );
-    let request = input.request(&JudgeConfig {
-        identity: ModelRef("openrouter/example/judge".into()),
-        request_model: "example/judge".into(),
-        max_output_tokens: Some(512),
-    });
+    let request = support::judge_request(&call, &Default::default());
     assert!(
         !serde_json::to_string(&request.messages)
             .unwrap()
