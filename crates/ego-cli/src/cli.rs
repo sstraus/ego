@@ -2004,11 +2004,18 @@ mod root_access_mapping_tests {
     #[test]
     fn root_access_spellings_and_clap_values_agree() {
         use ego_core::permit::RootAccess;
-        for (access, spelling) in [(RootAccess::Read, "read"), (RootAccess::ReadWrite, "read-write")] {
+        for (access, spelling) in [
+            (RootAccess::Read, "read"),
+            (RootAccess::ReadWrite, "read-write"),
+        ] {
             assert_eq!(access.as_str(), spelling);
-            let parsed = RootsCommand::try_parse_from(["roots", "add", "--access", spelling, "/tmp/root"]);
+            let parsed =
+                RootsCommand::try_parse_from(["roots", "add", "--access", spelling, "/tmp/root"]);
             assert!(parsed.is_ok(), "{spelling} must be accepted");
         }
-        assert!(RootsCommand::try_parse_from(["roots", "add", "--access", "write", "/tmp/root"]).is_err());
+        assert!(
+            RootsCommand::try_parse_from(["roots", "add", "--access", "write", "/tmp/root"])
+                .is_err()
+        );
     }
 }

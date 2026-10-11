@@ -490,7 +490,9 @@ fn receipt_text(
             ego_core::config::ManagedConfigKey::Roots,
             format!(
                 "{} {}",
-                access.map(ego_core::permit::RootAccess::as_str).unwrap_or("removed"),
+                access
+                    .map(ego_core::permit::RootAccess::as_str)
+                    .unwrap_or("removed"),
                 path.display()
             ),
         ),
