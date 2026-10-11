@@ -880,8 +880,6 @@ pub(super) fn finish_rooted_settings(
     .with_exec_paths(exec_paths)
     .with_roots(roots);
 
-    super::profile_roots::check_adaptive(&effective, &confinement).map_err(UsageError)?;
-
     Ok(Settings {
         run_deadline,
         root,
