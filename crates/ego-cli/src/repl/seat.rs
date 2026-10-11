@@ -35,8 +35,8 @@ use super::status::{
 };
 use super::surface::InteractivePainter;
 use super::{
-    BACKGROUND_COMMAND, BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line,
-    PASTE_PATH_COMMAND, REMOVE_PASTE_IMAGE_COMMAND, answer,
+    BACKGROUND_COMMAND, BUSY_STEER_COMMAND, BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand,
+    INTERRUPT_COMMAND, Line, PASTE_PATH_COMMAND, REMOVE_PASTE_IMAGE_COMMAND, answer,
 };
 use crate::cli::{managed_rule, managed_rule_effect, managed_rule_id};
 use crate::model::{GenerationSelection, GenerationSelectionSnapshot};

@@ -356,7 +356,8 @@ pub(super) fn surface_line(
                 drop(current);
                 repaint_status(status);
             }
-            HostCommand::BusySubmit => {
+            HostCommand::BusySubmit | HostCommand::BusySteer => {
+                let steer = command == HostCommand::BusySteer;
                 let buffer = editor.current_buffer_contents().to_string();
                 if buffer.trim().is_empty() {
                     continue;
@@ -463,6 +464,11 @@ pub(super) fn surface_line(
                         if !restore_latest_draft(editor, status, drafts) {
                             repaint_status(status);
                         }
+                        // A steer is the submission plus the Esc path: the same
+                        // durable expedite, not a second delivery mechanism.
+                        if steer && request_interrupt(status, ingress) {
+                            return (Line::HostCommand(HostCommand::Interrupt), false);
+                        }
                     }
                     Err(ego_core::turn::ControlError::Closed) => {
                         // Busy admission can close before the terminal observes idle.
@@ -478,27 +484,38 @@ pub(super) fn surface_line(
                     }
                 }
             }
-            HostCommand::Interrupt => match futures::executor::block_on(ingress.interrupt()) {
-                Ok(queue) => {
-                    let mut current = status.lock().expect("surface status lock");
-                    current.queue = queue;
-                    if let Some(snapshot) = current.snapshot.as_mut() {
-                        snapshot.set_queue(queue);
-                    }
-                    current.notice = None;
-                    drop(current);
-                    repaint_status(status);
+            HostCommand::Interrupt => {
+                if request_interrupt(status, ingress) {
                     return (Line::HostCommand(HostCommand::Interrupt), false);
                 }
-                Err(error) => {
-                    status.lock().expect("surface status lock").notice = Some(error.to_string());
-                }
-            },
+            }
             command => return (Line::HostCommand(command), failed),
         }
 
         // A suspended read retains the exact buffer and cursor. Starting it
         // again repaints the state changed by the local action above.
+    }
+}
+
+/// Ask the coordinator to expedite the queue and cancel the running turn.
+/// Returns whether it was accepted; a refusal is shown as the notice.
+fn request_interrupt(status: &SharedStatus, ingress: &InteractiveIngress) -> bool {
+    match futures::executor::block_on(ingress.interrupt()) {
+        Ok(queue) => {
+            let mut current = status.lock().expect("surface status lock");
+            current.queue = queue;
+            if let Some(snapshot) = current.snapshot.as_mut() {
+                snapshot.set_queue(queue);
+            }
+            current.notice = None;
+            drop(current);
+            repaint_status(status);
+            true
+        }
+        Err(error) => {
+            status.lock().expect("surface status lock").notice = Some(error.to_string());
+            false
+        }
     }
 }
 
