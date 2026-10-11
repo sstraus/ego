@@ -1,6 +1,61 @@
 use super::{command_line, printed_path};
 use ego_core::permit::{EnvPolicy, SpawnSpec};
 
+// Catches: a denial preview recompiles floor patterns for every stderr line.
+#[test]
+fn adaptive_large_denial_preview_compiles_constant_patterns_once() {
+    use ego_core::permit::{
+        AdaptivePerimeter, CanonPath, Confinement, RunConfinement, StreamProvenance,
+        ToolContentBlock, ToolOutputEncoding, ToolOutputProvenance, ToolResult,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let workspace = CanonPath::new(root.path());
+    let controls = (0..8)
+        .flat_map(|index| {
+            let metadata = root.path().join(format!("metadata-{index}"));
+            [
+                CanonPath::new(metadata.join("config")),
+                CanonPath::new(metadata.join("hooks")),
+            ]
+        })
+        .collect();
+    let policy = RunConfinement::new(Confinement::Adaptive, false, workspace.clone())
+        .unwrap()
+        .with_adaptive_perimeter(AdaptivePerimeter {
+            home: workspace.clone(),
+            writable: vec![],
+            credentials: vec![],
+            controls,
+        });
+    let path = root.path().join("missing").display().to_string();
+    let spec = SpawnSpec::new(
+        vec!["/bin/cat".into(), path.clone().into()],
+        Some(workspace),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let result = ToolResult::new(vec![ToolContentBlock {
+        text: format!("cat: {path}: Permission denied\n").repeat(1000),
+        provenance: ToolOutputProvenance::Process {
+            stream: StreamProvenance::Stderr,
+            encoding: ToolOutputEncoding::Utf8,
+            truncated: false,
+            omitted_bytes: 0,
+        },
+        full_output: None,
+    }]);
+    super::super::adaptive::floor::COMPILATIONS.with(|count| count.set(0));
+    let denial = super::analyze(&spec, &result, &policy, &[]).unwrap();
+    assert_eq!(denial.printed, path);
+    assert_eq!(denial.request, None);
+    let compilations = super::super::adaptive::floor::COMPILATIONS.with(|count| count.get());
+    assert!(
+        compilations <= 5,
+        "compiled {compilations} patterns for one preview"
+    );
+}
+
 // Lines recorded from macOS `cat`, `ls` and `touch` under `sandbox-exec`
 // with a profile that does not open the path, 2026-10-02.
 #[test]

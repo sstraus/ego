@@ -6,6 +6,7 @@
 
 use ego_core::permit::analysis::{RiskAssessment, RiskClass, RiskReason};
 use ego_core::permit::{Op, PermissionDecision, PermissionRequest, SessionProcessAction};
+use ego_core::permit::{shell_word, terminal_safe as safe};
 
 /// A command longer than this is cut in the compact prompt so it stays one
 /// row on a normal terminal; the details show it whole.
@@ -231,36 +232,6 @@ fn risk_words(risk: &RiskAssessment) -> String {
     format!("Risk: {class} - {reasons}")
 }
 
-/// A word a shell would read back as the same single argument.
-fn shell_word(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word.chars().all(|character| {
-            character.is_ascii_alphanumeric()
-                || matches!(
-                    character,
-                    '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
-                )
-        });
-    if plain {
-        word.to_owned()
-    } else {
-        format!("'{}'", safe(&word.replace('\'', r"'\''")))
-    }
-}
-
-/// Every control character shown, never executed.
-fn safe(text: &str) -> String {
-    text.chars()
-        .flat_map(|character| {
-            if character.is_control() {
-                character.escape_default().collect::<Vec<_>>()
-            } else {
-                vec![character]
-            }
-        })
-        .collect()
-}
-
 fn truncate(text: &str, cap: usize) -> String {
     if text.chars().count() <= cap {
         return text.to_owned();
@@ -326,6 +297,46 @@ mod tests {
             );
             assert!(rendered.contains("[y] yes"), "{rendered}");
             assert!(rendered.contains("[n] no"), "{rendered}");
+        }
+    }
+
+    // Catches: bidi argv reorders the approval prompt and tool row visually.
+    #[test]
+    fn bidi_argv_is_escaped_in_real_permission_prompt_and_tool_row() {
+        use ego_core::config::Mode;
+        use ego_core::permit::{CanonPath, EnvPolicy, Escalation, OpName, SpawnSpec};
+        let hostile = "a\u{202e}txt";
+        let spec = SpawnSpec::new(
+            vec!["/bin/echo".into(), hostile.into()],
+            None,
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let request = PermissionRequest::new(
+            "exec",
+            vec![Op::Spawn { spec }],
+            Escalation::ModeAsks {
+                mode: Mode::Default,
+                op: OpName::Spawn,
+                path: CanonPath::new("/workspace"),
+            },
+        );
+        let prompt = compact_prompt(&request);
+        let args = serde_json::json!({"argv": ["/bin/echo", hostile]}).to_string();
+        let tool = crate::render::tool_row::record(
+            &crate::render::tool_row::Finished {
+                name: "exec",
+                args: &args,
+                ok: true,
+                result: hostile,
+                timing: None,
+            },
+            crate::render::Capabilities::plain(),
+        );
+        for text in [&prompt, &tool.rows, &tool.detail] {
+            assert!(text.contains("\\u{202e}"), "unescaped bidi: {text:?}");
+            assert!(!text.contains('\u{202e}'), "active bidi: {text:?}");
         }
     }
 

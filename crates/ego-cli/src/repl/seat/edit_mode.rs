@@ -277,13 +277,19 @@ impl EditMode for SurfaceEditMode {
                 Intercept::SubmitBusy if self.phase.get() == EditPhase::Busy => {
                     return ReedlineEvent::ExecuteHostCommand(BUSY_SUBMIT_COMMAND.to_string());
                 }
+                Intercept::SteerBusy if self.phase.get() == EditPhase::Busy => {
+                    return ReedlineEvent::ExecuteHostCommand(BUSY_STEER_COMMAND.to_string());
+                }
                 Intercept::Background => {
                     return ReedlineEvent::ExecuteHostCommand(BACKGROUND_COMMAND.to_string());
                 }
                 Intercept::Interrupt if self.phase.get() == EditPhase::Busy => {
                     return ReedlineEvent::ExecuteHostCommand(INTERRUPT_COMMAND.to_string());
                 }
-                Intercept::Editor | Intercept::SubmitBusy | Intercept::Interrupt => {}
+                Intercept::Editor
+                | Intercept::SubmitBusy
+                | Intercept::SteerBusy
+                | Intercept::Interrupt => {}
             }
         }
 

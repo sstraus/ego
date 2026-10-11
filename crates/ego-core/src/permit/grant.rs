@@ -13,6 +13,8 @@
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
+use super::TerminalSafe;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -971,24 +973,6 @@ impl fmt::Display for PermissionRequest {
                     TerminalSafe(&authority.target().to_string()),
                     authority.header_sinks()
                 )?,
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Text shown on a terminal with every control represented, never executed.
-struct TerminalSafe<'a>(&'a str);
-
-impl fmt::Display for TerminalSafe<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for character in self.0.chars() {
-            if character.is_control() {
-                for escaped in character.escape_default() {
-                    f.write_char(escaped)?;
-                }
-            } else {
-                f.write_char(character)?;
             }
         }
         Ok(())

@@ -117,14 +117,7 @@ fn cap(mut text: String) -> String {
 /// Replace what could act on a terminal. Tabs become spaces so the cell count
 /// the wrapper measures is the cell count the terminal draws.
 fn printable(text: &str) -> String {
-    text.chars()
-        .filter(|&c| c != '\r')
-        .map(|c| match c {
-            '\t' => ' ',
-            c if c.is_control() => char::REPLACEMENT_CHARACTER,
-            c => c,
-        })
-        .collect()
+    ego_core::permit::terminal_safe(&text.replace('\r', "").replace('\t', " "))
 }
 
 /// [`printable`] for text that spans lines: the line breaks stay, the rest of
@@ -255,11 +248,7 @@ fn lines_note(count: usize) -> String {
 
 /// An argument that would split when read back as a command line is quoted.
 fn quote(argument: &str) -> String {
-    if !argument.is_empty() && !argument.contains(|c: char| c.is_whitespace() || c == '\'') {
-        argument.to_owned()
-    } else {
-        format!("'{}'", argument.replace('\'', "'\\''"))
-    }
+    ego_core::permit::shell_word(argument)
 }
 
 /// The arguments of a tool with no specialised row, on one line.

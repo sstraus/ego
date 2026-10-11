@@ -3,8 +3,8 @@
 εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
 εgo: ego 0.1.0 · ollama/qwen3
 mode default (default) · sandbox off (flags)
-Ctrl+B backgrounds · Esc interrupts · Enter queues · Ctrl+S draft
-Option+P models · /help
+Ctrl+B backgrounds · Esc interrupts · Enter queues · Ctrl+Enter steers
+Ctrl+S draft · Option+P models · /help
 hello
 a launch transcript
 εgo: 0 unsent drafts discarded; 0 prompts waiting to run.
@@ -15,8 +15,8 @@ a launch transcript
 εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
 εgo: ego 0.1.0 · ollama/qwen3
 mode default (default) · sandbox off (flags)
-Ctrl+B backgrounds · Esc interrupts · Enter queues · Ctrl+S draft
-Option+P models · /help
+Ctrl+B backgrounds · Esc interrupts · Enter queues · Ctrl+Enter steers
+Ctrl+S draft · Option+P models · /help
 hello
 a launch transcript
 εgo: 0 unsent drafts discarded; 0 prompts waiting to run.

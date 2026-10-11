@@ -3982,6 +3982,82 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     assert!(!output.windows(8).any(|window| window == b"\x1b[?1006h"));
 }
 
+// Catches: Ctrl+Enter on a busy composer inserting a newline or queueing behind
+// the turn, instead of the one durable expedite Esc uses, and a second delivery.
+#[test]
+fn live_surface_ctrl_enter_steers_a_busy_turn_once() {
+    let steer = "steer now with ctrl enter";
+    let (initial, initial_gate) = gated_paced_line("STREAMED-BEFORE-STEER");
+    let stub = Stub::start(Plan {
+        completions: vec![initial, Reply::Sse(text("STEER-RECEIVED"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"STREAMED-BEFORE-STEER");
+
+    let steer_start = output.len();
+    input.write_all(steer.as_bytes()).expect("steer text");
+    input.write_all(b"\x1b[13;5u").expect("Ctrl+Enter");
+    input.flush().expect("Ctrl+Enter flush");
+    until_normalized(&reader, &mut output, steer_start, "interrupt pending");
+    initial_gate.release();
+    until(&reader, &mut output, b"STEER-RECEIVED");
+    until_prompt_from(&reader, &mut output, steer_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        2,
+        "one interrupted turn, one steered turn"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, steer))
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "the steer reaches the provider once, in the next request"
+    );
+}
+
 #[test]
 fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() {
     // A real Ollama /api/tags response includes embedding-only rows. The
@@ -7793,6 +7869,7 @@ fn the_banner_lists_the_keys_at_120_80_60_and_40_columns() {
             for item in [
                 "Esc interrupts",
                 "Enter queues",
+                "Ctrl+Enter steers",
                 "Ctrl+S draft",
                 "Option+P models",
                 "/help",
