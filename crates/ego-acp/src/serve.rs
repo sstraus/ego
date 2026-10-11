@@ -688,6 +688,17 @@ struct AcpSinkFactory {
 }
 
 impl EventSinkFactory for AcpSinkFactory {
+    fn execution_policy_notice(&self, message: &str) -> Result<(), String> {
+        self.connection
+            .send_notification(v1::SessionNotification::new(
+                self.session.clone(),
+                v1::SessionUpdate::AgentMessageChunk(v1::ContentChunk::new(
+                    message.to_owned().into(),
+                )),
+            ))
+            .map_err(|error| error.to_string())
+    }
+
     fn create(&self, capabilities: &ModelCapabilities) -> Arc<dyn EventSink> {
         Arc::new(crate::sink::AcpSink::new(
             self.connection.clone(),

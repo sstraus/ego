@@ -444,7 +444,11 @@ impl RunEffectPorts {
                 measured.backend.as_ref(),
                 &measured.runtime_roots,
             )?,
-        );
+        )
+        .with_policy(ego_core::permit::ExecutionPolicy::capture(
+            &config.policy,
+            measured.runtime_roots,
+        ));
         Ok(ExecMeasurement {
             backend: measured.backend,
             observation,
@@ -492,7 +496,7 @@ impl RunEffectPorts {
     > {
         let measured = Self::measure(&config).await?;
         if let Some(admitted) = config.admitted_observation.as_ref()
-            && admitted != &measured.observation
+            && !admitted.same_measurement(&measured.observation)
         {
             return Err(ProcessError::ConfinementChanged {
                 admitted: Box::new(admitted.clone()),

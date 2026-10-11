@@ -210,7 +210,9 @@ impl AcpPermissionAdapter {
             // is the second invisible human the ADR rejects.
             return PermissionDecision::Deny;
         };
-        if self.session_approval.load(Ordering::Acquire) {
+        // A previous tool-session grant cannot approve newly reconstructed
+        // execution authority. Use this same permission seat for a fresh answer.
+        if self.session_approval.load(Ordering::Acquire) && !request.requires_explicit_answer() {
             return PermissionDecision::Allow;
         }
         let wire = self.live_request(item, &request);
