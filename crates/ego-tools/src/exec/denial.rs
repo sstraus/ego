@@ -65,13 +65,7 @@ pub(super) fn analyze(
             first.get_or_insert(printed);
             continue;
         }
-        let request = request_for(
-            printed,
-            &argv,
-            spec,
-            confinement.workspace().as_path(),
-            granted,
-        );
+        let request = request_for(printed, &argv, spec, confinement, granted);
         if request.is_some() {
             return Some(Denial {
                 printed: printed.to_owned(),
@@ -124,18 +118,19 @@ fn request_for(
     printed: &str,
     argv: &[String],
     spec: &SpawnSpec,
-    workspace: &Path,
+    confinement: &RunConfinement,
     granted: &[SandboxGrant],
 ) -> Option<SandboxGrant> {
+    let workspace = confinement.workspace().as_path();
     let (path, exists) = canonical(Path::new(printed))?;
     // The command line the human approved must name the path, or a directory
     // above it: without this a program could print any path it likes and have
     // the human asked about it. Names are compared by resolved path component,
     // never as substrings (`/a/Gits` is not named by `/a/Gits-evil/f`).
-    if !argv_anchors(argv, workspace).any(|anchor| path.is_or_under(&anchor)) {
+    if !argv_anchors(argv, confinement).any(|anchor| path.is_or_under(&anchor)) {
         return None;
     }
-    if path.is_or_under(&CanonPath::new(workspace)) || too_broad(&path, workspace) {
+    if path.is_or_under(&CanonPath::new(workspace)) || too_broad(&path, confinement) {
         return None;
     }
     if !renderable(path.as_path()) {
@@ -167,7 +162,7 @@ fn request_for(
 /// home directory, does not name what lies below it.
 fn argv_anchors<'a>(
     argv: &'a [String],
-    workspace: &'a Path,
+    confinement: &'a RunConfinement,
 ) -> impl Iterator<Item = CanonPath> + 'a {
     argv.iter().filter_map(|argument| {
         let spelled = match argument.split_once('=') {
@@ -179,19 +174,22 @@ fn argv_anchors<'a>(
             .then(|| canonical(Path::new(spelled)))
             .flatten()
             .map(|(path, _)| path)
-            .filter(|path| !too_broad(path, workspace))
+            .filter(|path| !too_broad(path, confinement))
     })
 }
 
 /// A grant of `/`, of the home directory, or of a directory above the
 /// workspace would hand the command far more than the one path it was refused.
-fn too_broad(path: &CanonPath, workspace: &Path) -> bool {
+fn too_broad(path: &CanonPath, confinement: &RunConfinement) -> bool {
     let above = |other: &Path| CanonPath::new(other).is_or_under(path);
     path.as_path() == Path::new("/")
-        || above(workspace)
-        || std::env::var_os("HOME")
-            .and_then(|home| std::fs::canonicalize(home).ok())
-            .is_some_and(|home| above(&home))
+        || above(confinement.workspace().as_path())
+        || match confinement.adaptive_perimeter() {
+            Some(perimeter) => above(perimeter.home.as_path()),
+            None => std::env::var_os("HOME")
+                .and_then(|home| std::fs::canonicalize(home).ok())
+                .is_none_or(|home| above(&home)),
+        }
 }
 
 #[cfg(target_os = "macos")]

@@ -56,6 +56,64 @@ fn adaptive_large_denial_preview_compiles_constant_patterns_once() {
     );
 }
 
+// Catches: denial analysis consults ambient HOME instead of the admitted home.
+#[test]
+fn captured_home_cannot_be_offered_as_a_grant() {
+    use ego_core::permit::{
+        AdaptivePerimeter, CanonPath, Confinement, RunConfinement, StreamProvenance,
+        ToolContentBlock, ToolOutputEncoding, ToolOutputProvenance, ToolResult,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let home = base.join("captured-home");
+    let workspace = base.join("workspace");
+    let narrow = home.join("ordinary");
+    for path in [&home, &workspace, &narrow] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let policy = RunConfinement::new(Confinement::Adaptive, false, CanonPath::new(&workspace))
+        .unwrap()
+        .with_adaptive_perimeter(AdaptivePerimeter {
+            home: CanonPath::new(&home),
+            writable: vec![],
+            credentials: vec![],
+            controls: vec![],
+        });
+    for (path, offered) in [
+        (&home, false),
+        (&base, false),
+        (&workspace, false),
+        (&narrow, true),
+    ] {
+        let text = path.display().to_string();
+        let spec = SpawnSpec::new(
+            vec!["/bin/cat".into(), text.clone().into()],
+            Some(CanonPath::new(&workspace)),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let result = ToolResult::new(vec![ToolContentBlock {
+            text: format!("cat: {text}: Permission denied"),
+            provenance: ToolOutputProvenance::Process {
+                stream: StreamProvenance::Stderr,
+                encoding: ToolOutputEncoding::Utf8,
+                truncated: false,
+                omitted_bytes: 0,
+            },
+            full_output: None,
+        }]);
+        assert_eq!(
+            super::analyze(&spec, &result, &policy, &[])
+                .unwrap()
+                .request
+                .is_some(),
+            offered,
+            "{text}"
+        );
+    }
+}
+
 // Lines recorded from macOS `cat`, `ls` and `touch` under `sandbox-exec`
 // with a profile that does not open the path, 2026-10-02.
 #[test]
