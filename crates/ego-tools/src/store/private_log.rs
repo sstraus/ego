@@ -280,15 +280,17 @@ fn open_directory(path: &Path, created: bool) -> io::Result<File> {
 
 #[cfg(windows)]
 fn harden_handle(file: &mut File, directory: bool) -> io::Result<()> {
+    use windows_permissions::Sid;
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
     use windows_permissions::utilities::current_process_sid;
     use windows_permissions::wrappers::SetSecurityInfo;
-    use windows_permissions::{LocalBox, SecurityDescriptor, Sid};
     let sid = current_process_sid()?;
-    let inheritance = if directory { "OICI" } else { "" };
-    let descriptor: LocalBox<SecurityDescriptor> = format!("D:P(A;{inheritance};FA;;;{sid})")
-        .parse()
-        .map_err(|_| invalid())?;
+    let kind = if directory {
+        crate::privacy::PrivatePathKind::Directory
+    } else {
+        crate::privacy::PrivatePathKind::File
+    };
+    let descriptor = crate::privacy::owner_only_descriptor(&sid, kind).map_err(|_| invalid())?;
     SetSecurityInfo(
         file,
         SeObjectType::SE_FILE_OBJECT,
