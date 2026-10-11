@@ -586,3 +586,80 @@ fn not_yet_run_siblings_close_with_explicit_interrupted_results() {
         "interrupted: not run"
     );
 }
+
+// Catches: replay resurrecting withdrawn text as a pending steer on resume.
+#[test]
+fn retracted_prompt_is_absent_on_replay_and_preserves_other_input() {
+    let first = QueuedPromptId::new();
+    let last = QueuedPromptId::new();
+    let state = replay([
+        EventKind::PromptQueued {
+            id: first,
+            text: "keep".into(),
+            images: vec![],
+        },
+        EventKind::PromptQueued {
+            id: last,
+            text: "withdraw".into(),
+            images: vec![],
+        },
+        EventKind::PromptRetracted { id: last },
+        EventKind::PromptRetracted { id: last },
+    ]);
+    assert_eq!(
+        state
+            .unacknowledged_prompts()
+            .iter()
+            .map(|prompt| prompt.text())
+            .collect::<Vec<_>>(),
+        ["keep"]
+    );
+}
+// Catches: a stale retraction removing an older queue entry instead of its tail.
+#[test]
+fn retraction_cannot_remove_a_non_tail_prompt() {
+    let first = QueuedPromptId::new();
+    let last = QueuedPromptId::new();
+    let state = replay([
+        EventKind::PromptQueued {
+            id: first,
+            text: "first".into(),
+            images: vec![],
+        },
+        EventKind::PromptQueued {
+            id: last,
+            text: "last".into(),
+            images: vec![],
+        },
+        EventKind::PromptRetracted { id: first },
+    ]);
+    assert_eq!(state.unacknowledged_prompts().len(), 2);
+}
+
+// Catches: stale withdrawal hiding an already consumed conversation prompt.
+#[test]
+fn retraction_does_not_remove_consumed_conversation_text() {
+    let id = QueuedPromptId::new();
+    let state = replay([
+        EventKind::PromptQueued {
+            id,
+            text: "delivered".into(),
+            images: vec![],
+        },
+        EventKind::UserPrompt {
+            text: "delivered".into(),
+            images: vec![],
+            queued_prompt: Some(id),
+        },
+        EventKind::PromptRetracted { id },
+    ]);
+    assert!(state.unacknowledged_prompts().is_empty());
+    assert_eq!(
+        state
+            .items
+            .values()
+            .filter(|item| item.text == "delivered")
+            .count(),
+        1
+    );
+}

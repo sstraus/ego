@@ -681,7 +681,9 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // the continuation token, and `CLI.md` §4.2's rule is that a new
         // internal event never becomes public automatically.
         EventKind::ReasoningState { .. } => None,
-        EventKind::PromptQueued { .. } | EventKind::PromptDeliveryExpedited { .. } => None,
+        EventKind::PromptQueued { .. }
+        | EventKind::PromptDeliveryExpedited { .. }
+        | EventKind::PromptRetracted { .. } => None,
         EventKind::Compacted { .. } => None,
         EventKind::Forked { .. } => None,
         EventKind::HookCatalogueAdmitted { .. }

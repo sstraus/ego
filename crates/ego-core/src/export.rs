@@ -229,6 +229,9 @@ pub enum ExportEvent {
     PromptDeliveryExpedited {
         through: QueuedPromptId,
     },
+    PromptRetracted {
+        id: QueuedPromptId,
+    },
     UserPrompt {
         images: Vec<ImageRef>,
         queued_prompt: Option<QueuedPromptId>,
@@ -804,6 +807,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
         EventKind::PromptDeliveryExpedited { through } => {
             ExportEvent::PromptDeliveryExpedited { through: *through }
         }
+        EventKind::PromptRetracted { id } => ExportEvent::PromptRetracted { id: *id },
         EventKind::UserPrompt {
             text: _,
             images,

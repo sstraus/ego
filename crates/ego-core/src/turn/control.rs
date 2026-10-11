@@ -36,6 +36,9 @@ impl fmt::Display for ControlError {
 impl std::error::Error for ControlError {}
 
 pub(crate) enum ControlIntent {
+    Recall {
+        reply: oneshot::Sender<Result<Option<(String, QueueStatus)>, ControlError>>,
+    },
     Background {
         reply: oneshot::Sender<Result<crate::event::id::DetachedExecId, ControlError>>,
     },
@@ -81,6 +84,21 @@ impl Clone for InteractiveIngress {
 }
 
 impl InteractiveIngress {
+    /// Durably withdraw the latest input still owned by the queue.
+    pub async fn recall(&self) -> Result<Option<(String, QueueStatus)>, ControlError> {
+        let (reply, answer) = oneshot::channel();
+        let mut sender = self.sender.lock().await;
+        if !self.admission.open.load(Ordering::Acquire) {
+            return Err(ControlError::Closed);
+        }
+        sender
+            .send(ControlIntent::Recall { reply })
+            .await
+            .map_err(|_| ControlError::Closed)?;
+        drop(sender);
+        answer.await.map_err(|_| ControlError::Closed)?
+    }
+
     pub async fn submit(&self, text: String) -> Result<QueueStatus, ControlError> {
         let (reply, answer) = oneshot::channel();
         let mut sender = self.sender.lock().await;

@@ -230,7 +230,7 @@ pub struct ToolTiming {
 /// ```text
 /// SessionTitleChanged | SessionDeleted | SessionPauseRequested | SessionPaused |
 /// SessionResumed | GoalSet | GoalTransitioned | PromptQueued |
-/// PromptDeliveryExpedited | UserPrompt | AssistantDelta | AssistantMessage |
+/// PromptDeliveryExpedited | PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ToolCallStarted |
 /// ToolCallDelta | ToolCallMeasured | ToolCallCompleted | PermissionRequested |
 /// PermissionAmended | PermissionDecided | GenerationStarted |
@@ -329,6 +329,8 @@ pub enum EventKind {
     },
     /// A durable request to expedite the FIFO prefix ending at `through`.
     PromptDeliveryExpedited { through: QueuedPromptId },
+    /// Withdraw the last unconsumed queued prompt before restoring its composer.
+    PromptRetracted { id: QueuedPromptId },
     /// The user submitted a prompt.
     UserPrompt {
         text: String,
@@ -746,6 +748,7 @@ impl EventKind {
             EventKind::GoalTransitioned { .. } => "goal_transitioned",
             EventKind::PromptQueued { .. } => "prompt_queued",
             EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",
+            EventKind::PromptRetracted { .. } => "prompt_retracted",
             EventKind::UserPrompt { .. } => "user_prompt",
             EventKind::AssistantDelta { .. } => "assistant_delta",
             EventKind::AssistantMessage { .. } => "assistant_message",
