@@ -1716,12 +1716,16 @@ files can run. It carries only release-pinned facts from each stated authority,
 cites the source and read date beside every provider's rows, and **states no
 prices**: a rate is the one fact whose staleness costs money instead of raising
 an error, so a run under a `--max-cost` ceiling with no operator rates still
-refuses with `NoPricingQuote`. Unknown price is not free price. It ships rows
-only for providers the selectable table already admits, and only for those
-whose resolver reads this file: `openai`, `openai-codex`, `anthropic`, and
-`gemini`. `openrouter` is selectable but stays operator-supplied: it proxies
-hundreds of third-party models under no citable contract. Ollama and the other
-subscription providers enumerate their own models.
+refuses with `NoPricingQuote`. Unknown price is not free price. It lists only
+the **current model generations** of each provider, generated from a pinned
+models.dev snapshot (`crates/ego-cli/catalogue/models.generated.toml`, rows with a
+provenance line each; the `model-catalogue-refresh` skill refreshes it). It ships
+rows for the providers whose resolver reads this file: `openai`, `openai-codex`,
+`anthropic`, `gemini`, `github-copilot`, `xai-oauth` and `minimax-oauth`. An older
+model a vendor still serves is stated in a stronger layer. `openrouter` is
+selectable but has no builtin rows: it proxies hundreds of third-party models.
+Ollama and `kimi-coding` enumerate their own models; `nous` is operator-supplied.
+See `ARCHITECTURE.md`.
 
 The `openai` rows are shipped and selectable. The row speaks the public
 Responses contract, and

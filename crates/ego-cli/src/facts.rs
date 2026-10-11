@@ -85,6 +85,14 @@ const SYSTEM_DIR: &str = "/etc/ego";
 /// rest do not.
 const BUILTIN: &str = include_str!("../catalogue/models.toml");
 
+/// The capability rows generated from the pinned models.dev snapshot.
+///
+/// Written by `.agents/skills/model-catalogue-refresh` from
+/// `catalogue/policy.toml` and `catalogue/upstream/models.dev.json`; a row here
+/// is never edited by hand, and a slug that [`BUILTIN`] also states is a build
+/// error ([`builtin`] panics on it).
+const BUILTIN_GENERATED: &str = include_str!("../catalogue/models.generated.toml");
+
 /// The date the compiled-in catalogue was last revised from its authorities.
 ///
 /// A date rather than a counter, because what a reader wants to know about a
@@ -93,7 +101,7 @@ const BUILTIN: &str = include_str!("../catalogue/models.toml");
 /// refusal names, so a test holds it equal to the `revision =` line in the
 /// file itself — a constant that had drifted would send an operator to the
 /// wrong catalogue.
-pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-09-30";
+pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-10-11";
 
 /// One `models.toml`.
 #[derive(Debug, Default, Deserialize)]
@@ -215,7 +223,17 @@ pub type Hosted = HostedModel;
 /// on somebody's machine. Returning an empty layer instead would ship a binary
 /// whose out-of-the-box path silently is not one.
 fn builtin() -> Facts {
-    toml::from_str(BUILTIN).expect("the compiled-in catalogue is valid TOML this build controls")
+    let mut facts: Facts = toml::from_str(BUILTIN)
+        .expect("the compiled-in catalogue is valid TOML this build controls");
+    let generated: Facts = toml::from_str(BUILTIN_GENERATED)
+        .expect("the generated catalogue is valid TOML this build controls");
+    for (slug, row) in generated.model {
+        assert!(
+            facts.model.insert(slug.clone(), row).is_none(),
+            "`{slug}` is stated by both models.toml and models.generated.toml"
+        );
+    }
+    facts
 }
 
 /// The three layers as one map, the strongest authority winning per key.
@@ -405,6 +423,9 @@ fn project_defaults(
 }
 
 #[cfg(test)]
+mod snapshot_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ego_core::generator::capabilities::{ImageInputSupport, ReasoningEffortSupport};
@@ -589,7 +610,10 @@ transport = "sse"
                     "openai-codex",
                     "anthropic",
                     "openrouter",
-                    "gemini"
+                    "gemini",
+                    "github-copilot",
+                    "xai-oauth",
+                    "minimax-oauth"
                 ]
                 .contains(&slug.provider.as_str()),
                 "`{slug}` names a provider whose resolver does not read this file",
@@ -685,7 +709,7 @@ transport = "sse"
             "the refusal must name what was typed"
         );
         assert!(
-            refusal.contains("claude-opus-4-8"),
+            refusal.contains("claude-opus-5-5"),
             "the refusal must name the replacement: {refusal}"
         );
         assert!(

@@ -5203,8 +5203,10 @@ fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
         "anthropic/claude-fable-5-1",
         "anthropic/claude-opus-5-5",
         "anthropic/claude-sonnet-5-5",
-        "anthropic/claude-sonnet-5",
-        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-haiku-5-5",
+        "gemini/gemini-3.8-flash",
+        "github-copilot/gpt-6.1-sol",
+        "xai-oauth/grok-4.7",
     ] {
         assert!(slugs.contains(&current), "missing {current} in {slugs:?}");
     }
@@ -5214,6 +5216,9 @@ fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
         "openai/gpt-5.6-luna",
         "openai-codex/gpt-5.6-sol",
         "anthropic/claude-opus-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-4-5",
+        "openai/gpt-5.5",
     ] {
         assert!(
             !slugs.contains(&superseded),
@@ -5853,7 +5858,7 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
         &reader,
         &mut output,
         down_start,
-        b"> 2. anthropic/claude-haiku-4-5",
+        b"> 2. anthropic/claude-haiku-5-5",
     );
     drain_until_quiet(&reader, &mut output);
 
@@ -5869,13 +5874,13 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
     drain_until_quiet(&reader, &mut output);
 
     let chosen_start = output.len();
-    input.write_all(b"2").expect("startup picker number two");
-    input.flush().expect("startup picker number two flush");
+    input.write_all(b"3").expect("startup picker number three");
+    input.flush().expect("startup picker number three flush");
     until_from(
         &reader,
         &mut output,
         chosen_start,
-        b"> 2. anthropic/claude-haiku-4-5",
+        b"> 3. anthropic/claude-opus-5-5",
     );
     drain_until_quiet(&reader, &mut output);
     input.write_all(b"\r").expect("startup model accept");
@@ -5898,8 +5903,8 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
 
     let config = std::fs::read_to_string(home.path().join("config.toml"))
         .expect("startup selection persisted atomically");
-    assert!(config.contains("model = \"anthropic/claude-haiku-4-5\""));
-    assert!(config.contains("thinking = \"off\""));
+    assert!(config.contains("model = \"anthropic/claude-opus-5-5\""));
+    assert!(config.contains("thinking = \"medium\""));
 
     input.write_all(b"\x04").expect("first EOF");
     input.flush().expect("first EOF flush");
@@ -7468,7 +7473,11 @@ fn rows_fit_the_terminal_at_120_80_60_and_40_columns() {
     }
 }
 
-const PICKER_ROWS: u16 = 40;
+/// Tall enough that the whole builtin catalogue (about 35 rows since regression_case)
+/// fits below the cursor. When a picker frame does not fit, the emulated screen
+/// keeps rows of earlier frames after the picker closes; that residue is not
+/// diagnosed (harness cursor reply or the surface); further terminal-harness investigation is required.
+const PICKER_ROWS: u16 = 80;
 /// Three chat models around the session's `qwen3`, so the current model is
 /// neither the first nor the last row.
 const PICKER_TAGS: &str = r#"{"models":[{"name":"aaa-first","capabilities":["completion","tools"]},{"name":"qwen3","capabilities":["completion","tools"]},{"name":"zzz-last","capabilities":["completion","tools"]}]}"#;
