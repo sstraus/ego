@@ -232,6 +232,31 @@ fn readmission_cases() {
                 ContinueRequest::new(run, super::request(501), digest("second"), before, "second"),
                 bindings().with_human(human.clone()),
             ));
+            let events: Vec<_> = store.entries.lock().unwrap()[&run.session_id()]
+                .iter()
+                .filter_map(|entry| match entry {
+                    SessionEntry::Event(event) => Some(event.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                events.iter().any(|event| matches!(
+                    event.kind,
+                    ego_core::event::domain::EventKind::ExecutionObserved { .. }
+                )),
+                "{name}: core continuation omitted durable observation"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event.kind,
+                        ego_core::event::domain::EventKind::PermissionDecided { .. }
+                    ))
+                    .count(),
+                usize::from(asks),
+                "{name}: missing durable permission decision"
+            );
             assert_eq!(
                 *human.questions.lock().unwrap(),
                 usize::from(asks),
@@ -431,4 +456,104 @@ fn missing_execution_observation_refuses_saved_authority_before_effects() {
         1,
         "unmeasured continuation ran effects"
     );
+}
+
+// Catches: independent core journals allocate duplicate sequences during overlapping decisions.
+#[test]
+fn overlapping_core_readmission_has_one_journal_authority() {
+    #[derive(Debug)]
+    struct HeldHuman {
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    }
+    impl HumanApprover for HeldHuman {
+        fn decide<'a>(
+            &'a self,
+            _: ItemId,
+            _: &'a PermissionRequest,
+        ) -> BoxFuture<'a, PermissionDecision> {
+            Box::pin(async move {
+                let release = self.release.lock().unwrap().take().unwrap();
+                self.entered.send(()).unwrap();
+                release.await.unwrap();
+                PermissionDecision::Allow
+            })
+        }
+    }
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    executor.allow_effects();
+    let controller = Arc::new(controller(store.clone(), executor.clone()));
+    let root = fixture_root("overlap-policy");
+    let base = RunConfinement::new(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(root.as_path()),
+    )
+    .unwrap();
+    let caps = Confinement::Workspace.required_caps();
+    let first = admitted_start(
+        &controller,
+        StartRequest::new(
+            RequestId::session_id(super::request(700)),
+            root,
+            super::request(700),
+            digest("first"),
+            selections().with_sandbox_observation(
+                Confinement::Workspace,
+                observation(&base, "sandbox", caps, "1"),
+            ),
+            "first",
+        ),
+    );
+    let run = first.run_id();
+    execute(&controller, first.into_execution());
+    let revision = store
+        .transactions(run.session_id())
+        .last()
+        .unwrap()
+        .revision();
+    *executor.execution_observation.lock().unwrap() =
+        Some(observation(&base, "other-backend", caps, "2"));
+    let (entered, observed) = std::sync::mpsc::sync_channel(1);
+    let (release, receiver) = futures::channel::oneshot::channel();
+    let human = Arc::new(HeldHuman {
+        entered,
+        release: Mutex::new(Some(receiver)),
+    });
+    let left_controller = controller.clone();
+    let left = std::thread::spawn(move || {
+        futures::executor::block_on(left_controller.continue_run(
+            ContinueRequest::new(run, super::request(701), digest("left"), revision, "left"),
+            bindings().with_human(human),
+        ))
+    });
+    observed
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let right = futures::executor::block_on(controller.continue_run(
+        ContinueRequest::new(run, super::request(702), digest("right"), revision, "right"),
+        bindings(),
+    ));
+    assert!(
+        right.is_err(),
+        "second writer must not enter a competing journal"
+    );
+    release.send(()).unwrap();
+    assert!(left.join().unwrap().is_ok());
+    let entries = store.entries.lock().unwrap();
+    let events: Vec<_> = entries[&run.session_id()]
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionEntry::Event(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert!(
+        events
+            .windows(2)
+            .all(|pair| pair[0].env.seq < pair[1].env.seq)
+    );
+    assert_eq!(events[2].env.parent, Some(events[1].env.id));
 }

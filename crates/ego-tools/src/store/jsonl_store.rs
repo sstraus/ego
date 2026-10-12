@@ -1832,6 +1832,29 @@ impl LeasedLifecycleAppend for InactiveLifecycleAppend<'_> {
 impl InactiveSessionLease for InactiveLifecycleAppend<'_> {}
 
 impl SessionStore for JsonlStore {
+    fn open_writer_lease(
+        &self,
+        id: &SessionId,
+        now: ego_core::event::time::Timestamp,
+    ) -> Result<ego_core::store::session_store::SessionWriterLease<'_>, StoreError> {
+        let opened = self
+            .open_writer(
+                id,
+                super::LeaseInputs {
+                    pid: std::process::id(),
+                    now,
+                    stale_after: std::time::Duration::from_secs(60),
+                    // Kernel lease release handles dead processes. Never steal a live lock.
+                    is_alive: &|_| true,
+                },
+            )
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        Ok(ego_core::store::session_store::SessionWriterLease {
+            state: opened.state,
+            writer: Box::new(opened.writer),
+        })
+    }
+
     fn append(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
         self.with_events_lock(id, || self.append_already_locked(id, ev))
     }

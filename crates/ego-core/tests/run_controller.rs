@@ -4,7 +4,7 @@
 //! purpose is to expose durable transaction order, admission-before-effect,
 //! recovery evidence, and interrupt ownership to these tests.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Condvar, Mutex};
@@ -42,6 +42,7 @@ enum StoreFault {
 struct RecordingSessionStore {
     entries: Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>,
     faults: Mutex<VecDeque<StoreFault>>,
+    writers: Mutex<BTreeSet<SessionId>>,
     sequence: Arc<Mutex<Vec<&'static str>>>,
 }
 
@@ -50,6 +51,7 @@ impl RecordingSessionStore {
         Self {
             entries: Mutex::new(BTreeMap::new()),
             faults: Mutex::new(VecDeque::new()),
+            writers: Mutex::new(BTreeSet::new()),
             sequence,
         }
     }
@@ -79,7 +81,66 @@ impl RecordingSessionStore {
     }
 }
 
+struct RecordingWriter<'a> {
+    store: &'a RecordingSessionStore,
+    session: SessionId,
+}
+impl Drop for RecordingWriter<'_> {
+    fn drop(&mut self) {
+        self.store.writers.lock().unwrap().remove(&self.session);
+    }
+}
+impl SessionStore for RecordingWriter<'_> {
+    fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+        assert_eq!(*id, self.session);
+        self.store.append(id, event)
+    }
+    fn read(
+        &self,
+        id: &SessionId,
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+        assert_eq!(*id, self.session);
+        self.store.read(id)
+    }
+    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        self.store.list()
+    }
+    fn compare_and_append_run(
+        &self,
+        id: &SessionId,
+        revision: Option<RunRevision>,
+        transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        assert_eq!(*id, self.session);
+        self.store.compare_and_append_run(id, revision, transaction)
+    }
+}
+
 impl SessionStore for RecordingSessionStore {
+    fn open_writer_lease(
+        &self,
+        id: &SessionId,
+        _: Timestamp,
+    ) -> Result<ego_core::store::session_store::SessionWriterLease<'_>, StoreError> {
+        if !self.writers.lock().unwrap().insert(*id) {
+            return Err(StoreError::Io(std::io::Error::other("writer occupied")));
+        }
+        let writer = RecordingWriter {
+            store: self,
+            session: *id,
+        };
+        let mut state = ego_core::state::SessionState::default();
+        for entry in self.entries.lock().unwrap().get(id).into_iter().flatten() {
+            if let SessionEntry::Event(event) = entry {
+                state.apply(event);
+            }
+        }
+        Ok(ego_core::store::session_store::SessionWriterLease {
+            state,
+            writer: Box::new(writer),
+        })
+    }
+
     fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
         self.entries
             .lock()
@@ -414,29 +475,6 @@ impl ScriptedRunExecutor {
 
 impl RunExecutor for ScriptedRunExecutor {
     type Prepared = PreparedToken;
-
-    fn request_execution_policy_permission<'a>(
-        &'a self,
-        _prepared: &'a mut Self::Prepared,
-        _observation: ego_core::run::RunExecutionObservation,
-        question: Option<ego_core::permit::PermissionRequest>,
-        bindings: &'a RunExecutionBindings,
-    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
-        Box::pin(async move {
-            let Some(question) = question else {
-                return Ok(true);
-            };
-            let Some(human) = bindings.human() else {
-                return Ok(false);
-            };
-            Ok(matches!(
-                human
-                    .decide(ego_core::event::id::ItemId::new(), &question)
-                    .await,
-                ego_core::permit::PermissionDecision::Allow
-            ))
-        })
-    }
 
     fn execution_observation<'a>(
         &'a self,

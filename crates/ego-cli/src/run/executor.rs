@@ -830,16 +830,6 @@ impl CliRunExecutor {
 impl RunExecutor for CliRunExecutor {
     type Prepared = CliPrepared;
 
-    fn request_execution_policy_permission<'a>(
-        &'a self,
-        prepared: &'a mut Self::Prepared,
-        observation: ego_core::run::RunExecutionObservation,
-        question: Option<ego_core::permit::PermissionRequest>,
-        bindings: &'a RunExecutionBindings,
-    ) -> futures::future::BoxFuture<'a, Result<bool, RunExecutorError>> {
-        Box::pin(self.journal_readmission(prepared, observation, question, bindings))
-    }
-
     fn execution_observation<'a>(
         &'a self,
         prepared: &'a mut Self::Prepared,
@@ -1089,5 +1079,3 @@ mod sandbox_ceiling_tests {
 
 #[cfg(test)]
 mod readmission_tests;
-
-mod readmission;
