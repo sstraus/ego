@@ -15,6 +15,7 @@ mod context_capacity;
 mod control;
 mod identity;
 mod journal;
+mod judge;
 mod mcp_registry;
 mod policy;
 mod task;
@@ -79,7 +80,7 @@ use crate::public::PublicEvent;
 use crate::question::{Elicitor, QuestionAnswer, QuestionOutcome, QuestionTarget};
 use crate::run::{Denial, DeniedBy, RequestId};
 use crate::sink::EventSink;
-use crate::state::{ItemKind, SessionState, Usage};
+use crate::state::{SessionState, Usage};
 use crate::store::evidence::EvidenceRef;
 use crate::store::session_store::{SessionStore, StoreError};
 
@@ -91,6 +92,7 @@ pub use control::{
 };
 pub use identity::{AgentIdentity, HostClient};
 pub use journal::{Journal, SharedJournal, SharedJournalError};
+pub use judge::{JudgeGeneration, JudgeGenerationResult};
 pub use mcp_registry::{
     McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, McpRegistryJournalErrorKind,
     McpRegistryJournalOperation,
@@ -4669,247 +4671,34 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             exec_caps,
             pending.request().why(),
         );
-        let state = self.state();
-        let mut items: Vec<_> = state.items.values().collect();
-        items.sort_by_key(|item| item.seq);
-        let task = items
-            .iter()
-            .rev()
-            .find(|item| item.kind == ItemKind::UserPrompt)
-            .map_or(String::new(), |item| item.text.clone());
-        let agent_reason = items
-            .iter()
-            .rev()
-            .find(|item| item.turn == turn && item.kind == ItemKind::Assistant)
-            .map_or(String::new(), |item| item.text.clone());
-        let recent_calls = items
-            .iter()
-            .rev()
-            .filter(|item| item.kind == ItemKind::ToolCall && item.completed)
-            .take(3)
-            .map(|item| {
-                let structure = serde_json::from_str::<serde_json::Value>(&item.args)
-                    .ok()
-                    .and_then(|args| {
-                        args.get("argv")
-                            .and_then(serde_json::Value::as_array)
-                            .map(|argv| {
-                                let argv: Vec<_> = argv
-                                    .iter()
-                                    .filter_map(serde_json::Value::as_str)
-                                    .map(str::to_owned)
-                                    .collect();
-                                crate::permit::shell::observe(&argv).skeleton
-                            })
-                    })
-                    .unwrap_or_else(|| "<non-exec-action>".into());
-                crate::permit::judge::JudgeRecentCall {
-                    tool: item.tool_name.clone().unwrap_or_default(),
-                    structure,
-                    ok: item.ok,
-                }
-            })
-            .collect();
-        let context = crate::permit::judge::JudgeTaskContext {
-            task,
-            agent_reason,
-            recent_calls,
-            roots: policy.judge_roots(),
-        }
-        .bounded();
-        let mut request =
-            input.request_with_context(&config, &context, self.main_model_identity.as_ref());
-        request.thinking = profile.thinking;
-
-        let gaps = profile.capabilities.request_gaps(&request);
-        if !gaps.is_empty() {
-            self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::Error {
-                    message: gaps
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                    kind: ErrorKind::Unclassified,
-                },
-            )?;
-            return Ok(JudgeRun::Unavailable);
-        }
-        if let Err(refused) = profile.generator.ensure_expressible(&request) {
-            self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::Error {
-                    message: refused.to_string(),
-                    kind: ErrorKind::Unclassified,
-                },
-            )?;
-            return Ok(JudgeRun::Unavailable);
-        }
-        let budget = self
-            .gate
-            .snapshot()
-            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
-        self.journal.publish(&PublicEvent::metering_selected(
+        let context = crate::permit::judge::JudgeTaskContext::from_state(
+            &self.state(),
             turn,
-            &profile.metering,
-            budget.ledger(),
-            profile
-                .rates
-                .as_ref()
-                .map_or(&RateSource::None, |rates| &rates.source),
-        ))?;
-        let quote = profile.rates.as_ref().map(|rates| &rates.quote);
-        let reservation =
-            match self
-                .gate
-                .reserve(&profile.metering, quote, &request, &profile.capabilities)
-            {
-                Ok(reservation) => reservation,
-                Err(denied) => {
-                    tracing::warn!(%denied, "the budget gate refused the judge generation");
-                    let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
-                        ExitReason::Budget
-                    } else {
-                        ExitReason::Internal
-                    };
-                    return Ok(JudgeRun::Ended(reason));
-                }
-            };
-        let attempt = match GenerationAttempt::new(
-            GenerationId::new(),
-            reservation,
-            &profile.metering,
-            quote,
-            &request,
-            &profile.capabilities,
-        ) {
-            Ok(attempt) => attempt,
-            Err(denied) => {
-                tracing::error!(%denied, "the judge reservation did not authorise its request");
-                return Ok(JudgeRun::Ended(ExitReason::Internal));
-            }
+            policy.judge_roots(),
+        );
+        let generated = judge::JudgeGeneration {
+            journal: &self.journal,
+            cancel: &self.cancel,
+            control: &mut self.control,
+            gate: &self.gate,
+            session_id: self.session_id,
+            invocation: self.invocation,
+            admission: self.admission.as_ref(),
+            evidence: self.evidence,
+        }
+        .run(
+            turn,
+            &profile,
+            &input,
+            &context,
+            self.main_model_identity.as_ref(),
+        )
+        .await?;
+        let (decoder, reference) = match generated {
+            judge::JudgeGenerationResult::Unavailable => return Ok(JudgeRun::Unavailable),
+            judge::JudgeGenerationResult::Ended(reason) => return Ok(JudgeRun::Ended(reason)),
+            judge::JudgeGenerationResult::Completed { decoder, attempt } => (decoder, attempt),
         };
-        let reference = attempt.attempt();
-        self.admit_generation(&profile, reference, GenerationRole::Judge)?;
-        self.journal.append(
-            turn,
-            None,
-            None,
-            EventKind::GenerationStarted {
-                attempt: reference,
-                role: GenerationRole::Judge,
-                snapshot: None,
-            },
-        )?;
-
-        let mut stream = profile.generator.generate(request, attempt);
-        let mut decoder = JudgeDecoder::new();
-        let mut usage: Option<Usage> = None;
-        let mut provider_cost: Option<Money> = None;
-        let mut interrupted = false;
-        let mut failure = None;
-        loop {
-            let event = match await_controlled(
-                &self.journal,
-                &self.cancel,
-                &mut self.control,
-                turn,
-                stream.next(),
-                InterruptDisposition::Return,
-                None,
-            )
-            .await
-            {
-                Controlled::Completed(Some(event)) => event,
-                Controlled::Completed(None) => break,
-                Controlled::Interrupted => {
-                    interrupted = true;
-                    break;
-                }
-                Controlled::Failed(cause) => {
-                    failure = Some(cause);
-                    break;
-                }
-            };
-            decoder.observe(&event);
-            match &event {
-                AiEvent::Usage(delta) => {
-                    let mut total = usage.unwrap_or(Usage::IDENTITY);
-                    total.add(delta);
-                    usage = Some(total);
-                }
-                AiEvent::ProviderCost { cost } => provider_cost = Some(*cost),
-                _ => {}
-            }
-        }
-
-        if failure.is_none() && (usage.is_some() || provider_cost.is_some()) {
-            let observed = usage.unwrap_or(Usage::IDENTITY);
-            let cost_delta = settled_cost(
-                &profile.metering,
-                quote,
-                usage.map_or(UsageReport::Missing, UsageReport::Reported),
-                provider_cost,
-                self.gate
-                    .snapshot()
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                    .currency(),
-            );
-            if let Err(cause) = self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::UsageUpdated {
-                    usage: observed,
-                    cost_delta,
-                    attempt: Some(reference),
-                },
-            ) {
-                failure = Some(cause.into());
-            }
-        }
-
-        let settlement = match self.gate.settle(stream) {
-            Ok(settlement) => settlement,
-            Err(denied) => {
-                failure.map_or(Ok(()), Err)?;
-                tracing::error!(%denied, "the gate refused to settle its judge attempt");
-                return Ok(JudgeRun::Ended(ExitReason::Internal));
-            }
-        };
-        failure.map_or(Ok(()), Err)?;
-        self.journal.append(
-            turn,
-            None,
-            None,
-            EventKind::AttemptSettled {
-                attempt: settlement.attempt,
-                outcome: settlement.outcome,
-            },
-        )?;
-
-        let (raw, truncated) = decoder.response_evidence();
-        self.journal.append(
-            turn,
-            None,
-            None,
-            EventKind::JudgeResponse {
-                attempt: reference,
-                text: raw.to_owned(),
-                truncated,
-            },
-        )?;
-
-        if interrupted {
-            return Ok(JudgeRun::Ended(ExitReason::Cancelled(
-                self.cancel.cause().unwrap_or(CancelCause::User),
-            )));
-        }
 
         let decoded = decoder.finish_valid();
         if let (Ok(outcome), Some(lease)) = (&decoded, &lease) {
