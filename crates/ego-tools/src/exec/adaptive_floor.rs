@@ -4,9 +4,60 @@ use ego_core::permit::{AdaptivePerimeter, RunConfinement};
 use std::path::Path;
 
 pub(in crate::exec) const GIT_ENTRY: &str = "(^|/)[.][gG][iI][tT]$";
-pub(in crate::exec) const METADATA_CONTROL: &str = "(/modules/.+)?(/worktrees/[^/]+)?/(config([.]worktree)?|hooks|commondir|gitdir|info/attributes)(/|$)";
-pub(in crate::exec) const METADATA_BOUNDARY: &str =
-    "(/modules(/.*)?|/worktrees(/[^/]+)?|/hooks|/info)?$";
+/// The one list of Git control names; both metadata floors derive from it.
+pub(in crate::exec) const GIT_CONTROLS: [&str; 6] = [
+    "config",
+    "config.worktree",
+    "hooks",
+    "commondir",
+    "gitdir",
+    "info/attributes",
+];
+
+fn escaped(name: &str) -> String {
+    name.replace('.', "[.]")
+}
+
+fn control_pattern(names: &[&str]) -> String {
+    let names: Vec<_> = names.iter().map(|name| escaped(name)).collect();
+    format!(
+        "(/modules/.+)?(/worktrees/[^/]+)?/({})(/|$)",
+        names.join("|")
+    )
+}
+
+// A control directory, or the directory that holds a control, must keep its
+// name; so every leading path prefix of every control is a boundary entry.
+fn boundary_pattern(names: &[&str]) -> String {
+    let mut prefixes = Vec::new();
+    for name in names {
+        for (index, _) in name.match_indices('/') {
+            prefixes.push(escaped(&name[..index]));
+        }
+        prefixes.push(escaped(name));
+    }
+    prefixes.dedup();
+    format!(
+        "(/modules(/.*)?|/worktrees(/[^/]+)?|{})?$",
+        prefixes
+            .iter()
+            .map(|prefix| format!("/{prefix}"))
+            .collect::<Vec<_>>()
+            .join("|")
+    )
+}
+
+pub(in crate::exec) fn metadata_control() -> &'static str {
+    static PATTERN: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| control_pattern(&GIT_CONTROLS));
+    &PATTERN
+}
+
+pub(in crate::exec) fn metadata_boundary() -> &'static str {
+    static PATTERN: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| boundary_pattern(&GIT_CONTROLS));
+    &PATTERN
+}
 // Operation state and object/ref fan-out inside module metadata stay removable;
 // the module boundary otherwise covers every directory beneath `modules/`.
 pub(in crate::exec) const METADATA_MODULE_TRANSIENT: &str =
@@ -54,9 +105,9 @@ pub(in crate::exec) fn blocks(path: &Path, policy: &RunConfinement) -> bool {
     static ENVIRONMENT: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| compile(ENV));
     static CONTROL: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| compile(&format!("^{METADATA_CONTROL}")));
+        std::sync::LazyLock::new(|| compile(&format!("^{}", metadata_control())));
     static BOUNDARY: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| compile(&format!("^{METADATA_BOUNDARY}")));
+        std::sync::LazyLock::new(|| compile(&format!("^{}", metadata_boundary())));
     static TRANSIENT: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| compile(&format!("^{METADATA_MODULE_TRANSIENT}")));
     let text = path.to_string_lossy();
@@ -123,10 +174,58 @@ mod tests {
                     .unwrap()
                     .is_match(&path.to_string_lossy())
             };
-            let oracle = matches(METADATA_CONTROL)
-                || (directory && matches(METADATA_BOUNDARY) && !matches(METADATA_MODULE_TRANSIENT));
+            let oracle = matches(metadata_control())
+                || (directory
+                    && matches(metadata_boundary())
+                    && !matches(METADATA_MODULE_TRANSIENT));
             assert_eq!(oracle, expected, "fixture {suffix}");
             assert_eq!(blocks(&path, &policy), expected, "floor {suffix}");
         }
+    }
+
+    // Catches: a Git control name added to the single list reaches only one of
+    // the two floor patterns, silently weakening the other floor.
+    #[test]
+    fn every_git_control_name_reaches_both_floor_patterns() {
+        let names: Vec<&str> = GIT_CONTROLS
+            .iter()
+            .copied()
+            .chain(["extra-control"])
+            .collect();
+        let control = regex::Regex::new(&format!("^{}", control_pattern(&names))).unwrap();
+        let boundary = regex::Regex::new(&format!("^{}", boundary_pattern(&names))).unwrap();
+        for name in &names {
+            for prefix in [
+                "",
+                "/modules/sub",
+                "/worktrees/peer",
+                "/modules/sub/worktrees/peer",
+            ] {
+                let path = format!("{prefix}/{name}");
+                assert!(control.is_match(&path), "control floor misses {path}");
+                assert!(
+                    control.is_match(&format!("{path}/inner")),
+                    "control floor misses {path}/inner"
+                );
+                assert!(
+                    !control.is_match(&format!("{path}-neighbor")),
+                    "control floor overreaches {path}-neighbor"
+                );
+            }
+            let directory = name.split_once('/').map_or(*name, |(head, _)| head);
+            assert!(
+                boundary.is_match(&format!("/{directory}")),
+                "boundary floor misses /{directory}"
+            );
+        }
+        assert!(!boundary.is_match("/ordinary"));
+    }
+
+    // Catches: the shipped patterns drift from GIT_CONTROLS (a hand-written
+    // alternation survives next to the list).
+    #[test]
+    fn shipped_floor_patterns_cover_the_shipped_control_list() {
+        assert_eq!(metadata_control(), control_pattern(&GIT_CONTROLS));
+        assert_eq!(metadata_boundary(), boundary_pattern(&GIT_CONTROLS));
     }
 }

@@ -318,14 +318,7 @@ fn git_roots(workspace: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProcessEr
             controls.push(ancestor.join(".git"));
         }
         for root in [git, common] {
-            for name in [
-                "config",
-                "config.worktree",
-                "hooks",
-                "commondir",
-                "gitdir",
-                "info/attributes",
-            ] {
+            for name in floor::GIT_CONTROLS {
                 controls.push(root.join(name));
             }
         }
