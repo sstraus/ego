@@ -267,6 +267,15 @@ impl SessionConfinementAdmission for CliSessionConfinementAdmission {
     }
 }
 
+fn offered(ceiling: Confinement) -> impl Iterator<Item = Confinement> {
+    Confinement::ALL.into_iter().filter(move |candidate| {
+        candidate.within(ceiling)
+            && (*candidate != Confinement::Adaptive
+                || cfg!(target_os = "macos")
+                || *candidate == ceiling)
+    })
+}
+
 /// Measure every confinement a session under `ceiling` may be offered, into
 /// the process-wide capability cache. Safe to run ahead of any session: the
 /// cache holds measurement facts only, and single-flights concurrent callers.
@@ -275,12 +284,7 @@ pub(crate) async fn warm_process_cache(
     cancel: CancelToken,
     root: &std::path::Path,
 ) -> Result<(), ControlError> {
-    for confinement in Confinement::ALL.into_iter().filter(|candidate| {
-        candidate.within(ceiling)
-            && (*candidate != Confinement::Adaptive
-                || cfg!(target_os = "macos")
-                || *candidate == ceiling)
-    }) {
+    for confinement in offered(ceiling) {
         let policy = ego_tools::exec::admit_confinement(confinement, false, CanonPath::new(root))
             .map_err(|error| {
             ControlError::Internal(format!(
@@ -329,12 +333,7 @@ async fn initialize_once(
         })?;
 
     let mut measured = Vec::new();
-    for confinement in Confinement::ALL.into_iter().filter(|candidate| {
-        candidate.within(ceiling)
-            && (*candidate != Confinement::Adaptive
-                || cfg!(target_os = "macos")
-                || *candidate == ceiling)
-    }) {
+    for confinement in offered(ceiling) {
         let policy =
             ego_tools::exec::admit_confinement(confinement, false, CanonPath::new(root.as_path()))
                 .map_err(|error| {
@@ -414,4 +413,30 @@ async fn initialize_once(
     drop(evidence);
     drop(opened);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Catches: warmup and session measurement offer different confinement sets.
+    #[test]
+    fn offered_confinements_preserve_each_ceiling_and_platform() {
+        use Confinement::{Adaptive, Off, Ro, Workspace};
+        for (ceiling, expected) in [
+            (Ro, vec![Ro]),
+            (Workspace, vec![Ro, Workspace]),
+            (Adaptive, vec![Ro, Workspace, Adaptive]),
+            (
+                Off,
+                if cfg!(target_os = "macos") {
+                    vec![Ro, Workspace, Adaptive, Off]
+                } else {
+                    vec![Ro, Workspace, Off]
+                },
+            ),
+        ] {
+            assert_eq!(offered(ceiling).collect::<Vec<_>>(), expected, "{ceiling}");
+        }
+    }
 }
