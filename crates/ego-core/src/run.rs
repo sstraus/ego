@@ -58,6 +58,9 @@ use crate::turn::AdmittedToolSource;
 
 mod readmission;
 
+/// Measured authority and its retained probe transcript.
+pub type RunExecutionObservation = (ExecObservation, Option<crate::store::evidence::EvidenceRef>);
+
 /// Borrowed future returned by run adapters at controller-owned boundaries.
 pub type RunFuture<'a, T> = BoxFuture<'a, T>;
 
@@ -1313,6 +1316,7 @@ pub struct RunExecutionBindings {
     budget_gate: Option<SharedBudgetGate>,
     effect_tools: Option<Arc<BTreeSet<String>>>,
     human: Option<Arc<dyn HumanApprover>>,
+    cancel: crate::turn::CancelToken,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     controls: Option<Arc<dyn crate::control::SessionControls>>,
     host: Option<crate::turn::HostClient>,
@@ -1333,11 +1337,22 @@ impl RunExecutionBindings {
             budget_gate: None,
             effect_tools: None,
             human: None,
+            cancel: crate::turn::CancelToken::new(),
             sandbox_grants: None,
             controls: None,
             host: None,
             interactive_control: None,
         }
+    }
+
+    /// Cancellation shared by admission measurement and the executing turn.
+    pub fn with_cancel(mut self, cancel: crate::turn::CancelToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    pub fn cancel(&self) -> crate::turn::CancelToken {
+        self.cancel.clone()
     }
 
     /// Transfer the sole turn coordinator's receiver to this execution.
@@ -1488,24 +1503,34 @@ impl std::error::Error for RunExecutorError {}
 pub trait RunExecutor: Send + Sync {
     type Prepared: Any + Send + 'static;
 
-    /// Ask the existing human seat after durably journaling its request.
-    /// Adapters that cannot own a serialized permission journal refuse.
-    fn request_execution_policy_permission<'a>(
-        &'a self,
-        _prepared: &'a mut Self::Prepared,
-        _question: crate::permit::PermissionRequest,
-        _bindings: &'a RunExecutionBindings,
-    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
-        Box::pin(async { Ok(false) })
-    }
-
     /// Measure current authority without constructing user effect ports.
     /// The prepared executor must pin this measurement for its final check.
     fn execution_observation<'a>(
         &'a self,
         _prepared: &'a mut Self::Prepared,
-    ) -> BoxFuture<'a, Result<Option<ExecObservation>, RunExecutorError>> {
-        Box::pin(async { Ok(None) })
+        _cancel: crate::turn::CancelToken,
+    ) -> BoxFuture<'a, Result<Option<RunExecutionObservation>, RunExecutorError>> {
+        Box::pin(async {
+            Err(RunExecutorError::new(
+                "execution authority is not measurable",
+            ))
+        })
+    }
+
+    /// Persist the measured observation and, when required, ask for consent
+    /// under the adapter's existing session writer lease.
+    fn request_execution_policy_permission<'a>(
+        &'a self,
+        _prepared: &'a mut Self::Prepared,
+        _observation: RunExecutionObservation,
+        _question: Option<crate::permit::PermissionRequest>,
+        _bindings: &'a RunExecutionBindings,
+    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
+        Box::pin(async {
+            Err(RunExecutorError::new(
+                "execution re-admission journal is unavailable",
+            ))
+        })
     }
 
     fn prepare<'a>(

@@ -44,10 +44,25 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
         let Some(old) = selections.sandbox_observation.as_ref() else {
             return Ok(selections.clone());
         };
-        let Some(observed) = self.executor.execution_observation(prepared).await? else {
-            return Ok(selections.clone());
+        let Some((observed, probe_evidence)) = self
+            .executor
+            .execution_observation(prepared, bindings.cancel())
+            .await?
+        else {
+            return Err(RunExecutorError::new("execution authority is not measurable").into());
         };
+        if bindings.cancel().is_cancelled() {
+            return Err(RunExecutorError::new("execution observation cancelled").into());
+        }
         if observed.same_measurement(old) {
+            self.executor
+                .request_execution_policy_permission(
+                    prepared,
+                    (observed, probe_evidence),
+                    None,
+                    bindings,
+                )
+                .await?;
             return Ok(selections.clone());
         }
         let automatic = observed.not_more_permissive_than(old);
@@ -64,21 +79,26 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
             .sink_factory
             .execution_policy_notice(&message)
             .map_err(RunExecutorError::new)?;
-        if !automatic {
-            let question = PermissionRequest::execution_policy_readmission(
-                message.clone(),
+        let question = (!automatic).then(|| {
+            PermissionRequest::execution_policy_readmission(
+                message,
                 CanonPath::new(snapshot.root.as_path()),
-            );
-            let allowed = self
-                .executor
-                .request_execution_policy_permission(prepared, question, bindings)
-                .await?;
-            if !allowed {
-                return Err(RunExecutorError::new(
-                    "execution policy re-admission was denied; no effects started",
-                )
-                .into());
-            }
+            )
+        });
+        let allowed = self
+            .executor
+            .request_execution_policy_permission(
+                prepared,
+                (observed.clone(), probe_evidence),
+                question,
+                bindings,
+            )
+            .await?;
+        if !allowed {
+            return Err(RunExecutorError::new(
+                "execution policy re-admission was denied; no effects started",
+            )
+            .into());
         }
         let mut updated = selections.clone();
         updated.sandbox_readmission = Some(Box::new(PolicyReadmission {

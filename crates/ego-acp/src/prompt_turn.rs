@@ -284,18 +284,23 @@ where
                                     .await
                             }
                             Some((run_id, revision)) => {
-                                controller
-                                    .continue_run(
-                                        ContinueRequest::new(
-                                            run_id,
-                                            request_id,
-                                            digest,
-                                            revision,
-                                            prompt,
-                                        ),
-                                        bindings,
-                                    )
-                                    .await
+                                let cancel = ego_core::turn::CancelToken::new();
+                                let admission = std::pin::pin!(controller.continue_run(
+                                    ContinueRequest::new(run_id, request_id, digest, revision, prompt),
+                                    bindings.with_cancel(cancel.clone()),
+                                ));
+                                match futures::future::select(&mut withdrawn, admission).await {
+                                    Either::Right((outcome, _)) => outcome,
+                                    Either::Left((_, admission)) => {
+                                        cancel.cancel(ego_core::event::domain::CancelCause::User);
+                                        let outcome = admission.await;
+                                        if outcome.is_err() {
+                                            sessions.refuse(&id, generation);
+                                            return responder.respond(v1::PromptResponse::new(v1::StopReason::Cancelled));
+                                        }
+                                        outcome
+                                    }
+                                }
                             }
                         };
                         let (subscription, execution, withdrawn) = match outcome {

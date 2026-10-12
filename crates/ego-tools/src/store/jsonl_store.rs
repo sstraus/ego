@@ -524,6 +524,20 @@ impl JsonlStore {
         }
     }
 
+    /// Open the immutable evidence CAS without leasing or replaying the session writer.
+    pub fn probe_evidence_store(
+        &self,
+        session: SessionId,
+        hard_cap: u64,
+    ) -> Result<super::SessionEvidenceStore, ego_core::store::evidence::EvidenceError> {
+        super::SessionEvidenceStore::unleased_with_io(
+            &self.root,
+            session,
+            hard_cap,
+            Arc::clone(&self.io),
+        )
+    }
+
     /// Conversational search is a derived cache beside the authoritative logs.
     pub fn history(self: &Arc<Self>) -> super::HistoryIndex {
         super::HistoryIndex::new(self.root.join("history.sqlite"), Arc::clone(self))
