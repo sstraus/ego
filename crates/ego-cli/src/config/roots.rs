@@ -33,7 +33,11 @@ pub(super) fn list(
         None => {
             out.line("No roots are stored; platform defaults or other configuration layers apply.")
         }
-        Some(_) => unreachable!("the roots key holds roots"),
+        Some(_) => {
+            return Err(RunTermination::Failed {
+                message: "roots listing received an unrelated stored value".into(),
+            });
+        }
     }
     Ok(())
 }
@@ -72,4 +76,50 @@ pub(super) fn receipt(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct WrongTypedStore;
+
+    impl UserConfigStore for WrongTypedStore {
+        fn snapshot(
+            &self,
+            target: UserConfigTarget,
+        ) -> Result<UserConfigSnapshot, ego_core::config::UserConfigError> {
+            Ok(UserConfigSnapshot {
+                target,
+                values: vec![(
+                    ManagedConfigKey::Roots,
+                    Some(ManagedConfigValue::parse(ManagedConfigKey::Bare, "true").unwrap()),
+                )],
+            })
+        }
+
+        fn rule_snapshot(
+            &self,
+            _: UserConfigTarget,
+        ) -> Result<ego_core::config::RuleSnapshot, ego_core::config::UserConfigError> {
+            Err(ego_core::config::UserConfigError::new("not used"))
+        }
+
+        fn mutate(
+            &self,
+            _: UserConfigMutation,
+        ) -> Result<UserConfigMutationResult, ego_core::config::UserConfigError> {
+            Err(ego_core::config::UserConfigError::new("not used"))
+        }
+    }
+
+    // Catches: an inconsistent port snapshot panics instead of reporting failure.
+    #[test]
+    fn wrong_typed_roots_snapshot_reports_failure_without_panicking() {
+        let out = Stdout::new(CancelToken::new());
+        let result = list(&WrongTypedStore, &UserConfigTarget::Base, false, &out);
+        assert!(
+            matches!(result, Err(RunTermination::Failed { message }) if message.contains("roots"))
+        );
+    }
 }
