@@ -1,5 +1,7 @@
 //! Bounded action-evidence request and strict response decoder for the auto-mode judge.
 
+mod context;
+
 use crate::digest::sha256_hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
