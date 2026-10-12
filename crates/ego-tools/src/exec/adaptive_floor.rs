@@ -129,4 +129,32 @@ mod tests {
             assert_eq!(blocks(&path, &policy), expected, "floor {suffix}");
         }
     }
+
+    // Catches: a Git control name added to the single list reaches only one of
+    // the two floor patterns, silently weakening the other floor.
+    #[test]
+    fn every_git_control_name_reaches_both_floor_patterns() {
+        let names: Vec<&str> = GIT_CONTROLS.iter().copied().chain(["extra-control"]).collect();
+        let control = regex::Regex::new(&format!("^{}", control_pattern(&names))).unwrap();
+        let boundary = regex::Regex::new(&format!("^{}", boundary_pattern(&names))).unwrap();
+        for name in &names {
+            for prefix in ["", "/modules/sub", "/worktrees/peer", "/modules/sub/worktrees/peer"] {
+                let path = format!("{prefix}/{name}");
+                assert!(control.is_match(&path), "control floor misses {path}");
+                assert!(control.is_match(&format!("{path}/inner")), "control floor misses {path}/inner");
+                assert!(!control.is_match(&format!("{path}-neighbor")), "control floor overreaches {path}-neighbor");
+            }
+            let directory = name.split_once('/').map_or(*name, |(head, _)| head);
+            assert!(boundary.is_match(&format!("/{directory}")), "boundary floor misses /{directory}");
+        }
+        assert!(!boundary.is_match("/ordinary"));
+    }
+
+    // Catches: the shipped patterns drift from GIT_CONTROLS (a hand-written
+    // alternation survives next to the list).
+    #[test]
+    fn shipped_floor_patterns_cover_the_shipped_control_list() {
+        assert_eq!(metadata_control(), control_pattern(&GIT_CONTROLS));
+        assert_eq!(metadata_boundary(), boundary_pattern(&GIT_CONTROLS));
+    }
 }
