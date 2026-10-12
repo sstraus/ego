@@ -33,6 +33,18 @@ impl SessionEvidenceStore {
         })
     }
 
+    pub(super) fn unleased_with_io(
+        sessions_root: &Path,
+        session: SessionId,
+        hard_cap: u64,
+        io: Arc<dyn StoreIo>,
+    ) -> Result<Self, EvidenceError> {
+        Ok(Self {
+            blobs: SessionBlobStore::unleased_with_io(sessions_root, session, hard_cap, io)
+                .map_err(evidence_error)?,
+        })
+    }
+
     pub(super) fn with_io(
         session_directory: PathBuf,
         hard_cap: u64,

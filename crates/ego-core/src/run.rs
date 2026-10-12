@@ -58,6 +58,9 @@ use crate::turn::AdmittedToolSource;
 
 mod readmission;
 
+/// Measured authority and its retained probe transcript.
+pub type RunExecutionObservation = (ExecObservation, Option<crate::store::evidence::EvidenceRef>);
+
 /// Borrowed future returned by run adapters at controller-owned boundaries.
 pub type RunFuture<'a, T> = BoxFuture<'a, T>;
 
@@ -1313,6 +1316,7 @@ pub struct RunExecutionBindings {
     budget_gate: Option<SharedBudgetGate>,
     effect_tools: Option<Arc<BTreeSet<String>>>,
     human: Option<Arc<dyn HumanApprover>>,
+    cancel: crate::turn::CancelToken,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     controls: Option<Arc<dyn crate::control::SessionControls>>,
     host: Option<crate::turn::HostClient>,
@@ -1333,11 +1337,22 @@ impl RunExecutionBindings {
             budget_gate: None,
             effect_tools: None,
             human: None,
+            cancel: crate::turn::CancelToken::new(),
             sandbox_grants: None,
             controls: None,
             host: None,
             interactive_control: None,
         }
+    }
+
+    /// Cancellation shared by admission measurement and the executing turn.
+    pub fn with_cancel(mut self, cancel: crate::turn::CancelToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    pub fn cancel(&self) -> crate::turn::CancelToken {
+        self.cancel.clone()
     }
 
     /// Transfer the sole turn coordinator's receiver to this execution.
@@ -1493,7 +1508,8 @@ pub trait RunExecutor: Send + Sync {
     fn execution_observation<'a>(
         &'a self,
         _prepared: &'a mut Self::Prepared,
-    ) -> BoxFuture<'a, Result<Option<ExecObservation>, RunExecutorError>> {
+        _cancel: crate::turn::CancelToken,
+    ) -> BoxFuture<'a, Result<Option<RunExecutionObservation>, RunExecutorError>> {
         Box::pin(async {
             Err(RunExecutorError::new(
                 "execution authority is not measurable",

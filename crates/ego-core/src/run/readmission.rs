@@ -45,9 +45,34 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
         let Some(old) = selections.sandbox_observation.as_ref() else {
             return Ok(selections.clone());
         };
-        let Some(observed) = self.executor.execution_observation(prepared).await? else {
+        let Some((observed, probe_evidence)) = self
+            .executor
+            .execution_observation(prepared, bindings.cancel())
+            .await?
+        else {
             return Err(RunExecutorError::new("execution authority is not measurable").into());
         };
+        if bindings.cancel().is_cancelled() {
+            return Err(RunExecutorError::new("execution observation cancelled").into());
+        }
+        let mut journal = crate::turn::Journal::new(
+            snapshot.run_id.session_id,
+            self.store.as_ref(),
+            self.clock.as_ref(),
+            &crate::sink::NullSink,
+            crate::event::id::Producer::Main,
+            state,
+        );
+        let turn = TurnId::new();
+        journal.append(
+            turn,
+            None,
+            None,
+            crate::event::domain::EventKind::ExecutionObserved {
+                observation: observed.clone(),
+                probe_evidence,
+            },
+        )?;
         if observed.same_measurement(old) {
             return Ok(selections.clone());
         }
@@ -70,15 +95,6 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
                 message.clone(),
                 CanonPath::new(snapshot.root.as_path()),
             );
-            let mut journal = crate::turn::Journal::new(
-                snapshot.run_id.session_id,
-                self.store.as_ref(),
-                self.clock.as_ref(),
-                &crate::sink::NullSink,
-                crate::event::id::Producer::Main,
-                state,
-            );
-            let turn = TurnId::new();
             let item = ItemId::new();
             let requested = journal.append(
                 turn,

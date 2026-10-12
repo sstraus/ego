@@ -224,6 +224,11 @@ fn readmission_cases() {
                 .unwrap()
                 .revision();
             *executor.execution_observation.lock().unwrap() = Some(observed.clone());
+            let transcript = ego_core::store::evidence::EvidenceRef {
+                id: ego_core::store::evidence::EvidenceId::try_from("a".repeat(64)).unwrap(),
+                bytes: 5,
+            };
+            *executor.probe_evidence.lock().unwrap() = Some(transcript.clone());
             let human = Arc::new(Human {
                 allow,
                 questions: Mutex::new(0),
@@ -243,6 +248,23 @@ fn readmission_cases() {
                     }
                 })
                 .collect();
+            let measurements: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind,
+                        ego_core::event::domain::EventKind::ExecutionObserved { .. }
+                    )
+                })
+                .collect();
+            assert_eq!(
+                measurements.len(),
+                1,
+                "{name}: probe observation not retained once"
+            );
+            assert!(matches!(&measurements[0].kind,
+                ego_core::event::domain::EventKind::ExecutionObserved { observation, probe_evidence }
+                if observation == &observed && probe_evidence.as_ref() == Some(&transcript)));
             let requests: Vec<_> = events
                 .iter()
                 .filter(|event| {

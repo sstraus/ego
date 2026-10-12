@@ -199,6 +199,7 @@ enum ExecutorCall {
 
 struct ScriptedRunExecutor {
     execution_observation: Mutex<Option<ego_core::permit::ExecObservation>>,
+    probe_evidence: Mutex<Option<ego_core::store::evidence::EvidenceRef>>,
     calls: Mutex<Vec<ExecutorCall>>,
     attachments: Mutex<VecDeque<Result<RunHandle, RunExecutorError>>>,
     recoveries: Mutex<VecDeque<Result<ego_core::run::RecoveryEvidence, RunExecutorError>>>,
@@ -257,6 +258,7 @@ impl ScriptedRunExecutor {
     fn with_sequence(sequence: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
             execution_observation: Mutex::new(None),
+            probe_evidence: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             attachments: Mutex::new(VecDeque::new()),
             recoveries: Mutex::new(VecDeque::new()),
@@ -418,12 +420,17 @@ impl RunExecutor for ScriptedRunExecutor {
     fn execution_observation<'a>(
         &'a self,
         _prepared: &'a mut Self::Prepared,
-    ) -> BoxFuture<'a, Result<Option<ego_core::permit::ExecObservation>, RunExecutorError>> {
+        _cancel: ego_core::turn::CancelToken,
+    ) -> BoxFuture<'a, Result<Option<ego_core::run::RunExecutionObservation>, RunExecutorError>>
+    {
         Box::pin(future::ready(Ok(self
             .execution_observation
             .lock()
             .unwrap()
-            .clone())))
+            .clone()
+            .map(|observation| {
+                (observation, self.probe_evidence.lock().unwrap().clone())
+            }))))
     }
 
     fn admit_run_context<'a>(
@@ -894,7 +901,12 @@ fn rewrite_transaction(
     let mut entries = store.entries.lock().expect("session entries");
     let entry = entries
         .get_mut(&session)
-        .and_then(|entries| entries.get_mut(index))
+        .and_then(|entries| {
+            entries
+                .iter_mut()
+                .filter(|entry| matches!(entry, SessionEntry::RunTransaction(_)))
+                .nth(index)
+        })
         .expect("transaction fixture entry");
     let SessionEntry::RunTransaction(transaction) = entry else {
         panic!("transaction fixture entry was an event");
