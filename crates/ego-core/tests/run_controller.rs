@@ -199,7 +199,6 @@ enum ExecutorCall {
 
 struct ScriptedRunExecutor {
     execution_observation: Mutex<Option<ego_core::permit::ExecObservation>>,
-    probe_evidence: Mutex<Option<ego_core::store::evidence::EvidenceRef>>,
     calls: Mutex<Vec<ExecutorCall>>,
     attachments: Mutex<VecDeque<Result<RunHandle, RunExecutorError>>>,
     recoveries: Mutex<VecDeque<Result<ego_core::run::RecoveryEvidence, RunExecutorError>>>,
@@ -258,7 +257,6 @@ impl ScriptedRunExecutor {
     fn with_sequence(sequence: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
             execution_observation: Mutex::new(None),
-            probe_evidence: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             attachments: Mutex::new(VecDeque::new()),
             recoveries: Mutex::new(VecDeque::new()),
@@ -417,6 +415,29 @@ impl ScriptedRunExecutor {
 impl RunExecutor for ScriptedRunExecutor {
     type Prepared = PreparedToken;
 
+    fn request_execution_policy_permission<'a>(
+        &'a self,
+        _prepared: &'a mut Self::Prepared,
+        _observation: ego_core::run::RunExecutionObservation,
+        question: Option<ego_core::permit::PermissionRequest>,
+        bindings: &'a RunExecutionBindings,
+    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
+        Box::pin(async move {
+            let Some(question) = question else {
+                return Ok(true);
+            };
+            let Some(human) = bindings.human() else {
+                return Ok(false);
+            };
+            Ok(matches!(
+                human
+                    .decide(ego_core::event::id::ItemId::new(), &question)
+                    .await,
+                ego_core::permit::PermissionDecision::Allow
+            ))
+        })
+    }
+
     fn execution_observation<'a>(
         &'a self,
         _prepared: &'a mut Self::Prepared,
@@ -428,9 +449,7 @@ impl RunExecutor for ScriptedRunExecutor {
             .lock()
             .unwrap()
             .clone()
-            .map(|observation| {
-                (observation, self.probe_evidence.lock().unwrap().clone())
-            }))))
+            .map(|observation| (observation, None)))))
     }
 
     fn admit_run_context<'a>(

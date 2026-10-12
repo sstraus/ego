@@ -1517,6 +1517,22 @@ pub trait RunExecutor: Send + Sync {
         })
     }
 
+    /// Persist the measured observation and, when required, ask for consent
+    /// under the adapter's existing session writer lease.
+    fn request_execution_policy_permission<'a>(
+        &'a self,
+        _prepared: &'a mut Self::Prepared,
+        _observation: RunExecutionObservation,
+        _question: Option<crate::permit::PermissionRequest>,
+        _bindings: &'a RunExecutionBindings,
+    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
+        Box::pin(async {
+            Err(RunExecutorError::new(
+                "execution re-admission journal is unavailable",
+            ))
+        })
+    }
+
     fn prepare<'a>(
         &'a self,
         request: &'a RunPreparation,
@@ -1926,7 +1942,6 @@ struct FoldedRun {
     admissions: Vec<AdmissionReceipt>,
     cancels: BTreeMap<RequestId, (RequestDigest, TurnLease)>,
     active: Option<ActiveLease>,
-    session_state: crate::state::SessionState,
 }
 
 #[derive(Clone)]
@@ -2166,12 +2181,7 @@ where
             });
         }
         let selections = self
-            .readmit_policy(
-                &folded.snapshot,
-                folded.session_state,
-                &mut prepared,
-                &bindings,
-            )
+            .readmit_policy(&folded.snapshot, &mut prepared, &bindings)
             .await?;
         let lease = TurnLease(self.ids.next_uuid());
         let revision = folded.snapshot.revision.next();
@@ -3085,17 +3095,12 @@ where
     async fn read_folded(&self, session: SessionId) -> Result<FoldedRun, RunError> {
         let mut stream = self.store.read(&session)?;
         let mut transactions = Vec::new();
-        let mut session_state = crate::state::SessionState::default();
         while let Some(entry) = stream.next().await {
-            match entry? {
-                SessionEntry::RunTransaction(transaction) => transactions.push(transaction),
-                SessionEntry::Event(event) => session_state.apply(&event),
-                _ => {}
+            if let SessionEntry::RunTransaction(transaction) = entry? {
+                transactions.push(transaction);
             }
         }
-        let mut folded = FoldedRun::from_transactions(transactions)?;
-        folded.session_state = session_state;
-        Ok(folded)
+        FoldedRun::from_transactions(transactions)
     }
 
     fn retained_receipt<'a>(
@@ -3510,7 +3515,6 @@ impl FoldedRun {
             snapshot,
             admissions,
             cancels,
-            session_state: crate::state::SessionState::default(),
             active,
         })
     }

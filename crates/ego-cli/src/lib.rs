@@ -62,3 +62,21 @@ pub(crate) mod skill;
 pub mod trust;
 pub mod usage;
 pub(crate) mod yaml_envelope;
+
+// Hosts the same child envelope as the production offline probe. The script
+// lets the cancellation regression hold a real probe until cancellation.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[test]
+#[ignore = "offline probe child host"]
+fn __ego_internal_network_probe_v1() {
+    if std::path::Path::new("readmission-probe.sh").exists() {
+        assert!(
+            std::process::Command::new("/bin/sh")
+                .arg("readmission-probe.sh")
+                .status()
+                .expect("scripted probe")
+                .success()
+        );
+    }
+    assert!(ego_tools::exec::dispatch_network_probe(std::env::args_os()).expect("probe envelope"));
+}

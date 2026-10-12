@@ -37,7 +37,6 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
     pub(super) async fn readmit_policy(
         &self,
         snapshot: &RunSnapshot,
-        state: crate::state::SessionState,
         prepared: &mut E::Prepared,
         bindings: &RunExecutionBindings,
     ) -> Result<RunSelections, RunError> {
@@ -55,25 +54,15 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
         if bindings.cancel().is_cancelled() {
             return Err(RunExecutorError::new("execution observation cancelled").into());
         }
-        let mut journal = crate::turn::Journal::new(
-            snapshot.run_id.session_id,
-            self.store.as_ref(),
-            self.clock.as_ref(),
-            &crate::sink::NullSink,
-            crate::event::id::Producer::Main,
-            state,
-        );
-        let turn = TurnId::new();
-        journal.append(
-            turn,
-            None,
-            None,
-            crate::event::domain::EventKind::ExecutionObserved {
-                observation: observed.clone(),
-                probe_evidence,
-            },
-        )?;
         if observed.same_measurement(old) {
+            self.executor
+                .request_execution_policy_permission(
+                    prepared,
+                    (observed, probe_evidence),
+                    None,
+                    bindings,
+                )
+                .await?;
             return Ok(selections.clone());
         }
         let automatic = observed.not_more_permissive_than(old);
@@ -90,42 +79,26 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
             .sink_factory
             .execution_policy_notice(&message)
             .map_err(RunExecutorError::new)?;
-        if !automatic {
-            let question = PermissionRequest::execution_policy_readmission(
-                message.clone(),
+        let question = (!automatic).then(|| {
+            PermissionRequest::execution_policy_readmission(
+                message,
                 CanonPath::new(snapshot.root.as_path()),
-            );
-            let item = ItemId::new();
-            let requested = journal.append(
-                turn,
-                Some(item),
-                None,
-                crate::event::domain::EventKind::PermissionRequested {
-                    tool: question.tool().to_owned(),
-                    escalation: question.why().clone(),
-                },
-            )?;
-            let decision = match bindings.human() {
-                Some(human) => Some(human.decide(item, &question).await),
-                None => None,
-            };
-            let allowed = matches!(decision, Some(crate::permit::PermissionDecision::Allow));
-            journal.append(
-                turn,
-                Some(item),
-                Some(requested),
-                crate::event::domain::EventKind::PermissionDecided {
-                    allowed: Some(allowed),
-                    by: decision.map(|_| Authority::Party),
-                    reason: Some(question.to_string()),
-                },
-            )?;
-            if !allowed {
-                return Err(RunExecutorError::new(
-                    "execution policy re-admission was denied; no effects started",
-                )
-                .into());
-            }
+            )
+        });
+        let allowed = self
+            .executor
+            .request_execution_policy_permission(
+                prepared,
+                (observed.clone(), probe_evidence),
+                question,
+                bindings,
+            )
+            .await?;
+        if !allowed {
+            return Err(RunExecutorError::new(
+                "execution policy re-admission was denied; no effects started",
+            )
+            .into());
         }
         let mut updated = selections.clone();
         updated.sandbox_readmission = Some(Box::new(PolicyReadmission {
