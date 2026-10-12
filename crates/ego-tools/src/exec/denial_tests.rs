@@ -9,10 +9,11 @@ fn adaptive_large_denial_preview_compiles_constant_patterns_once() {
         ToolContentBlock, ToolOutputEncoding, ToolOutputProvenance, ToolResult,
     };
     let root = tempfile::tempdir().unwrap();
-    let workspace = CanonPath::new(root.path());
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let workspace = CanonPath::new(&base);
     let controls = (0..8)
         .flat_map(|index| {
-            let metadata = root.path().join(format!("metadata-{index}"));
+            let metadata = base.join(format!("metadata-{index}"));
             [
                 CanonPath::new(metadata.join("config")),
                 CanonPath::new(metadata.join("hooks")),
@@ -27,7 +28,7 @@ fn adaptive_large_denial_preview_compiles_constant_patterns_once() {
             credentials: vec![],
             controls,
         });
-    let path = root.path().join("missing").display().to_string();
+    let path = base.join("missing").display().to_string();
     let spec = SpawnSpec::new(
         vec!["/bin/cat".into(), path.clone().into()],
         Some(workspace),
