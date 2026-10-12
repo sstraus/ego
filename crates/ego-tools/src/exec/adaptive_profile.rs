@@ -47,14 +47,14 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     // A captured Git root has config and hooks controls even when absent.
     // Cover nested submodules/worktrees beneath separately named metadata too.
     for root in floor::metadata_roots(perimeter) {
-        rooted_regex(&mut out, root, floor::METADATA_CONTROL)?;
+        rooted_regex(&mut out, root, floor::metadata_control())?;
     }
     out.push_str(")\n(deny file-write-unlink\n");
     // Protect structural boundaries from relocation, while leaving transient
     // operation directories and objects/refs cleanup available to Git.
     for root in floor::metadata_roots(perimeter) {
         out.push_str("  (require-all\n");
-        rooted_regex(&mut out, root, floor::METADATA_BOUNDARY)?;
+        rooted_regex(&mut out, root, floor::metadata_boundary())?;
         out.push_str("    (vnode-type DIRECTORY)\n    (require-not\n");
         rooted_regex(&mut out, root, floor::METADATA_MODULE_TRANSIENT)?;
         out.push_str("    ))\n");
