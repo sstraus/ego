@@ -27,7 +27,7 @@ pub(super) fn roots_command(printed: &str, confinement: &RunConfinement) -> Opti
     let (path, _) = canonical(Path::new(printed))?;
     let directory = CanonPath::new(path.as_path().parent()?);
     let workspace = confinement.workspace();
-    if directory.is_or_under(workspace) || too_broad(&directory, workspace.as_path()) {
+    if directory.is_or_under(workspace) || too_broad(&directory, confinement) {
         return None;
     }
     Some(format!(
