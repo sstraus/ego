@@ -8623,3 +8623,16 @@ fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
     assert!(!offers(&generations[0]), "off server still offered tools");
     assert!(offers(&generations[1]), "enabled server tools are absent");
 }
+
+/// Catches question completion rendering before the call receives timing.
+#[test]
+fn human_input_real_turn_does_not_render_duration_unavailable() {
+    let call = r#"{"prompt":"Pick a channel","mode":"single","options":[{"id":"yes","label":"Yes"}],"free_text":false}"#;
+    let (_, after_turn) = question_session(call, |input, reader, output| {
+        selector_screen(reader, output);
+        input.write_all(b"\r").expect("answer");
+        input.flush().expect("answer flush");
+    });
+    let shown = after_turn.join("\n");
+    assert!(!shown.contains("duration unavailable"), "{shown}");
+}
