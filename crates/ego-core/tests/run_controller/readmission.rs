@@ -500,3 +500,107 @@ fn missing_execution_observation_refuses_saved_authority_before_effects() {
         "unmeasured continuation ran effects"
     );
 }
+
+// Catches: overlapping continuations append permission events from stale journal sequences.
+#[test]
+fn overlapping_readmission_permissions_keep_the_session_event_sequence_unique() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct HeldHuman(Arc<AtomicBool>);
+    impl HumanApprover for HeldHuman {
+        fn decide<'a>(
+            &'a self,
+            _item: ItemId,
+            _question: &'a PermissionRequest,
+        ) -> BoxFuture<'a, PermissionDecision> {
+            Box::pin(future::poll_fn(move |_| {
+                if self.0.load(Ordering::SeqCst) {
+                    Poll::Ready(PermissionDecision::Allow)
+                } else {
+                    Poll::Pending
+                }
+            }))
+        }
+    }
+
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    executor.allow_effects();
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let policy = RunConfinement::new(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(fixture_root("overlapping-readmission").as_path()),
+    )
+    .unwrap();
+    let caps = Confinement::Workspace.required_caps();
+    let old = observation(&policy, "sandbox", caps, "1");
+    let wider = policy.clone().with_roots(vec![ProfileRoot::new(
+        CanonPath::new("/extra"),
+        RootAccess::ReadWrite,
+    )]);
+    let first = admitted_start(
+        &controller,
+        StartRequest::new(
+            RequestId::session_id(super::request(950)),
+            fixture_root("overlapping-readmission"),
+            super::request(950),
+            digest("first"),
+            selections().with_sandbox_observation(Confinement::Workspace, old),
+            "first",
+        ),
+    );
+    let run = first.run_id();
+    execute(&controller, first.into_execution());
+    *executor.execution_observation.lock().unwrap() =
+        Some(observation(&wider, "sandbox", caps, "2"));
+    let revision = store
+        .transactions(run.session_id())
+        .last()
+        .unwrap()
+        .revision();
+    let answered = Arc::new(AtomicBool::new(false));
+    let human = Arc::new(HeldHuman(Arc::clone(&answered)));
+    let mut left = Box::pin(controller.continue_run(
+        ContinueRequest::new(run, super::request(951), digest("left"), revision, "left"),
+        bindings().with_human(human.clone()),
+    ));
+    let mut right = Box::pin(controller.continue_run(
+        ContinueRequest::new(run, super::request(952), digest("right"), revision, "right"),
+        bindings().with_human(human),
+    ));
+    let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(left.as_mut().poll(&mut context).is_pending());
+    assert!(right.as_mut().poll(&mut context).is_pending());
+    answered.store(true, Ordering::SeqCst);
+    let (left, right) = futures::executor::block_on(future::join(left, right));
+    assert!(left.is_ok());
+    assert!(
+        right.is_err(),
+        "revision CAS must refuse the competing continuation"
+    );
+    let events: Vec<_> = futures::executor::block_on(async {
+        use futures::StreamExt;
+        store
+            .read(&run.session_id())
+            .unwrap()
+            .filter_map(|entry| async move {
+                match entry.unwrap() {
+                    SessionEntry::Event(event) => Some(event),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
+    });
+    for pair in events.windows(2) {
+        assert!(
+            pair[0].env.seq < pair[1].env.seq,
+            "overlapping re-admission corrupted durable event order: {:?} then {:?}",
+            pair[0].env.seq,
+            pair[1].env.seq
+        );
+    }
+}
