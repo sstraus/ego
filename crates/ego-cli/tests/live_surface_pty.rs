@@ -6346,7 +6346,8 @@ fn question_session(
             "--sandbox",
             "off",
         ])
-        .env("TERM", "xterm-256color");
+        .env("TERM", "xterm-256color")
+        .env("TUIC_SOCKET", "/nonexistent/tuic.sock");
     ego.file("AGENTS.md", "# question fixture\n");
     let (session, mut input, reader) = PtySession::start(&ego, ROWS, COLS, Some((ROWS, COLS)));
     let mut output = Vec::new();
@@ -6375,6 +6376,38 @@ fn selector_screen(reader: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) -> Ve
     until_from(reader, output, 0, b"Up/Down or number selects");
     drain_until_quiet(reader, output);
     screen_rows(output, 70, 120)
+}
+
+// Catches: model questions entering the modal without telling TUIC that human input is required.
+#[test]
+fn questions_in_a_tuic_pane_signal_awaiting_until_answered() {
+    for mode in ["single", "multiple", "free_text"] {
+        let free_text = mode == "free_text";
+        let call = serde_json::json!({
+            "prompt": "Host question",
+            "mode": mode,
+            "options": if free_text { serde_json::json!([]) } else {
+                serde_json::json!([{"id":"yes","label":"Yes"},{"id":"no","label":"No"}])
+            },
+            "free_text": free_text,
+        })
+        .to_string();
+        question_session(&call, |input, reader, output| {
+            until_normalized(reader, output, 0, "Host question");
+            drain_until_quiet(reader, output);
+            let before_answer = String::from_utf8_lossy(output);
+            assert!(
+                before_answer.contains("\x1b]7770;state=awaiting\x07"),
+                "{mode} question is visible but TUIC was never told it awaits input"
+            );
+            let answered = output.len();
+            input
+                .write_all(if free_text { b"answer\r" } else { b"1\r" })
+                .unwrap();
+            input.flush().unwrap();
+            until_from(reader, output, answered, b"\x1b]7770;state=busy\x07");
+        });
+    }
 }
 
 #[test]

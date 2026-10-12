@@ -327,7 +327,9 @@ pub(super) fn answer_control(
             request,
             reply,
         } => {
+            tell_host(surface.status, |osc, _| osc.state(State::Awaiting));
             let outcome = answer_question(editor, surface, &request);
+            tell_host(surface.status, |osc, _| osc.state(State::Busy));
             (Reply::Question(reply, outcome), EditPhase::Busy, true)
         }
         Control::Shutdown => return false,
