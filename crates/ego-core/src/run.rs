@@ -1488,24 +1488,17 @@ impl std::error::Error for RunExecutorError {}
 pub trait RunExecutor: Send + Sync {
     type Prepared: Any + Send + 'static;
 
-    /// Ask the existing human seat after durably journaling its request.
-    /// Adapters that cannot own a serialized permission journal refuse.
-    fn request_execution_policy_permission<'a>(
-        &'a self,
-        _prepared: &'a mut Self::Prepared,
-        _question: crate::permit::PermissionRequest,
-        _bindings: &'a RunExecutionBindings,
-    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
-        Box::pin(async { Ok(false) })
-    }
-
     /// Measure current authority without constructing user effect ports.
     /// The prepared executor must pin this measurement for its final check.
     fn execution_observation<'a>(
         &'a self,
         _prepared: &'a mut Self::Prepared,
     ) -> BoxFuture<'a, Result<Option<ExecObservation>, RunExecutorError>> {
-        Box::pin(async { Ok(None) })
+        Box::pin(async {
+            Err(RunExecutorError::new(
+                "execution authority is not measurable",
+            ))
+        })
     }
 
     fn prepare<'a>(
@@ -1917,6 +1910,7 @@ struct FoldedRun {
     admissions: Vec<AdmissionReceipt>,
     cancels: BTreeMap<RequestId, (RequestDigest, TurnLease)>,
     active: Option<ActiveLease>,
+    session_state: crate::state::SessionState,
 }
 
 #[derive(Clone)]
@@ -2156,7 +2150,12 @@ where
             });
         }
         let selections = self
-            .readmit_policy(&folded.snapshot, &mut prepared, &bindings)
+            .readmit_policy(
+                &folded.snapshot,
+                folded.session_state,
+                &mut prepared,
+                &bindings,
+            )
             .await?;
         let lease = TurnLease(self.ids.next_uuid());
         let revision = folded.snapshot.revision.next();
@@ -3070,12 +3069,17 @@ where
     async fn read_folded(&self, session: SessionId) -> Result<FoldedRun, RunError> {
         let mut stream = self.store.read(&session)?;
         let mut transactions = Vec::new();
+        let mut session_state = crate::state::SessionState::default();
         while let Some(entry) = stream.next().await {
-            if let SessionEntry::RunTransaction(transaction) = entry? {
-                transactions.push(transaction);
+            match entry? {
+                SessionEntry::RunTransaction(transaction) => transactions.push(transaction),
+                SessionEntry::Event(event) => session_state.apply(&event),
+                _ => {}
             }
         }
-        FoldedRun::from_transactions(transactions)
+        let mut folded = FoldedRun::from_transactions(transactions)?;
+        folded.session_state = session_state;
+        Ok(folded)
     }
 
     fn retained_receipt<'a>(
@@ -3490,6 +3494,7 @@ impl FoldedRun {
             snapshot,
             admissions,
             cancels,
+            session_state: crate::state::SessionState::default(),
             active,
         })
     }

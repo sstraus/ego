@@ -415,25 +415,6 @@ impl ScriptedRunExecutor {
 impl RunExecutor for ScriptedRunExecutor {
     type Prepared = PreparedToken;
 
-    fn request_execution_policy_permission<'a>(
-        &'a self,
-        _prepared: &'a mut Self::Prepared,
-        question: ego_core::permit::PermissionRequest,
-        bindings: &'a RunExecutionBindings,
-    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
-        Box::pin(async move {
-            let Some(human) = bindings.human() else {
-                return Ok(false);
-            };
-            Ok(matches!(
-                human
-                    .decide(ego_core::event::id::ItemId::new(), &question)
-                    .await,
-                ego_core::permit::PermissionDecision::Allow
-            ))
-        })
-    }
-
     fn execution_observation<'a>(
         &'a self,
         _prepared: &'a mut Self::Prepared,

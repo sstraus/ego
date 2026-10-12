@@ -37,6 +37,7 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
     pub(super) async fn readmit_policy(
         &self,
         snapshot: &RunSnapshot,
+        state: crate::state::SessionState,
         prepared: &mut E::Prepared,
         bindings: &RunExecutionBindings,
     ) -> Result<RunSelections, RunError> {
@@ -45,7 +46,7 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
             return Ok(selections.clone());
         };
         let Some(observed) = self.executor.execution_observation(prepared).await? else {
-            return Ok(selections.clone());
+            return Err(RunExecutorError::new("execution authority is not measurable").into());
         };
         if observed.same_measurement(old) {
             return Ok(selections.clone());
@@ -69,10 +70,40 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
                 message.clone(),
                 CanonPath::new(snapshot.root.as_path()),
             );
-            let allowed = self
-                .executor
-                .request_execution_policy_permission(prepared, question, bindings)
-                .await?;
+            let mut journal = crate::turn::Journal::new(
+                snapshot.run_id.session_id,
+                self.store.as_ref(),
+                self.clock.as_ref(),
+                &crate::sink::NullSink,
+                crate::event::id::Producer::Main,
+                state,
+            );
+            let turn = TurnId::new();
+            let item = ItemId::new();
+            let requested = journal.append(
+                turn,
+                Some(item),
+                None,
+                crate::event::domain::EventKind::PermissionRequested {
+                    tool: question.tool().to_owned(),
+                    escalation: question.why().clone(),
+                },
+            )?;
+            let decision = match bindings.human() {
+                Some(human) => Some(human.decide(item, &question).await),
+                None => None,
+            };
+            let allowed = matches!(decision, Some(crate::permit::PermissionDecision::Allow));
+            journal.append(
+                turn,
+                Some(item),
+                Some(requested),
+                crate::event::domain::EventKind::PermissionDecided {
+                    allowed: Some(allowed),
+                    by: decision.map(|_| Authority::Party),
+                    reason: Some(question.to_string()),
+                },
+            )?;
             if !allowed {
                 return Err(RunExecutorError::new(
                     "execution policy re-admission was denied; no effects started",

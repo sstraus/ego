@@ -232,6 +232,52 @@ fn readmission_cases() {
                 ContinueRequest::new(run, super::request(501), digest("second"), before, "second"),
                 bindings().with_human(human.clone()),
             ));
+            let entries = store.entries.lock().unwrap();
+            let events: Vec<_> = entries[&run.session_id()]
+                .iter()
+                .filter_map(|entry| {
+                    if let SessionEntry::Event(event) = entry {
+                        Some(event)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let requests: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind,
+                        ego_core::event::domain::EventKind::PermissionRequested { .. }
+                    )
+                })
+                .collect();
+            let decisions: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind,
+                        ego_core::event::domain::EventKind::PermissionDecided { .. }
+                    )
+                })
+                .collect();
+            assert_eq!(
+                requests.len(),
+                usize::from(asks),
+                "{name}: request not journaled once"
+            );
+            assert_eq!(
+                decisions.len(),
+                usize::from(asks),
+                "{name}: decision not journaled once"
+            );
+            if asks {
+                assert!(matches!(decisions[0].kind,
+                    ego_core::event::domain::EventKind::PermissionDecided {
+                        allowed: Some(value), by: Some(ego_core::permit::Authority::Party), ..
+                    } if value == allow));
+            }
+            drop(entries);
             assert_eq!(
                 *human.questions.lock().unwrap(),
                 usize::from(asks),
@@ -371,4 +417,64 @@ fn forged_readmission_transitions_are_rejected_before_any_effect() {
             before,
         );
     }
+}
+
+// Catches: an executor without measurement support silently re-admitting saved authority.
+#[test]
+fn missing_execution_observation_refuses_saved_authority_before_effects() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    executor.allow_effects();
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let policy = RunConfinement::new(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(fixture_root("unmeasured-policy").as_path()),
+    )
+    .unwrap();
+    let old = observation(
+        &policy,
+        "sandbox",
+        Confinement::Workspace.required_caps(),
+        "1",
+    );
+    let first = admitted_start(
+        &controller,
+        StartRequest::new(
+            RequestId::session_id(super::request(900)),
+            fixture_root("unmeasured-policy"),
+            super::request(900),
+            digest("first"),
+            selections().with_sandbox_observation(Confinement::Workspace, old),
+            "first",
+        ),
+    );
+    let run = first.run_id();
+    execute(&controller, first.into_execution());
+    let before = store
+        .transactions(run.session_id())
+        .last()
+        .unwrap()
+        .revision();
+    let answer = futures::executor::block_on(controller.continue_run(
+        ContinueRequest::new(run, super::request(901), digest("second"), before, "second"),
+        bindings(),
+    ));
+    assert!(
+        answer.is_err(),
+        "missing measurement silently admitted saved authority"
+    );
+    assert_eq!(
+        store
+            .transactions(run.session_id())
+            .last()
+            .unwrap()
+            .revision(),
+        before
+    );
+    assert_eq!(
+        executor.prepared_tokens().len(),
+        1,
+        "unmeasured continuation ran effects"
+    );
 }
