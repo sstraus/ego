@@ -248,7 +248,10 @@ fn refused_acp_widening_still_requires_consent_on_cli_resume() {
         }
         if frame["id"].as_u64() == Some(id) && frame.get("method").is_none() {
             assert!(asked, "ACP did not ask about the wider roots: {frame}");
-            assert!(frame["error"].is_object(), "denial must refuse the turn: {frame}");
+            assert!(
+                frame["error"].is_object(),
+                "denial must refuse the turn: {frame}"
+            );
             break;
         }
     }
@@ -257,7 +260,14 @@ fn refused_acp_widening_still_requires_consent_on_cli_resume() {
 
     let resumed = Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
         .subcommand("resume")
-        .args([session.as_str(), "--profile", "chat", "--output", "text", "next"])
+        .args([
+            session.as_str(),
+            "--profile",
+            "chat",
+            "--output",
+            "text",
+            "next",
+        ])
         .run();
     assert_ne!(
         resumed.code,
