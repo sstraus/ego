@@ -21,23 +21,29 @@ State is a **reduction over an append-only event log** (pi's reducer,
 `ARCHITECTURE.md` §3, generalised):
 
 ```
-SessionTitleChanged | SessionDeleted | PromptQueued |
-PromptDeliveryExpedited | UserPrompt | AssistantDelta |
-AssistantMessage | ReasoningDelta | ReasoningState | ToolCallStarted |
-ToolCallDelta | ToolCallMeasured | ToolCallCompleted | PermissionRequested | PermissionAmended |
-PermissionDecided | QuestionRequested | QuestionSettled | GenerationStarted |
-ExecutionObserved | AttemptSettled | UsageUpdated | UsageCorrected |
-ContextWindowUpdated | TurnCompleted | Compacted | Forked |
-CompactionSeeded | HookCatalogueAdmitted | HookLifecycleReached |
-HookInvocationStarted | HookInvocationSettled | SubagentRequested |
-SubagentSpawned | SubagentSettled | SkillCatalogueAdmitted |
-SkillInstructionAdmitted | SkillResourceAdmitted | Error
+SessionTitleChanged | SessionDeleted | SessionPauseRequested | SessionPaused |
+SessionPauseObserved | SessionResumed | GoalSet | GoalTransitioned |
+PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
+AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState |
+ToolCallStarted | ToolCallDelta | ToolCallCompleted | ToolCallMeasured |
+DetachedExecStarted | DetachedExecSettled | QuestionRequested |
+QuestionSettled | PermissionRequested | PermissionAmended |
+PermissionDecided | GenerationStarted | FallbackDecision | ExecutionObserved |
+ExecutionMeasured | JudgeResponse | SandboxResidualDecided | AttemptSettled |
+UsageUpdated | UsageCorrected | ContextWindowUpdated | TurnCompleted |
+CompactionSeeded | Compacted | Forked | HookCatalogueAdmitted |
+HookLifecycleReached | HookInvocationStarted | HookInvocationSettled |
+SubagentRequested | SubagentSpawned | SubagentSettled |
+SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
+Error
 ```
 
-Thirty-eight in the current schema, and this list is exhaustive by contract.
+52 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-thirty-eight, including the session-metadata, question, hook, subagent, skill,
-and clean-session compaction lifecycles.
+52, including the session-metadata, pause and goal, question, detached-exec,
+hook, subagent, skill, and clean-session compaction lifecycles.
+`ExecutionObserved` records an admitted execution authority.
+`ExecutionMeasured` records a capability measurement as evidence only (§3.4).
 The enum and this list are compared by hand at each milestone close.
 regression case added the durable display-name and soft-delete transitions listed
 above. M5 further extends the same event log for durable goal transitions; the
@@ -382,6 +388,23 @@ handled-rights); **Seatbelt on macOS** via generated profile + `sandbox-exec`
 v1 (honestly labelled: no confinement); rootless OCI containers post-v1.
 Approval frequency keys on **per-operation demonstrated capability**, never on
 a backend's name; a requested-but-unavailable guarantee fails closed (R2).
+
+Levels, narrowest first: `ro`, `workspace`, `adaptive`, `off`. `adaptive` is
+the default where the backend demonstrates it (macOS Seatbelt today); elsewhere
+a fresh session selects `workspace`. An explicit level keeps its meaning and no
+saved config is rewritten. `adaptive` reads and executes broadly, because a
+usable sandbox is a permissive one, but the credential floors (SSH, AWS, GnuPG,
+netrc, keychains, browser profiles, provider and ego credentials, `.env*`
+outside the workspace) stay closed. Writes reach the workspace, the configured
+roots and a toolchain set (Cargo, rustup, mbx cache, git common directory,
+`TMPDIR`, pnpm and npm caches) that the host captures from the operator
+environment before any child runs (`AdaptivePerimeter`). A write outside that
+perimeter is a residual write. In permission mode `auto` with a configured
+judge, the same judge may open that one path for the session
+(`SandboxResidualDecided`); with `permissions.judge = "none"`, in another mode,
+or when the judge gives no opinion, the human is asked; headless ⇒ exit 3. No
+rule, judge or human grant lifts a floor. Permission mode and sandbox level are
+independent. See the 2026-10-10 sandbox-auto ADR.
 The transport structurally supporting an authorized opaque foreign tool is not
 a second user decision: its exact route or process remains permit-bound, while
 the tool's unobservable downstream effects are outside Ego's confinement.
