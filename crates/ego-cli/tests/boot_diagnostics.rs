@@ -363,7 +363,7 @@ fn assert_durable_observation(home: &Path, session_id: &str) {
         )
     });
     assert!(
-        events.contains("ExecutionObserved"),
+        events.contains("ExecutionMeasured"),
         "observation was not durable: {events}"
     );
 }

@@ -378,7 +378,7 @@ async fn initialize_once(
                 turn,
                 None,
                 None,
-                EventKind::ExecutionObserved {
+                EventKind::ExecutionMeasured {
                     observation: observation.clone(),
                     probe_evidence: probe_evidence.clone(),
                 },

@@ -461,8 +461,13 @@ pub enum EventKind {
         candidate: crate::config::ModelRef,
         decision: FallbackDecision,
     },
-    /// The process backend evidence captured before any turn action.
+    /// The process backend evidence for an admitted execution authority.
     ExecutionObserved {
+        observation: ExecObservation,
+        probe_evidence: Option<crate::store::evidence::EvidenceRef>,
+    },
+    /// A capability measurement, retained as evidence without admitting authority.
+    ExecutionMeasured {
         observation: ExecObservation,
         probe_evidence: Option<crate::store::evidence::EvidenceRef>,
     },
@@ -683,7 +688,8 @@ impl EventKind {
     pub fn blob_references(&self) -> Vec<BlobRef> {
         let mut references = Vec::new();
         match self {
-            Self::ExecutionObserved { probe_evidence, .. } => {
+            Self::ExecutionObserved { probe_evidence, .. }
+            | Self::ExecutionMeasured { probe_evidence, .. } => {
                 references.extend(probe_evidence.iter().map(|evidence| evidence.blob_ref()));
             }
             Self::PromptQueued { images, .. } | Self::UserPrompt { images, .. } => {
@@ -786,6 +792,7 @@ impl EventKind {
             EventKind::GenerationStarted { .. } => "generation_started",
             EventKind::FallbackDecision { .. } => "fallback_decision",
             EventKind::ExecutionObserved { .. } => "execution_observed",
+            EventKind::ExecutionMeasured { .. } => "execution_measured",
             EventKind::JudgeResponse { .. } => "judge_response",
             EventKind::SandboxResidualDecided { .. } => "sandbox_residual_decided",
             EventKind::AttemptSettled { .. } => "attempt_settled",

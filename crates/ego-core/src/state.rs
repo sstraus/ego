@@ -1066,7 +1066,7 @@ impl QueuedPrompt {
 /// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
-    /// Latest measured execution authority, reduced from the durable session log.
+    /// Latest admitted execution authority, reduced from the durable session log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_observation: Option<crate::permit::ExecObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2048,6 +2048,7 @@ impl SessionState {
             EventKind::ExecutionObserved { observation, .. } => {
                 self.execution_observation = Some(observation.clone());
             }
+            EventKind::ExecutionMeasured { .. } => {}
             EventKind::JudgeResponse { .. } | EventKind::SandboxResidualDecided { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {

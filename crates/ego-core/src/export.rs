@@ -285,6 +285,10 @@ pub enum ExportEvent {
         observation: ExecObservation,
         probe_evidence: Option<crate::store::evidence::EvidenceRef>,
     },
+    ExecutionMeasured {
+        observation: ExecObservation,
+        probe_evidence: Option<crate::store::evidence::EvidenceRef>,
+    },
     JudgeResponse {
         attempt: AttemptRef,
         bytes: usize,
@@ -1013,6 +1017,13 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             observation,
             probe_evidence,
         } => ExportEvent::ExecutionObserved {
+            observation: observation.clone(),
+            probe_evidence: probe_evidence.clone(),
+        },
+        EventKind::ExecutionMeasured {
+            observation,
+            probe_evidence,
+        } => ExportEvent::ExecutionMeasured {
             observation: observation.clone(),
             probe_evidence: probe_evidence.clone(),
         },
