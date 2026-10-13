@@ -659,13 +659,13 @@ impl<'a> Tools<'a> {
             })
     }
 
-    pub(crate) fn revalidate_processes(&self, call: &PreparedCall) -> Result<(), String> {
+    pub(crate) fn revalidate_processes(
+        &self,
+        call: &PreparedCall,
+    ) -> Result<(), crate::permit::ProcessError> {
         for op in call.ops() {
             if let Op::Spawn { spec } = op {
-                self.effects
-                    .process
-                    .revalidate(spec)
-                    .map_err(|error| error.to_string())?;
+                self.effects.process.revalidate(spec)?;
             }
         }
         Ok(())

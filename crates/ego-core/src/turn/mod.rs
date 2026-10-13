@@ -5322,9 +5322,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     }
                 }
             };
-            if let Err(diagnostic) = self.tools.revalidate_processes(authorized.call()) {
-                if identity_refreshes == 1 {
-                    return Ok(answered(false, diagnostic));
+            if let Err(error) = self.tools.revalidate_processes(authorized.call()) {
+                // A fresh capture cannot supply a missing program; asking the
+                // human again for it would only repeat the refusal.
+                if identity_refreshes == 1
+                    || matches!(error, crate::permit::ProcessError::Launch { .. })
+                {
+                    return Ok(answered(false, error.to_string()));
                 }
                 identity_refreshes += 1;
                 prepared = match self.tools.refresh_processes(authorized.into_parts().0) {

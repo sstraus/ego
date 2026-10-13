@@ -109,10 +109,14 @@ pub(super) fn require_launchable(program: &OsStr, spec: &SpawnSpec) -> Result<()
     let env = super::backend::environment(spec)?;
     match resolve(program, &cwd, &env) {
         Some(_) => Ok(()),
-        None => Err(ProcessError::Launch {
-            executable: program.to_owned(),
-            reason: "no executable file at the named path or on PATH".into(),
-        }),
+        None => Err(not_found(program)),
+    }
+}
+
+fn not_found(program: &OsStr) -> ProcessError {
+    ProcessError::Launch {
+        executable: program.to_owned(),
+        reason: "program not found: no executable file at the named path or on PATH".into(),
     }
 }
 
@@ -396,10 +400,15 @@ pub(super) fn revalidate(spec: &SpawnSpec) -> Result<(), ProcessError> {
         ));
     }
     let environment = super::backend::environment(spec)?;
-    let named = resolve(&spec.argv()[0], cwd.as_path(), &environment);
-    if !identity.files.first().is_some_and(|file| {
-        file.resolved == identity.target && named.as_deref() == Some(file.named.as_path())
-    }) {
+    // Nothing to launch is a missing program, not a changed authority.
+    let Some(named) = resolve(&spec.argv()[0], cwd.as_path(), &environment) else {
+        return Err(not_found(&spec.argv()[0]));
+    };
+    if !identity
+        .files
+        .first()
+        .is_some_and(|file| file.resolved == identity.target && named == file.named.as_path())
+    {
         return Err(ProcessError::Invariant(
             "execution target no longer matches its captured authority; no process was launched"
                 .into(),
@@ -527,6 +536,50 @@ mod tests {
         forged.files = vec![hash_file(&other).unwrap()];
         let env = captured.env_policy().clone();
         assert!(revalidate(&captured.with_execution_identity(env, forged)).is_err());
+    }
+
+    // Catches: every failed revalidation reported as a missing program, so a
+    // target that exists but now resolves elsewhere loses the authority refusal.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_shadowed_after_capture_keeps_the_authority_refusal() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let (early, late) = (
+            directory.path().join("early"),
+            directory.path().join("late"),
+        );
+        for root in [&early, &late] {
+            fs::create_dir(root).unwrap();
+        }
+        let install = |path: &Path| {
+            fs::write(path, b"tool").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        install(&late.join("tool"));
+        let env = EnvPolicy::exact(vec![
+            ExplicitEnvBinding::from_native(
+                EnvName::new("PATH").unwrap(),
+                std::env::join_paths([&early, &late]).unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let spec = SpawnSpec::new(
+            vec!["tool".into()],
+            Some(CanonPath::new(directory.path())),
+            None,
+            env,
+        )
+        .unwrap();
+        let captured = capture(&spec).unwrap();
+        assert!(revalidate(&captured).is_ok());
+        install(&early.join("tool"));
+        let refusal = revalidate(&captured).unwrap_err().to_string();
+        assert!(
+            refusal.contains("no longer matches its captured authority"),
+            "{refusal}"
+        );
     }
 
     #[cfg(unix)]
