@@ -77,7 +77,7 @@ The first `ego roots add` writes an explicit list and replaces implicit
 `~/Gits` access. Removing all stored roots leaves an explicit empty list. Use
 `ego config unset roots` to restore absence. Extra execution grants require
 `exec_paths` in the user/system file or invocation flags; `ego roots` cannot
-express them. Use `ego config edit` to edit `exec_paths`. Restart or resume the
+express them. Use `ego config set 'exec_paths=["/absolute/path"]'` to edit `exec_paths`. Restart or resume the
 session to apply changed perimeter settings.
 
 Extra roots use canonical paths; conflicting nested read-only/read-write roots
@@ -111,9 +111,15 @@ The CLI managed key set is intentionally smaller than the full file schema:
 
 | Target | Keys accepted by `config set/get/unset` |
 | --- | --- |
-| User base | `model`, `thinking`, `mode`, `sandbox`, `roots`, `budget`, `bare`, `permissions.judge`, `ui.statusline.segments`, `exec.env`, `exec.env_allowlist`, `network` |
-| User profile | Same minus `bare` and `ui.statusline.segments` |
+| User base | `model`, `thinking`, `mode`, `sandbox`, `roots`, `exec_paths`, `budget`, `bare`, `permissions.judge`, `ui.statusline.segments`, `exec.env`, `exec.env_allowlist`, `network`, `auth.PROVIDER.headers`, `auth.PROVIDER.credential_command` |
+| User profile | Same minus `bare`, `ui.statusline.segments`, and both `auth.PROVIDER.*` keys |
 | User `ci` profile | Profile keys plus `session_dir`, `artifact_dir` |
+
+Authentication edits replace the selected provider's complete headers map or
+credential command. They are base-only. `config ls`, `config get`, and mutation
+receipts show `<redacted>` for both fields, including JSON output. Header names
+and values use the same validation as file edits; forbidden overrides fail
+without publishing a change.
 
 Use `config edit` for other file fields; it selects `VISUAL`, then `EDITOR`,
 creates a private sibling candidate, and validates the complete TOML before

@@ -81,14 +81,14 @@ impl UserConfigMutation {
         match self {
             Self::Root { .. } => Ok(()),
             Self::ManagedSet { target, key, value } => {
-                validate_managed_target_key(target, *key)?;
-                if !managed_value_matches_key(*key, value) {
+                validate_managed_target_key(target, key.clone())?;
+                if !managed_value_matches_key(key.clone(), value) {
                     return Err(UserConfigError::new(format!(
                         "managed configuration key `{key}` received a value of the wrong type"
                     )));
                 }
                 let canonical = value.to_toml();
-                let reparsed = ManagedConfigValue::parse(*key, &canonical).map_err(|error| {
+                let reparsed = ManagedConfigValue::parse(key.clone(), &canonical).map_err(|error| {
                     UserConfigError::new(format!(
                         "managed configuration key `{key}` cannot store its typed value: {error}"
                     ))
@@ -100,7 +100,7 @@ impl UserConfigMutation {
                 }
                 Ok(())
             }
-            Self::ManagedUnset { target, key } => validate_managed_target_key(target, *key),
+            Self::ManagedUnset { target, key } => validate_managed_target_key(target, key.clone()),
             Self::Statusline { segments } => {
                 validate_status_segment_names(segments).map_err(UserConfigError::new)
             }
@@ -173,10 +173,10 @@ impl UserConfigMutation {
                 access: *access,
             },
             Self::ManagedSet { key, value, .. } => UserConfigMutationFacts::Set {
-                key: *key,
+                key: key.clone(),
                 value: value.clone(),
             },
-            Self::ManagedUnset { key, .. } => UserConfigMutationFacts::Unset { key: *key },
+            Self::ManagedUnset { key, .. } => UserConfigMutationFacts::Unset { key: key.clone() },
             Self::ModelAndThinking { model, thinking } => {
                 UserConfigMutationFacts::ModelAndThinking {
                     model: model.clone(),
@@ -213,7 +213,7 @@ fn validate_managed_target_key(
     target: &UserConfigTarget,
     key: ManagedConfigKey,
 ) -> Result<(), UserConfigError> {
-    if ManagedConfigKey::for_target(target.clone()).contains(&key) {
+    if key.available_in(target) {
         return Ok(());
     }
     let target = match target {
@@ -229,6 +229,18 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
     matches!(
         (key, value),
         (ManagedConfigKey::Roots, ManagedConfigValue::Roots(_))
+            | (
+                ManagedConfigKey::ExecPaths,
+                ManagedConfigValue::ExecPaths(_)
+            )
+            | (
+                ManagedConfigKey::AuthHeaders(_),
+                ManagedConfigValue::AuthHeaders(_)
+            )
+            | (
+                ManagedConfigKey::AuthCredentialCommand(_),
+                ManagedConfigValue::AuthCredentialCommand(_)
+            )
             | (ManagedConfigKey::Model, ManagedConfigValue::Model(_))
             | (ManagedConfigKey::Thinking, ManagedConfigValue::Thinking(_))
             | (ManagedConfigKey::Mode, ManagedConfigValue::Mode(_))

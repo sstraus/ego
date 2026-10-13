@@ -457,3 +457,6 @@ fn roots_commands_update_exact_user_target_without_erasing_other_settings() {
         before_invalid
     );
 }
+
+#[path = "config_management_cli/auth_exec_paths.rs"]
+mod auth_exec_paths;

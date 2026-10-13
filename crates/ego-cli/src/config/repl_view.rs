@@ -193,7 +193,7 @@ pub(crate) fn saved_override(
         return None;
     };
     if !matches!(
-        key.as_str(),
+        key.as_str().as_ref(),
         "model"
             | "thinking"
             | "mode"
@@ -226,7 +226,7 @@ pub(crate) fn saved_override(
         .active_profile
         .as_ref()
         .map(|profile| profile.name.as_str());
-    let declarations = declarations(key.as_str(), profile, &ordered);
+    let declarations = declarations(&key.as_str(), profile, &ordered);
     declarations
         .into_iter()
         .rev()

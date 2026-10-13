@@ -10,8 +10,8 @@ fn managed_set_and_unset_carry_one_typed_target_and_key() {
     let key = ManagedConfigKey::Model;
     let set = UserConfigMutation::ManagedSet {
         target: target.clone(),
-        key,
-        value: ManagedConfigValue::parse(key, "'provider/model'").unwrap(),
+        key: key.clone(),
+        value: ManagedConfigValue::parse(key.clone(), "'provider/model'").unwrap(),
     };
     let unset = UserConfigMutation::ManagedUnset { target, key };
     let UserConfigMutation::ManagedSet {

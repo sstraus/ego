@@ -88,7 +88,7 @@ impl UserConfigStore for RecordingStore {
         Ok(UserConfigSnapshot {
             values: ManagedConfigKey::for_target(target.clone())
                 .iter()
-                .copied()
+                .cloned()
                 .map(|key| (key, None))
                 .collect(),
             target,

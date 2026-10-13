@@ -147,9 +147,9 @@ async fn execute_inner(
                     message: format!("config key `{key}` is absent from the selected user target"),
                 })?;
             if *json {
-                render_json(target, std::iter::once((*key, Some(value))), out)?;
+                render_json(target, std::iter::once((key.clone(), Some(value))), out)?;
             } else {
-                out.line(&value.to_toml());
+                out.line(&display_managed_value(key, &value));
             }
         }
         ConfigAction::List { target, json } => {
@@ -178,7 +178,7 @@ async fn execute_inner(
                     out.line(&format!(
                         "{}\t{}",
                         key.as_str(),
-                        escape_field(&value.to_toml())
+                        escape_field(&display_managed_value(&key, &value))
                     ));
                 }
             }
@@ -201,14 +201,14 @@ async fn execute_inner(
             );
         }
         ConfigAction::Set { target, key, value } => {
-            let result = set_managed(&store, target.clone(), *key, value.clone())?;
+            let result = set_managed(&store, target.clone(), key.clone(), value.clone())?;
             render_receipt(result, out)?;
         }
         ConfigAction::Unset { target, key } => {
             let result = store
                 .mutate(UserConfigMutation::ManagedUnset {
                     target: target.clone(),
-                    key: *key,
+                    key: key.clone(),
                 })
                 .map_err(store_failure)?;
             render_receipt(result, out)?;
@@ -442,6 +442,17 @@ fn store_failure(error: impl std::fmt::Display) -> RunTermination {
     }
 }
 
+fn display_managed_value(
+    key: &ego_core::config::ManagedConfigKey,
+    value: &ManagedConfigValue,
+) -> String {
+    if key.is_secret() {
+        "<redacted>".to_owned()
+    } else {
+        value.to_toml()
+    }
+}
+
 fn render_json(
     target: &UserConfigTarget,
     values: impl IntoIterator<
@@ -456,6 +467,7 @@ fn render_json(
     for (key, value) in values {
         let json =
             match value {
+                Some(_) if key.is_secret() => serde_json::Value::String("<redacted>".into()),
                 Some(value) => {
                     let toml = value.to_toml().parse::<toml::Value>().map_err(|_| {
                         RunTermination::Failed {
@@ -468,7 +480,7 @@ fn render_json(
                 }
                 None => serde_json::Value::Null,
             };
-        let key = serde_json::to_string(key.as_str()).expect("a string is always valid JSON");
+        let key = serde_json::to_string(&key.as_str()).expect("a string is always valid JSON");
         let value = serde_json::to_string(&json).map_err(|error| RunTermination::Failed {
             message: format!("config value could not be rendered: {error}"),
         })?;
@@ -510,7 +522,10 @@ fn receipt_text(
                 path.display()
             ),
         ),
-        UserConfigMutationFacts::Set { key, value } => (key, value.to_toml()),
+        UserConfigMutationFacts::Set { key, value } => {
+            let rendered = display_managed_value(&key, &value);
+            (key, rendered)
+        }
         UserConfigMutationFacts::Unset { key } => (key, "<absent>".to_owned()),
         _ => {
             return Err(RunTermination::Failed {
@@ -1411,8 +1426,12 @@ pub(crate) fn repl_set_on(
             message: "expected a config set action".into(),
         });
     };
-    let (mut receipt, warning) =
-        receipt_text(set_managed(store, target.clone(), *key, value.clone())?)?;
+    let (mut receipt, warning) = receipt_text(set_managed(
+        store,
+        target.clone(),
+        key.clone(),
+        value.clone(),
+    )?)?;
     if let Some(warning) = warning {
         receipt.push_str(&format!("\n{warning}"));
     }

@@ -71,6 +71,7 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
         (ManagedConfigKey::Network, "network"),
         (ManagedConfigKey::Roots, "roots"),
+        (ManagedConfigKey::ExecPaths, "exec_paths"),
     ];
     let profile = [
         (ManagedConfigKey::Model, "model"),
@@ -83,6 +84,7 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
         (ManagedConfigKey::Network, "network"),
         (ManagedConfigKey::Roots, "roots"),
+        (ManagedConfigKey::ExecPaths, "exec_paths"),
     ];
     let ci = [
         (ManagedConfigKey::Model, "model"),
@@ -97,6 +99,7 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
         (ManagedConfigKey::Network, "network"),
         (ManagedConfigKey::Roots, "roots"),
+        (ManagedConfigKey::ExecPaths, "exec_paths"),
     ];
     for (key, spelling) in base.iter().chain(profile.iter()).chain(ci.iter()) {
         assert_eq!(key.as_str(), *spelling);
@@ -185,7 +188,7 @@ fn managed_values_parse_to_existing_strong_types_and_canonical_toml() {
         ),
     ];
     for (key, raw, canonical, expected) in cases {
-        let value = ManagedConfigValue::parse(key, raw).unwrap();
+        let value = ManagedConfigValue::parse(key.clone(), raw).unwrap();
         assert_eq!(value, expected, "{key:?}");
         assert_eq!(value.to_toml(), canonical, "{key:?}");
     }
@@ -214,7 +217,7 @@ fn managed_values_parse_to_existing_strong_types_and_canonical_toml() {
         (ManagedConfigKey::Bare, "[true]"),
     ] {
         assert!(
-            ManagedConfigValue::parse(key, raw).is_err(),
+            ManagedConfigValue::parse(key.clone(), raw).is_err(),
             "{key:?}: {raw}"
         );
     }
