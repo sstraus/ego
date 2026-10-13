@@ -344,3 +344,59 @@ fn every_v3_attack_path_fails_the_recheck_under_a_forced_write() {
     assert_eq!(opened, PROMPT_ONLY);
     assert!(desk.grants().is_empty());
 }
+
+// Catches: automatic residual grants overwrite the operator's agent instructions.
+#[test]
+fn adaptive_judge_cannot_overwrite_agent_instruction_files() {
+    let Some(root) =
+        isolated("adaptive_residual::adaptive_judge_cannot_overwrite_agent_instruction_files")
+    else {
+        return;
+    };
+    let files = [
+        ".codex/ORCHESTRATION.md",
+        ".claude/CLAUDE.md",
+        "Gits/other/AGENTS.md",
+        "Gits/other/CLAUDE.md",
+    ];
+    for file in files {
+        let path = root.join("home").join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "operator instructions").unwrap();
+    }
+    let policy = admit(&root.join("workspace")).unwrap();
+    let desk = ResidualWriteDesk::new();
+    let _heard = serve(
+        &desk,
+        Box::new(
+            |request| match (request.admissible)(&request.evidence.candidate) {
+                Ok(()) => grant()(request),
+                Err(reason) => ResidualDecision::Refused { reason },
+            },
+        ),
+    );
+    for file in files {
+        let script = format!("printf changed > \"$HOME/{file}\"");
+        // First attempt may obtain a grant; the second observes its authority.
+        for _ in 0..2 {
+            let _ = execute_with_desk(
+                policy.clone(),
+                &root,
+                shell(&script),
+                None,
+                Some(desk.clone()),
+            );
+        }
+    }
+    let overwritten: Vec<_> = files
+        .into_iter()
+        .filter(|file| {
+            std::fs::read_to_string(root.join("home").join(file)).unwrap()
+                != "operator instructions"
+        })
+        .collect();
+    assert!(
+        overwritten.is_empty(),
+        "judge overwrote agent instruction files: {overwritten:?}"
+    );
+}
