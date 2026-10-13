@@ -374,7 +374,7 @@ fn execution_observation_and_backend_identity_are_serde_values_without_authority
 }
 
 #[test]
-fn execution_observed_is_additive_internal_noop_and_has_no_public_projection() {
+fn execution_observed_only_records_saved_authority_and_has_no_public_projection() {
     let observation = ExecObservation::new(
         BackendIdentity::new("null", "test"),
         ExecCaps::empty(),
@@ -409,11 +409,16 @@ fn execution_observed_is_additive_internal_noop_and_has_no_public_projection() {
     let mut before = serde_json::to_value(SessionState::default()).unwrap();
     let mut state = SessionState::default();
     state.apply(&event);
+    assert_eq!(state.execution_observation.as_ref(), Some(&observation));
     let mut after = serde_json::to_value(&state).unwrap();
     // Every domain event advances the replay cursor and records its id.
-    // ExecutionObserved must not alter any semantic session field.
+    // ExecutionObserved alters no semantic field except the saved authority.
     before.as_object_mut().unwrap().remove("known_events");
     after.as_object_mut().unwrap().remove("known_events");
+    after
+        .as_object_mut()
+        .unwrap()
+        .remove("execution_observation");
     assert_eq!(after, before);
 }
 

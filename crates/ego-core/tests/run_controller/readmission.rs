@@ -578,5 +578,5 @@ fn overlapping_core_readmission_has_one_journal_authority() {
             .windows(2)
             .all(|pair| pair[0].env.seq < pair[1].env.seq)
     );
-    assert_eq!(events[2].env.parent, Some(events[1].env.id));
+    assert_eq!(events[1].env.parent, Some(events[0].env.id));
 }

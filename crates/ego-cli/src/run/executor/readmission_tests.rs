@@ -204,21 +204,21 @@ fn overlapping_readmission_permissions_keep_the_session_event_sequence_unique() 
             );
             assert!(matches!(
                 events[0].kind,
-                ego_core::event::domain::EventKind::ExecutionObserved { .. }
-            ));
-            assert!(matches!(
-                events[1].kind,
                 ego_core::event::domain::EventKind::PermissionRequested { .. }
             ));
             assert!(matches!(
-                events[2].kind,
+                events[1].kind,
                 ego_core::event::domain::EventKind::PermissionDecided {
                     allowed: Some(true),
                     by: Some(ego_core::permit::Authority::Party),
                     ..
                 }
             ));
-            assert_eq!(events[2].env.parent, Some(events[1].env.id));
+            assert!(matches!(
+                events[2].kind,
+                ego_core::event::domain::EventKind::ExecutionObserved { .. }
+            ));
+            assert_eq!(events[1].env.parent, Some(events[0].env.id));
             for pair in events.windows(2) {
                 assert!(
                     pair[0].env.seq < pair[1].env.seq,
