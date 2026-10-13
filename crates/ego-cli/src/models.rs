@@ -243,6 +243,14 @@ pub async fn build_catalogue_snapshot(
             &mut models,
             &mut sources,
         );
+        // Only OpenRouter resolves user `models.toml` rows at run time, so only its
+        // listing may show them; elsewhere they would list facts the run ignores.
+        if row.id() == "openrouter" {
+            let supplied = catalogue
+                .enumerate_hosted(row.id(), None)
+                .map_err(|message| RunTermination::Failed { message })?;
+            overlay_supplied(supplied.models(), missing_credential.as_ref(), &mut models);
+        }
     }
 
     Ok(ModelCatalogueSnapshot::from_entries_and_sources(
@@ -584,6 +592,31 @@ fn project_cached(
             .cloned()
             .unwrap_or_else(|| failure.map_or(ModelAvailability::Available, discovery_unavailable)),
     });
+}
+
+/// Operator-supplied rows stand over what a provider's listing states: they
+/// replace a listed model's facts and add a model the listing lacks.
+fn overlay_supplied(
+    supplied: &[ego_ai::catalogue::ModelDiscoveryEntry],
+    credential_unavailability: Option<&ModelAvailability>,
+    models: &mut Vec<ModelCatalogueEntry>,
+) {
+    for entry in supplied {
+        let overlaid = ModelCatalogueEntry {
+            slug: entry.slug.clone(),
+            capabilities: entry.capabilities.clone(),
+            metering: entry.metering,
+            provenance: entry.provenance.clone(),
+            freshness: FactFreshness::Current,
+            availability: credential_unavailability
+                .cloned()
+                .unwrap_or(ModelAvailability::Available),
+        };
+        match models.iter_mut().find(|listed| listed.slug == entry.slug) {
+            Some(listed) => *listed = overlaid,
+            None => models.push(overlaid),
+        }
+    }
 }
 
 fn discovery_unavailable(failure: &ModelDiscoveryFailure) -> ModelAvailability {

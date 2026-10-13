@@ -5,6 +5,7 @@
 //! knows about the call sits behind the details key.
 
 use ego_core::permit::analysis::{RiskAssessment, RiskClass, RiskReason};
+use ego_core::permit::shell::{ReadOnlyRefusal, read_only_refusal as read_only_refusal_of};
 use ego_core::permit::{Op, PermissionDecision, PermissionRequest, SessionProcessAction};
 use ego_core::permit::{shell_word, terminal_safe as safe};
 
@@ -15,7 +16,8 @@ const COMMAND_CAP: usize = 100;
 /// The same for the rule list on the `a` row, which also carries the key text.
 const RULE_CAP: usize = 60;
 
-/// Four rows at most: what, how risky, and the keys.
+/// Four rows at most: what, how risky, and the keys; a fifth when the judge
+/// passed the call to the human says why.
 pub(super) fn compact_prompt(request: &PermissionRequest) -> String {
     let mut rows = headline_rows(request);
     rows.extend(key_rows(request, true));
@@ -30,6 +32,14 @@ pub(super) fn details_prompt(
     capabilities: crate::render::Capabilities,
 ) -> String {
     let mut rows = headline_rows(request);
+    // The headline rows cut a long judge reason; the details show it whole.
+    if let Some(reason) = request
+        .presentation()
+        .and_then(|presentation| presentation.judge_reason())
+        .filter(|reason| reason.chars().count() > COMMAND_CAP)
+    {
+        rows.push(format!("Judge reason: {}", safe(reason)));
+    }
     rows.push(format!("Tool: {}", safe(request.tool())));
     rows.push(format!("Reason: {}", safe(&request.why().to_string())));
     let operations = request
@@ -128,9 +138,36 @@ fn headline_rows(request: &PermissionRequest) -> Vec<String> {
         rows[0] = format!("Child {}: {}", safe(name), rows[0]);
     }
     if let Some(presentation) = request.presentation() {
-        rows.push(risk_words(presentation.risk()));
+        let mut risk = risk_words(presentation.risk());
+        if let Some(reason) = read_only_refusal(request.ops()) {
+            risk.push_str("; not read-only: ");
+            risk.push_str(reason);
+        }
+        rows.push(risk);
+        if let Some(reason) = presentation.judge_reason() {
+            rows.push(format!("Judge: {}", truncate(&safe(reason), COMMAND_CAP)));
+        }
     }
     rows
+}
+
+/// Why the shell read-only proof refuses a program this call runs, in plain
+/// words. The risk class stays what the policy engine assessed.
+fn read_only_refusal(ops: &[Op]) -> Option<&'static str> {
+    ops.iter().find_map(|op| {
+        let Op::Spawn { spec } = op else {
+            return None;
+        };
+        let argv: Vec<_> = spec
+            .argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        Some(match read_only_refusal_of(&argv)? {
+            ReadOnlyRefusal::RepositoryHelpers => "git may run repository-configured commands",
+            ReadOnlyRefusal::ImplicitSearch => "the command does not name every file it searches",
+        })
+    })
 }
 
 fn key_rows(request: &PermissionRequest, with_details: bool) -> Vec<String> {

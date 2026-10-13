@@ -334,6 +334,7 @@ impl ModelResolver for OpenRouter {
         at: &'a Resolution<'a>,
     ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
         Box::pin(crate::openrouter::resolve(
+            at.catalogue,
             at.row,
             &at.slug.model,
             at.http,

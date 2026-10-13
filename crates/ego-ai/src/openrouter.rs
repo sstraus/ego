@@ -10,8 +10,9 @@ use ego_core::public::MeteringKind;
 use serde::Deserialize;
 
 use crate::catalogue::{
-    ModelDiscoveryEntry, ModelDiscoveryFailure, ModelDiscoveryReport, ModelDiscoverySource,
-    ModelFactProvenance, ModelSlug, ResolveError, ResolvedModel, provider_reported,
+    Catalogue, ModelDiscoveryEntry, ModelDiscoveryFailure, ModelDiscoveryReport,
+    ModelDiscoverySource, ModelFactProvenance, ModelSlug, ResolveError, ResolvedModel,
+    provider_reported,
 };
 use crate::http::{Http, HttpRequest, Method, exchange, public_header};
 use crate::provider::{ProviderRow, ResolvedCredential};
@@ -137,6 +138,7 @@ pub async fn enumerate(
 }
 
 pub async fn resolve(
+    catalogue: &Catalogue,
     row: &ProviderRow,
     model: &str,
     http: &Arc<dyn Http>,
@@ -152,18 +154,26 @@ pub async fn resolve(
         .iter()
         .map(|entry| entry.slug.model.clone())
         .collect();
-    let selected = models
-        .into_iter()
-        .find(|entry| entry.slug.model == model)
-        .ok_or_else(|| ResolveError::NotInstalled {
-            model: model.to_owned(),
-            installed,
-        })?;
+    // OpenRouter's response states no reasoning facts: a row the operator wrote
+    // in `models.toml` replaces the listed one, and stands for an unlisted model.
+    let capabilities = match catalogue.supplied_capabilities(&format!("{}/{model}", row.id())) {
+        Some(supplied) => supplied.clone(),
+        None => {
+            models
+                .into_iter()
+                .find(|entry| entry.slug.model == model)
+                .ok_or_else(|| ResolveError::NotInstalled {
+                    model: model.to_owned(),
+                    installed,
+                })?
+                .capabilities
+        }
+    };
     Ok(ResolvedModel {
         model: model.to_owned(),
         row: row.clone(),
         wire: &OpenRouterCompletions,
-        capabilities: selected.capabilities,
+        capabilities,
         metering: provider_reported(
             row.cost
                 .as_ref()
