@@ -2126,6 +2126,10 @@ where
         request: ContinueRequest,
         bindings: RunExecutionBindings,
     ) -> Result<RunCommandOutcome, RunError> {
+        let folded = self.read_exact(request.run_id).await?;
+        if let Some(outcome) = self.continuation_guard(&request, &folded)? {
+            return Ok(outcome);
+        }
         let writer = self
             .store
             .open_writer_lease(&request.run_id.session_id, self.clock.now())?;
@@ -2136,19 +2140,8 @@ where
                 run_id: request.run_id,
             });
         }
-        if let Some(receipt) = self.retained_receipt(&folded, request.request_id) {
-            return self.replay_receipt(&request.digest, receipt, &folded);
-        }
-        if folded.snapshot.revision != request.expected_revision {
-            return Err(RunError::StaleRevision {
-                expected: request.expected_revision,
-                actual: folded.snapshot.revision,
-            });
-        }
-        if folded.snapshot.blocks_new_turn() || folded.active.is_some() {
-            return Err(RunError::LeaseOccupied {
-                run_id: request.run_id,
-            });
+        if let Some(outcome) = self.continuation_guard(&request, &folded)? {
+            return Ok(outcome);
         }
 
         let model = self.model_of(&folded);
@@ -2267,6 +2260,31 @@ where
                 })
             }
         }
+    }
+
+    fn continuation_guard(
+        &self,
+        request: &ContinueRequest,
+        folded: &FoldedRun,
+    ) -> Result<Option<RunCommandOutcome>, RunError> {
+        if let Some(receipt) = self.retained_receipt(folded, request.request_id) {
+            return self
+                .replay_receipt(&request.digest, receipt, folded)
+                .map(Some);
+        }
+        if folded.snapshot.revision != request.expected_revision {
+            return Err(RunError::StaleRevision {
+                expected: request.expected_revision,
+                actual: folded.snapshot.revision,
+            });
+        }
+        if folded.snapshot.blocks_new_turn() || folded.active.is_some() {
+            return Err(RunError::LeaseOccupied {
+                run_id: request.run_id,
+            });
+        }
+
+        Ok(None)
     }
 
     pub async fn execute(&self, execution: RunExecution) -> Result<RunSnapshot, RunError> {

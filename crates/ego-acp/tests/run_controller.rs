@@ -214,41 +214,8 @@ impl AcpStore {
     }
 }
 
-struct AcpWriter<'a> {
-    store: &'a AcpStore,
-    session: SessionId,
-}
-impl Drop for AcpWriter<'_> {
-    fn drop(&mut self) {
-        self.store.writers.lock().unwrap().remove(&self.session);
-    }
-}
-impl SessionStore for AcpWriter<'_> {
-    fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
-        assert_eq!(*id, self.session);
-        self.store.append(id, event)
-    }
-    fn read(
-        &self,
-        id: &SessionId,
-    ) -> Result<futures::stream::BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError>
-    {
-        assert_eq!(*id, self.session);
-        self.store.read(id)
-    }
-    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
-        self.store.list()
-    }
-    fn compare_and_append_run(
-        &self,
-        id: &SessionId,
-        revision: Option<RunRevision>,
-        transaction: RunTransaction,
-    ) -> Result<RunAppend, StoreError> {
-        assert_eq!(*id, self.session);
-        self.store.compare_and_append_run(id, revision, transaction)
-    }
-}
+#[path = "../../ego-core/tests/support/session_writer.rs"]
+mod session_writer;
 
 impl SessionStore for AcpStore {
     fn open_writer_lease(
@@ -256,23 +223,7 @@ impl SessionStore for AcpStore {
         id: &SessionId,
         _: Timestamp,
     ) -> Result<ego_core::store::session_store::SessionWriterLease<'_>, StoreError> {
-        if !self.writers.lock().unwrap().insert(*id) {
-            return Err(StoreError::Io(std::io::Error::other("writer occupied")));
-        }
-        let writer = AcpWriter {
-            store: self,
-            session: *id,
-        };
-        let mut state = ego_core::state::SessionState::default();
-        for entry in self.entries.lock().unwrap().get(id).into_iter().flatten() {
-            if let SessionEntry::Event(event) = entry {
-                state.apply(event);
-            }
-        }
-        Ok(ego_core::store::session_store::SessionWriterLease {
-            state,
-            writer: Box::new(writer),
-        })
+        session_writer::open(self, &self.writers, *id)
     }
 
     fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {

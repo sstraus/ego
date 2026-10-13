@@ -1,6 +1,6 @@
 //! Minimal deterministic RunController adapters for the MCP contract tests.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Poll, Waker};
@@ -36,6 +36,9 @@ use ego_mcp::{
 };
 use serde_json::{Map, json};
 
+#[path = "../../../ego-core/tests/support/session_writer.rs"]
+mod session_writer;
+
 pub const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/mcp-run-controller");
 
 pub fn root() -> RunRoot {
@@ -51,10 +54,19 @@ fn invalid_error() -> McpError {
 
 #[derive(Default)]
 pub struct SessionStoreFixture {
+    writers: Mutex<BTreeSet<SessionId>>,
     entries: Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>,
 }
 
 impl SessionStore for SessionStoreFixture {
+    fn open_writer_lease(
+        &self,
+        id: &SessionId,
+        _: Timestamp,
+    ) -> Result<ego_core::store::session_store::SessionWriterLease<'_>, StoreError> {
+        session_writer::open(self, &self.writers, *id)
+    }
+
     fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
         self.entries
             .lock()

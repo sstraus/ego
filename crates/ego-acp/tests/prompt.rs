@@ -18,7 +18,7 @@
 //! JSON. A literal would pass while the two mappings diverged, which is the one
 //! failure this file exists to catch.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,6 +65,9 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::Notify;
 
 mod support;
+
+#[path = "../../ego-core/tests/support/session_writer.rs"]
+mod session_writer;
 
 const WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-workspace");
 const SOME_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-some-workspace");
@@ -604,10 +607,19 @@ impl RunExecutor for PromptExecutor {
 
 #[derive(Default)]
 struct PromptStore {
+    writers: Mutex<BTreeSet<SessionId>>,
     entries: Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>,
 }
 
 impl SessionStore for PromptStore {
+    fn open_writer_lease(
+        &self,
+        id: &SessionId,
+        _: Timestamp,
+    ) -> Result<ego_core::store::session_store::SessionWriterLease<'_>, StoreError> {
+        session_writer::open(self, &self.writers, *id)
+    }
+
     fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
         self.entries
             .lock()
