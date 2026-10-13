@@ -1669,8 +1669,8 @@ fn managed_config_key(
     target: &UserConfigTarget,
     raw: &str,
 ) -> Result<ManagedConfigKey, UsageError> {
-    let key =
-        ManagedConfigKey::parse(raw).map_err(|_| UsageError("unknown config key".to_owned()))?;
+    let key = ManagedConfigKey::parse(raw)
+        .map_err(|_| UsageError(format!("unknown config key `{raw}`")))?;
     if !key.available_in(target) {
         return Err(UsageError(format!(
             "config key `{key}` is not available for this target"

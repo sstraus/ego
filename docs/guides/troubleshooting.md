@@ -179,8 +179,8 @@ lists the shared run options. The trust offer names absolute file paths and
 explains both answers; trust admits project files and their configuration.
 `ego roots` uses plain receipts and access/path listings. Its edits remind the
 user to exit and resume because running sessions keep their captured perimeter.
-The generic `ego config` publication receipt still describes the stored change,
-not a live session reload.
+The `ego config set` receipt still describes the stored change, not a live
+session reload.
 
 The run also observed answered approval blocks remaining in scrollback, slow
 exec calls, and a configured MCP server unavailable without a visible warning.

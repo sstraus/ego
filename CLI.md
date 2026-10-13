@@ -234,11 +234,11 @@ values preserve their types and keys use canonical dotted spelling. Text uses
 canonical TOML values: `get` prints only value plus newline and `ls` prints
 escaped `KEY\tVALUE` rows in closed-schema order. A missing `get` writes no
 stdout, reports the key on stderr, and exits 1; an empty `ls` succeeds.
-Mutations print one five-field tab-separated receipt containing changed state,
-target, canonical key, canonical value or `<absent>`, and publication state.
-Successful no-ops use `not_published`;
-pre-publication failures emit no receipt. Text fields escape backslash, tab,
-carriage return, and newline.
+`set` and `unset` print one plain line: `Saved KEY = VALUE in TARGET.`,
+`Removed KEY from TARGET.`, or `Unchanged: ...` when nothing changed. Unknown
+keys fail with a usage error that names the key. `edit` and `rules` keep their
+tab-separated receipts, which carry the publication state. Text fields escape
+backslash, tab, carriage return, and newline.
 
 `rules allow|deny` stores the canonical AST in the existing user
 `permissions` arrays. A same-effect duplicate is an unchanged success; the

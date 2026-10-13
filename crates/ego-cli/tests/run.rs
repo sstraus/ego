@@ -1088,6 +1088,108 @@ fn a_deny_rule_on_the_command_line_stops_a_tool_and_names_the_rule() {
     );
 }
 
+/// regression case. A real file outside the workspace and outside every root:
+/// the refusal the model receives names the exact grant and the resume step,
+/// and the file contents never reach the model.
+#[test]
+fn a_read_outside_the_workspace_tells_the_model_the_grant_and_leaks_nothing() {
+    let elsewhere = tempfile::tempdir().expect("a temp dir");
+    let target = elsewhere.path().join("sibling.md");
+    std::fs::write(&target, "SIBLING-CONTENTS").expect("a temp dir is writable");
+    let target = std::fs::canonicalize(&target).expect("the file exists");
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "call_a",
+                "read",
+                &serde_json::json!({ "path": target }).to_string(),
+            )),
+            Reply::Sse(text("Refused.")),
+        ],
+        ..Plan::default()
+    });
+    let finished = Ego::against(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Read the sibling",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    let second = stub.generations()[1].to_string();
+    assert!(
+        second.contains("ego roots add --access read") && second.contains("resume the session"),
+        "the model was not told the grant: {second}"
+    );
+    assert!(!second.contains("SIBLING-CONTENTS"), "{second}");
+}
+
+/// regression case, the other half: the grant the refusal names works. Same
+/// real file, refused first, then `ego roots add --access read`, then
+/// `ego resume` reads it.
+#[test]
+fn the_named_roots_grant_lets_a_resumed_session_read_the_file() {
+    let elsewhere = tempfile::tempdir().expect("a temp dir");
+    let target = elsewhere.path().join("sibling.md");
+    std::fs::write(&target, "SIBLING-CONTENTS").expect("a temp dir is writable");
+    let target = std::fs::canonicalize(&target).expect("the file exists");
+    let read = |id: &str| {
+        Reply::Sse(tool_call(
+            id,
+            "read",
+            &serde_json::json!({ "path": target }).to_string(),
+        ))
+    };
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![read("call_a"), Reply::Sse(text("Refused."))],
+        ..Plan::default()
+    });
+    let first = places
+        .ego(&stub)
+        .args(["--model", "ollama/qwen3", "--output", "json", "Read it"])
+        .run();
+    assert_eq!(first.code, Some(0), "stderr: {}", first.stderr);
+    assert!(
+        !stub.generations()[1]
+            .to_string()
+            .contains("SIBLING-CONTENTS")
+    );
+
+    let granted = places
+        .raw_ego(&stub)
+        .subcommand("roots")
+        .args(["add", "--access", "read", &target.display().to_string()])
+        .run();
+    assert_eq!(granted.code, Some(0), "stderr: {}", granted.stderr);
+
+    let stub = Stub::start(Plan {
+        completions: vec![read("call_b"), Reply::Sse(text("Read."))],
+        ..Plan::default()
+    });
+    let second = places
+        .ego(&stub)
+        .subcommand("resume")
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--output",
+            "json",
+            "Read it again",
+        ])
+        .run();
+    assert_eq!(second.code, Some(0), "stderr: {}", second.stderr);
+    assert!(
+        stub.generations()[1]
+            .to_string()
+            .contains("SIBLING-CONTENTS"),
+        "the granted read did not reach the model"
+    );
+}
+
 /// The same read, with the same tool, and no `--deny`: exit 0.
 ///
 /// The control for the test above. Without it, that test passes if the binary
