@@ -18,6 +18,7 @@ mod journal;
 mod judge;
 mod mcp_registry;
 mod policy;
+mod residual;
 mod task;
 mod tools;
 
@@ -5348,22 +5349,65 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             HookCausality::item(call.item, turn, call.started),
             policy_snapshot,
         );
+        let is_exec = tool.descriptor().name == "exec";
+        let desk = is_exec
+            .then(|| self.tools.effect_ports().process().residual_desk())
+            .flatten();
+        // Plain field borrows, not a closure: the server must leave
+        // `self.control` free for `await_controlled`.
+        let residual = match desk {
+            None => None,
+            Some(desk) => {
+                let context = crate::permit::judge::JudgeTaskContext::from_state(
+                    &self.state(),
+                    turn,
+                    policy.judge_roots(),
+                );
+                let server = residual::ResidualServer {
+                    journal: &self.journal,
+                    cancel: &self.cancel,
+                    gate: &self.gate,
+                    session_id: self.session_id,
+                    invocation: self.invocation,
+                    admission: self.admission.as_ref(),
+                    evidence: self.evidence,
+                    source: self.source.as_ref(),
+                    retry_pause: self.retry_pause.as_ref(),
+                    // Only `auto` delegates to the sentinel; every other
+                    // mode keeps the refusal for its human.
+                    judge: self.judge.as_ref().filter(|_| policy.mode() == Mode::Auto),
+                    main: self.main_model_identity.as_ref(),
+                    turn,
+                    started: call.started,
+                    call: authorized.call().clone(),
+                    context,
+                };
+                Some((desk, server))
+            }
+        };
+        let execute = self
+            .tools
+            .execute(policy, tool.as_ref(), authorized, resume_context);
         let execution_started = Instant::now();
         let execution = await_controlled(
             &self.journal,
             &self.cancel,
             &mut self.control,
             turn,
-            self.tools
-                .execute(policy, tool.as_ref(), authorized, resume_context),
+            async move {
+                match residual {
+                    Some((desk, server)) => server.serve(&desk, execute).await,
+                    None => Ok(execute.await),
+                }
+            },
             InterruptDisposition::AwaitEffect,
-            (tool.descriptor().name == "exec").then_some(self.tools.effect_ports().process()),
+            is_exec.then_some(self.tools.effect_ports().process()),
         )
         .await;
         call.timing.execution_ms =
             Some(u64::try_from(execution_started.elapsed().as_millis()).unwrap_or(u64::MAX));
         let execution = match execution {
-            Controlled::Completed(execution) => execution,
+            Controlled::Completed(execution) => execution?,
             Controlled::Interrupted => unreachable!("effect waits are never dropped"),
             Controlled::Failed(cause) => return Err(cause),
         };

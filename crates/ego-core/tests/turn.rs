@@ -6617,6 +6617,12 @@ mod turn {
                 "/tests/common/judge_eval.rs"
             ));
         }
+        mod residual_write {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/common/residual_write.rs"
+            ));
+        }
 
         use super::*;
         use ego_core::generation_model_source::{
