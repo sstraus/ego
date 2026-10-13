@@ -617,7 +617,8 @@ impl fmt::Display for PolicyDenied {
                 write!(f, "{tool} may not {op} {path}: it is outside the workspace")?;
                 // A read the shell could still do under Adaptive: name the
                 // grant, because the model otherwise falls back to `cat`.
-                if self.is_unreachable_read() {
+                // Not for credentials: the defaults keep denying those.
+                if self.is_unreachable_read() && !Ruleset::is_credential_path(path) {
                     write!(
                         f,
                         "; ask the user to run `ego roots add --access read '{path}'` \
