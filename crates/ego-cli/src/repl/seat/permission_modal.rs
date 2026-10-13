@@ -16,7 +16,8 @@ const COMMAND_CAP: usize = 100;
 /// The same for the rule list on the `a` row, which also carries the key text.
 const RULE_CAP: usize = 60;
 
-/// Four rows at most: what, how risky, and the keys.
+/// Four rows at most: what, how risky, and the keys; a fifth when the judge
+/// passed the call to the human says why.
 pub(super) fn compact_prompt(request: &PermissionRequest) -> String {
     let mut rows = headline_rows(request);
     rows.extend(key_rows(request, true));
@@ -31,6 +32,14 @@ pub(super) fn details_prompt(
     capabilities: crate::render::Capabilities,
 ) -> String {
     let mut rows = headline_rows(request);
+    // The headline rows cut a long judge reason; the details show it whole.
+    if let Some(reason) = request
+        .presentation()
+        .and_then(|presentation| presentation.judge_reason())
+        .filter(|reason| reason.chars().count() > COMMAND_CAP)
+    {
+        rows.push(format!("Judge reason: {}", safe(reason)));
+    }
     rows.push(format!("Tool: {}", safe(request.tool())));
     rows.push(format!("Reason: {}", safe(&request.why().to_string())));
     let operations = request
@@ -135,6 +144,9 @@ fn headline_rows(request: &PermissionRequest) -> Vec<String> {
             risk.push_str(reason);
         }
         rows.push(risk);
+        if let Some(reason) = presentation.judge_reason() {
+            rows.push(format!("Judge: {}", truncate(&safe(reason), COMMAND_CAP)));
+        }
     }
     rows
 }

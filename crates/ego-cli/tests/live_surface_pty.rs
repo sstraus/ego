@@ -1,5 +1,7 @@
 #[path = "live_surface_pty/exec_risk_reason.rs"]
 mod exec_risk_reason;
+#[path = "live_surface_pty/foreign_judge_reason.rs"]
+mod foreign_judge_reason;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
 #[path = "live_surface_pty/raw_columns.rs"]
@@ -7415,6 +7417,11 @@ fn modal_session_with(completions: Vec<Reply>) -> ModalSession {
             "off",
         ])
         .env("TERM", "xterm-256color");
+    modal_session_on(ego, stub)
+}
+
+/// [`modal_session_with`] for an `ego` the caller configured against `stub`.
+fn modal_session_on(ego: Ego, stub: Stub) -> ModalSession {
     ego.file("AGENTS.md", "# permission modal fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
