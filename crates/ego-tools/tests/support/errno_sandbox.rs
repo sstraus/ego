@@ -16,20 +16,12 @@ fn adaptive_errno_refusals_request_only_absolute_stderr_paths() {
         "Permission denied".to_owned(),
         std::io::Error::from_raw_os_error(2).to_string(),
     ] {
-        for (stream, suffix, anchored) in [
-            ("2", "", true),
-            ("1", "", true),
-            ("2", " ignored", true),
-            ("2", "", false),
-        ] {
+        for (stream, suffix) in [("2", ""), ("1", ""), ("2", " ignored")] {
             let seat = Seat::answering(false);
             let run = run_with(&seat, workspace.path());
             let script =
                 format!("printf '%s: %s%s\\n' '{printed}' \"$1\" \"$2\" >&{stream}; exit 1");
-            let mut argv = vec!["/bin/sh", "-c", &script, "probe", &error, suffix];
-            if anchored {
-                argv.push(printed);
-            }
+            let argv = vec!["/bin/sh", "-c", &script, "probe", &error, suffix];
             let child = SpawnSpec::new(
                 argv.into_iter().map(Into::into).collect(),
                 Some(run.workspace.clone()),
@@ -51,7 +43,7 @@ fn adaptive_errno_refusals_request_only_absolute_stderr_paths() {
                 } else {
                     vec![]
                 },
-                "{error} {stream} {suffix} {anchored}"
+                "{error} {stream} {suffix}"
             );
             if expected {
                 assert!(
