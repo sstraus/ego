@@ -177,3 +177,34 @@ fn the_command_line_quotes_what_a_person_could_misread() {
     .expect("spawn spec");
     assert_eq!(command_line(&spec), "/bin/sh -c 'echo hi there' ''");
 }
+
+// Catches: the parser drifts from the v3 evaluation set, so a recorded
+// refusal line stops yielding its path or a prose/ENOENT/relative line starts
+// to yield one.
+#[test]
+fn the_v3_parser_suite_matches_the_production_parser() {
+    let set: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../evals/sandbox-auto/v3/cases.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let cases: Vec<_> = set["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case["suite"] == "parser")
+        .collect();
+    assert_eq!(cases.len(), 7, "the v3 parser suite changed");
+    for case in cases {
+        let line = case["input"]["line"].as_str().unwrap();
+        assert_eq!(
+            printed_path(line),
+            case["expected"]["path"].as_str(),
+            "{}",
+            case["id"]
+        );
+    }
+}

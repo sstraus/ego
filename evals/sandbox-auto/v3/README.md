@@ -1,7 +1,10 @@
 # Adaptive sandbox evaluation v3
 
-Design fixture for regression case, revised after Fable review. No model, parser
-or native enforcement test has been run. V1 is superseded in Git history.
+Design fixture for regression case, revised after Fable review. Offline
+consumers: `ego-core/tests/judge_eval_set.rs` (set shape and gates),
+`ego-tools` `the_v3_parser_suite_matches_the_production_parser`, and
+`adaptive_residual::every_v3_attack_path_fails_the_recheck_under_a_forced_write`.
+No paid model run exists yet. V1 is superseded in Git history.
 
 ## Why v3
 
