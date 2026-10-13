@@ -315,3 +315,40 @@ impl ModelResolver for KimiManaged {
         Box::pin(crate::kimi::enumerate(at.row, at.http, credential))
     }
 }
+
+/// Dynamic OpenRouter inventory; monetary accounting remains provider-reported.
+#[derive(Debug)]
+pub struct OpenRouter;
+impl ModelResolver for OpenRouter {
+    fn supplied_request_mapping(
+        &self,
+        _: &StaticResolution<'_>,
+    ) -> Result<Option<StaticRequestProfile>, ResolveError> {
+        Ok(None)
+    }
+    fn enumeration_credential(&self) -> ResolverCredentialRequirement {
+        ResolverCredentialRequirement::Required
+    }
+    fn resolve<'a>(
+        &'a self,
+        at: &'a Resolution<'a>,
+    ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
+        Box::pin(crate::openrouter::resolve(
+            at.row,
+            &at.slug.model,
+            at.http,
+            at.credential,
+        ))
+    }
+    fn enumerate<'a>(
+        &'a self,
+        at: &'a Enumeration<'a>,
+    ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
+        let Some(credential) = at.credential else {
+            return Box::pin(std::future::ready(Err(
+                "OpenRouter inventory requires its resolved credential".to_owned(),
+            )));
+        };
+        Box::pin(crate::openrouter::enumerate(at.row, at.http, credential))
+    }
+}

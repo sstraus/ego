@@ -11,6 +11,7 @@ pub mod http;
 pub mod kimi;
 pub mod oauth;
 pub mod ollama;
+mod openrouter;
 pub mod pricing;
 pub mod provider;
 pub mod resolver;

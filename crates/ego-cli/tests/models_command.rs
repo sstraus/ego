@@ -736,3 +736,68 @@ fn selecting_the_openai_row_reaches_the_transport_rather_than_a_gate() {
         refused.stderr
     );
 }
+
+// Catches: OpenRouter discovery is wired to neither the CLI nor the shared picker.
+#[test]
+fn openrouter_recorded_inventory_reaches_json_and_picker_without_invented_limits() {
+    let stub = Stub::start(Plan {
+        models_response: Some(include_str!("fixtures/openrouter-models.json").to_owned()),
+        ..Plan::default()
+    });
+    let result = Ego::against(&stub)
+        .env("OPENROUTER_API_KEY", "fixture-key")
+        .env(
+            "OPENROUTER_BASE_URL",
+            &format!("http://{}/api/v1/", stub.address),
+        )
+        .subcommand("models")
+        .args(["--provider", "openrouter", "--refresh", "--json"])
+        .run();
+    assert_eq!(result.code, Some(0), "{}", result.stderr);
+    let snapshot: ego_ai::catalogue::ModelCatalogueSnapshot =
+        serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(
+        snapshot.models.len(),
+        459,
+        "snapshot={}, requests={:?}",
+        result.stdout,
+        stub.requests()
+    );
+    let picker = ego_cli::model_picker::ModelPicker::new(std::sync::Arc::new(snapshot));
+    let muse = picker
+        .entries()
+        .iter()
+        .find(|entry| entry.slug.to_string() == "openrouter/meta/muse-wonder")
+        .unwrap();
+    assert_eq!(muse.capabilities.max_context_tokens, Some(1048576));
+    assert_eq!(muse.capabilities.max_output_tokens, Some(943718));
+    assert_eq!(muse.capabilities.max_tools, None);
+    assert!(!result.stdout.contains("pricing"));
+    assert!(!result.stdout.contains("rates"));
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/openrouter-models.json")).unwrap();
+    for entry in picker.entries() {
+        let row = fixture["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"].as_str() == Some(entry.slug.model.as_str()))
+            .unwrap();
+        assert_eq!(
+            entry.capabilities.max_context_tokens,
+            row["context_length"].as_u64()
+        );
+        assert_eq!(
+            entry.capabilities.max_output_tokens,
+            row["top_provider"]["max_completion_tokens"].as_u64()
+        );
+        assert_eq!(entry.capabilities.max_tools, None);
+    }
+    assert_eq!(
+        stub.requests()
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/api/v1/models"]
+    );
+}

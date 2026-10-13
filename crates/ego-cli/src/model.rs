@@ -46,6 +46,8 @@ pub const OLLAMA_HOST: &str = "OLLAMA_HOST";
 /// that uses one has already set this. It is also how a test reaches a
 /// loopback stub without a network.
 pub const OPENAI_BASE_URL: &str = "OPENAI_BASE_URL";
+/// Override the admitted OpenRouter API base, including its version path.
+pub const OPENROUTER_BASE_URL: &str = "OPENROUTER_BASE_URL";
 
 /// The variable every Anthropic client reads to be pointed somewhere other
 /// than `api.anthropic.com`.
@@ -124,6 +126,15 @@ pub(crate) fn rows(
         ProviderRow::anthropic(base(ANTHROPIC_BASE_URL, ANTHROPIC_BASE)?),
     );
     for row in &mut rows {
+        if row.id() == "openrouter" {
+            let address = std::env::var(OPENROUTER_BASE_URL)
+                .unwrap_or_else(|_| ego_ai::provider::OPENROUTER_BASE.to_owned());
+            let url = Url::parse(&address).map_err(|error| ResolveError::EndpointUnreachable {
+                endpoint: "OpenRouter API base".to_owned(),
+                message: error.to_string(),
+            })?;
+            *row = ProviderRow::openrouter(url);
+        }
         if let Some(config) = auth.get(row.id()) {
             let overlay = config
                 .headers

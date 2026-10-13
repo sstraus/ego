@@ -350,12 +350,6 @@ fn every_current_fixed_profile_also_installs_its_wire_on_resolved_model() {
             "hermes-3-70b",
             "NousPortal",
         ),
-        (
-            ProviderRow::openrouter_default(),
-            "openrouter",
-            "z-ai/glm-4.7",
-            "OpenRouterCompletions",
-        ),
     ] {
         let slug = format!("{provider}/{model}");
         let catalogue = Catalogue::new([row]).with_hosted(
@@ -834,4 +828,25 @@ fn qwen_oauth_has_no_selectable_compatibility_surface() {
 
 fn unasked_http() -> Arc<dyn Http> {
     server(Vec::<Answer>::new()).0
+}
+
+// Catches: OpenRouter generation still requires a builtin row or imports a price.
+#[test]
+fn openrouter_current_inventory_resolves_its_owned_wire_without_prices() {
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()]);
+    let (http, stub) = server([(
+        200,
+        include_str!("../../ego-cli/tests/fixtures/openrouter-models.json"),
+    )]);
+    let resolved = block_on(catalogue.resolve(
+        &ModelSlug::parse("openrouter/meta/muse-wonder").unwrap(),
+        &http,
+        &credential(),
+    ))
+    .unwrap();
+    assert_eq!(format!("{:?}", resolved.wire), "OpenRouterCompletions");
+    assert_eq!(resolved.capabilities.max_context_tokens, Some(1048576));
+    assert_eq!(resolved.capabilities.max_output_tokens, Some(943718));
+    assert!(resolved.rates.is_none());
+    assert_eq!(stub.paths(), ["/api/v1/models"]);
 }
