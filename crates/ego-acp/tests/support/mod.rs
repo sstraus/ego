@@ -57,7 +57,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::Notify;
 
 #[path = "../../../ego-core/tests/support/session_writer.rs"]
-mod session_writer;
+pub(super) mod session_writer;
 
 pub const SESSION_PAGE_SIZE: usize = 50;
 

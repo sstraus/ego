@@ -66,8 +66,7 @@ use tokio::sync::Notify;
 
 mod support;
 
-#[path = "../../ego-core/tests/support/session_writer.rs"]
-mod session_writer;
+use support::session_writer;
 
 const WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-workspace");
 const SOME_WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/prompt-some-workspace");
