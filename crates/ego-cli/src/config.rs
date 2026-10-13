@@ -514,45 +514,37 @@ fn receipt_text(
     let (key, value) = match result.facts {
         UserConfigMutationFacts::Root { path, access } => (
             ego_core::config::ManagedConfigKey::Roots,
-            format!(
+            Some(format!(
                 "{} {}",
                 access
                     .map(ego_core::permit::RootAccess::as_str)
                     .unwrap_or("removed"),
                 path.display()
-            ),
+            )),
         ),
         UserConfigMutationFacts::Set { key, value } => {
             let rendered = display_managed_value(&key, &value);
-            (key, rendered)
+            (key, Some(rendered))
         }
-        UserConfigMutationFacts::Unset { key } => (key, "<absent>".to_owned()),
+        UserConfigMutationFacts::Unset { key } => (key, None),
         _ => {
             return Err(RunTermination::Failed {
                 message: "config mutation returned unrelated transaction facts".to_owned(),
             });
         }
     };
-    let target = user_target(&result.target);
-    let (publication, warning) = match result.publication {
-        UserConfigPublication::NotPublished => ("not_published", None),
-        UserConfigPublication::PublishedDurably => ("published_durably", None),
-        UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => {
-            ("published_durability_uncertain", Some(diagnostic))
-        }
+    let target = escape_field(&user_target(&result.target));
+    let key = key.as_str();
+    let receipt = match (value, result.changed) {
+        (Some(value), true) => format!("Saved {key} = {} in {target}.", escape_field(&value)),
+        (Some(value), false) => format!("Unchanged: {key} = {} in {target}.", escape_field(&value)),
+        (None, true) => format!("Removed {key} from {target}."),
+        (None, false) => format!("Unchanged: {key} is not set in {target}."),
     };
-    let receipt = format!(
-        "{}\t{}\t{}\t{}\t{}",
-        if result.changed {
-            "changed"
-        } else {
-            "unchanged"
-        },
-        escape_field(&target),
-        key.as_str(),
-        escape_field(&value),
-        publication
-    );
+    let warning = match result.publication {
+        UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => Some(diagnostic),
+        UserConfigPublication::NotPublished | UserConfigPublication::PublishedDurably => None,
+    };
     let warning = warning
         .map(|warning| format!("config was published but durability is uncertain: {warning}"));
     Ok((receipt, warning))
@@ -1510,7 +1502,10 @@ mod config_repl_tests {
         let store = OsUserConfigStore::new(Arc::new(OsIo), path.clone());
         let args = repl_set_args("set exec.env_allowlist [\"PATH\", \"HOME\"]").unwrap();
         let receipt = repl_set_on(&store, &args).unwrap();
-        assert!(receipt.contains("published_durably"));
+        assert!(
+            receipt.starts_with("Saved exec.env_allowlist = "),
+            "{receipt}"
+        );
         let ConfigAction::Set { target, key, value } = args.action else {
             panic!("set action")
         };

@@ -102,6 +102,35 @@ fn root_grammar_accepts_only_the_frozen_config_forms() {
     }
 }
 
+// Catches: `config set` receipt exposes the internal publication word, and an
+// unknown key error that does not say which key was wrong (regression case).
+#[test]
+fn set_prints_a_plain_receipt_and_an_unknown_key_error_names_the_key() {
+    let fixture = Fixture::new();
+    let set = fixture.run(&["config", "set", "model=\"ollama/qwen3\""]);
+    assert_eq!(set.status.code(), Some(0), "stderr: {}", error(&set));
+    assert_eq!(text(&set), "Saved model = \"ollama/qwen3\" in user.\n");
+    let profile = fixture.run(&["config", "set", "--profile", "ci", "model=\"ollama/qwen3\""]);
+    assert_eq!(
+        text(&profile),
+        "Saved model = \"ollama/qwen3\" in user:profile=\"ci\".\n"
+    );
+    let same = fixture.run(&["config", "set", "model=\"ollama/qwen3\""]);
+    assert_eq!(
+        text(&same),
+        "Unchanged: model = \"ollama/qwen3\" in user.\n"
+    );
+    let unset = fixture.run(&["config", "unset", "model"]);
+    assert_eq!(text(&unset), "Removed model from user.\n");
+    let unset_again = fixture.run(&["config", "unset", "model"]);
+    assert_eq!(text(&unset_again), "Unchanged: model is not set in user.\n");
+
+    let unknown = fixture.run(&["config", "set", "modle=\"x\""]);
+    assert_usage_failure(&unknown, "unknown config key `modle`");
+    let unknown_unset = fixture.run(&["config", "unset", "modle"]);
+    assert_usage_failure(&unknown_unset, "unknown config key `modle`");
+}
+
 #[test]
 fn management_is_persistent_user_authority_and_ignores_ego_profile() {
     let fixture = Fixture::new();
@@ -110,16 +139,7 @@ fn management_is_persistent_user_authority_and_ignores_ego_profile() {
         &[("EGO_PROFILE", "ci")],
     );
     assert_eq!(set.status.code(), Some(0), "stderr: {}", error(&set));
-    assert_eq!(
-        text(&set).split('\t').collect::<Vec<_>>(),
-        [
-            "changed",
-            "user",
-            "model",
-            "\"ollama/qwen3\"",
-            "published_durably\n"
-        ]
-    );
+    assert_eq!(text(&set), "Saved model = \"ollama/qwen3\" in user.\n");
 
     let get = fixture.run_with_env(&["config", "get", "model"], &[("EGO_PROFILE", "ci")]);
     assert_eq!(get.status.code(), Some(0), "stderr: {}", error(&get));
@@ -264,10 +284,7 @@ fn profile_json_isolated_and_profile_removal_prunes_empty_container() {
     assert_eq!(json.stdout, b"{\"v\":1,\"scope\":\"user\",\"profile\":\"ci\",\"values\":{\"model\":\"ollama/qwen3\"}}\n");
     let unset = fixture.run(&["config", "unset", "--profile", "ci", "model"]);
     assert_eq!(unset.status.code(), Some(0), "stderr: {}", error(&unset));
-    assert_eq!(
-        text(&unset),
-        "changed\tuser:profile=\"ci\"\tmodel\t<absent>\tpublished_durably\n"
-    );
+    assert_eq!(text(&unset), "Removed model from user:profile=\"ci\".\n");
     let bytes = std::fs::read_to_string(fixture.config_path()).expect("config remains readable");
     assert!(
         !bytes.contains("[profile.ci]"),
@@ -288,7 +305,7 @@ fn mutation_receipts_escape_fields_and_report_changed_unchanged_and_unset_noop()
     assert_eq!(first.status.code(), Some(0), "stderr: {}", error(&first));
     assert_eq!(
         text(&first),
-        "changed\tuser:profile=\"ci\"\tsession_dir\t\"/tmp/sessions\"\tpublished_durably\n"
+        "Saved session_dir = \"/tmp/sessions\" in user:profile=\"ci\".\n"
     );
     let same = fixture.run(&[
         "config",
@@ -300,19 +317,19 @@ fn mutation_receipts_escape_fields_and_report_changed_unchanged_and_unset_noop()
     assert_eq!(same.status.code(), Some(0));
     assert_eq!(
         text(&same),
-        "unchanged\tuser:profile=\"ci\"\tsession_dir\t\"/tmp/sessions\"\tnot_published\n"
+        "Unchanged: session_dir = \"/tmp/sessions\" in user:profile=\"ci\".\n"
     );
     let unset = fixture.run(&["config", "unset", "--profile", "ci", "session_dir"]);
     assert_eq!(unset.status.code(), Some(0));
     assert_eq!(
         text(&unset),
-        "changed\tuser:profile=\"ci\"\tsession_dir\t<absent>\tpublished_durably\n"
+        "Removed session_dir from user:profile=\"ci\".\n"
     );
     let missing = fixture.run(&["config", "unset", "--profile", "ci", "session_dir"]);
     assert_eq!(missing.status.code(), Some(0));
     assert_eq!(
         text(&missing),
-        "unchanged\tuser:profile=\"ci\"\tsession_dir\t<absent>\tnot_published\n"
+        "Unchanged: session_dir is not set in user:profile=\"ci\".\n"
     );
 }
 
