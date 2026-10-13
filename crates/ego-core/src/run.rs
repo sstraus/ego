@@ -57,6 +57,7 @@ use crate::store::session_store::{SessionEntry, SessionStore, StoreError};
 use crate::turn::AdmittedToolSource;
 
 mod readmission;
+pub use readmission::admit_execution_policy;
 
 /// Measured authority and its retained probe transcript.
 pub type RunExecutionObservation = (ExecObservation, Option<crate::store::evidence::EvidenceRef>);
