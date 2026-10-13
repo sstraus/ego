@@ -28,6 +28,11 @@ of a successful live login or entitlement to every model.
 | `minimax-oauth` | MiniMax subscription Messages profile | `ego auth login minimax-oauth` |
 | `nous` | Nous subscription profile | `ego auth login nous` |
 
+For `openrouter`, rows in the user `models.toml` supply the capabilities of
+models that the gateway lists dynamically. The run and `ego models` both use
+these rows. Rows for other providers do not replace their discovered or supplied
+facts.
+
 The separate API-key `xai` row is not in the CLI's selectable inventory. Design
 mentions of LM Studio, vLLM, or llama.cpp are not additional selectable profiles.
 

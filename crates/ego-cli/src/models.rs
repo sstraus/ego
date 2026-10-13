@@ -243,10 +243,14 @@ pub async fn build_catalogue_snapshot(
             &mut models,
             &mut sources,
         );
-        let supplied = catalogue
-            .enumerate_hosted(row.id(), None)
-            .map_err(|message| RunTermination::Failed { message })?;
-        overlay_supplied(supplied.models(), missing_credential.as_ref(), &mut models);
+        // Only OpenRouter resolves user `models.toml` rows at run time, so only its
+        // listing may show them; elsewhere they would list facts the run ignores.
+        if row.id() == "openrouter" {
+            let supplied = catalogue
+                .enumerate_hosted(row.id(), None)
+                .map_err(|message| RunTermination::Failed { message })?;
+            overlay_supplied(supplied.models(), missing_credential.as_ref(), &mut models);
+        }
     }
 
     Ok(ModelCatalogueSnapshot::from_entries_and_sources(
