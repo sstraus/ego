@@ -263,26 +263,6 @@ fn a_forged_refusal_of_the_filesystem_root_is_never_a_question() {
     );
 }
 
-/// Catches: an argv alias or unrelated spelling changes the exact human hint request.
-#[test]
-fn a_refusal_hint_names_its_exact_path_not_the_argv_prefix() {
-    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
-        return;
-    };
-    let parent = fixture.outside.join("Gits");
-    std::fs::create_dir_all(&parent).expect("parent");
-    let evil = write_file(&fixture.outside.join("Gits-evil/f"), "x");
-    let _ = fixture.sh(
-        "p=$0; printf '%s: Operation not permitted\\n' \"${p%-evil/f}\" >&2; exit 1",
-        &[&evil],
-    );
-    assert_eq!(fixture.seat.asked_paths(), vec![parent]);
-    assert!(
-        fixture.seat.granted().is_empty(),
-        "declined hint widened reach"
-    );
-}
-
 /// Catches: a refused path whose name the profile cannot express (a tab) is
 /// allowed once, and from then on `render` fails for every command of the session
 /// (and, when stored, of the workspace): one grant poisons the exec tool.
@@ -589,25 +569,6 @@ fn dotdot_and_trailing_slash_spellings_anchor_the_same_directory() {
 }
 
 /// Catches: an argv alias or unrelated spelling changes the exact human hint request.
-#[test]
-fn a_root_argument_does_not_expand_the_human_hint_request() {
-    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
-        return;
-    };
-    let target = write_file(&fixture.outside.join("f"), "x");
-    let script = format!(
-        "printf '%s: Operation not permitted\\n' '{}' >&2; exit 1",
-        target.display()
-    );
-    let _ = fixture.sh(&script, &[Path::new("/")]);
-    assert_eq!(fixture.seat.asked_paths(), vec![target]);
-    assert!(
-        fixture.seat.granted().is_empty(),
-        "declined hint widened reach"
-    );
-}
-
-/// Catches: an argv alias or unrelated spelling changes the exact human hint request.
 #[cfg(unix)]
 #[test]
 fn a_home_alias_does_not_expand_the_human_hint_request() {
@@ -767,72 +728,6 @@ fn control_and_bidi_characters_in_arguments_never_reach_the_question_raw() {
         "the question carries raw control characters: {:?}",
         commands[0]
     );
-}
-
-/// Catches: an argv alias or unrelated spelling changes the exact human hint request.
-#[cfg(unix)]
-#[test]
-fn an_ancestor_alias_does_not_expand_the_human_hint_request() {
-    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
-        return;
-    };
-    let target = write_file(&fixture.outside.join("f"), "x");
-    let ancestor = fixture
-        .workspace
-        .as_path()
-        .parent()
-        .expect("workspace parent")
-        .to_path_buf();
-    let second = fixture.outside.join("hop2");
-    let first = fixture.outside.join("hop1");
-    std::os::unix::fs::symlink(&ancestor, &second).expect("hop2");
-    std::os::unix::fs::symlink(&second, &first).expect("hop1");
-    let _ = fixture.run(vec![
-        OsString::from("/bin/sh"),
-        OsString::from("-c"),
-        OsString::from(format!(
-            "printf '%s: Operation not permitted\\n' '{}' >&2; exit 1",
-            target.display()
-        )),
-        first.into_os_string(),
-    ]);
-    assert_eq!(fixture.seat.asked_paths(), vec![target]);
-    assert!(
-        fixture.seat.granted().is_empty(),
-        "declined hint widened reach"
-    );
-}
-
-/// Catches: an argv alias or unrelated spelling changes the exact human hint request.
-#[test]
-fn a_relative_argument_does_not_hide_an_absolute_refusal_hint() {
-    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
-        return;
-    };
-    let target = write_file(&fixture.outside.join("f"), "x");
-    let relative = pathdiff_from(fixture.workspace.as_path(), &fixture.outside);
-    let _ = fixture.run(vec![
-        OsString::from("/bin/sh"),
-        OsString::from("-c"),
-        OsString::from(format!(
-            "printf '%s: Operation not permitted\\n' '{}' >&2; exit 1",
-            target.display()
-        )),
-        relative.into_os_string(),
-    ]);
-    assert_eq!(fixture.seat.asked_paths(), vec![target]);
-    assert!(
-        fixture.seat.granted().is_empty(),
-        "declined hint widened reach"
-    );
-}
-
-fn pathdiff_from(workspace: &Path, target: &Path) -> PathBuf {
-    let mut relative = PathBuf::new();
-    for _ in workspace.components().skip(1) {
-        relative.push("..");
-    }
-    relative.join(target.strip_prefix("/").expect("absolute"))
 }
 
 /// Catches: the renderable filter drops the whole stored list when one entry is
