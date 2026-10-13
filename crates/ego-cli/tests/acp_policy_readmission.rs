@@ -212,3 +212,72 @@ fn recover(legacy: bool, allow: bool, wider: bool) {
         assert_eq!(stub.generations().len(), 3);
     }
 }
+
+// Catches: a refused ACP widening is journaled as the session authority, so a later
+// CLI resume under the same wider authority finds an equal measurement and runs unasked.
+#[test]
+fn refused_acp_widening_still_requires_consent_on_cli_resume() {
+    let places = Places::new();
+    let stub = Stub::start(Plan::default());
+    let session = save(&places, &stub, "workspace");
+    let extra = tempfile::tempdir().unwrap();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        format!(
+            "[profile.chat]\nmodel='ollama/qwen3'\nthinking='off'\nsandbox='workspace'\nroots=[{{path='{}',access='read-write'}}]\n",
+            extra.path().canonicalize().unwrap().display(),
+        ),
+    )
+    .unwrap();
+    let mut refused = host(&places, &stub);
+    let loaded = refused.request(
+        "session/load",
+        json!({
+            "sessionId": session, "cwd": places.workspace_path(), "mcpServers": []
+        }),
+    );
+    assert!(loaded["result"].is_object(), "{loaded}");
+    let id = prompt(&mut refused, &session);
+    let mut asked = false;
+    loop {
+        let frame = refused.read_frame();
+        if frame["method"] == "session/request_permission" {
+            asked = true;
+            refused.write_frame(json!({"jsonrpc":"2.0", "id":frame["id"],
+                "result":{"outcome":{"outcome":"selected", "optionId":"reject-once"}}}));
+        }
+        if frame["id"].as_u64() == Some(id) && frame.get("method").is_none() {
+            assert!(asked, "ACP did not ask about the wider roots: {frame}");
+            assert!(
+                frame["error"].is_object(),
+                "denial must refuse the turn: {frame}"
+            );
+            break;
+        }
+    }
+    refused.finish();
+    assert_eq!(stub.generations().len(), 1);
+
+    let resumed = Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+        .subcommand("resume")
+        .args([
+            session.as_str(),
+            "--profile",
+            "chat",
+            "--output",
+            "text",
+            "next",
+        ])
+        .run();
+    assert_ne!(
+        resumed.code,
+        Some(0),
+        "headless CLI resume ran under the authority ACP refused: {}",
+        resumed.stderr
+    );
+    assert_eq!(
+        stub.generations().len(),
+        1,
+        "the refused wider authority reached the provider through the CLI"
+    );
+}

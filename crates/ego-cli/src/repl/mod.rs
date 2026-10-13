@@ -51,6 +51,7 @@ pub(super) const CLIPBOARD_PASTE_COMMAND: &str = "ego:clipboard-paste";
 pub enum HostCommand {
     Action(ActionId),
     History(String),
+    Resume(Option<String>),
     Fork(ego_core::event::id::ItemId),
     SessionMetadata(crate::cli::SessionMetadataOperation),
     Policy(PolicyControlRequest),

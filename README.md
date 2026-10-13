@@ -55,7 +55,7 @@ model, supply its API key or complete subscription login first; see
 | `ego run PROMPT` | One headless run; text, JSON, or live JSONL on stdout |
 | `ego acp` | ACP over stdio for a host such as TUICommander |
 
-The command set is `ego run`, `ego resume`, `ego fork`, `ego compact`,
+The command set is `ego run`, `ego resume`, `ego continue`, `ego fork`, `ego compact`,
 `ego export`, `ego ls`, `ego usage`, `ego models`, `ego hooks`, `ego doctor`,
 `ego acp`, `ego a2a`, `ego auth`, `ego mcp`, `ego config`, `ego roots`,
 `ego rules`, `ego orchestrator`, and `ego mcp-server`.

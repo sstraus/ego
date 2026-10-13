@@ -1066,6 +1066,9 @@ impl QueuedPrompt {
 /// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
+    /// Latest measured execution authority, reduced from the durable session log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_observation: Option<crate::permit::ExecObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_snapshot: Option<crate::session::PromptSnapshot>,
     /// The `seq` carried by the most recently applied event. `apply` trusts
@@ -1220,6 +1223,7 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            execution_observation: None,
             usage: Usage::IDENTITY,
             last_seq: Seq::default(),
             lineage: None,
@@ -2041,7 +2045,10 @@ impl SessionState {
                 }
             }
             EventKind::FallbackDecision { .. } => {}
-            EventKind::ExecutionObserved { .. } | EventKind::JudgeResponse { .. } => {}
+            EventKind::ExecutionObserved { observation, .. } => {
+                self.execution_observation = Some(observation.clone());
+            }
+            EventKind::JudgeResponse { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
                 usage,

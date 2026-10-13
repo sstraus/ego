@@ -27,6 +27,7 @@ end
 complete -c ego -n "__fish_ego_needs_command" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_needs_command" -f -a "run" -d 'Run an agent from a prompt, headless.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "resume" -d 'Continue a session; no ID = latest in this workspace.'
+complete -c ego -n "__fish_ego_needs_command" -f -a "continue" -d 'Continue a session; no ID = latest in this workspace.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "fork" -d 'Fork a session at its tip or after the completed turn containing a message.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "compact" -d 'Compact a session into its deterministic successor.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "export" -d 'Export a session locally or as a structurally sanitized bundle.'
@@ -127,6 +128,48 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l yolo -d 'Shorthand fo
 complete -c ego -n "__fish_ego_using_subcommand resume" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_using_subcommand resume" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l answer -d 'Settle a pending question. Repeat for multiple sibling questions' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
+complete -c ego -n "__fish_ego_using_subcommand continue" -l var -d 'Supply one declared agent-file template variable' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -s m -l model -d 'provider/model slug, e.g. ollama/qwen3' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l thinking -d 'off|minimal|low|medium|high|xhigh|max' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
+complete -c ego -n "__fish_ego_using_subcommand continue" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l deny -d 'Deny rule, e.g. \'write(**)\'. Repeatable' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l profile -d 'Layer [profile.NAME] from config' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l session -d 'Named session: created or attached' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l session-id -d 'A session id supplied by the caller' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l session-dir -d 'Override the store location' -r -F
+complete -c ego -n "__fish_ego_using_subcommand continue" -s C -d 'Run as if started in DIR' -r -F
+complete -c ego -n "__fish_ego_using_subcommand continue" -l output -d 'text|json|jsonl' -r -f -a "text\t''
+json\t''
+jsonl\t''"
+complete -c ego -n "__fish_ego_using_subcommand continue" -l artifact-dir -d 'Override the sanitized run-artifact root for profile `ci`' -r -F
+complete -c ego -n "__fish_ego_using_subcommand continue" -l schema -d 'JSON Schema the final answer must validate against; `@file` or inline' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l schema-retries -d 'How many times to re-prompt on a schema mismatch' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l retry -d 'Additional delivery-safe attempts for each candidate' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l fallback -d 'Ordered provider/model candidate used after a delivery-safe failure' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l budget -d 'Hard cap: \'2.5$\' or \'400k\' tokens' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l max-turns -d 'Cap the turns this run may take' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l timeout -d 'Wall clock, e.g. \'90s\' or \'10m\'' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l mode -d 'Permission mode: plan|default|auto|edits|yolo' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -s c -l set -d 'Dotted-path config override, value parsed as TOML' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l bare -d 'No ambient discovery, even in a trusted workspace'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l no-tools -d 'Offer no tools at all'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l trust-workspace -d 'Trust this interactive launch\'s workspace without asking; remember the answer'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l ephemeral -d 'Refused: every run uses a durable session'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l plan -d 'Shorthand for --mode plan'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l yolo -d 'Shorthand for --mode yolo'
+complete -c ego -n "__fish_ego_using_subcommand continue" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
+complete -c ego -n "__fish_ego_using_subcommand continue" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand fork" -l at -r
 complete -c ego -n "__fish_ego_using_subcommand fork" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand fork" -s C -d 'Run as if started in DIR' -r -F

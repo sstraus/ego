@@ -166,6 +166,7 @@ const UNAVAILABLE: &[Unavailable] = &[Unavailable {
 pub const BUILT: &[&str] = &[
     "run",
     "resume",
+    "continue",
     "fork",
     "compact",
     "export",
@@ -247,6 +248,7 @@ pub fn root_command() -> clap::Command {
         .disable_help_subcommand(true)
         .subcommand(named("run", RunCommand::command()))
         .subcommand(named("resume", ResumeCommand::command()))
+        .subcommand(named("continue", ResumeCommand::command()))
         .subcommand(named("fork", ForkCommand::command()))
         .subcommand(named("compact", CompactCommand::command()))
         .subcommand(named("export", ExportCommand::command()))
@@ -1126,7 +1128,7 @@ fn overview(program: &str) -> String {
     for name in BUILT {
         let about = match *name {
             "run" => "Run an agent from a prompt, headless",
-            "resume" => "Continue a session; no ID = latest in this workspace",
+            "resume" | "continue" => "Continue a session; no ID = latest in this workspace",
             "fork" => "Fork a session at its tip or after a completed turn",
             "ls" => "List sessions (this workspace; --all for every one)",
             "usage" => "Report usage, context and cost for this workspace",
@@ -1269,7 +1271,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 INTERACTIVE_PROVIDER_RETRIES,
             )?))),
         },
-        Some("resume") if resume_metadata => {
+        Some("resume" | "continue") if resume_metadata => {
             match clap_or_answer::<SessionMetadataCommand>(&tokens)? {
                 Parsed::Answered(text) => Ok(Invocation::Answered(text)),
                 Parsed::Command(parsed) => Ok(Invocation::SessionMetadata(Box::new(
@@ -1277,7 +1279,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 ))),
             }
         }
-        Some("resume") => match clap_or_answer::<ResumeCommand>(&tokens)? {
+        Some("resume" | "continue") => match clap_or_answer::<ResumeCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
                 let args = into_resume_args(parsed)?;

@@ -798,7 +798,15 @@ impl ExecObservation {
 
     pub fn not_more_permissive_than(&self, old: &Self) -> bool {
         self.backend == old.backend
-            && self.capabilities.contains(old.capabilities)
+            && self
+                .capabilities
+                .union(if self.capabilities.contains(ExecCaps::WRITE_DENIED) {
+                    // Denying all writes also guarantees that writes cannot escape scoped roots.
+                    ExecCaps::WRITE_SCOPED
+                } else {
+                    ExecCaps::empty()
+                })
+                .contains(old.capabilities)
             && self
                 .policy
                 .as_ref()

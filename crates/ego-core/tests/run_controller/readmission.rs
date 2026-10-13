@@ -86,6 +86,17 @@ fn readmission_cases() {
             false,
         ),
         (
+            "workspace to read-only",
+            old.clone(),
+            observation(
+                &RunConfinement::new(Confinement::Ro, false, base.workspace().clone()).unwrap(),
+                "sandbox",
+                Confinement::Ro.required_caps(),
+                "2",
+            ),
+            false,
+        ),
+        (
             "narrower roots",
             observation(&wider, "sandbox", caps, "1"),
             observation(&base, "sandbox", caps, "2"),
@@ -239,13 +250,25 @@ fn readmission_cases() {
                     _ => None,
                 })
                 .collect();
-            assert!(
-                events.iter().any(|event| matches!(
-                    event.kind,
-                    ego_core::event::domain::EventKind::ExecutionObserved { .. }
-                )),
-                "{name}: core continuation omitted durable observation"
-            );
+            let saved = events.iter().rev().find_map(|event| match &event.kind {
+                ego_core::event::domain::EventKind::ExecutionObserved { observation, .. } => {
+                    Some(observation)
+                }
+                _ => None,
+            });
+            if asks && !allow {
+                assert_ne!(
+                    saved,
+                    Some(&observed),
+                    "{name}: refused authority became the saved observation"
+                );
+            } else {
+                assert_eq!(
+                    saved,
+                    Some(&observed),
+                    "{name}: core continuation omitted durable observation"
+                );
+            }
             assert_eq!(
                 events
                     .iter()
@@ -555,5 +578,5 @@ fn overlapping_core_readmission_has_one_journal_authority() {
             .windows(2)
             .all(|pair| pair[0].env.seq < pair[1].env.seq)
     );
-    assert_eq!(events[2].env.parent, Some(events[1].env.id));
+    assert_eq!(events[1].env.parent, Some(events[0].env.id));
 }

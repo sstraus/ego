@@ -79,6 +79,7 @@ impl Submission {
 pub enum Dispatch {
     Action(ActionId),
     History(String),
+    Resume(Option<String>),
     SessionMetadata(SessionMetadataOperation),
     Skill(AdmittedSkillOperation),
     Skills(SkillSurfaceAction),
@@ -484,7 +485,10 @@ impl ActionRegistry {
                 "mcp",
                 "List MCP servers, toggle session state, or add a server",
             ),
-            enabled(Sessions, "sessions", "Browse durable sessions").alias("history"),
+            enabled(Sessions, "sessions", "Browse durable sessions")
+                .alias("history")
+                .alias("resume")
+                .alias("continue"),
             enabled(Fork, "fork", "Fork a durable session"),
             enabled(Compact, "compact", "Compact the active context")
                 .unavailable("the compaction service"),
@@ -819,6 +823,22 @@ impl ActionRegistry {
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
             if name == "tasks" && self.resolve_slash(name) == Some(ActionId::Tasks) {
                 return Dispatch::Tasks(raw_arguments.trim().to_owned());
+            }
+            if matches!(name, "resume" | "continue")
+                && self.resolve_alias(name) == Some(ActionId::Sessions)
+            {
+                if self.availability(ActionId::Sessions) != Availability::Enabled {
+                    return Dispatch::Refused {
+                        reason: "resume is unavailable while a turn is running",
+                    };
+                }
+                let argument = raw_arguments.trim();
+                if argument.split_whitespace().count() > 1 {
+                    return Dispatch::Refused {
+                        reason: "usage: /resume [SESSION_ID] or /continue",
+                    };
+                }
+                return Dispatch::Resume((!argument.is_empty()).then(|| argument.to_owned()));
             }
             if name == "history" && self.resolve_alias(name) == Some(ActionId::Sessions) {
                 if self.availability(ActionId::Sessions) != Availability::Enabled {
