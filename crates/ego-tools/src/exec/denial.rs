@@ -125,12 +125,15 @@ fn request_for(
     let access = if exec_target(spec).is_some_and(|target| target == path.as_path()) {
         SandboxAccess::Exec
     } else if !exists
+        || confinement.adaptive_perimeter().is_some()
         || granted
             .iter()
             .any(|grant| grant.covers(&path, SandboxAccess::Read))
     {
-        // Suggest the capability that could unblock this hint to the human.
-        // Nonexistence/read reach does not prove a write; no judge consumes it.
+        // Suggest the capability that could unblock this hint to the human:
+        // Adaptive already reads every path outside its floors, so a Read
+        // grant cannot. Nonexistence/read reach does not prove a write; no
+        // judge consumes it.
         SandboxAccess::Write
     } else {
         SandboxAccess::Read
