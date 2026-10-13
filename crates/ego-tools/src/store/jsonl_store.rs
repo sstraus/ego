@@ -1600,6 +1600,7 @@ impl JsonlStore {
 
         let is_turn_boundary = matches!(ev.kind, EventKind::TurnCompleted { .. });
         let is_execution_observation = matches!(ev.kind, EventKind::ExecutionObserved { .. });
+        let is_execution_measurement = matches!(ev.kind, EventKind::ExecutionMeasured { .. });
         let is_hook_admission = matches!(ev.kind, EventKind::HookCatalogueAdmitted { .. });
         let is_hook_invocation = matches!(
             ev.kind,
@@ -1625,6 +1626,7 @@ impl JsonlStore {
         );
         if is_turn_boundary
             || is_execution_observation
+            || is_execution_measurement
             || is_hook_admission
             || is_hook_invocation
             || is_skill_admission

@@ -152,6 +152,7 @@ async fn cli_adapter_measures_the_offer_and_preserves_typed_unsupported_rows() {
     }
 }
 
+// Catches: offer initialization admits a candidate authority or loses its probe evidence.
 #[tokio::test]
 async fn cli_adapter_commits_measurement_evidence_before_publishing_the_offer() {
     let sessions = tempfile::tempdir().expect("session root");
@@ -201,6 +202,12 @@ async fn cli_adapter_commits_measurement_evidence_before_publishing_the_offer() 
     assert!(
         events.contains("probe_evidence"),
         "the durable observation event must carry the probe reference"
+    );
+    let opened = ego_cli::session::open(store.as_ref(), &session, &ego_tools::clock::SystemClock)
+        .expect("reopen measured session");
+    assert!(
+        opened.state.execution_observation.is_none(),
+        "an offer is not admission"
     );
 }
 

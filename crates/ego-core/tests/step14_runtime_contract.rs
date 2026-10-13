@@ -373,6 +373,7 @@ fn execution_observation_and_backend_identity_are_serde_values_without_authority
     );
 }
 
+// Catches: evidence-only measurements replace admitted authority or leak into conversation.
 #[test]
 fn execution_observed_only_records_saved_authority_and_has_no_public_projection() {
     let observation = ExecObservation::new(
@@ -420,6 +421,30 @@ fn execution_observed_only_records_saved_authority_and_has_no_public_projection(
         .unwrap()
         .remove("execution_observation");
     assert_eq!(after, before);
+
+    let measured = EventKind::ExecutionMeasured {
+        observation: ExecObservation::new(
+            BackendIdentity::new("null", "candidate"),
+            ExecCaps::empty(),
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .try_into()
+                .unwrap(),
+        ),
+        probe_evidence: None,
+    };
+    assert_eq!(measured.name(), "execution_measured");
+    let measured = serde_json::from_value::<EventKind>(serde_json::to_value(measured).unwrap())
+        .expect("measurement roundtrip");
+    let event = DomainEvent {
+        env: Envelope {
+            id: EventId::new(),
+            ..event.env
+        },
+        kind: measured,
+    };
+    assert!(project_public(&event).is_none());
+    state.apply(&event);
+    assert_eq!(state.execution_observation.as_ref(), Some(&observation));
 }
 
 mod turn_execution_observation {

@@ -45,6 +45,45 @@ fn save(places: &Places, stub: &Stub, sandbox: &str) -> String {
     session
 }
 
+// Catches: the ACP measurement ladder replaces admitted workspace authority
+// with the off ceiling, allowing a headless CLI widening without consent.
+#[test]
+fn acp_load_ceiling_does_not_authorize_wider_cli_resume() {
+    let places = Places::new();
+    let stub = Stub::start(Plan::default());
+    let session = save(&places, &stub, "workspace");
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.chat]\nmodel='ollama/qwen3'\nthinking='off'\nsandbox='off'\n",
+    )
+    .unwrap();
+    let mut loaded = host(&places, &stub);
+    let response = loaded.request(
+        "session/load",
+        json!({"sessionId": session, "cwd": places.workspace_path(), "mcpServers": []}),
+    );
+    assert!(response["result"].is_object(), "{response}");
+    loaded.finish();
+
+    let resumed = Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+        .subcommand("resume")
+        .args([
+            session.as_str(),
+            "--profile",
+            "chat",
+            "--output",
+            "text",
+            "next",
+        ])
+        .run();
+    assert_eq!(resumed.code, Some(3), "{}", resumed.stderr);
+    assert_eq!(
+        stub.generations().len(),
+        1,
+        "unapproved widening reached provider"
+    );
+}
+
 // Keep real recorded state and its codec; simulate a prior digest schema only.
 fn old_digest(places: &Places, session: &str, legacy: bool) {
     fn change(value: &mut Value, legacy: bool) -> usize {

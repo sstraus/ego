@@ -72,6 +72,17 @@ fn append_evidence(
 
 #[test]
 fn execution_observation_retains_probe_evidence_across_writer_reopen_gc() {
+    retains_probe_evidence_across_writer_reopen_gc(false);
+}
+
+// Catches: separating capability evidence from admission makes GC delete probes
+// or lets replay install an unadmitted measurement as saved authority.
+#[test]
+fn execution_measurement_retains_probe_evidence_without_admitting_authority() {
+    retains_probe_evidence_across_writer_reopen_gc(true);
+}
+
+fn retains_probe_evidence_across_writer_reopen_gc(measurement: bool) {
     let root = tempdir().expect("store root");
     let workspace = std::fs::canonicalize(root.path()).expect("canonical workspace");
     let store = JsonlStore::new(root.path(), workspace, Box::new(OsIo));
@@ -99,14 +110,21 @@ fn execution_observation_retains_probe_evidence_across_writer_reopen_gc() {
             .expect("evidence store");
         retained = append_evidence(&evidence, b"retained probe transcript");
         garbage = append_evidence(&evidence, b"unreferenced garbage");
-        let kind = EventKind::ExecutionObserved {
-            observation: observation("seatbelt", "probe-test"),
-            probe_evidence: Some(retained.clone()),
+        let kind = if measurement {
+            EventKind::ExecutionMeasured {
+                observation: observation("seatbelt", "probe-test"),
+                probe_evidence: Some(retained.clone()),
+            }
+        } else {
+            EventKind::ExecutionObserved {
+                observation: observation("seatbelt", "probe-test"),
+                probe_evidence: Some(retained.clone()),
+            }
         };
         assert_eq!(
             kind.blob_references(),
             vec![retained.blob_ref()],
-            "ExecutionObserved must make its probe transcript reachable"
+            "execution evidence must make its probe transcript reachable"
         );
         opened
             .writer
@@ -125,6 +143,7 @@ fn execution_observation_retains_probe_evidence_across_writer_reopen_gc() {
             },
         )
         .expect("writer reopens and repairs no data");
+    assert_eq!(reopened.state.execution_observation.is_none(), measurement);
     let evidence = reopened
         .writer
         .evidence_store(1024 * 1024)
