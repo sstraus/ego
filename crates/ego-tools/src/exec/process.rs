@@ -395,7 +395,7 @@ impl RunProcessContext {
             .map_err(|error| ProcessError::Backend(format!("process task failed: {error}")))?
     }
 
-    /// Run a command, and when the sandbox refuses a path it names, ask the
+    /// Run a command, and when stderr hints at a refused absolute path, ask the
     /// human whether to open that one path and run it again.
     ///
     /// The command is re-run only after it has exited unsuccessfully, so no

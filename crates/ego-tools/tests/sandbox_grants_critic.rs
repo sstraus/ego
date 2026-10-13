@@ -263,12 +263,10 @@ fn a_forged_refusal_of_the_filesystem_root_is_never_a_question() {
     );
 }
 
-/// Catches: a child names a parent of the path on the command line (`.../Gits`
-/// while the command line says `.../Gits-evil/f`) and the human is asked to open
-/// the parent, because `argument.contains(printed)` accepts any substring.
+/// Catches: an argv alias or unrelated spelling changes the exact human hint request.
 #[test]
-fn a_refusal_printed_for_a_prefix_of_an_argv_path_is_not_a_question_about_that_prefix() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+fn a_refusal_hint_names_its_exact_path_not_the_argv_prefix() {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let parent = fixture.outside.join("Gits");
@@ -278,11 +276,10 @@ fn a_refusal_printed_for_a_prefix_of_an_argv_path_is_not_a_question_about_that_p
         "p=$0; printf '%s: Operation not permitted\\n' \"${p%-evil/f}\" >&2; exit 1",
         &[&evil],
     );
+    assert_eq!(fixture.seat.asked_paths(), vec![parent]);
     assert!(
-        !fixture.seat.asked_paths().contains(&parent),
-        "the command line never named {}, yet the human was asked about it: {:?}",
-        parent.display(),
-        fixture.seat.asked()
+        fixture.seat.granted().is_empty(),
+        "declined hint widened reach"
     );
 }
 
@@ -591,12 +588,10 @@ fn dotdot_and_trailing_slash_spellings_anchor_the_same_directory() {
     assert_eq!(fixture.seat.asked_paths(), vec![target]);
 }
 
-/// Catches: a command line that names only `/` anchors every path on the machine
-/// (`path.is_or_under("/")`), so the "the command line named it" gate is empty
-/// for `ls /` and a forged refusal of any outside file becomes a question.
+/// Catches: an argv alias or unrelated spelling changes the exact human hint request.
 #[test]
-fn a_command_line_naming_only_the_filesystem_root_does_not_anchor_other_paths() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+fn a_root_argument_does_not_expand_the_human_hint_request() {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let target = write_file(&fixture.outside.join("f"), "x");
@@ -605,21 +600,18 @@ fn a_command_line_naming_only_the_filesystem_root_does_not_anchor_other_paths() 
         target.display()
     );
     let _ = fixture.sh(&script, &[Path::new("/")]);
+    assert_eq!(fixture.seat.asked_paths(), vec![target]);
     assert!(
-        fixture.seat.asked().is_empty(),
-        "`/` on the command line does not name {}: {:?}",
-        target.display(),
-        fixture.seat.asked()
+        fixture.seat.granted().is_empty(),
+        "declined hint widened reach"
     );
 }
 
-/// Catches: the same hole through the home directory: a symlink spelled on the
-/// command line that resolves to HOME anchors everything below HOME (`.ssh`,
-/// `Library`), though the person approved a command about a workspace link.
+/// Catches: an argv alias or unrelated spelling changes the exact human hint request.
 #[cfg(unix)]
 #[test]
-fn a_command_line_path_that_resolves_to_home_does_not_anchor_files_below_it() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+fn a_home_alias_does_not_expand_the_human_hint_request() {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let home = std::fs::canonicalize(std::env::var_os("HOME").expect("HOME")).expect("home");
@@ -634,11 +626,10 @@ fn a_command_line_path_that_resolves_to_home_does_not_anchor_files_below_it() {
         below.display()
     );
     let _ = fixture.sh(&script, &[&link]);
+    assert_eq!(fixture.seat.asked_paths(), vec![below]);
     assert!(
-        fixture.seat.asked().is_empty(),
-        "asked about {} because a link to HOME was on the command line: {:?}",
-        below.display(),
-        fixture.seat.asked()
+        fixture.seat.granted().is_empty(),
+        "declined hint widened reach"
     );
 }
 
@@ -778,13 +769,11 @@ fn control_and_bidi_characters_in_arguments_never_reach_the_question_raw() {
     );
 }
 
-/// Catches: a command line that names a symlink chain ending at an ancestor of
-/// the workspace still anchors everything below that ancestor, because only the
-/// spelled path (not the resolved one) is compared with the workspace.
+/// Catches: an argv alias or unrelated spelling changes the exact human hint request.
 #[cfg(unix)]
 #[test]
-fn a_symlink_chain_to_an_ancestor_of_the_workspace_anchors_nothing() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+fn an_ancestor_alias_does_not_expand_the_human_hint_request() {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let target = write_file(&fixture.outside.join("f"), "x");
@@ -807,18 +796,17 @@ fn a_symlink_chain_to_an_ancestor_of_the_workspace_anchors_nothing() {
         )),
         first.into_os_string(),
     ]);
+    assert_eq!(fixture.seat.asked_paths(), vec![target]);
     assert!(
-        fixture.seat.asked().is_empty(),
-        "a path under an ancestor of the workspace was asked: {:?}",
-        fixture.seat.asked()
+        fixture.seat.granted().is_empty(),
+        "declined hint widened reach"
     );
 }
 
-/// Catches: a relative argument is resolved against the process cwd and anchors
-/// an absolute path the command line never spelled (`../outside`).
+/// Catches: an argv alias or unrelated spelling changes the exact human hint request.
 #[test]
-fn a_relative_argument_does_not_anchor_an_absolute_refusal() {
-    let Some(fixture) = open(Confinement::Workspace, Seat::new(no)) else {
+fn a_relative_argument_does_not_hide_an_absolute_refusal_hint() {
+    let Some(fixture) = open_widening(Confinement::Workspace, Seat::new(no)) else {
         return;
     };
     let target = write_file(&fixture.outside.join("f"), "x");
@@ -832,10 +820,10 @@ fn a_relative_argument_does_not_anchor_an_absolute_refusal() {
         )),
         relative.into_os_string(),
     ]);
+    assert_eq!(fixture.seat.asked_paths(), vec![target]);
     assert!(
-        fixture.seat.asked().is_empty(),
-        "a relative argument anchored a question: {:?}",
-        fixture.seat.asked()
+        fixture.seat.granted().is_empty(),
+        "declined hint widened reach"
     );
 }
 

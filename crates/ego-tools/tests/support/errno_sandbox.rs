@@ -1,8 +1,8 @@
 use super::*;
 
-// Catches: errno-suffixed EPERM/EACCES lose the human request, or stdout/unanchored text raises one.
+// Catches: errno-suffixed EPERM/EACCES lose the human request, or stdout/trailing prose raises one.
 #[test]
-fn adaptive_errno_refusals_request_only_the_anchored_stderr_path() {
+fn adaptive_errno_refusals_request_only_absolute_stderr_paths() {
     let workspace = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let target = std::fs::canonicalize(outside.path())
@@ -40,8 +40,7 @@ fn adaptive_errno_refusals_request_only_the_anchored_stderr_path() {
             let Err(ProcessError::Exit { result, .. }) = execute(&run, &child) else {
                 panic!("fixture must fail")
             };
-            let expected =
-                stream == "2" && suffix.is_empty() && anchored && !error.contains("os error 2");
+            let expected = stream == "2" && suffix.is_empty() && !error.contains("os error 2");
             assert_eq!(
                 seat.asked(),
                 if expected {
