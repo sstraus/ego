@@ -250,13 +250,25 @@ fn readmission_cases() {
                     _ => None,
                 })
                 .collect();
-            assert!(
-                events.iter().any(|event| matches!(
-                    event.kind,
-                    ego_core::event::domain::EventKind::ExecutionObserved { .. }
-                )),
-                "{name}: core continuation omitted durable observation"
-            );
+            let saved = events.iter().rev().find_map(|event| match &event.kind {
+                ego_core::event::domain::EventKind::ExecutionObserved { observation, .. } => {
+                    Some(observation)
+                }
+                _ => None,
+            });
+            if asks && !allow {
+                assert_ne!(
+                    saved,
+                    Some(&observed),
+                    "{name}: refused authority became the saved observation"
+                );
+            } else {
+                assert_eq!(
+                    saved,
+                    Some(&observed),
+                    "{name}: core continuation omitted durable observation"
+                );
+            }
             assert_eq!(
                 events
                     .iter()

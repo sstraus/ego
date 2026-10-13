@@ -57,7 +57,6 @@ use crate::store::session_store::{SessionEntry, SessionStore, StoreError};
 use crate::turn::AdmittedToolSource;
 
 mod readmission;
-pub use readmission::admit_execution_policy;
 
 /// Measured authority and its retained probe transcript.
 pub type RunExecutionObservation = (ExecObservation, Option<crate::store::evidence::EvidenceRef>);
@@ -2050,23 +2049,14 @@ where
                 origin: request.origin.clone(),
             })
             .await?;
-        let (model, mut prepared) = prepared.into_parts();
-        let mut selections = request.selections.clone();
-        if selections.sandbox_observation.is_none()
-            && let Some((observation, _)) = self
-                .executor
-                .execution_observation(&mut prepared, bindings.cancel())
-                .await?
-        {
-            selections.sandbox_observation = Some(observation);
-        }
+        let (model, prepared) = prepared.into_parts();
         let lease = TurnLease(self.ids.next_uuid());
         let transaction = RunTransaction {
             revision: RunRevision::new(1),
             run_id,
             origin: request.origin.clone(),
             root: request.root.clone(),
-            selections: selections.clone(),
+            selections: request.selections.clone(),
             command: RunCommand::CommandAdmitted {
                 request_id: request.request_id,
                 digest: request.digest.clone(),
@@ -2111,7 +2101,7 @@ where
                         run_id,
                         origin: request.origin,
                         root: request.root,
-                        selections,
+                        selections: request.selections,
                         revision,
                         status: RunStatus::Running,
                         settlement: None,
