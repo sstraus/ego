@@ -1319,6 +1319,7 @@ pub struct RunExecutionBindings {
     human: Option<Arc<dyn HumanApprover>>,
     cancel: crate::turn::CancelToken,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
+    residual: Option<Arc<crate::permit::residual::ResidualWriteDesk>>,
     controls: Option<Arc<dyn crate::control::SessionControls>>,
     host: Option<crate::turn::HostClient>,
     interactive_control: Option<Arc<Mutex<Option<crate::turn::InteractiveControl>>>>,
@@ -1340,6 +1341,7 @@ impl RunExecutionBindings {
             human: None,
             cancel: crate::turn::CancelToken::new(),
             sandbox_grants: None,
+            residual: None,
             controls: None,
             host: None,
             interactive_control: None,
@@ -1408,6 +1410,20 @@ impl RunExecutionBindings {
 
     pub fn sandbox_grants(&self) -> Option<Arc<dyn SandboxGrantPort>> {
         self.sandbox_grants.as_ref().map(Arc::clone)
+    }
+
+    /// Attach the session desk that puts Adaptive write refusals to the
+    /// sandbox judge. Owned by the session, so its grants outlive one run.
+    pub fn with_residual_desk(
+        mut self,
+        desk: Arc<crate::permit::residual::ResidualWriteDesk>,
+    ) -> Self {
+        self.residual = Some(desk);
+        self
+    }
+
+    pub fn residual_desk(&self) -> Option<Arc<crate::permit::residual::ResidualWriteDesk>> {
+        self.residual.as_ref().map(Arc::clone)
     }
 
     /// Attach the operator seat's generation controls for this execution.

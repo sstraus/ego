@@ -342,6 +342,7 @@ impl CliPrepared {
             self.run_deadline,
             self.admitted_sandbox_observation.as_ref(),
             bindings.sandbox_grants(),
+            bindings.residual_desk(),
         )
         .await
         {

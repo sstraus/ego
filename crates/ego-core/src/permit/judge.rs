@@ -1,6 +1,9 @@
 //! Bounded action-evidence request and strict response decoder for the auto-mode judge.
 
 mod context;
+mod residual;
+
+pub use residual::{ResidualVerdict, decode_residual};
 
 use crate::digest::sha256_hex;
 use serde::{Deserialize, Serialize};
@@ -36,6 +39,7 @@ pub struct JudgeConfig {
 /// The only facts permitted to cross into the judge request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JudgeInput {
+    instructions: &'static str,
     canonical: String,
     raw_argv: Vec<Vec<String>>,
 }
@@ -54,6 +58,10 @@ impl JudgeInput {
             escalation: CanonicalEscalation::from(escalation),
         })
         .expect("the closed judge projection always serializes");
+        Self::with_facts(JUDGE_INSTRUCTIONS, canonical, call)
+    }
+
+    fn with_facts(instructions: &'static str, canonical: String, call: &PreparedCall) -> Self {
         let raw_argv = call
             .ops()
             .iter()
@@ -68,6 +76,7 @@ impl JudgeInput {
             })
             .collect();
         Self {
+            instructions,
             canonical,
             raw_argv,
         }
@@ -85,6 +94,35 @@ impl JudgeInput {
         context: &JudgeTaskContext,
         main: Option<&ModelRef>,
     ) -> GenRequest {
+        let facts = self.facts(config, context, main);
+        let evidence = format!(
+            "<untrusted_action_json>\n{}\n</untrusted_action_json>",
+            facts
+        );
+        let messages = Conversation::new(vec![
+            Message::text(Role::System, self.instructions),
+            Message::text(Role::User, evidence),
+        ])
+        .expect("two text messages are a valid conversation");
+        GenRequest {
+            cache: None,
+            model: config.request_model.clone(),
+            messages,
+            tools: Vec::new(),
+            thinking: ThinkingLevel::Off,
+            max_output_tokens: config.max_output_tokens,
+            parallel_tool_calls: false,
+        }
+    }
+
+    /// The facts exactly as the judge reads them, after provider-sensitive
+    /// redaction.
+    fn facts(
+        &self,
+        config: &JudgeConfig,
+        context: &JudgeTaskContext,
+        main: Option<&ModelRef>,
+    ) -> serde_json::Value {
         let same_provider = main
             .and_then(|model| model.0.split_once('/'))
             .zip(config.identity.0.split_once('/'))
@@ -115,24 +153,7 @@ impl JudgeInput {
             context.clone().redacted()
         };
         facts["task_context"] = serde_json::to_value(context).expect("bounded context");
-        let evidence = format!(
-            "<untrusted_action_json>\n{}\n</untrusted_action_json>",
-            facts
-        );
-        let messages = Conversation::new(vec![
-            Message::text(Role::System, JUDGE_INSTRUCTIONS),
-            Message::text(Role::User, evidence),
-        ])
-        .expect("two text messages are a valid conversation");
-        GenRequest {
-            cache: None,
-            model: config.request_model.clone(),
-            messages,
-            tools: Vec::new(),
-            thinking: ThinkingLevel::Off,
-            max_output_tokens: config.max_output_tokens,
-            parallel_tool_calls: false,
-        }
+        facts
     }
 }
 
@@ -282,15 +303,20 @@ impl JudgeDecoder {
         self.finish_valid().unwrap_or_else(escalate)
     }
 
-    /// Only a valid explicit verdict may enter durable advisory storage.
-    pub fn finish_valid(self) -> Result<JudgeOutcome, &'static str> {
+    /// The complete response body of one cleanly finished generation.
+    fn finish_text(&self) -> Result<&str, &'static str> {
         if let Some(reason) = self.uncertain {
             return Err(reason);
         }
         if self.terminal != Some(StopReason::Stop) {
             return Err("judge response was incomplete");
         }
-        let response = match serde_json::from_str::<JudgeResponse>(verdict_json(&self.response)) {
+        Ok(verdict_json(&self.response))
+    }
+
+    /// Only a valid explicit verdict may enter durable advisory storage.
+    pub fn finish_valid(self) -> Result<JudgeOutcome, &'static str> {
+        let response = match serde_json::from_str::<JudgeResponse>(self.finish_text()?) {
             Ok(response) => response,
             Err(_) => return Err("judge response was not one strict JSON verdict"),
         };

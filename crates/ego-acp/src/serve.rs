@@ -659,6 +659,10 @@ pub struct AcpRunBindingsBuilder {
     /// and ends with the session (`end_session`). Keyed by the wire session id.
     sandbox_sessions:
         std::sync::Mutex<std::collections::HashMap<String, crate::sandbox::SessionSandboxGrants>>,
+    /// One sandbox-judge desk per session, beside its human answers.
+    residual_sessions: std::sync::Mutex<
+        std::collections::HashMap<String, Arc<ego_core::permit::residual::ResidualWriteDesk>>,
+    >,
 }
 
 impl AcpRunBindingsBuilder {
@@ -672,6 +676,7 @@ impl AcpRunBindingsBuilder {
             permission_rules: None,
             sandbox_store: None,
             sandbox_sessions: std::sync::Mutex::default(),
+            residual_sessions: std::sync::Mutex::default(),
         }
     }
 
@@ -727,6 +732,10 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(session.0.as_ref());
+        self.residual_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session.0.as_ref());
     }
 
     fn build(
@@ -754,6 +763,13 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
                 .entry(session.0.to_string())
                 .or_default(),
         );
+        let residual = Arc::clone(
+            self.residual_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(session.0.to_string())
+                .or_insert_with(ego_core::permit::residual::ResidualWriteDesk::new),
+        );
         let sandbox_grants = crate::sandbox::AcpSandboxGrants::new(
             session.clone(),
             connection.clone(),
@@ -770,7 +786,8 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
             Some(elicitor),
         )
         .with_human(human)
-        .with_sandbox_grants(Arc::new(sandbox_grants));
+        .with_sandbox_grants(Arc::new(sandbox_grants))
+        .with_residual_desk(residual);
         match &self.controls {
             Some(controls) => bindings.with_controls(Arc::clone(controls)),
             None => bindings,

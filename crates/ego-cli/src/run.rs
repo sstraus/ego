@@ -52,6 +52,7 @@ use ego_core::hook::{
 };
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
+use ego_core::permit::residual::ResidualWriteDesk;
 use ego_core::permit::{
     CanonPath, Change, Confinement, Escalation, ExecCaps, ExecObservation, HumanApprover,
     MissingExecCaps, Op, OpName, PermissionDecision, PermissionRequest, PolicyDigest, PolicyEngine,

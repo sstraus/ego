@@ -65,7 +65,7 @@ async fn paste_image_limits(
     run_deadline: Option<std::time::Instant>,
 ) -> Result<ego_core::generator::capabilities::ImageLimits, String> {
     let paste_cancel = CancelToken::new();
-    let (ports, _, _) = effect_scope(confinement, evidence, &paste_cancel, run_deadline)
+    let (ports, _, _) = effect_scope(confinement, evidence, &paste_cancel, run_deadline, None)
         .await
         .map_err(|error| format!("image paste could not check the model: {error:?}"))?;
     let http = Arc::new(ProviderHttpAdapter::new(ports)) as Arc<dyn ego_ai::http::Http>;
@@ -419,8 +419,16 @@ pub(super) async fn drive_execution<S: EventSink>(
                 },
                 None => HeadlessInput::Prompt(&RunPrompt::from(text.clone())),
             };
-            let (ports, observation, probe_evidence) =
-                effect_scope(&confinement, active.evidence(), &cancel, run_deadline).await?;
+            // One run is one session: the judge's grants die with it.
+            let residual = judge_available.then(ResidualWriteDesk::new);
+            let (ports, observation, probe_evidence) = effect_scope(
+                &confinement,
+                active.evidence(),
+                &cancel,
+                run_deadline,
+                residual.clone(),
+            )
+            .await?;
             admit_saved_session_policy(
                 &mut active,
                 &observation,
@@ -596,9 +604,12 @@ pub(super) async fn drive_execution<S: EventSink>(
             // Only owned transition data crosses the boundary where the
             // replaceable ActiveSession is mutated or replaced.
             'sessions: loop {
+                // A new, forked, compacted or resumed epoch is another
+                // session, so the judge's grants do not cross into it.
+                let residual = judge_available.then(ResidualWriteDesk::new);
                 let (transition, source_state, session_end) = {
                     let (session_hook_ports, observation, probe_evidence) =
-                        effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
+                        effect_scope(&confinement, active.evidence(), &cancel, run_deadline, None)
                             .await?;
                     let human = seat
                         .has_human()
@@ -833,6 +844,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     }
                                 };
 
+                                if let Some(residual) = &residual {
+                                    perimeter = perimeter.with_residual_grants(&residual.grants());
+                                }
                                 match line {
                                     repl::Line::HostCommand(
                                         repl::HostCommand::RemovePasteImage,
@@ -1869,6 +1883,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                     active.evidence(),
                                                     &compaction_cancel,
                                                     run_deadline,
+                                                    None,
                                                 )
                                                 .await
                                                 .map_err(compaction_termination)?;
@@ -2102,6 +2117,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 active.evidence(),
                                 &turn_cancel,
                                 run_deadline,
+                                residual.clone(),
                             )
                             .await?;
                             perimeter = perimeter

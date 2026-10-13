@@ -735,7 +735,8 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::AttemptSettled { .. }
         | EventKind::UsageCorrected { .. }
         | EventKind::ExecutionObserved { .. }
-        | EventKind::JudgeResponse { .. } => None,
+        | EventKind::JudgeResponse { .. }
+        | EventKind::SandboxResidualDecided { .. } => None,
         EventKind::ToolCallMeasured { .. } => None,
     }
 }

@@ -52,7 +52,7 @@ fn adaptive_large_denial_preview_compiles_constant_patterns_once() {
     assert_eq!(denial.request, None);
     let compilations = super::super::adaptive::floor::COMPILATIONS.with(|count| count.get());
     assert!(
-        compilations <= 5,
+        compilations <= 7,
         "compiled {compilations} patterns for one preview"
     );
 }

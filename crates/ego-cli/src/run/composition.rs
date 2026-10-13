@@ -1338,7 +1338,7 @@ pub(super) async fn generation_preflight_inner(
             },
         )?;
     let (proof_ports, proof_observation, _) =
-        effect_scope(confinement, &proof_evidence, cancel, run_deadline).await?;
+        effect_scope(confinement, &proof_evidence, cancel, run_deadline, None).await?;
     let http = Arc::new(ProviderHttpAdapter::new(proof_ports)) as Arc<dyn ego_ai::http::Http>;
 
     let mode = effective.mode.unwrap_or(Mode::Default);

@@ -17,6 +17,7 @@ pub mod judge;
 mod orchestration;
 mod path;
 mod prepared_call;
+pub mod residual;
 mod roots;
 pub mod rule;
 mod sandbox_grant;

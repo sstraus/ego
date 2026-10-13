@@ -743,3 +743,51 @@ fn raw_judge_response_stays_private_in_projection_and_export() {
     assert_eq!(response["event"]["bytes"], raw.len());
     assert_eq!(response["event"]["truncated"], false);
 }
+
+// Catches: a residual judge decision exports the refused path or the judge's
+// reason, which name host files and private task text.
+#[test]
+fn residual_judge_decision_exports_its_outcome_without_path_or_reason() {
+    let (mut fixture, target, _) = fixture();
+    let entries = fixture.entries.get_mut(&target).unwrap().as_mut().unwrap();
+    let mut seq = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionEntry::Event(event) => Some(event.env.seq),
+            _ => None,
+        })
+        .max()
+        .unwrap();
+    seq.next();
+    let (path, reason) = ("/PRIVATE-HOST/exports", "PRIVATE-JUDGE-REASON");
+    let decided = event(
+        &mut seq,
+        EventKind::SandboxResidualDecided {
+            path: CanonPath::new(path),
+            outcome: ego_core::permit::residual::ResidualOutcome::Granted,
+            recommended: Some(ego_core::permit::residual::ResidualScope::Session),
+            reason: reason.into(),
+            attempt: Some(AttemptRef::first(ego_core::event::id::GenerationId::new())),
+        },
+    );
+    let SessionEntry::Event(domain) = &decided else {
+        unreachable!()
+    };
+    assert!(ego_core::public::project_public(domain).is_none());
+    entries.push(decided);
+    let exported = Exporter::new(&fixture).sanitized(target).unwrap();
+    let encoded = serde_json::to_string(&exported).unwrap();
+    assert!(
+        !encoded.contains(path) && !encoded.contains(reason),
+        "{encoded}"
+    );
+    let value = serde_json::to_value(exported).unwrap();
+    let record = value["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["event"]["kind"] == "sandbox_residual_decided")
+        .expect("the decision survives export");
+    assert_eq!(record["event"]["outcome"], "granted");
+    assert_eq!(record["event"]["recommended"], "session");
+}

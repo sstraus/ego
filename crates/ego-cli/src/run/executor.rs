@@ -573,7 +573,7 @@ impl CliCompactionCommand {
             fallbacks: Vec::new(),
         };
         let (ports, observation, probe_evidence) =
-            effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
+            effect_scope(&confinement, active.evidence(), &cancel, run_deadline, None)
                 .await
                 .map_err(compaction_termination)?;
         let fs = OsFs;

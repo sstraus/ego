@@ -137,20 +137,62 @@ intentional. Workspace and derived toolchain/target executables remain runnable.
 Adaptive's OS credential floors cannot be lifted by permission rules or human
 sandbox grants: SSH/AWS/GnuPG, netrc, keychain/browser stores, provider/ego/Cargo
 credentials and `.env*` outside the workspace. Git config/hooks and worktree
-selectors stay protected against writes. Metadata roots, module directories,
+selectors stay protected against writes.
+`AGENTS.md` and `CLAUDE.md` at any depth, and Markdown files beneath the admitted
+home's `.codex`, `.claude` and `.claude-private` directories also stay read-only,
+including beneath workspace, derived, human and judge write grants.
+Metadata roots, module directories,
 worktree entries, hooks and info directories cannot be relocated. Git can still
 remove transient operation state and empty object/ref directories. Ordinary OS
 privacy restrictions also remain. These OS floors are separate from the default
 read rules described above.
 Report the exact refused target and its task relevance. A failed mutation can
-leave partial effects; do not assume replay is safe. Automatic residual-write
-judgment is pending the shared judge integration; the existing human grant flow
-still handles eligible refusals. A refused path that the approved command line
-does not name (for example inside a script) also raises that question. Paths
-inside the workspace, `/`, the home directory, a workspace ancestor or a floor
-never raise one. Under Adaptive a question about a path other than the program
-asks for write access, because reads are already open. A future judge-write grant will also forbid
-execution within that residual root for the rest of its session.
+leave partial effects; do not assume replay is safe. In `auto`, a refused write
+goes to the sandbox judge first (see
+[Sandbox judge for residual writes](#sandbox-judge-for-residual-writes)); a human
+grant question follows when the judge has no opinion or says no. A refused path
+that the approved command line does not name (for example inside a script) also
+raises that question. Paths inside the workspace, `/`, the home directory, a
+workspace ancestor or a floor never raise one. Under Adaptive a question about a
+path other than the program asks for write access, because reads are already open.
+
+### Sandbox judge for residual writes
+
+`sandbox="adaptive"` with permission mode `auto` and a configured judge lets the
+judge open one refused write for the session. Other modes and
+`permissions.judge = "none"` keep the human question.
+
+1. A foreground `exec` child exits and its stderr names an EPERM or EACCES path
+   outside the writable perimeter. Floors, the workspace and paths that are too
+   broad stop here and the judge is not asked.
+2. The judge sees the printed and canonical path, owner and kind (dotfile,
+   system directory, other repository), at most 32 directory entries (names,
+   sizes and types, never contents), the refusal line, the writable roots, the
+   refused command, the task and the agent's reason. All of it is data, not
+   instructions. Its answer must name that exact path.
+3. ego checks a write verdict again: floors, system directories, breadth and the
+   canonical identity of the path. Then it records a `sandbox_residual_decided`
+   event and only after that opens the path for the rest of the session.
+4. The command is not run again. Its result says that the path is now writable;
+   the agent runs the command again if the result is still needed.
+
+A judge grant is never persistent. A recommended `always` scope is recorded but
+applies only to this session; only a human can store a permanent grant. A
+judge-granted path stays non-executable: programs placed there cannot run.
+One command can raise at most 3 judge decisions and one session at most 32.
+A judge that does not answer in time (the command waits at most 10 seconds), an
+invalid verdict and a refusal from a background command get no grant; the human
+question follows.
+`/config perimeter` lists judge-granted paths as `read-write` roots with source
+`judge`. A sanitized export keeps the outcome and scope of each decision but
+not the path or the reason.
+
+Judge prompts are versioned with an evaluation set in
+[`evals/sandbox-auto/v3`](../../evals/sandbox-auto/v3/README.md). A native test
+gives every attack path of that set a forced write verdict and checks that the
+executor refuses it. The cases that only the prompt protects (injected text and
+other prompt-only cases) are listed in that test. Agent instruction files have
+an executor write floor and do not depend on the judge prompt.
 
 **Root-list traps:** `ego roots add PATH --access read` edits the stored list,
 not the implicit default. The first addition replaces the default `~/Gits`
@@ -234,6 +276,12 @@ not a host PTY or TUICommander session. The facts do not expose a full
 effective-root list.
 This guidance is captured in the session's prompt epoch; existing sessions can
 retain the previous identity until an idle `/refresh` opens a new epoch.
+
+The model learns about a judge grant from the refused command's result: the note
+says that the path is writable for the rest of the session, that the command did
+not run again and that programs placed there cannot run. It must not ask the
+judge itself, edit roots or claim that a partially failed command is safe to
+replay.
 
 Sources: [model identity](../../crates/ego-core/src/turn/identity.rs),
 [system-context assembly](../../crates/ego-core/src/turn/mod.rs), and

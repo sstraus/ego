@@ -75,9 +75,13 @@ fn git_at(root: &Path, args: &[&std::ffi::OsStr]) {
 
 #[path = "support/adaptive_exec.rs"]
 mod adaptive_exec;
-use adaptive_exec::{execute, execute_with_grants};
+use adaptive_exec::{execute, execute_with_desk, execute_with_grants};
 #[path = "support/adaptive_grants.rs"]
 mod adaptive_grants;
+#[path = "support/adaptive_instruction_grants.rs"]
+mod adaptive_instruction_grants;
+#[path = "support/adaptive_residual.rs"]
+mod adaptive_residual;
 #[path = "support/adaptive_git_controls.rs"]
 mod git_controls;
 #[path = "support/adaptive_git_layouts.rs"]

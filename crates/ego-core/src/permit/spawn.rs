@@ -1110,6 +1110,12 @@ pub trait ProcessExecutor: Send + Sync {
         None
     }
 
+    /// The session desk this executor routes residual write refusals to.
+    /// The turn loop serves it while a call of this executor runs.
+    fn residual_desk(&self) -> Option<Arc<super::residual::ResidualWriteDesk>> {
+        None
+    }
+
     /// An adapter that cannot observe identity leaves it incomplete, never
     /// inventing facts that could support reusable approval.
     fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {

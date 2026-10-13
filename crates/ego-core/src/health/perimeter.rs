@@ -136,6 +136,26 @@ impl Perimeter {
         }
     }
 
+    /// Include the paths the sandbox judge opened for writing this session.
+    /// They are writable and never executable.
+    pub fn with_residual_grants(mut self, grants: &[crate::permit::CanonPath]) -> Self {
+        for path in grants {
+            let path = path.as_path().to_path_buf();
+            if !self
+                .roots
+                .iter()
+                .any(|root| root.path == path && root.source == "judge")
+            {
+                self.roots.push(PerimeterRoot {
+                    path,
+                    access: RootAccess::ReadWrite,
+                    source: "judge".to_owned(),
+                });
+            }
+        }
+        self
+    }
+
     /// Include process-edge diagnostics without exposing mutable projection state.
     pub fn with_warnings(mut self, warnings: Vec<String>) -> Self {
         for warning in warnings {

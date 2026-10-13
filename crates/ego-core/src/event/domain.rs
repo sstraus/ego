@@ -22,8 +22,10 @@ use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::capabilities::CapabilityGap;
 use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
 use crate::goal::{GoalOwner, GoalTransition};
+use crate::permit::residual::{ResidualOutcome, ResidualScope};
 use crate::permit::{
-    Authority, DetachedExecSnapshot, Escalation, ExecObservation, ToolResult, ToolResultProvenance,
+    Authority, CanonPath, DetachedExecSnapshot, Escalation, ExecObservation, ToolResult,
+    ToolResultProvenance,
 };
 use crate::question::{QuestionOutcome, QuestionRequest, QuestionTarget};
 use crate::run::{CancelReason, DeniedBy, RequestId, RunId, RunSelections, RunSettlement};
@@ -234,7 +236,8 @@ pub struct ToolTiming {
 /// ReasoningDelta | ReasoningState | ToolCallStarted |
 /// ToolCallDelta | ToolCallMeasured | ToolCallCompleted | PermissionRequested |
 /// PermissionAmended | PermissionDecided | GenerationStarted |
-/// ExecutionObserved | FallbackDecision | JudgeResponse | AttemptSettled | UsageUpdated | UsageCorrected |
+/// ExecutionObserved | FallbackDecision | JudgeResponse | SandboxResidualDecided | AttemptSettled |
+/// UsageUpdated | UsageCorrected |
 /// ContextWindowUpdated | TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled |
@@ -469,6 +472,21 @@ pub enum EventKind {
         attempt: AttemptRef,
         text: String,
         truncated: bool,
+    },
+    /// The loop decided one refused write of a running exec. Written before
+    /// a grant is published to the session desk, so the log never holds less
+    /// authority than the sandbox enforces. A grant opens `path` for writing,
+    /// never for exec, for this session only; `recommended` is the judge's
+    /// advice, not an applied scope.
+    SandboxResidualDecided {
+        path: CanonPath,
+        outcome: ResidualOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recommended: Option<ResidualScope>,
+        reason: String,
+        /// The judge attempt that answered; `None` when no judge ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<AttemptRef>,
     },
     /// One attempt reached a terminal state.
     ///
@@ -769,6 +787,7 @@ impl EventKind {
             EventKind::FallbackDecision { .. } => "fallback_decision",
             EventKind::ExecutionObserved { .. } => "execution_observed",
             EventKind::JudgeResponse { .. } => "judge_response",
+            EventKind::SandboxResidualDecided { .. } => "sandbox_residual_decided",
             EventKind::AttemptSettled { .. } => "attempt_settled",
             EventKind::UsageUpdated { .. } => "usage_updated",
             EventKind::UsageCorrected { .. } => "usage_corrected",

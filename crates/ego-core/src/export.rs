@@ -26,6 +26,7 @@ use crate::evidence::{
 use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::types::{ErrorKind, ImageRef};
+use crate::permit::residual::{ResidualOutcome, ResidualScope};
 use crate::permit::{Escalation, ExecObservation, PolicyDigest};
 use crate::public::InstructionSource;
 use crate::question::{QuestionMode, QuestionOutcome, QuestionTarget};
@@ -288,6 +289,11 @@ pub enum ExportEvent {
         attempt: AttemptRef,
         bytes: usize,
         truncated: bool,
+    },
+    SandboxResidualDecided {
+        outcome: ResidualOutcome,
+        recommended: Option<ResidualScope>,
+        attempt: Option<AttemptRef>,
     },
     AttemptSettled {
         attempt: AttemptRef,
@@ -1020,6 +1026,21 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 attempt: *attempt,
                 bytes: text.len(),
                 truncated: *truncated,
+            }
+        }
+        EventKind::SandboxResidualDecided {
+            path: _,
+            outcome,
+            recommended,
+            reason: _,
+            attempt,
+        } => {
+            redactions.path += 1;
+            redactions.permission_material += 1;
+            ExportEvent::SandboxResidualDecided {
+                outcome: *outcome,
+                recommended: *recommended,
+                attempt: *attempt,
             }
         }
         EventKind::AttemptSettled { attempt, outcome } => ExportEvent::AttemptSettled {

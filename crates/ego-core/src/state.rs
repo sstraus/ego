@@ -2048,7 +2048,7 @@ impl SessionState {
             EventKind::ExecutionObserved { observation, .. } => {
                 self.execution_observation = Some(observation.clone());
             }
-            EventKind::JudgeResponse { .. } => {}
+            EventKind::JudgeResponse { .. } | EventKind::SandboxResidualDecided { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
                 usage,
