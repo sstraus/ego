@@ -54,7 +54,7 @@ impl ProfileName {
 
 impl fmt::Display for ProfileName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.as_str())
+        f.write_str(self.as_str())
     }
 }
 
@@ -228,17 +228,17 @@ impl ManagedConfigKey {
 
     /// Parse only the canonical spelling; aliases and arbitrary dotted keys fail.
     pub fn parse(value: &str) -> Result<Self, UserConfigError> {
-        if let Some(auth) = value.strip_prefix("auth.") {
-            if let Some((provider, field)) = auth.rsplit_once('.') {
-                if !provider.is_empty() && !provider.chars().any(char::is_control) {
-                    match field {
-                        "headers" => return Ok(Self::AuthHeaders(provider.to_owned())),
-                        "credential_command" => {
-                            return Ok(Self::AuthCredentialCommand(provider.to_owned()));
-                        }
-                        _ => {}
-                    }
+        if let Some(auth) = value.strip_prefix("auth.")
+            && let Some((provider, field)) = auth.rsplit_once('.')
+            && !provider.is_empty()
+            && !provider.chars().any(char::is_control)
+        {
+            match field {
+                "headers" => return Ok(Self::AuthHeaders(provider.to_owned())),
+                "credential_command" => {
+                    return Ok(Self::AuthCredentialCommand(provider.to_owned()));
                 }
+                _ => {}
             }
         }
         match value {
