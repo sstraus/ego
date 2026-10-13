@@ -55,9 +55,24 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
         if bindings.cancel().is_cancelled() {
             return Err(RunExecutorError::new("execution observation cancelled").into());
         }
-        let turn = TurnId::new();
+        let automatic = if observed.same_measurement(old) {
+            None
+        } else {
+            Some(
+                admit_execution_policy(
+                    old,
+                    &observed,
+                    CanonPath::new(snapshot.root.as_path()),
+                    bindings.human().as_deref(),
+                    journal,
+                    |message| bindings.sink_factory.execution_policy_notice(message),
+                )
+                .await?,
+            )
+        };
+        // Only an admitted measurement may become the saved authority a later resume compares with.
         journal.append(
-            turn,
+            TurnId::new(),
             None,
             None,
             crate::event::domain::EventKind::ExecutionObserved {
@@ -65,18 +80,9 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
                 probe_evidence,
             },
         )?;
-        if observed.same_measurement(old) {
+        let Some(automatic) = automatic else {
             return Ok(selections.clone());
-        }
-        let automatic = admit_execution_policy(
-            old,
-            &observed,
-            CanonPath::new(snapshot.root.as_path()),
-            bindings.human().as_deref(),
-            journal,
-            |message| bindings.sink_factory.execution_policy_notice(message),
-        )
-        .await?;
+        };
         let mut updated = selections.clone();
         updated.sandbox_readmission = Some(Box::new(PolicyReadmission {
             previous: old.clone(),
