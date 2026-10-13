@@ -21,6 +21,7 @@ pub(super) async fn effect_scope(
     evidence: &SessionEvidenceStore,
     cancel: &CancelToken,
     run_deadline: Option<std::time::Instant>,
+    residual: Option<Arc<ResidualWriteDesk>>,
 ) -> Result<
     (
         Arc<RunEffectPorts>,
@@ -36,6 +37,7 @@ pub(super) async fn effect_scope(
         run_deadline,
         None,
         None,
+        residual,
     )
     .await
     .map_err(|error| process_error_termination(error, confinement, cancel))

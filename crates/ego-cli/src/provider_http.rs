@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use ego_ai::http::{Http, HttpCall, HttpProfileFingerprint, PreparedHttpCall};
 use ego_core::event::id::SessionId;
+use ego_core::permit::residual::ResidualWriteDesk;
 use ego_core::permit::{
     CanonPath, Confinement, ExecObservation, GuardedHttp, RunConfinement, SandboxGrantPort,
     TransportError, TransportFailure,
@@ -93,6 +94,7 @@ pub(crate) async fn run_effect_ports(
     run_deadline: Option<Instant>,
     admitted_observation: Option<&ExecObservation>,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
+    residual: Option<Arc<ResidualWriteDesk>>,
 ) -> Result<
     (
         Arc<RunEffectPorts>,
@@ -116,6 +118,10 @@ pub(crate) async fn run_effect_ports(
     };
     let config = match sandbox_grants {
         Some(grants) => config.with_sandbox_grants(grants),
+        None => config,
+    };
+    let config = match residual {
+        Some(desk) => config.with_residual_desk(desk),
         None => config,
     };
     let (ports, observation, probe_evidence) = RunEffectPorts::for_run(config).await?;
@@ -166,6 +172,7 @@ impl CommandHttpScope {
             cancel,
             run_deadline,
             admitted_observation,
+            None,
             None,
         )
         .await
