@@ -564,16 +564,18 @@ impl RunEffectPorts {
 
     fn build(config: ExecRunConfig, backend: Arc<dyn Backend>, capabilities: ExecCaps) -> Self {
         let confinement = config.policy.clone();
-        let context = Arc::new(process::RunProcessContext::new(
-            backend,
-            config.evidence,
-            config.cancel.clone(),
-            config.exec_limits,
-            config.policy,
-            capabilities,
-            config.sandbox_grants,
-            config.residual,
-        ));
+        let context = Arc::new(
+            process::RunProcessContext::new(
+                backend,
+                config.evidence,
+                config.cancel.clone(),
+                config.exec_limits,
+                config.policy,
+                capabilities,
+                config.sandbox_grants,
+            )
+            .with_residual_desk(config.residual),
+        );
         Self {
             process: Arc::new(GuardedExec::new(Arc::clone(&context))),
             http: Arc::new(crate::http::OneShotHttpTransport::new(

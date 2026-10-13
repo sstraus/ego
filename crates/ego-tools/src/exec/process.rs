@@ -122,7 +122,6 @@ impl RunProcessContext {
         confinement: RunConfinement,
         capabilities: ExecCaps,
         sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
-        residual: Option<Arc<ResidualWriteDesk>>,
     ) -> Self {
         Self {
             backend,
@@ -135,9 +134,15 @@ impl RunProcessContext {
             background_changed: Arc::new(Condvar::new()),
             foreground: Mutex::new(None),
             sandbox_grants,
-            residual,
+            residual: None,
             widened: Mutex::new(None),
         }
+    }
+
+    /// Put Adaptive write refusals to the session's judge desk.
+    pub(crate) fn with_residual_desk(mut self, desk: Option<Arc<ResidualWriteDesk>>) -> Self {
+        self.residual = desk;
+        self
     }
 
     pub(crate) async fn execute(&self, spec: &SpawnSpec) -> Result<ToolResult, ProcessError> {
@@ -1747,7 +1752,6 @@ mod sandbox_question_tests {
                 .union(ExecCaps::WRITE_DENIED)
                 .union(ExecCaps::NO_IP_NETWORK),
             Some(Arc::clone(&seat) as Arc<dyn SandboxGrantPort>),
-            None,
         );
         let spec = SpawnSpec::new(
             vec![
