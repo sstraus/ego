@@ -784,9 +784,16 @@ pub struct PermissionPresentation {
     risk: super::analysis::RiskAssessment,
     remember: Result<RememberPlan, String>,
     suggested: Result<RememberPlan, String>,
+    /// Why the judge passed the call to the human, when it did. Model text:
+    /// show it as untrusted words, never as a decision.
+    judge_reason: Option<String>,
 }
 
 impl PermissionPresentation {
+    pub fn judge_reason(&self) -> Option<&str> {
+        self.judge_reason.as_deref()
+    }
+
     pub fn parameters(&self) -> &Value {
         &self.parameters
     }
@@ -1027,6 +1034,13 @@ impl Pending {
         self.ask.why = why;
         self
     }
+
+    fn with_judge_reason(mut self, reason: &str) -> Self {
+        if let Some(presentation) = self.ask.presentation.as_mut() {
+            presentation.judge_reason = Some(reason.to_owned());
+        }
+        self
+    }
 }
 
 /// What [`PolicyEngine::classify`] concluded.
@@ -1242,6 +1256,7 @@ impl PolicyEngine {
                     risk: self.risk(&pending.call),
                     remember,
                     suggested,
+                    judge_reason: None,
                 }));
                 Classification::Ask(pending)
             }
@@ -1542,6 +1557,10 @@ impl PolicyEngine {
         outcome: &super::judge::JudgeOutcome,
         by: Authority,
     ) -> Resolution {
+        let pending = match outcome {
+            super::judge::JudgeOutcome::Escalate { reason } => pending.with_judge_reason(reason),
+            _ => pending,
+        };
         if self.mode != Mode::Auto
             || self.risk(pending.call()).class == super::analysis::RiskClass::High
         {

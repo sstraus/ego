@@ -1,3 +1,7 @@
+#[path = "live_surface_pty/exec_risk_reason.rs"]
+mod exec_risk_reason;
+#[path = "live_surface_pty/foreign_judge_reason.rs"]
+mod foreign_judge_reason;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
 #[path = "live_surface_pty/raw_columns.rs"]
@@ -7413,6 +7417,11 @@ fn modal_session_with(completions: Vec<Reply>) -> ModalSession {
             "off",
         ])
         .env("TERM", "xterm-256color");
+    modal_session_on(ego, stub)
+}
+
+/// [`modal_session_with`] for an `ego` the caller configured against `stub`.
+fn modal_session_on(ego: Ego, stub: Stub) -> ModalSession {
     ego.file("AGENTS.md", "# permission modal fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
@@ -7546,6 +7555,9 @@ fn exec_permission_is_a_compact_modal_and_the_detail_sits_behind_d() {
     assert!(last - first < 4, "the modal is more than 4 rows:\n{modal}");
     assert!(modal.contains("Allow run seq 1 3?"), "{modal}");
     assert!(modal.contains("Risk: unknown - "), "{modal}");
+    // Catches: a read-only refusal reason shown for a command the proof has
+    // no known reason to refuse.
+    assert!(!modal.contains("not read-only"), "{modal}");
     assert!(modal.contains("[y] yes"), "{modal}");
     assert!(
         modal.contains("[a] yes, do not ask again for exec(seq 1 3)"),
