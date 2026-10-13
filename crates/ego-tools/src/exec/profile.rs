@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeSet, error::Error, fmt, path::Path};
 
-use ego_core::permit::{Confinement, SandboxAccess, SandboxGrant};
+use ego_core::permit::{CanonPath, Confinement, SandboxAccess, SandboxGrant};
 
 #[path = "adaptive_profile.rs"]
 mod adaptive;
@@ -205,6 +205,22 @@ fn path_literal(path: &Path) -> Result<String, ProfileError> {
     }
     encoded.push('"');
     Ok(encoded)
+}
+
+/// The rule that keeps judge-granted roots from running what was written
+/// there. Appended last, so it wins over every exec allowance before it.
+pub(super) fn deny_exec(paths: &[CanonPath]) -> Result<String, ProfileError> {
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    let mut rule = String::from("(deny process-exec*\n");
+    for path in paths {
+        rule.push_str("  (subpath ");
+        rule.push_str(&path_literal(path.as_path())?);
+        rule.push_str(")\n");
+    }
+    rule.push_str(")\n");
+    Ok(rule)
 }
 
 /// Whether [`render`] can express `path`; the one place that rule lives.

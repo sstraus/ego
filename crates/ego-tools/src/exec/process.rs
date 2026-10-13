@@ -12,10 +12,14 @@ use ego_core::event::domain::CancelCause;
 use ego_core::event::id::DetachedExecId;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::EffectScope;
+use ego_core::permit::residual::{
+    DECISION_DEADLINE, MAX_DECISIONS_PER_CALL, ResidualDecision, ResidualWriteDesk,
+};
 use ego_core::permit::{
-    CleanupCertainty, DetachedExecOutcome, DetachedExecSnapshot, DuplexEnd, DuplexSession,
-    DuplexSettlement, ExecCaps, ProcessError, RunConfinement, SandboxGrant, SandboxGrantPort,
-    SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult, TransportError, TransportFailure,
+    CanonPath, CleanupCertainty, DetachedExecOutcome, DetachedExecSnapshot, DuplexEnd,
+    DuplexSession, DuplexSettlement, ExecCaps, ProcessError, RunConfinement, SandboxAccess,
+    SandboxGrant, SandboxGrantPort, SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult,
+    TransportError, TransportFailure,
 };
 use ego_core::store::evidence::{EvidenceError, EvidenceStore as _, EvidenceWriter};
 use ego_core::turn::CancelToken;
@@ -41,7 +45,7 @@ const MAX_SANDBOX_QUESTIONS: usize = 3;
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
 
-type WidenedBackend = (Vec<SandboxGrant>, Arc<dyn Backend>);
+type WidenedBackend = (Vec<SandboxGrant>, Vec<CanonPath>, Arc<dyn Backend>);
 
 /// Process state captured once and shared by the run's normal and duplex
 /// process adapters.
@@ -56,6 +60,8 @@ pub(crate) struct RunProcessContext {
     background_changed: Arc<Condvar>,
     foreground: Mutex<Option<DetachedExecId>>,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
+    /// The session desk that puts Adaptive write refusals to the judge.
+    residual: Option<Arc<ResidualWriteDesk>>,
     /// The last profile rendered for a grant list, so a run of commands under
     /// the same grants shares one private profile file.
     widened: Mutex<Option<WidenedBackend>>,
@@ -104,6 +110,10 @@ impl RunProcessContext {
         self.confinement.level()
     }
 
+    pub(crate) fn residual_desk(&self) -> Option<Arc<ResidualWriteDesk>> {
+        self.residual.clone()
+    }
+
     pub(crate) fn new(
         backend: Arc<dyn Backend>,
         evidence: SessionEvidenceStore,
@@ -112,6 +122,7 @@ impl RunProcessContext {
         confinement: RunConfinement,
         capabilities: ExecCaps,
         sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
+        residual: Option<Arc<ResidualWriteDesk>>,
     ) -> Self {
         Self {
             backend,
@@ -124,6 +135,7 @@ impl RunProcessContext {
             background_changed: Arc::new(Condvar::new()),
             foreground: Mutex::new(None),
             sandbox_grants,
+            residual,
             widened: Mutex::new(None),
         }
     }
@@ -352,9 +364,9 @@ impl RunProcessContext {
             .requirements()
             .check(self.capabilities)
             .map_err(ProcessError::MissingCapabilities)?;
-        match (&self.sandbox_grants, &handler) {
-            (Some(grants), None) => {
-                self.execute_asking(grants.as_ref(), spec, background_cancel, live_output)
+        match (&self.sandbox_grants, &self.residual, &handler) {
+            (Some(_), _, None) | (_, Some(_), None) => {
+                self.execute_asking(spec, background_cancel, live_output)
                     .await
             }
             _ => {
@@ -396,23 +408,34 @@ impl RunProcessContext {
     }
 
     /// Run a command, and when stderr hints at a refused absolute path, ask the
-    /// human whether to open that one path and run it again.
+    /// judge, then the human, whether to open that one path.
     ///
-    /// The command is re-run only after it has exited unsuccessfully, so no
-    /// process of the first attempt is still alive; whatever it did before the
-    /// refusal is not undone, and the human is told which path the retry is
-    /// for.
+    /// A human allowance runs the command again, and only after it has exited
+    /// unsuccessfully, so no process of the first attempt is still alive;
+    /// whatever it did before the refusal is not undone, and the human is told
+    /// which path the retry is for. A judge allowance never runs it again: the
+    /// path stays writable for the session and the model decides.
     async fn execute_asking(
         &self,
-        grants: &dyn SandboxGrantPort,
         spec: &SpawnSpec,
         background_cancel: Option<CancelToken>,
         live_output: Option<Arc<Mutex<LiveOutput>>>,
     ) -> Result<ToolResult, ProcessError> {
+        let grants = self.sandbox_grants.as_deref();
         let mut questions = 0;
+        let mut decisions = 0;
         loop {
-            let granted = grants.granted();
-            let backend = self.backend_under(&granted)?;
+            let judged = self
+                .residual
+                .as_ref()
+                .map_or_else(Vec::new, |desk| desk.grants());
+            let mut granted = grants.map_or_else(Vec::new, SandboxGrantPort::granted);
+            granted.extend(
+                judged
+                    .iter()
+                    .map(|path| SandboxGrant::new(path.clone(), SandboxAccess::Write)),
+            );
+            let backend = self.backend_under(&granted, &judged)?;
             let (code, mut result) = match self
                 .spawn_once(
                     backend,
@@ -431,18 +454,57 @@ impl RunProcessContext {
             };
             let outcome = match &found.request {
                 Some(_) if !self.backend.can_widen() => denial::Outcome::CannotWiden,
-                Some(request) if questions < MAX_SANDBOX_QUESTIONS => {
-                    questions += 1;
-                    match self
-                        .ask_until_cancelled(grants, request, spec, background_cancel.as_ref())
-                        .await
-                    {
-                        Some(true) => continue,
-                        Some(false) => denial::Outcome::Declined,
-                        None => return Err(ProcessError::Cancelled),
+                Some(request) => {
+                    let desk = self.residual.as_ref().filter(|_| {
+                        request.access == SandboxAccess::Write
+                            && self.confinement.adaptive_perimeter().is_some()
+                            && background_cancel.is_none()
+                            && decisions < MAX_DECISIONS_PER_CALL
+                    });
+                    let judged_grant = match desk {
+                        Some(desk) => {
+                            decisions += 1;
+                            let evidence = super::residual::evidence(
+                                &found,
+                                request,
+                                &denial::stderr(&result),
+                                &self.confinement,
+                                &judged,
+                            );
+                            let decided = desk.decide(
+                                spec.clone(),
+                                evidence,
+                                super::residual::admissible(self.confinement.clone()),
+                            );
+                            matches!(
+                                tokio::time::timeout(2 * DECISION_DEADLINE, decided).await,
+                                Ok(ResidualDecision::Granted { .. })
+                            )
+                        }
+                        None => false,
+                    };
+                    match grants {
+                        _ if judged_grant => denial::Outcome::JudgeGranted,
+                        Some(grants) if questions < MAX_SANDBOX_QUESTIONS => {
+                            questions += 1;
+                            match self
+                                .ask_until_cancelled(
+                                    grants,
+                                    request,
+                                    spec,
+                                    background_cancel.as_ref(),
+                                )
+                                .await
+                            {
+                                Some(true) => continue,
+                                Some(false) => denial::Outcome::Declined,
+                                None => return Err(ProcessError::Cancelled),
+                            }
+                        }
+                        Some(_) => denial::Outcome::QuestionLimit,
+                        None => denial::Outcome::NobodyToAsk,
                     }
                 }
-                Some(_) => denial::Outcome::QuestionLimit,
                 None => denial::Outcome::NobodyToAsk,
             };
             result.content.push(ToolContentBlock::builtin(denial::note(
@@ -480,9 +542,14 @@ impl RunProcessContext {
         }
     }
 
-    /// The backend with `granted` added, or the admitted one when nothing is
-    /// granted or the mechanism cannot express a per-path grant.
-    fn backend_under(&self, granted: &[SandboxGrant]) -> Result<Arc<dyn Backend>, ProcessError> {
+    /// The backend with `granted` added and exec denied under `no_exec`, or
+    /// the admitted one when nothing is granted or the mechanism cannot
+    /// express a per-path grant.
+    fn backend_under(
+        &self,
+        granted: &[SandboxGrant],
+        no_exec: &[CanonPath],
+    ) -> Result<Arc<dyn Backend>, ProcessError> {
         // A stored grant the profile cannot express (a hand-edited ledger) is
         // left out, so it cannot make every command of the workspace fail.
         let granted = granted
@@ -498,15 +565,16 @@ impl RunProcessContext {
             .widened
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((known, backend)) = cache.as_ref()
+        if let Some((known, tainted, backend)) = cache.as_ref()
             && known.as_slice() == granted
+            && tainted.as_slice() == no_exec
         {
             return Ok(Arc::clone(backend));
         }
-        let Some(widened) = self.backend.widened(granted)? else {
+        let Some(widened) = self.backend.widened(granted, no_exec)? else {
             return Ok(Arc::clone(&self.backend));
         };
-        *cache = Some((granted.to_vec(), Arc::clone(&widened)));
+        *cache = Some((granted.to_vec(), no_exec.to_vec(), Arc::clone(&widened)));
         Ok(widened)
     }
 
@@ -1596,7 +1664,11 @@ mod sandbox_question_tests {
             NullBackend.launch_prefix()
         }
 
-        fn widened(&self, _: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
+        fn widened(
+            &self,
+            _: &[SandboxGrant],
+            _: &[CanonPath],
+        ) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
             Ok(Some(Arc::new(NullBackend)))
         }
 
@@ -1675,6 +1747,7 @@ mod sandbox_question_tests {
                 .union(ExecCaps::WRITE_DENIED)
                 .union(ExecCaps::NO_IP_NETWORK),
             Some(Arc::clone(&seat) as Arc<dyn SandboxGrantPort>),
+            None,
         );
         let spec = SpawnSpec::new(
             vec![

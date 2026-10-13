@@ -104,19 +104,25 @@ impl SeatbeltBackend {
                 })
                 .collect(),
         };
-        Self::render_profile(base, &[], policy.requirements().required())
+        Self::render_profile(base, &[], &[], policy.requirements().required())
     }
 
-    /// The same backend with `grants` added to its profile. The scratch root
-    /// stays the one the measured backend owns, so the caller keeps that
-    /// backend alive for as long as it uses the result.
-    pub(crate) fn widened(&self, grants: &[SandboxGrant]) -> Result<Self, ProcessError> {
-        Self::render_profile(self.base.clone(), grants, self.maximum_caps)
+    /// The same backend with `grants` added to its profile and exec denied
+    /// under `no_exec`. The scratch root stays the one the measured backend
+    /// owns, so the caller keeps that backend alive for as long as it uses
+    /// the result.
+    pub(crate) fn widened(
+        &self,
+        grants: &[SandboxGrant],
+        no_exec: &[CanonPath],
+    ) -> Result<Self, ProcessError> {
+        Self::render_profile(self.base.clone(), grants, no_exec, self.maximum_caps)
     }
 
     fn render_profile(
         base: ProfileBase,
         grants: &[SandboxGrant],
+        no_exec: &[CanonPath],
         maximum_caps: ExecCaps,
     ) -> Result<Self, ProcessError> {
         let runtime_roots = base
@@ -130,7 +136,7 @@ impl SeatbeltBackend {
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
         let grants = base.roots.iter().chain(grants).cloned().collect::<Vec<_>>();
-        let profile = profile::render(&ProfileInput {
+        let mut profile = profile::render(&ProfileInput {
             adaptive: base.adaptive.as_ref(),
             level: base.level,
             offline: base.offline,
@@ -141,6 +147,10 @@ impl SeatbeltBackend {
             grants: &grants,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
+        profile.push_str(
+            &profile::deny_exec(no_exec)
+                .map_err(|error| ProcessError::Backend(error.to_string()))?,
+        );
 
         Ok(Self {
             profile,

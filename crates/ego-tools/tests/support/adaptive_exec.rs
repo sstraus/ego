@@ -25,6 +25,17 @@ pub(super) fn execute_with_grants(
     argv: Vec<std::ffi::OsString>,
     grants: Option<Arc<dyn ego_core::permit::SandboxGrantPort>>,
 ) -> Result<ego_core::permit::ToolResult, ego_core::permit::ProcessError> {
+    execute_with_desk(policy, root, argv, grants, None)
+}
+
+/// As [`execute_with_grants`], with the session's residual-write desk.
+pub(super) fn execute_with_desk(
+    policy: ego_core::permit::RunConfinement,
+    root: &Path,
+    argv: Vec<std::ffi::OsString>,
+    grants: Option<Arc<dyn ego_core::permit::SandboxGrantPort>>,
+    desk: Option<Arc<ego_core::permit::residual::ResidualWriteDesk>>,
+) -> Result<ego_core::permit::ToolResult, ego_core::permit::ProcessError> {
     let evidence =
         SessionEvidenceStore::open(root.join("evidence"), SessionId::new(), 1024 * 1024).unwrap();
     let spec = SpawnSpec::new(
@@ -45,6 +56,9 @@ pub(super) fn execute_with_grants(
     );
     if let Some(grants) = grants {
         config = config.with_sandbox_grants(grants);
+    }
+    if let Some(desk) = desk {
+        config = config.with_residual_desk(desk);
     }
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

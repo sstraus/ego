@@ -38,21 +38,7 @@ pub(super) fn analyze(
     if confinement.level() == ego_core::permit::Confinement::Off {
         return None;
     }
-    let stderr = result
-        .content
-        .iter()
-        .filter(|block| {
-            matches!(
-                block.provenance,
-                ToolOutputProvenance::Process {
-                    stream: StreamProvenance::Stderr,
-                    ..
-                }
-            )
-        })
-        .map(|block| block.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let stderr = stderr(result);
     let mut first = None;
     for printed in stderr.lines().filter_map(printed_path) {
         if floor_refusal(printed, confinement) {
@@ -72,6 +58,25 @@ pub(super) fn analyze(
         printed: printed.to_owned(),
         request: None,
     })
+}
+
+/// Everything the child wrote to stderr, in order.
+pub(super) fn stderr(result: &ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter(|block| {
+            matches!(
+                block.provenance,
+                ToolOutputProvenance::Process {
+                    stream: StreamProvenance::Stderr,
+                    ..
+                }
+            )
+        })
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn floor_refusal(printed: &str, policy: &RunConfinement) -> bool {
@@ -147,7 +152,7 @@ fn request_for(
 
 /// A grant of `/`, of the home directory, or of a directory above the
 /// workspace would hand the command far more than the one path it was refused.
-fn too_broad(path: &CanonPath, confinement: &RunConfinement) -> bool {
+pub(super) fn too_broad(path: &CanonPath, confinement: &RunConfinement) -> bool {
     let above = |other: &Path| CanonPath::new(other).is_or_under(path);
     path.as_path() == Path::new("/")
         || above(confinement.workspace().as_path())
@@ -173,7 +178,7 @@ pub(super) fn renderable(_: &Path) -> bool {
 /// The resolved location, and whether the path itself exists. A path that is
 /// not there yet resolves through its parent, so the grant names the exact
 /// file a write would create.
-fn canonical(path: &Path) -> Option<(CanonPath, bool)> {
+pub(super) fn canonical(path: &Path) -> Option<(CanonPath, bool)> {
     if let Ok(resolved) = std::fs::canonicalize(path) {
         return Some((CanonPath::new(resolved), true));
     }
@@ -202,6 +207,10 @@ pub(super) enum Outcome {
     QuestionLimit,
     /// This platform's sandbox cannot open a path after the run was admitted.
     CannotWiden,
+    /// The sandbox judge opened the path for writing for the session. The
+    /// command is not run again: it already exited, and nothing proves that
+    /// running it twice is safe.
+    JudgeGranted,
 }
 
 /// The note appended to a refused command's output, for the model and the
@@ -227,6 +236,12 @@ pub(super) fn note(denial: &Denial, confinement: &RunConfinement, outcome: Outco
             "sandbox denied {request} (confinement {level}); this platform's sandbox cannot open \
              extra paths after the run started, so the command did not complete; to allow it, \
              use a looser --sandbox level"
+        ),
+        (Some(request), Outcome::JudgeGranted) => format!(
+            "sandbox denied {request} (confinement {level}); the sandbox judge allowed writing \
+             this path for the rest of the session, but the command did not run again, so it did \
+             not complete; run it again if its result is still needed; programs placed there \
+             cannot be run"
         ),
         (Some(request), Outcome::QuestionLimit) => format!(
             "sandbox denied {request} (confinement {level}); this command already raised the \

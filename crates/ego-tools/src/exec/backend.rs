@@ -4,8 +4,8 @@ use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
 
 use ego_core::permit::{
-    BackendIdentity, EnvName, EnvPolicy, ExecCaps, ProcessError, RunConfinement, SandboxGrant,
-    SpawnSpec,
+    BackendIdentity, CanonPath, EnvName, EnvPolicy, ExecCaps, ProcessError, RunConfinement,
+    SandboxGrant, SpawnSpec,
 };
 use tokio::process::Command;
 
@@ -25,11 +25,16 @@ pub(crate) trait Backend: Send + Sync {
     fn maximum_demonstrable_caps(&self) -> ExecCaps;
     fn launch_prefix(&self) -> LaunchPrefix;
 
-    /// This backend with human-allowed paths added, or `None` when the
-    /// mechanism cannot express a per-path grant after admission. The result
-    /// keeps the identity and verified capabilities of the backend it came
-    /// from; it only adds reach the human named.
-    fn widened(&self, _grants: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
+    /// This backend with allowed paths added and exec denied under
+    /// `no_exec`, or `None` when the mechanism cannot express a per-path grant
+    /// after admission. The result keeps the identity and verified
+    /// capabilities of the backend it came from; it only adds reach a human
+    /// or the judge named.
+    fn widened(
+        &self,
+        _grants: &[SandboxGrant],
+        _no_exec: &[CanonPath],
+    ) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
         Ok(None)
     }
 
@@ -89,8 +94,12 @@ impl Backend for MeasuredBackend {
         self.inner.launch_prefix()
     }
 
-    fn widened(&self, grants: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
-        self.inner.widened(grants)
+    fn widened(
+        &self,
+        grants: &[SandboxGrant],
+        no_exec: &[CanonPath],
+    ) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
+        self.inner.widened(grants, no_exec)
     }
 
     fn can_widen(&self) -> bool {
@@ -225,9 +234,14 @@ impl Backend for super::seatbelt::SeatbeltBackend {
         super::seatbelt::SeatbeltBackend::launch_prefix(self)
     }
 
-    fn widened(&self, grants: &[SandboxGrant]) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
-        let widened: Arc<dyn Backend> =
-            Arc::new(super::seatbelt::SeatbeltBackend::widened(self, grants)?);
+    fn widened(
+        &self,
+        grants: &[SandboxGrant],
+        no_exec: &[CanonPath],
+    ) -> Result<Option<Arc<dyn Backend>>, ProcessError> {
+        let widened: Arc<dyn Backend> = Arc::new(super::seatbelt::SeatbeltBackend::widened(
+            self, grants, no_exec,
+        )?);
         Ok(Some(widened))
     }
 

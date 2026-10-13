@@ -16,6 +16,7 @@ pub(crate) mod process;
 mod process_tree;
 #[cfg(target_os = "macos")]
 mod profile;
+mod residual;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 mod secret_child;
@@ -24,6 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ego_core::event::id::DetachedExecId;
+use ego_core::permit::residual::ResidualWriteDesk;
 use ego_core::permit::{
     CanonPath, DuplexSpawner, ExecCaps, ExecObservation, OneHop, PolicyDigest, Resolver,
     RunConfinement, SandboxGrantPort, SpawnSpec,
@@ -113,6 +115,7 @@ pub struct ExecRunConfig {
     resolver: Arc<dyn Resolver>,
     admitted_observation: Option<ExecObservation>,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
+    residual: Option<Arc<ResidualWriteDesk>>,
 }
 
 impl ExecRunConfig {
@@ -135,6 +138,7 @@ impl ExecRunConfig {
             resolver,
             admitted_observation: None,
             sandbox_grants: None,
+            residual: None,
         }
     }
 
@@ -144,6 +148,15 @@ impl ExecRunConfig {
     #[must_use]
     pub fn with_sandbox_grants(mut self, grants: Arc<dyn SandboxGrantPort>) -> Self {
         self.sandbox_grants = Some(grants);
+        self
+    }
+
+    /// Put Adaptive write refusals of this run's commands to the session's
+    /// sandbox judge before any human. The desk outlives the run: its grants
+    /// belong to the session.
+    #[must_use]
+    pub fn with_residual_desk(mut self, desk: Arc<ResidualWriteDesk>) -> Self {
+        self.residual = Some(desk);
         self
     }
 
@@ -346,6 +359,10 @@ impl Drop for GuardedExec {
 impl ProcessExecutor for GuardedExec {
     fn confinement(&self) -> Option<ego_core::permit::Confinement> {
         Some(self.context.confinement())
+    }
+
+    fn residual_desk(&self) -> Option<Arc<ResidualWriteDesk>> {
+        self.context.residual_desk()
     }
 
     fn observe(&self, spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
@@ -555,6 +572,7 @@ impl RunEffectPorts {
             config.policy,
             capabilities,
             config.sandbox_grants,
+            config.residual,
         ));
         Self {
             process: Arc::new(GuardedExec::new(Arc::clone(&context))),

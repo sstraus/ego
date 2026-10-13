@@ -45,10 +45,13 @@ fn adaptive_policy_tampering_cannot_unconfine_later_spawns() {
     let granted = base.join("granted");
     fs::create_dir(&granted).unwrap();
     let widened = backend
-        .widened(&[SandboxGrant {
-            path: CanonPath::new(granted),
-            access: SandboxAccess::Write,
-        }])
+        .widened(
+            &[SandboxGrant {
+                path: CanonPath::new(granted),
+                access: SandboxAccess::Write,
+            }],
+            &[],
+        )
         .unwrap();
     // TMPDIR is intentionally writable, as in production Adaptive. Use a
     // synthetic credential floor to observe escape without reading real secrets.
