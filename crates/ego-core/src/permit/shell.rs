@@ -288,9 +288,38 @@ fn proof_word(source: &str) -> Option<String> {
     Some(literal.to_owned())
 }
 
+/// Why the read-only proof refuses a command it recognises. Display only: it
+/// tells the human what the proof saw and grants nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOnlyRefusal {
+    /// Repository configuration can invoke fsmonitor/diff/textconv helpers.
+    RepositoryHelpers,
+    /// Source text cannot prove which files directory/implicit search selects.
+    ImplicitSearch,
+}
+
+/// The known reason the proof refuses `argv`, if it is one of these commands.
+pub fn read_only_refusal(argv: &[String]) -> Option<ReadOnlyRefusal> {
+    let word = |index: usize| {
+        argv.get(index)
+            .map(|word| word.trim_matches(['\'', '"']))
+            .unwrap_or_default()
+    };
+    match word(0).rsplit('/').next().unwrap_or_default() {
+        "git" if matches!(word(1), "status" | "log" | "diff" | "show") => {
+            Some(ReadOnlyRefusal::RepositoryHelpers)
+        }
+        "rg" | "grep" => Some(ReadOnlyRefusal::ImplicitSearch),
+        _ => None,
+    }
+}
+
 /// Narrow proof, not a name allowlist: reject write flags, dynamic text, sensitive
 /// reads, configuration overrides, and unknown options before accepting a command.
 fn read_only_command(raw: &[String]) -> bool {
+    if read_only_refusal(raw).is_some() {
+        return false;
+    }
     let words: Vec<String> = raw
         .iter()
         .map(|word| word.trim_matches(['\'', '"']).to_owned())
@@ -321,8 +350,6 @@ fn read_only_command(raw: &[String]) -> bool {
                 return false;
             };
             match subcommand.as_str() {
-                // Repository configuration can invoke fsmonitor/diff/textconv helpers.
-                "status" | "log" | "diff" | "show" => false,
                 "branch" => {
                     words.len() == 2
                         || words[2..].iter().all(|word| {
@@ -355,8 +382,6 @@ fn read_only_command(raw: &[String]) -> bool {
                     .skip(1)
                     .all(|c| "alhFnrbqvctu0123456789".contains(c))
         }),
-        // Source text cannot prove which files directory/implicit search selects.
-        "rg" | "grep" => false,
         _ => false,
     }
 }
