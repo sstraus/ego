@@ -68,62 +68,15 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
         if observed.same_measurement(old) {
             return Ok(selections.clone());
         }
-        let automatic = observed.not_more_permissive_than(old);
-        let message = format!(
-            "{} {}",
-            observed.changes_from(old),
-            if automatic {
-                "Re-admitting under equal or narrower authority."
-            } else {
-                "Approval is required: current authority may be wider."
-            }
-        );
-        bindings
-            .sink_factory
-            .execution_policy_notice(&message)
-            .map_err(RunExecutorError::new)?;
-        let question = (!automatic).then(|| {
-            PermissionRequest::execution_policy_readmission(
-                message,
-                CanonPath::new(snapshot.root.as_path()),
-            )
-        });
-        let allowed = if let Some(question) = question {
-            let item = ItemId::new();
-            let requested = journal.append(
-                turn,
-                Some(item),
-                None,
-                crate::event::domain::EventKind::PermissionRequested {
-                    tool: question.tool().to_owned(),
-                    escalation: question.why().clone(),
-                },
-            )?;
-            let decision = match bindings.human() {
-                Some(human) => Some(human.decide(item, &question).await),
-                None => None,
-            };
-            let allowed = matches!(decision, Some(crate::permit::PermissionDecision::Allow));
-            journal.append(
-                turn,
-                Some(item),
-                Some(requested),
-                crate::event::domain::EventKind::PermissionDecided {
-                    allowed: Some(allowed),
-                    by: decision.map(|_| Authority::Party),
-                    reason: Some(question.to_string()),
-                },
-            )?;
-            allowed
-        } else {
-            true
-        };
-        if !allowed {
-            return Err(RunExecutorError::new(
-                "execution policy re-admission was denied; no effects started",
-            )
-            .into());
-        }
+        let automatic = admit_execution_policy(
+            old,
+            &observed,
+            CanonPath::new(snapshot.root.as_path()),
+            bindings.human().as_deref(),
+            journal,
+            |message| bindings.sink_factory.execution_policy_notice(message),
+        )
+        .await?;
         let mut updated = selections.clone();
         updated.sandbox_readmission = Some(Box::new(PolicyReadmission {
             previous: old.clone(),
@@ -132,4 +85,67 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
         updated.sandbox_observation = Some(observed);
         Ok(updated)
     }
+}
+
+/// Decide a measured saved-session authority transition before external effects.
+/// Both run-controller continuations and direct terminal sessions use this policy.
+pub async fn admit_execution_policy(
+    previous: &ExecObservation,
+    observed: &ExecObservation,
+    root: CanonPath,
+    human: Option<&dyn crate::permit::HumanApprover>,
+    journal: &mut crate::turn::Journal<'_>,
+    notice: impl Fn(&str) -> Result<(), String>,
+) -> Result<bool, RunError> {
+    let turn = TurnId::new();
+    let automatic = observed.not_more_permissive_than(previous);
+    let message = format!(
+        "{} {}",
+        observed.changes_from(previous),
+        if automatic {
+            "Re-admitting under equal or narrower authority."
+        } else {
+            "Approval is required: current authority may be wider."
+        }
+    );
+    notice(&message).map_err(RunExecutorError::new)?;
+    let question =
+        (!automatic).then(|| PermissionRequest::execution_policy_readmission(message, root));
+    let allowed = if let Some(question) = question {
+        let item = ItemId::new();
+        let requested = journal.append(
+            turn,
+            Some(item),
+            None,
+            crate::event::domain::EventKind::PermissionRequested {
+                tool: question.tool().to_owned(),
+                escalation: question.why().clone(),
+            },
+        )?;
+        let decision = match human {
+            Some(human) => Some(human.decide(item, &question).await),
+            None => None,
+        };
+        let allowed = matches!(decision, Some(crate::permit::PermissionDecision::Allow));
+        journal.append(
+            turn,
+            Some(item),
+            Some(requested),
+            crate::event::domain::EventKind::PermissionDecided {
+                allowed: Some(allowed),
+                by: decision.map(|_| Authority::Party),
+                reason: Some(question.to_string()),
+            },
+        )?;
+        allowed
+    } else {
+        true
+    };
+    if !allowed {
+        return Err(RunExecutorError::new(
+            "execution policy re-admission was denied; no effects started",
+        )
+        .into());
+    }
+    Ok(automatic)
 }

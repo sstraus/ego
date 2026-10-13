@@ -2,6 +2,68 @@
 
 use super::*;
 
+async fn admit_saved_session_policy(
+    active: &mut ActiveSession<'_>,
+    observation: &ExecObservation,
+    probe_evidence: Option<ego_core::store::evidence::EvidenceRef>,
+    root: &Path,
+    journal_ports: (&SystemClock, &dyn EventSink),
+    diagnostics: &dyn Diagnostics,
+    human: Option<&dyn HumanApprover>,
+) -> Result<(), RunTermination> {
+    let (clock, sink) = journal_ports;
+    let previous = active.state().execution_observation.clone();
+    if previous
+        .as_ref()
+        .is_some_and(|old| observation.same_measurement(old))
+    {
+        return Ok(());
+    }
+    let mut journal = Journal::new(
+        active.id(),
+        active.store(),
+        clock,
+        sink,
+        Producer::Main,
+        active.state().clone(),
+    );
+    if let Some(previous) = previous {
+        ego_core::run::admit_execution_policy(
+            &previous,
+            observation,
+            CanonPath::new(root),
+            human,
+            &mut journal,
+            |message| {
+                diagnostics.note(message);
+                Ok(())
+            },
+        )
+        .await
+        .map_err(|error| RunTermination::PermissionRequired {
+            action: error.to_string(),
+            by: DeniedBy::Nobody,
+        })?;
+    }
+    journal
+        .append(
+            TurnId::new(),
+            None,
+            None,
+            EventKind::ExecutionObserved {
+                observation: observation.clone(),
+                probe_evidence,
+            },
+        )
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
+    let state = journal.state().clone();
+    drop(journal);
+    active.replace_state(state);
+    Ok(())
+}
+
 enum StagedPasteSource {
     Path(String),
     Inline(Image),
@@ -375,6 +437,17 @@ pub(super) async fn drive_execution<S: EventSink>(
             };
             let (ports, observation, probe_evidence) =
                 effect_scope(&confinement, active.evidence(), &cancel, run_deadline).await?;
+            admit_saved_session_policy(
+                &mut active,
+                &observation,
+                probe_evidence.clone(),
+                &root,
+                (&clock, sink),
+                diagnostics,
+                None,
+            )
+            .await?;
+            let opening = active.state().clone();
             let pause = PauseToken::default();
             let driven = drive_headless_turn(
                 HeadlessSession {
@@ -544,6 +617,19 @@ pub(super) async fn drive_execution<S: EventSink>(
                     let (session_hook_ports, observation, probe_evidence) =
                         effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
                             .await?;
+                    let human = seat
+                        .has_human()
+                        .then(|| SeatApprover { seat: seat.clone() });
+                    admit_saved_session_policy(
+                        &mut active,
+                        &observation,
+                        probe_evidence.clone(),
+                        &root,
+                        (&clock, sink),
+                        diagnostics,
+                        human.as_ref().map(|human| human as &dyn HumanApprover),
+                    )
+                    .await?;
                     perimeter =
                         perimeter.with_execution_observation(&observation, probe_evidence.as_ref());
                     let recovered_epoch_policy = match resumed.as_ref() {
@@ -1382,7 +1468,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         command @ (repl::HostCommand::Action(
                                             repl::actions::ActionId::Sessions,
                                         )
-                                        | repl::HostCommand::History(_)),
+                                        | repl::HostCommand::History(_)
+                                        | repl::HostCommand::Resume(_)),
                                     ) => {
                                         if !seat.has_human() {
                                             match crate::catalogue::listing(jsonl_store.as_ref(), &root, true) {
@@ -1408,8 +1495,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                     continue;
                                                 }
                                             };
-                                        if let repl::HostCommand::History(query) = command {
+                                        if let repl::HostCommand::History(query) = &command {
                                             let history = jsonl_store.history();
+                                            let query = query.clone();
                                             let hits =
                                                 match tokio::task::spawn_blocking(move || {
                                                     history.matches(&query)
@@ -1428,7 +1516,23 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 hits.iter().any(|hit| hit.id == meta.id)
                                             });
                                         }
-                                        let Some(target) = seat.pick_session(metas.clone()) else {
+                                        let target = match &command {
+                                            repl::HostCommand::Resume(Some(id)) => match id.parse()
+                                            {
+                                                Ok(id) => Some(id),
+                                                Err(_) => {
+                                                    diagnostics.note("invalid session ID");
+                                                    continue;
+                                                }
+                                            },
+                                            repl::HostCommand::Resume(None) => metas
+                                                .iter()
+                                                .filter(|meta| meta.workspace_root == root)
+                                                .max_by_key(|meta| meta.updated)
+                                                .map(|meta| meta.id),
+                                            _ => seat.pick_session(metas.clone()),
+                                        };
+                                        let Some(target) = target else {
                                             continue;
                                         };
                                         let Some(meta) =

@@ -86,6 +86,17 @@ fn readmission_cases() {
             false,
         ),
         (
+            "workspace to read-only",
+            old.clone(),
+            observation(
+                &RunConfinement::new(Confinement::Ro, false, base.workspace().clone()).unwrap(),
+                "sandbox",
+                Confinement::Ro.required_caps(),
+                "2",
+            ),
+            false,
+        ),
+        (
             "narrower roots",
             observation(&wider, "sandbox", caps, "1"),
             observation(&base, "sandbox", caps, "2"),

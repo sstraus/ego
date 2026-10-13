@@ -98,6 +98,89 @@ Continue a session; no ID = latest in this workspace.
 - `<ID>` — The session to continue. Omit it for the latest in this workspace
 - `<PROMPT>` — The prompt. `-` reads it from stdin
 
+`ego continue` shares the saved-session admission and options of `ego resume`.
+In the terminal use `/resume [ID]` or `/continue`. Current execution authority
+is measured before effects: narrower authority is automatic; potentially
+wider authority requires explicit human consent. Headless callers cannot
+approve wider authority.
+
+With terminal stdin and stdout, `ego resume ID "next task"` opens the
+interactive seat, submits the task once, and accepts further messages.
+Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file,
+or profile `ci` selects the headless driver. Redirected stdin or stdout
+also selects headless execution. `EGO_PROFILE=ci` has the same effect.
+
+Headless execution never asks for permission: an unresolved approval exits 3.
+Pre-approve only the required operations in trusted CI profile configuration:
+
+```toml
+[profile.ci]
+model = "ollama/qwen3"
+session_dir = "/absolute/ci-sessions"
+artifact_dir = "/absolute/ci-artifacts"
+
+[profile.ci.permissions]
+allow = ["exec(seq 1 3)"]
+```
+
+Pre-create both roots outside the workspace and outside each other.
+Supply a non-interactive provider credential when the model requires one.
+Then run `ego resume ID "next task" --profile ci --instructions ci.md`.
+Allow rules grant policy approval; sandbox and system ceilings still apply.
+
+## `ego continue`
+
+Continue a session; no ID = latest in this workspace.
+
+- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable
+- `--answer <QUESTION_ID=JSON>` — Settle a pending question. Repeat for multiple sibling questions
+- `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
+- `--artifact-dir <ARTIFACT_DIR>` — Override the sanitized run-artifact root for profile `ci`
+- `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text
+- `--bare` — No ambient discovery, even in a trusted workspace
+- `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
+- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
+- `-C <DIR>` — Run as if started in DIR
+- `--ephemeral` — Refused: every run uses a durable session
+- `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure
+- `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
+- `-h, --help` — Print help
+- `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
+- `--max-turns <MAX_TURNS>` — Cap the turns this run may take
+- `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
+- `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
+- `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
+- `--no-color` — Never emit ANSI colour, whatever the terminal claims to support
+- `--no-tools` — Offer no tools at all
+- `--offline` — No non-loopback egress from ego's own HTTP transport
+- `--output <OUTPUT>` — text|json|jsonl
+- `--plan` — Shorthand for --mode plan
+- `--profile <PROFILE>` — Layer [profile.NAME] from config
+- `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
+- `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
+- `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off
+- `--schema <SCHEMA>` — JSON Schema the final answer must validate against; `@file` or inline
+- `--schema-retries <SCHEMA_RETRIES>` — How many times to re-prompt on a schema mismatch
+- `--session <SESSION>` — Named session: created or attached
+- `--session-dir <SESSION_DIR>` — Override the store location
+- `--session-id <SESSION_ID>` — A session id supplied by the caller
+- `-c, --set <K=V>` — Dotted-path config override, value parsed as TOML
+- `--system <SYSTEM>` — Replace the system prompt. `@file` reads it from a file
+- `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
+- `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
+- `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
+- `--trust-workspace` — Trust this interactive launch's workspace without asking; remember the answer
+- `--var <KEY=VALUE>` — Supply one declared agent-file template variable
+- `--yolo` — Shorthand for --mode yolo
+- `<ID>` — The session to continue. Omit it for the latest in this workspace
+- `<PROMPT>` — The prompt. `-` reads it from stdin
+
+`ego continue` shares the saved-session admission and options of `ego resume`.
+In the terminal use `/resume [ID]` or `/continue`. Current execution authority
+is measured before effects: narrower authority is automatic; potentially
+wider authority requires explicit human consent. Headless callers cannot
+approve wider authority.
+
 With terminal stdin and stdout, `ego resume ID "next task"` opens the
 interactive seat, submits the task once, and accepts further messages.
 Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file,

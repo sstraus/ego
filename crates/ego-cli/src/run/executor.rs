@@ -839,9 +839,6 @@ impl RunExecutor for CliRunExecutor {
         Result<Option<ego_core::run::RunExecutionObservation>, RunExecutorError>,
     > {
         Box::pin(async move {
-            if prepared.admitted_sandbox_observation.is_none() {
-                return Ok(None);
-            }
             if cancel.is_cancelled() {
                 return Err(RunExecutorError::new("execution observation cancelled"));
             }

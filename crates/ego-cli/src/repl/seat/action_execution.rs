@@ -184,6 +184,9 @@ pub(super) fn surface_line(
                     }
                     continue;
                 }
+                Dispatch::Resume(id) => {
+                    return (Line::HostCommand(HostCommand::Resume(id)), failed);
+                }
                 Dispatch::History(query) => {
                     if phase.get() == EditPhase::Busy {
                         status.lock().expect("surface status lock").notice =
@@ -412,7 +415,7 @@ pub(super) fn surface_line(
                         }
                         continue;
                     }
-                    Dispatch::History(_) => {
+                    Dispatch::History(_) | Dispatch::Resume(_) => {
                         status.lock().expect("surface status lock").notice =
                             Some("history is unavailable while a turn is running".to_owned());
                         repaint_status(status);

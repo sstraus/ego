@@ -29,6 +29,7 @@ proposed.
 ```
 ego [PROMPT]                  interactive session (prompt submitted if given)
 ego run [PROMPT]              headless one-shot; PROMPT from argv, -f FILE, or stdin
+ego continue [ID] [PROMPT]    continue the latest saved session; shares resume options
 ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or headless latest;
                               --answer QUESTION_ID=JSON answers pending input;
                               --name and --goal are metadata-only operations
@@ -147,6 +148,7 @@ omitted when empty: two states, identical bytes.
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
 | `ego [PROMPT]` | **yes** | asks once whether to trust project files before ambient reads, then runs the line-oriented session. Permission questions accept `allow`, `deny`, or `amend`; amended raw JSON parameters are prepared and classified again from the beginning |
+| `ego continue` | **yes** | resumes a saved session through the same admission policy and options as `ego resume` |
 | `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it a human terminal shows the session picker across roots; headless execution takes the most recently updated session of this workspace. With terminal stdin and stdout, a positional prompt is submitted once to the interactive driver, which accepts further messages. Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file, or profile `ci` selects headless execution. Redirected stdin or stdout also selects headless execution |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | **yes** | creates a durable lineage branch at the idle tip or after the completed turn containing `--at ITEM_ID`, without copying source spend or run state |

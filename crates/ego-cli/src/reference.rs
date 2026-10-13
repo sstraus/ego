@@ -105,9 +105,14 @@ fn section(out: &mut String, command: &Command) {
         let _ = writeln!(out, "{flag}");
     }
     out.push('\n');
-    if command.get_name() == "resume" {
+    if matches!(command.get_name(), "resume" | "continue") {
         out.push_str(
-            "With terminal stdin and stdout, `ego resume ID \"next task\"` opens the\n\
+            "`ego continue` shares the saved-session admission and options of `ego resume`.\n\
+             In the terminal use `/resume [ID]` or `/continue`. Current execution authority\n\
+             is measured before effects: narrower authority is automatic; potentially\n\
+             wider authority requires explicit human consent. Headless callers cannot\n\
+             approve wider authority.\n\n\
+             With terminal stdin and stdout, `ego resume ID \"next task\"` opens the\n\
              interactive seat, submits the task once, and accepts further messages.\n\
              Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file,\n\
              or profile `ci` selects the headless driver. Redirected stdin or stdout\n\

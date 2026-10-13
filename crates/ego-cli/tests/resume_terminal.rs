@@ -111,6 +111,73 @@ fn resume_machine_signals_keep_the_headless_driver() {
     }
 }
 
+// Catches: CLI-saved sessions silently skip consent when confinement is widened.
+#[test]
+fn cli_saved_session_wider_sandbox_requires_consent() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("SESSION-CREATED")),
+            Reply::Sse(text("WIDER-RESUME-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let places = Places::new();
+    let initial = places
+        .ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "ro",
+            "--session-id",
+            FIXTURE_SESSION_ID,
+            "create session",
+        ])
+        .run();
+    assert_eq!(initial.code, Some(0), "{}", initial.stderr);
+    let denied = places
+        .ego(&stub)
+        .subcommand("resume")
+        .args([
+            FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+            "--output",
+            "text",
+            "resume wider",
+        ])
+        .run();
+    assert_ne!(
+        denied.code,
+        Some(0),
+        "wider authority ran without a human: {} {}",
+        denied.stdout,
+        denied.stderr
+    );
+    assert_eq!(
+        stub.generations().len(),
+        1,
+        "denied re-admission must not call the provider"
+    );
+    let resumed = places
+        .ego(&stub)
+        .subcommand("resume")
+        .args([
+            FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+            "--bare",
+            "resume wider",
+        ])
+        .run_pty_responding_seeded("Allow ?", "y");
+    assert_eq!(resumed.code, Some(0), "{}", resumed.stdout);
+    assert!(
+        resumed.stdout.contains("WIDER-RESUME-DONE"),
+        "{}",
+        resumed.stdout
+    );
+}
+
 fn bounded_run(ego: support::Ego) -> support::Finished {
     let mut running = ego.spawn();
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -218,5 +285,65 @@ fn ci_resume_permission_exits_three_or_uses_profile_preapproval_without_promptin
             assert_eq!(stub.generations().len(), 2);
             assert_eq!(result.report()["exit_reason"], "permission");
         }
+    }
+}
+
+// Catches: equal or narrower CLI authority incorrectly asks an unavailable human.
+#[test]
+fn cli_saved_session_equal_and_narrower_sandbox_admits_without_human() {
+    for initial_sandbox in ["ro", "workspace"] {
+        let stub = Stub::start(Plan {
+            completions: vec![Reply::Sse(text("INITIAL")), Reply::Sse(text("CONTINUED"))],
+            ..Plan::default()
+        });
+        let places = Places::new();
+        let initial = places
+            .ego(&stub)
+            .args([
+                "--thinking",
+                "off",
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                initial_sandbox,
+                "--session-id",
+                FIXTURE_SESSION_ID,
+                "initial",
+            ])
+            .run();
+        assert_eq!(initial.code, Some(0), "{}", initial.stderr);
+        let resumed = places
+            .ego(&stub)
+            .subcommand("continue")
+            .args([
+                FIXTURE_SESSION_ID,
+                "--thinking",
+                "off",
+                "--sandbox",
+                "ro",
+                "--output",
+                "text",
+                "continue task",
+            ])
+            .run();
+        assert_eq!(resumed.code, Some(0), "{}", resumed.stderr);
+        assert!(resumed.stdout.contains("CONTINUED"), "{}", resumed.stdout);
+    }
+}
+
+// Catches: resume/continue slash commands are submitted as model prompts.
+#[test]
+fn resume_and_continue_slashes_dispatch_saved_session_commands() {
+    use ego_cli::repl::actions::{ActionRegistry, Dispatch, InputOrigin};
+    let registry = ActionRegistry::final_surface();
+    for (text, id) in [
+        ("/resume", None),
+        ("/continue", None),
+        ("/resume 123", Some("123")),
+    ] {
+        assert_eq!(
+            registry.classify(registry.submit(text.to_owned(), InputOrigin::Typed)),
+            Dispatch::Resume(id.map(str::to_owned))
+        );
     }
 }

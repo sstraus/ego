@@ -1059,6 +1059,7 @@ impl Seat {
                     .classify(self.registry.submit(text.clone(), InputOrigin::Typed))
                 {
                     Dispatch::History(query) => Line::HostCommand(HostCommand::History(query)),
+                    Dispatch::Resume(id) => Line::HostCommand(HostCommand::Resume(id)),
                     Dispatch::SessionMetadata(operation) => {
                         Line::HostCommand(HostCommand::SessionMetadata(operation))
                     }
