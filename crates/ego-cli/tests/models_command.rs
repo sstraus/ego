@@ -823,7 +823,13 @@ fn openrouter_row_without_stated_limits_lists_no_limit() {
     let models = value["models"].as_array().unwrap();
     assert_eq!(models.len(), 1, "{models:?}");
     let capabilities = &models[0]["capabilities"];
-    assert!(capabilities["max_context_tokens"].is_null(), "{capabilities}");
-    assert!(capabilities["max_output_tokens"].is_null(), "{capabilities}");
+    assert!(
+        capabilities["max_context_tokens"].is_null(),
+        "{capabilities}"
+    );
+    assert!(
+        capabilities["max_output_tokens"].is_null(),
+        "{capabilities}"
+    );
     assert!(capabilities["max_tools"].is_null(), "{capabilities}");
 }
