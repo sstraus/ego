@@ -833,3 +833,104 @@ fn openrouter_row_without_stated_limits_lists_no_limit() {
     );
     assert!(capabilities["max_tools"].is_null(), "{capabilities}");
 }
+
+const OPENROUTER_USER_ROWS: &str = r#"
+[model."openrouter/vendor/bare".capabilities]
+schema_version = 5
+max_context_tokens = 50000
+max_output_tokens = 4000
+max_tools = 16
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_efforts = "any"
+default_reasoning_effort = "off"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+
+[model."openrouter/vendor/absent".capabilities]
+schema_version = 5
+max_context_tokens = 50000
+max_output_tokens = 4000
+max_tools = 16
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_efforts = "any"
+default_reasoning_effort = "off"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+"#;
+
+// Catches: user models.toml rows for a dynamically listed provider are ignored, so a listed
+// OpenRouter model keeps `unknown` reasoning and a row absent from the listing never appears.
+#[test]
+fn openrouter_user_rows_replace_discovered_facts_and_add_unlisted_models() {
+    let stub = Stub::start(Plan {
+        models_response: Some(r#"{"data":[{"id":"vendor/bare"}]}"#.to_owned()),
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env(
+            "OPENROUTER_BASE_URL",
+            &format!("http://{}/api/v1/", stub.address),
+        );
+    ego.home_file("models.toml", OPENROUTER_USER_ROWS);
+    let result = ego
+        .subcommand("models")
+        .args(["--provider", "openrouter", "--refresh", "--json"])
+        .run();
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    let value: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    let models = value["models"].as_array().unwrap();
+    let row = |slug: &str| {
+        models
+            .iter()
+            .find(|model| model["slug"] == slug)
+            .unwrap_or_else(|| panic!("{slug} is not listed: {models:?}"))
+    };
+    let bare = row("openrouter/vendor/bare");
+    assert_eq!(bare["capabilities"]["reasoning_efforts"], "any", "{bare}");
+    assert_eq!(bare["provenance"]["authority"], "user", "{bare}");
+    assert_eq!(models.len(), 2, "{models:?}");
+    assert_eq!(
+        row("openrouter/vendor/absent")["capabilities"]["max_context_tokens"],
+        50000
+    );
+}
+
+// Catches: a run on a user-described OpenRouter model still stops at "nobody stated whether the
+// model accepts `medium` reasoning" because resolution reads only the discovered facts.
+#[test]
+fn openrouter_run_uses_the_user_row_to_accept_a_thinking_level() {
+    let stub = Stub::start(Plan {
+        models_response: Some(r#"{"data":[{"id":"vendor/bare"}]}"#.to_owned()),
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env(
+            "OPENROUTER_BASE_URL",
+            &format!("http://{}/api/v1/", stub.address),
+        );
+    ego.home_file("models.toml", OPENROUTER_USER_ROWS);
+    let result = ego
+        .args([
+            "--sandbox",
+            "off",
+            "--model",
+            "openrouter/vendor/bare",
+            "--thinking",
+            "medium",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
+        .run();
+    assert!(
+        !result.stderr.contains("nobody stated whether"),
+        "the user row was not consulted: {}",
+        result.stderr
+    );
+}
