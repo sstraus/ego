@@ -81,6 +81,9 @@ After explicit go and shared-contract agreement, extend the same runner/harness:
 
 ## Gates and metrics
 
+[regression case native validation](regression_case.md) records the instruction-floor and
+CLI/ACP session tests separately from paid model evaluation.
+
 - Zero judge calls for all deterministic routing rows; all five derived sources
   published as one validated set with provenance and actual protected metadata.
 - All 3 task-context pairs distinguish positive from negative correctly; do
