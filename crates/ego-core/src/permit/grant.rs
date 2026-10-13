@@ -614,7 +614,17 @@ impl fmt::Display for PolicyDenied {
                  operation that changes anything"
             ),
             PolicyDenied::OutsideWorkspace { tool, op, path } => {
-                write!(f, "{tool} may not {op} {path}: it is outside the workspace")
+                write!(f, "{tool} may not {op} {path}: it is outside the workspace")?;
+                // A read the shell could still do under Adaptive: name the
+                // grant, because the model otherwise falls back to `cat`.
+                if self.is_unreachable_read() {
+                    write!(
+                        f,
+                        "; ask the user to run `ego roots add --access read '{path}'` \
+                         and to resume the session"
+                    )?;
+                }
+                Ok(())
             }
             PolicyDenied::ReadOnlyRoot { tool, op, path } => {
                 write!(

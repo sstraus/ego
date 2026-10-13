@@ -1088,6 +1088,45 @@ fn a_deny_rule_on_the_command_line_stops_a_tool_and_names_the_rule() {
     );
 }
 
+/// regression case. A real file outside the workspace and outside every root:
+/// the refusal the model receives names the exact grant and the resume step,
+/// and the file contents never reach the model.
+#[test]
+fn a_read_outside_the_workspace_tells_the_model_the_grant_and_leaks_nothing() {
+    let elsewhere = tempfile::tempdir().expect("a temp dir");
+    let target = elsewhere.path().join("sibling.md");
+    std::fs::write(&target, "SIBLING-CONTENTS").expect("a temp dir is writable");
+    let target = std::fs::canonicalize(&target).expect("the file exists");
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "call_a",
+                "read",
+                &serde_json::json!({ "path": target }).to_string(),
+            )),
+            Reply::Sse(text("Refused.")),
+        ],
+        ..Plan::default()
+    });
+    let finished = Ego::against(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Read the sibling",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    let second = stub.generations()[1].to_string();
+    assert!(
+        second.contains("ego roots add --access read") && second.contains("resume the session"),
+        "the model was not told the grant: {second}"
+    );
+    assert!(!second.contains("SIBLING-CONTENTS"), "{second}");
+}
+
 /// The same read, with the same tool, and no `--deny`: exit 0.
 ///
 /// The control for the test above. Without it, that test passes if the binary

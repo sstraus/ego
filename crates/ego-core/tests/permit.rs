@@ -325,6 +325,29 @@ mod permit {
         assert!(denied.to_string().contains("/etc/passwd"));
     }
 
+    /// regression case. Plausible bug: a bare "outside the workspace" refusal
+    /// leaves the model and the operator without the grant that lifts it, so
+    /// the model falls back to `cat` under a perimeter the read tool does not
+    /// share. A write refusal must not suggest a read grant.
+    #[test]
+    fn a_refused_read_outside_the_workspace_names_the_grant_and_the_resume_step() {
+        let outside = |op| PolicyDenied::OutsideWorkspace {
+            tool: "t".to_string(),
+            op,
+            path: CanonPath::new("/sibling/a b.md"),
+        };
+        for op in [OpName::Read, OpName::List, OpName::Search] {
+            let text = outside(op).to_string();
+            assert!(
+                text.contains("ego roots add --access read '/sibling/a b.md'")
+                    && text.contains("resume"),
+                "{op}: {text}"
+            );
+        }
+        let write = outside(OpName::Write).to_string();
+        assert!(!write.contains("ego roots add"), "{write}");
+    }
+
     /// Critic regression_case. Plausible bug: the exception for a refused read drops
     /// `list` or `search` (a model listing `~/.codex` still ends the run), or
     /// widens to a mutating or spawning op outside the workspace.
