@@ -229,3 +229,129 @@ fn overlapping_readmission_permissions_keep_the_session_event_sequence_unique() 
             }
         });
 }
+
+// Catches: the continuation takes the session writer lease before its idempotent-replay guard,
+// so a retried request fails with a store error while the admitted turn holds the writer.
+#[test]
+fn retried_continuation_replays_while_the_admitted_turn_holds_the_session_writer() {
+    if std::env::var("EGO_REGRESSION_CHILD").as_deref() != Ok("retried_continuation") {
+        run_child("retried_continuation", Some("off"));
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let owner = tempfile::tempdir().unwrap();
+            let workspace = owner.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let root = RunRoot::new(workspace.clone()).unwrap();
+            let store = Arc::new(ego_tools::store::JsonlStore::new(
+                owner.path().join("sessions"),
+                workspace,
+                Box::new(ego_tools::store::OsIo),
+            ));
+            let artifacts: Arc<dyn RunArtifactStore> = store.clone();
+            let (executor, _) = super::CliRunExecutor::for_mcp(
+                root.clone(),
+                None,
+                store.clone(),
+                artifacts,
+                std::num::NonZeroUsize::new(2).unwrap(),
+                Arc::new(ego_core::evidence::EvidenceAdmissionService::new()),
+                Some(&catalogue(None)),
+            )
+            .unwrap();
+            let controller = RunController::new(
+                store.clone(),
+                Arc::new(executor),
+                Arc::new(super::SystemClock),
+                Arc::new(crate::host_ports::UuidIds),
+                RunRetention::new(std::num::NonZeroUsize::new(8).unwrap()).unwrap(),
+            );
+            let initial = RequestId::from_uuid(uuid::Uuid::now_v7());
+            let session = RequestId::session_id(initial);
+            let first = controller
+                .start(
+                    StartRequest::new(
+                        session,
+                        root,
+                        initial,
+                        RequestDigest::of(&"initial").unwrap(),
+                        RunSelections::new(None, None, None, None, None),
+                        "initial",
+                    ),
+                    RunExecutionBindings::new(Arc::new(Sinks), None),
+                )
+                .await
+                .unwrap();
+            let RunCommandOutcome::Admitted(first) = first else {
+                panic!("initial admission")
+            };
+            let run = first.run_id();
+            drop(first);
+            let entries: Vec<_> = SessionStore::read(store.as_ref(), &session)
+                .unwrap()
+                .collect()
+                .await;
+            let admission = entries
+                .into_iter()
+                .find_map(|entry| match entry.unwrap() {
+                    SessionEntry::RunTransaction(tx) => Some(tx),
+                    _ => None,
+                })
+                .unwrap();
+            let RunCommand::CommandAdmitted { lease, .. } = admission.command() else {
+                panic!("admission transaction")
+            };
+            let mut settled = serde_json::to_value(&admission).unwrap();
+            settled["revision"] = serde_json::to_value(admission.revision().next()).unwrap();
+            settled["status"] = serde_json::to_value(RunStatus::Settled).unwrap();
+            settled["command"] = serde_json::to_value(RunCommand::CommandSettled {
+                lease: *lease,
+                settlement: RunSettlement::Completed,
+            })
+            .unwrap();
+            let settled: RunTransaction = serde_json::from_value(settled).unwrap();
+            let revision = settled.revision();
+            assert!(matches!(
+                store
+                    .compare_and_append_run(&session, Some(admission.revision()), settled)
+                    .unwrap(),
+                RunAppend::Committed { .. }
+            ));
+            let request = RequestId::from_uuid(uuid::Uuid::now_v7());
+            let continuation = || {
+                ContinueRequest::new(
+                    run,
+                    request,
+                    RequestDigest::of(&"again").unwrap(),
+                    revision,
+                    "again",
+                )
+            };
+            let admitted = controller
+                .continue_run(
+                    continuation(),
+                    RunExecutionBindings::new(Arc::new(Sinks), None),
+                )
+                .await
+                .unwrap();
+            // The admitted turn opens the durable session writer and keeps it until it settles.
+            let _turn_writer = super::session::open(store.as_ref(), &session, &super::SystemClock)
+                .expect("the executing turn's session writer");
+            match controller
+                .continue_run(
+                    continuation(),
+                    RunExecutionBindings::new(Arc::new(Sinks), None),
+                )
+                .await
+            {
+                Ok(RunCommandOutcome::Replayed(_)) => {}
+                Ok(RunCommandOutcome::Admitted(_)) => panic!("the retry admitted a second turn"),
+                Err(error) => panic!("a retried request must replay, not fail: {error}"),
+            }
+            drop(admitted);
+        });
+}

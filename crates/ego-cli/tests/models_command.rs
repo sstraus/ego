@@ -801,3 +801,29 @@ fn openrouter_recorded_inventory_reaches_json_and_picker_without_invented_limits
         ["/api/v1/models"]
     );
 }
+
+// Catches: an OpenRouter row whose response states no limit is given an invented one.
+#[test]
+fn openrouter_row_without_stated_limits_lists_no_limit() {
+    let stub = Stub::start(Plan {
+        models_response: Some(r#"{"data":[{"id":"vendor/bare"}]}"#.to_owned()),
+        ..Plan::default()
+    });
+    let result = Ego::against(&stub)
+        .subcommand("models")
+        .args(["--provider", "openrouter", "--refresh", "--json"])
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env(
+            "OPENROUTER_BASE_URL",
+            &format!("http://{}/api/v1/", stub.address),
+        )
+        .run();
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    let value: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    let models = value["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1, "{models:?}");
+    let capabilities = &models[0]["capabilities"];
+    assert!(capabilities["max_context_tokens"].is_null(), "{capabilities}");
+    assert!(capabilities["max_output_tokens"].is_null(), "{capabilities}");
+    assert!(capabilities["max_tools"].is_null(), "{capabilities}");
+}
