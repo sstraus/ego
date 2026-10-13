@@ -188,6 +188,51 @@ fn embedding_only_ollama_model_is_absent_from_chat_catalogue_and_refused_for_run
 }
 
 #[test]
+fn user_row_for_ollama_does_not_replace_the_daemon_facts_the_run_resolves() {
+    // Catches: `ego models` overlays a models.toml row on every discovered
+    // provider, but only the OpenRouter resolver reads it, so the listing
+    // states an Ollama context and reasoning set that `ego run` never uses.
+    let home = tempfile::tempdir().expect("a temp home");
+    let workspace = tempfile::tempdir().expect("a temp workspace");
+    std::fs::write(
+        home.path().join("models.toml"),
+        r#"
+[model."ollama/qwen3".capabilities]
+schema_version = 5
+max_context_tokens = 12345
+max_output_tokens = 4096
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_efforts = "any"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+"#,
+    )
+    .expect("the user row is writable");
+    let tags = r#"{"models":[{"name":"qwen3","capabilities":["completion","thinking"]}]}"#;
+    let stub = Stub::start(Plan {
+        tags_refusal: Some((200, tags.to_string())),
+        ..Plan::default()
+    });
+    let listing = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("models")
+        .args(["--provider", "ollama", "--refresh", "--json"])
+        .run();
+    assert_eq!(listing.code, Some(0), "{}", listing.stderr);
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&listing.stdout).expect("catalogue JSON");
+    let row = snapshot["models"]
+        .as_array()
+        .expect("model rows")
+        .iter()
+        .find(|row| row["slug"] == "ollama/qwen3")
+        .expect("the daemon's model is listed");
+    assert_eq!(row["provenance"]["source"], "discovered", "{row}");
+    assert_ne!(row["capabilities"]["max_context_tokens"], 12345, "{row}");
+}
+
+#[test]
 fn provider_filter_is_applied_before_transport_and_refresh_is_filter_scoped() {
     let stub = Stub::start(Plan::default());
     let result = Ego::against(&stub)
