@@ -39,6 +39,12 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     for path in &perimeter.controls {
         subpath(&mut out, path.as_path())?;
     }
+    out.push_str(&format!("  (regex #\"{}\")\n", floor::AGENT_INSTRUCTIONS));
+    rooted_regex(
+        &mut out,
+        perimeter.home.as_path(),
+        floor::OPERATOR_INSTRUCTIONS,
+    )?;
     // Selector files stay protected; a new fixture .git directory is allowed.
     out.push_str(&format!(
         "  (require-all (regex #\"{}\") (require-not (vnode-type DIRECTORY)))\n",
@@ -50,6 +56,10 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
         rooted_regex(&mut out, root, floor::metadata_control())?;
     }
     out.push_str(")\n(deny file-write-unlink\n");
+    // Keep operator instruction directories at their protected names.
+    out.push_str("  (require-all\n");
+    rooted_regex(&mut out, perimeter.home.as_path(), floor::OPERATOR_BOUNDARY)?;
+    out.push_str("    (vnode-type DIRECTORY))\n");
     // Protect structural boundaries from relocation, while leaving transient
     // operation directories and objects/refs cleanup available to Git.
     for root in floor::metadata_roots(perimeter) {

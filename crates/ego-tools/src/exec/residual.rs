@@ -13,6 +13,10 @@ use ego_core::permit::{CanonPath, RunConfinement, SandboxGrant};
 
 use super::denial::Denial;
 
+#[cfg(test)]
+#[path = "residual_tests.rs"]
+mod tests;
+
 /// Entries one listing may name.
 const LISTING_ENTRIES: usize = 32;
 /// Bytes of the refusal line the judge may read.

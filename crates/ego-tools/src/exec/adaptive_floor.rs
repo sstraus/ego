@@ -63,6 +63,13 @@ pub(in crate::exec) fn metadata_boundary() -> &'static str {
 pub(in crate::exec) const METADATA_MODULE_TRANSIENT: &str =
     "/modules/.+/(rebase-merge|rebase-apply|sequencer|objects/[^/]+|refs/.+|logs/.+)$";
 pub(in crate::exec) const ENV: &str = "(^|/)[.]env[^/]*(/|$)";
+// Case variants name the same files on the usual macOS filesystem.
+pub(in crate::exec) const AGENT_INSTRUCTIONS: &str =
+    "(^|/)([aA][gG][eE][nN][tT][sS]|[cC][lL][aA][uU][dD][eE])[.][mM][dD](/|$)";
+pub(in crate::exec) const OPERATOR_INSTRUCTIONS: &str = "/[.]([cC][oO][dD][eE][xX]|[cC][lL][aA][uU][dD][eE](-[pP][rR][iI][vV][aA][tT][eE])?)/.*[.][mM][dD](/|$)";
+#[cfg(target_os = "macos")]
+pub(in crate::exec) const OPERATOR_BOUNDARY: &str =
+    "/[.]([cC][oO][dD][eE][xX]|[cC][lL][aA][uU][dD][eE](-[pP][rR][iI][vV][aA][tT][eE])?)(/.*)?$";
 
 #[cfg(any(target_os = "macos", test))]
 pub(in crate::exec) fn rooted_pattern(root: &Path, suffix: &str) -> String {
@@ -110,6 +117,10 @@ pub(in crate::exec) fn blocks(path: &Path, policy: &RunConfinement) -> bool {
         std::sync::LazyLock::new(|| compile(&format!("^{}", metadata_boundary())));
     static TRANSIENT: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| compile(&format!("^{METADATA_MODULE_TRANSIENT}")));
+    static INSTRUCTIONS: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| compile(AGENT_INSTRUCTIONS));
+    static OPERATOR: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| compile(&format!("^{OPERATOR_INSTRUCTIONS}")));
     let text = path.to_string_lossy();
     // Match the captured root as literal text; only its fixed suffix is regex.
     // This is equivalent to rooted_pattern without compiling host paths.
@@ -123,6 +134,8 @@ pub(in crate::exec) fn blocks(path: &Path, policy: &RunConfinement) -> bool {
         .chain(&perimeter.controls)
         .any(|floor| path.starts_with(floor.as_path()))
         || (GIT.is_match(&text) && !path.is_dir())
+        || INSTRUCTIONS.is_match(&text)
+        || rooted_matches(perimeter.home.as_path(), &OPERATOR)
         || metadata_roots(perimeter).any(|root| rooted_matches(root, &CONTROL))
         || (path.is_dir()
             && metadata_roots(perimeter)

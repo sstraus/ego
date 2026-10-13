@@ -137,7 +137,11 @@ intentional. Workspace and derived toolchain/target executables remain runnable.
 Adaptive's OS credential floors cannot be lifted by permission rules or human
 sandbox grants: SSH/AWS/GnuPG, netrc, keychain/browser stores, provider/ego/Cargo
 credentials and `.env*` outside the workspace. Git config/hooks and worktree
-selectors stay protected against writes. Metadata roots, module directories,
+selectors stay protected against writes.
+`AGENTS.md` and `CLAUDE.md` at any depth, and Markdown files beneath the admitted
+home's `.codex`, `.claude` and `.claude-private` directories also stay read-only,
+including beneath workspace, derived, human and judge write grants.
+Metadata roots, module directories,
 worktree entries, hooks and info directories cannot be relocated. Git can still
 remove transient operation state and empty object/ref directories. Ordinary OS
 privacy restrictions also remain. These OS floors are separate from the default
@@ -187,7 +191,8 @@ Judge prompts are versioned with an evaluation set in
 [`evals/sandbox-auto/v3`](../../evals/sandbox-auto/v3/README.md). A native test
 gives every attack path of that set a forced write verdict and checks that the
 executor refuses it. The cases that only the prompt protects (injected text and
-agent control files outside the floors) are listed in that test.
+other prompt-only cases) are listed in that test. Agent instruction files have
+an executor write floor and do not depend on the judge prompt.
 
 **Root-list traps:** `ego roots add PATH --access read` edits the stored list,
 not the implicit default. The first addition replaces the default `~/Gits`

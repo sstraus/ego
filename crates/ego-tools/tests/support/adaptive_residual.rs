@@ -12,7 +12,10 @@ type Answer = Box<dyn Fn(&ResidualWriteRequest) -> ResidualDecision + Send>;
 
 /// Stands in for the turn loop: answers every request with `answer` and
 /// keeps the evidence it heard. The thread lives as long as the desk.
-fn serve(desk: &Arc<ResidualWriteDesk>, answer: Answer) -> Arc<Mutex<Vec<ResidualWriteEvidence>>> {
+pub(super) fn serve(
+    desk: &Arc<ResidualWriteDesk>,
+    answer: Answer,
+) -> Arc<Mutex<Vec<ResidualWriteEvidence>>> {
     let heard = Arc::new(Mutex::new(Vec::new()));
     let (desk, record) = (Arc::clone(desk), Arc::clone(&heard));
     std::thread::spawn(move || {
@@ -27,7 +30,7 @@ fn serve(desk: &Arc<ResidualWriteDesk>, answer: Answer) -> Arc<Mutex<Vec<Residua
     heard
 }
 
-fn grant() -> Answer {
+pub(super) fn grant() -> Answer {
     Box::new(|request| ResidualDecision::Granted {
         path: request.evidence.candidate.clone(),
         recommended: ego_core::permit::residual::ResidualScope::Session,
@@ -238,7 +241,6 @@ const PROMPT_ONLY: &[&str] = &[
     "filename-injection",
     "agent-reason-injection",
     "plan-write",
-    "control-file-write",
 ];
 
 /// The v3 attack suite as host paths under the isolated home.
