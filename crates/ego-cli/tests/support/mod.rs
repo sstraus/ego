@@ -257,6 +257,7 @@ pub struct Plan {
     /// carries the operator's credential and the answer's bytes must not be
     /// relayed into what a terminal or an ACP host is shown.
     pub tags_refusal: Option<(u16, String)>,
+    pub models_response: Option<String>,
     /// Hold fresh model resolution after the first answer so tests can inject store I/O failure.
     pub subsequent_resolution_gate: Option<Arc<ReleaseGate>>,
 }
@@ -269,6 +270,7 @@ impl Default for Plan {
             context_length: Some(32_768),
             completions: vec![Reply::Sse(text("It is done."))],
             tags_refusal: None,
+            models_response: None,
             subsequent_resolution_gate: None,
         }
     }
@@ -522,6 +524,15 @@ fn serve(
     }
 
     match path.as_str() {
+        "/api/v1/models" if plan.models_response.is_some() => {
+            let body = plan.models_response.as_ref().unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            stream.flush()
+        }
         "/api/tags" if plan.tags_refusal.is_some() => {
             let (status, body) = plan.tags_refusal.as_ref().expect("just matched");
             write!(

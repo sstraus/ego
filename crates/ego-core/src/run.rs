@@ -1517,22 +1517,6 @@ pub trait RunExecutor: Send + Sync {
         })
     }
 
-    /// Persist the measured observation and, when required, ask for consent
-    /// under the adapter's existing session writer lease.
-    fn request_execution_policy_permission<'a>(
-        &'a self,
-        _prepared: &'a mut Self::Prepared,
-        _observation: RunExecutionObservation,
-        _question: Option<crate::permit::PermissionRequest>,
-        _bindings: &'a RunExecutionBindings,
-    ) -> BoxFuture<'a, Result<bool, RunExecutorError>> {
-        Box::pin(async {
-            Err(RunExecutorError::new(
-                "execution re-admission journal is unavailable",
-            ))
-        })
-    }
-
     fn prepare<'a>(
         &'a self,
         request: &'a RunPreparation,
@@ -2143,19 +2127,21 @@ where
         bindings: RunExecutionBindings,
     ) -> Result<RunCommandOutcome, RunError> {
         let folded = self.read_exact(request.run_id).await?;
-        if let Some(receipt) = self.retained_receipt(&folded, request.request_id) {
-            return self.replay_receipt(&request.digest, receipt, &folded);
+        if let Some(outcome) = self.continuation_guard(&request, &folded)? {
+            return Ok(outcome);
         }
-        if folded.snapshot.revision != request.expected_revision {
-            return Err(RunError::StaleRevision {
-                expected: request.expected_revision,
-                actual: folded.snapshot.revision,
-            });
-        }
-        if folded.snapshot.blocks_new_turn() || folded.active.is_some() {
-            return Err(RunError::LeaseOccupied {
+        let writer = self
+            .store
+            .open_writer_lease(&request.run_id.session_id, self.clock.now())?;
+        let folded =
+            Self::read_folded_from(writer.writer.as_ref(), request.run_id.session_id).await?;
+        if folded.snapshot.run_id != request.run_id {
+            return Err(RunError::NotFound {
                 run_id: request.run_id,
             });
+        }
+        if let Some(outcome) = self.continuation_guard(&request, &folded)? {
+            return Ok(outcome);
         }
 
         let model = self.model_of(&folded);
@@ -2180,8 +2166,16 @@ where
                 ),
             });
         }
+        let mut journal = crate::turn::Journal::new(
+            request.run_id.session_id,
+            writer.writer.as_ref(),
+            self.clock.as_ref(),
+            &crate::sink::NullSink,
+            crate::event::id::Producer::Main,
+            writer.state,
+        );
         let selections = self
-            .readmit_policy(&folded.snapshot, &mut prepared, &bindings)
+            .readmit_policy(&folded.snapshot, &mut prepared, &bindings, &mut journal)
             .await?;
         let lease = TurnLease(self.ids.next_uuid());
         let revision = folded.snapshot.revision.next();
@@ -2205,11 +2199,14 @@ where
             observed_at: self.clock.now(),
             pruned_receipts: Vec::new(),
         };
-        match self.store.compare_and_append_run(
+        let appended = writer.writer.compare_and_append_run(
             &request.run_id.session_id,
             Some(folded.snapshot.revision),
             transaction,
-        )? {
+        )?;
+        drop(journal);
+        drop(writer.writer);
+        match appended {
             RunAppend::Committed {
                 revision: committed,
             } => {
@@ -2263,6 +2260,31 @@ where
                 })
             }
         }
+    }
+
+    fn continuation_guard(
+        &self,
+        request: &ContinueRequest,
+        folded: &FoldedRun,
+    ) -> Result<Option<RunCommandOutcome>, RunError> {
+        if let Some(receipt) = self.retained_receipt(folded, request.request_id) {
+            return self
+                .replay_receipt(&request.digest, receipt, folded)
+                .map(Some);
+        }
+        if folded.snapshot.revision != request.expected_revision {
+            return Err(RunError::StaleRevision {
+                expected: request.expected_revision,
+                actual: folded.snapshot.revision,
+            });
+        }
+        if folded.snapshot.blocks_new_turn() || folded.active.is_some() {
+            return Err(RunError::LeaseOccupied {
+                run_id: request.run_id,
+            });
+        }
+
+        Ok(None)
     }
 
     pub async fn execute(&self, execution: RunExecution) -> Result<RunSnapshot, RunError> {
@@ -3093,7 +3115,14 @@ where
     }
 
     async fn read_folded(&self, session: SessionId) -> Result<FoldedRun, RunError> {
-        let mut stream = self.store.read(&session)?;
+        Self::read_folded_from(self.store.as_ref(), session).await
+    }
+
+    async fn read_folded_from(
+        store: &dyn SessionStore,
+        session: SessionId,
+    ) -> Result<FoldedRun, RunError> {
+        let mut stream = store.read(&session)?;
         let mut transactions = Vec::new();
         while let Some(entry) = stream.next().await {
             if let SessionEntry::RunTransaction(transaction) = entry? {

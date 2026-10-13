@@ -56,6 +56,9 @@ use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::Notify;
 
+#[path = "../../../ego-core/tests/support/session_writer.rs"]
+pub(super) mod session_writer;
+
 pub const SESSION_PAGE_SIZE: usize = 50;
 
 pub struct SeededReplay {
@@ -808,6 +811,14 @@ impl Store {
 }
 
 impl SessionStore for Store {
+    fn open_writer_lease(
+        &self,
+        id: &SessionId,
+        _: Timestamp,
+    ) -> Result<ego_core::store::session_store::SessionWriterLease<'_>, StoreError> {
+        session_writer::open(self, &self.leases, *id)
+    }
+
     fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
         self.entries
             .lock()

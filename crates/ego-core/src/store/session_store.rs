@@ -250,10 +250,29 @@ impl From<CodecError> for StoreError {
     }
 }
 
+/// One session's repaired state and append authority under its writer lease.
+/// Dropping the writer releases the lease; consumers retain it through admission.
+pub struct SessionWriterLease<'a> {
+    pub state: crate::state::SessionState,
+    pub writer: Box<dyn SessionStore + 'a>,
+}
+
 /// Durable session storage: append events, read them back, and catalogue
 /// sessions. `ARCHITECTURE.md` §3.3; `JsonlStore`, the filesystem
 /// implementation, lives in `ego-tools`, because this crate opens no files.
 pub trait SessionStore: Send + Sync {
+    /// Acquire the existing session writer lease before reading journal state.
+    /// Stores without a writer authority fail closed on continuation admission.
+    fn open_writer_lease(
+        &self,
+        _id: &SessionId,
+        _now: crate::event::time::Timestamp,
+    ) -> Result<SessionWriterLease<'_>, StoreError> {
+        Err(StoreError::Io(std::io::Error::other(
+            "session writer lease is unavailable",
+        )))
+    }
+
     /// Append `ev` to `id`'s durable log, writing the session's versioned
     /// header first if this is the first event for `id`. When to force
     /// bytes to stable storage is a durability concern owned by the

@@ -4,7 +4,7 @@
 //! `prompt.rs`. ACP owns only wire correlation. The real `Arc<RunController>`
 //! owns store transactions, leases, status and interruption.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -65,6 +65,7 @@ impl McpSessionAdmitter for NoMcpAdmitter {
 #[derive(Default)]
 struct AcpStore {
     entries: Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>,
+    writers: Mutex<BTreeSet<SessionId>>,
     sequence: Arc<Mutex<Vec<&'static str>>>,
 }
 
@@ -187,6 +188,7 @@ impl AcpStore {
     fn with_sequence(sequence: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
             entries: Mutex::new(BTreeMap::new()),
+            writers: Mutex::new(BTreeSet::new()),
             sequence,
         }
     }
@@ -212,7 +214,18 @@ impl AcpStore {
     }
 }
 
+#[path = "../../ego-core/tests/support/session_writer.rs"]
+mod session_writer;
+
 impl SessionStore for AcpStore {
+    fn open_writer_lease(
+        &self,
+        id: &SessionId,
+        _: Timestamp,
+    ) -> Result<ego_core::store::session_store::SessionWriterLease<'_>, StoreError> {
+        session_writer::open(self, &self.writers, *id)
+    }
+
     fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
         self.entries
             .lock()

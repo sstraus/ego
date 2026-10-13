@@ -30,7 +30,6 @@ use crate::wire::github_copilot_completions::GithubCopilotCompletions;
 use crate::wire::minimax_anthropic::MiniMaxAnthropic;
 use crate::wire::nous_portal::NousPortal;
 use crate::wire::openai_codex_responses::OpenAiCodexResponses;
-use crate::wire::openai_completions::OpenRouterCompletions;
 use crate::wire::openai_responses::OpenAiResponses;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
 use crate::wire::xai_responses::XaiResponses;
@@ -476,7 +475,7 @@ static OPENAI_SUPPLIED: Supplied = Supplied::new(&OpenAiResponses);
 /// row*, not about the mapping. Sharing one static would have made moving
 /// OpenAI to Responses silently retarget every compatible gateway at an
 /// endpoint it does not serve.
-static OPENROUTER_SUPPLIED: Supplied = Supplied::new(&OpenRouterCompletions);
+static OPENROUTER_MODELS: crate::resolver::OpenRouter = crate::resolver::OpenRouter;
 static ANTHROPIC_SUPPLIED: Supplied = Supplied::new(&AnthropicMessages);
 static GEMINI_SUPPLIED: Supplied = Supplied::new(&GeminiInteractions);
 static OPENAI_CODEX_SUBSCRIPTION: SubscriptionSupplied = SubscriptionSupplied::new(
@@ -807,11 +806,8 @@ impl ProviderRow {
     /// stays — it is current on the contract the mapping is derived from
     /// (`ARCHITECTURE.md` §3).
     ///
-    /// [`Supplied`] and not a discovering resolver: OpenRouter's models
-    /// endpoint publishes a *public* table rather than what this key is
-    /// charged, which is the property that earned xAI a resolver. A public
-    /// table read live is a third-party table with extra steps, and §5 ranks
-    /// it below the operator's own figures either way.
+    /// The public models endpoint supplies current inventory and stated limits.
+    /// Prices are never imported; actual charges come only from response usage.
     pub fn openrouter(base: Url) -> Self {
         let (base, http_profile) = admitted_base("openrouter", base);
         ProviderRow {
@@ -820,7 +816,7 @@ impl ProviderRow {
             http_profile,
             extra_headers: Vec::new(),
             cost_expectation: CostExpectation::Positive,
-            resolver: &OPENROUTER_SUPPLIED,
+            resolver: &OPENROUTER_MODELS,
             credential: CredentialStrategy::OAuthOrEnv {
                 provider: "openrouter".to_string(),
                 var: OPENROUTER_KEY_VAR.to_string(),
