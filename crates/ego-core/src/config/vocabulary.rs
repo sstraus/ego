@@ -1,6 +1,6 @@
 //! Closed vocabulary for user-scoped configuration management.
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -54,7 +54,7 @@ impl ProfileName {
 
 impl fmt::Display for ProfileName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(&self.as_str())
     }
 }
 
@@ -114,13 +114,16 @@ impl UserConfigTarget {
 }
 
 /// A field writable by the general configuration management service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ManagedConfigKey {
     Model,
     Thinking,
     Mode,
     Sandbox,
     Roots,
+    ExecPaths,
+    AuthHeaders(String),
+    AuthCredentialCommand(String),
     ExecEnv,
     ExecEnvAllowlist,
     Network,
@@ -133,7 +136,7 @@ pub enum ManagedConfigKey {
 }
 
 impl ManagedConfigKey {
-    const BASE: [Self; 12] = [
+    const BASE: [Self; 13] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
@@ -146,8 +149,9 @@ impl ManagedConfigKey {
         Self::ExecEnvAllowlist,
         Self::Network,
         Self::Roots,
+        Self::ExecPaths,
     ];
-    const PROFILE: [Self; 10] = [
+    const PROFILE: [Self; 11] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
@@ -158,8 +162,9 @@ impl ManagedConfigKey {
         Self::ExecEnvAllowlist,
         Self::Network,
         Self::Roots,
+        Self::ExecPaths,
     ];
-    const CI_PROFILE: [Self; 12] = [
+    const CI_PROFILE: [Self; 13] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
@@ -172,10 +177,11 @@ impl ManagedConfigKey {
         Self::ExecEnvAllowlist,
         Self::Network,
         Self::Roots,
+        Self::ExecPaths,
     ];
 
-    pub const fn as_str(self) -> &'static str {
-        match self {
+    pub fn as_str(&self) -> Cow<'_, str> {
+        Cow::Borrowed(match self {
             Self::Model => "model",
             Self::Thinking => "thinking",
             Self::Mode => "mode",
@@ -183,6 +189,11 @@ impl ManagedConfigKey {
             Self::ExecEnv => "exec.env",
             Self::ExecEnvAllowlist => "exec.env_allowlist",
             Self::Roots => "roots",
+            Self::ExecPaths => "exec_paths",
+            Self::AuthHeaders(provider) => return Cow::Owned(format!("auth.{provider}.headers")),
+            Self::AuthCredentialCommand(provider) => {
+                return Cow::Owned(format!("auth.{provider}.credential_command"));
+            }
             Self::Network => "network",
             Self::Budget => "budget",
             Self::Bare => "bare",
@@ -190,10 +201,10 @@ impl ManagedConfigKey {
             Self::StatuslineSegments => "ui.statusline.segments",
             Self::SessionDir => "session_dir",
             Self::ArtifactDir => "artifact_dir",
-        }
+        })
     }
 
-    /// Keys available in `target`, in their canonical listing order.
+    /// Static keys available in `target`, in canonical order; auth keys name a provider.
     pub fn for_target(target: UserConfigTarget) -> &'static [Self] {
         match target {
             UserConfigTarget::Base => &Self::BASE,
@@ -202,9 +213,36 @@ impl ManagedConfigKey {
         }
     }
 
+    /// Dynamic authentication keys are available only at the user base.
+    pub fn available_in(&self, target: &UserConfigTarget) -> bool {
+        if self.is_secret() {
+            matches!(target, UserConfigTarget::Base)
+        } else {
+            Self::for_target(target.clone()).contains(self)
+        }
+    }
+
+    pub fn is_secret(&self) -> bool {
+        matches!(self, Self::AuthHeaders(_) | Self::AuthCredentialCommand(_))
+    }
+
     /// Parse only the canonical spelling; aliases and arbitrary dotted keys fail.
     pub fn parse(value: &str) -> Result<Self, UserConfigError> {
+        if let Some(auth) = value.strip_prefix("auth.") {
+            if let Some((provider, field)) = auth.rsplit_once('.') {
+                if !provider.is_empty() && !provider.chars().any(char::is_control) {
+                    match field {
+                        "headers" => return Ok(Self::AuthHeaders(provider.to_owned())),
+                        "credential_command" => {
+                            return Ok(Self::AuthCredentialCommand(provider.to_owned()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         match value {
+            "exec_paths" => Ok(Self::ExecPaths),
             "model" => Ok(Self::Model),
             "thinking" => Ok(Self::Thinking),
             "mode" => Ok(Self::Mode),
@@ -228,7 +266,7 @@ impl ManagedConfigKey {
 
 impl fmt::Display for ManagedConfigKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(&self.as_str())
     }
 }
 
@@ -248,6 +286,9 @@ pub enum ManagedConfigValue {
     Mode(Mode),
     Sandbox(Confinement),
     Roots(Vec<crate::permit::RootCfg>),
+    ExecPaths(Vec<PathBuf>),
+    AuthHeaders(std::collections::HashMap<String, String>),
+    AuthCredentialCommand(String),
     ExecEnv(super::ExecEnvironment),
     ExecEnvAllowlist(Vec<String>),
     Network(super::Network),
@@ -266,25 +307,35 @@ impl ManagedConfigValue {
                 "invalid TOML value for managed configuration key `{key}`: {error}"
             ))
         })?;
-        match key {
-            ManagedConfigKey::Model => decode(key, value).map(Self::Model),
-            ManagedConfigKey::Thinking => decode(key, value).map(Self::Thinking),
-            ManagedConfigKey::Mode => decode(key, value).map(Self::Mode),
-            ManagedConfigKey::Sandbox => decode(key, value).map(Self::Sandbox),
-            ManagedConfigKey::ExecEnv => decode(key, value).map(Self::ExecEnv),
-            ManagedConfigKey::Roots => decode(key, value).map(Self::Roots),
-            ManagedConfigKey::Network => decode(key, value).map(Self::Network),
+        match &key {
+            ManagedConfigKey::ExecPaths => decode(&key, value).map(Self::ExecPaths),
+            ManagedConfigKey::AuthHeaders(_) => {
+                let mut auth = toml::map::Map::new();
+                auth.insert("headers".into(), value);
+                let auth: super::layer::AuthProviderLayer = decode(&key, toml::Value::Table(auth))?;
+                Ok(Self::AuthHeaders(auth.headers))
+            }
+            ManagedConfigKey::AuthCredentialCommand(_) => {
+                decode(&key, value).map(Self::AuthCredentialCommand)
+            }
+            ManagedConfigKey::Model => decode(&key, value).map(Self::Model),
+            ManagedConfigKey::Thinking => decode(&key, value).map(Self::Thinking),
+            ManagedConfigKey::Mode => decode(&key, value).map(Self::Mode),
+            ManagedConfigKey::Sandbox => decode(&key, value).map(Self::Sandbox),
+            ManagedConfigKey::ExecEnv => decode(&key, value).map(Self::ExecEnv),
+            ManagedConfigKey::Roots => decode(&key, value).map(Self::Roots),
+            ManagedConfigKey::Network => decode(&key, value).map(Self::Network),
             ManagedConfigKey::ExecEnvAllowlist => {
-                let names: Vec<String> = decode(key, value)?;
+                let names: Vec<String> = decode(&key, value)?;
                 crate::permit::EnvPolicy::allow_only(names.iter().map(String::as_str))
                     .map_err(|error| UserConfigError::new(error.to_string()))?;
                 Ok(Self::ExecEnvAllowlist(names))
             }
-            ManagedConfigKey::Budget => decode(key, value).map(Self::Budget),
-            ManagedConfigKey::Bare => decode(key, value).map(Self::Bare),
-            ManagedConfigKey::PermissionsJudge => decode(key, value).map(Self::PermissionsJudge),
+            ManagedConfigKey::Budget => decode(&key, value).map(Self::Budget),
+            ManagedConfigKey::Bare => decode(&key, value).map(Self::Bare),
+            ManagedConfigKey::PermissionsJudge => decode(&key, value).map(Self::PermissionsJudge),
             ManagedConfigKey::StatuslineSegments => {
-                let segments: Vec<StatusSegmentName> = decode(key, value)?;
+                let segments: Vec<StatusSegmentName> = decode(&key, value)?;
                 validate_unique_status_segments(&segments).map_err(|error| {
                     UserConfigError::new(format!(
                         "invalid value for managed configuration key `{key}`: {error}"
@@ -293,12 +344,12 @@ impl ManagedConfigValue {
                 Ok(Self::StatuslineSegments(segments))
             }
             ManagedConfigKey::SessionDir | ManagedConfigKey::ArtifactDir => {
-                decode(key, value).map(Self::Path)
+                decode(&key, value).map(Self::Path)
             }
         }
     }
 
-    /// Render the canonical TOML value spelling used by get, list, and receipts.
+    /// Render the canonical TOML value for persistence; callers must redact secret keys.
     pub fn to_toml(&self) -> String {
         let value = match self {
             Self::Model(model) | Self::PermissionsJudge(model) => {
@@ -334,13 +385,18 @@ impl ManagedConfigValue {
                     .collect(),
             ),
             Self::Roots(roots) => toml::Value::try_from(roots).expect("roots are TOML data"),
+            Self::ExecPaths(paths) => toml::Value::try_from(paths).expect("paths are TOML data"),
+            Self::AuthHeaders(headers) => {
+                toml::Value::try_from(headers).expect("headers are TOML data")
+            }
+            Self::AuthCredentialCommand(command) => toml::Value::String(command.clone()),
             Self::Path(path) => toml::Value::String(path.to_string_lossy().into_owned()),
         };
         value.to_string()
     }
 }
 
-fn decode<T>(key: ManagedConfigKey, value: toml::Value) -> Result<T, UserConfigError>
+fn decode<T>(key: &ManagedConfigKey, value: toml::Value) -> Result<T, UserConfigError>
 where
     T: DeserializeOwned,
 {

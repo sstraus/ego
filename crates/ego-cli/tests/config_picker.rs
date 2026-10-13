@@ -132,7 +132,7 @@ impl UserConfigStore for RecordingUserConfigStore {
         Ok(UserConfigSnapshot {
             values: ego_core::config::ManagedConfigKey::for_target(target.clone())
                 .iter()
-                .copied()
+                .cloned()
                 .map(|key| (key, None))
                 .collect(),
             target,

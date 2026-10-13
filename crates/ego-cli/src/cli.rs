@@ -1536,7 +1536,7 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
                 ));
             };
             let key = managed_config_key(&target, key)?;
-            let value = ManagedConfigValue::parse(key, raw_value).map_err(|_| {
+            let value = ManagedConfigValue::parse(key.clone(), raw_value).map_err(|_| {
                 UsageError(format!("invalid TOML value or type for config key `{key}`"))
             })?;
             ConfigAction::Set { target, key, value }
@@ -1671,7 +1671,7 @@ fn managed_config_key(
 ) -> Result<ManagedConfigKey, UsageError> {
     let key =
         ManagedConfigKey::parse(raw).map_err(|_| UsageError("unknown config key".to_owned()))?;
-    if !ManagedConfigKey::for_target(target.clone()).contains(&key) {
+    if !key.available_in(target) {
         return Err(UsageError(format!(
             "config key `{key}` is not available for this target"
         )));

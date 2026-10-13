@@ -76,11 +76,25 @@ where
     I::Target: StoreIo,
 {
     fn snapshot(&self, target: UserConfigTarget) -> Result<UserConfigSnapshot, UserConfigError> {
-        let (_, parsed) = read_user_config(&*self.io, &self.path)?;
-        let values = ManagedConfigKey::for_target(target.clone())
-            .iter()
-            .copied()
-            .map(|key| (key, managed_value(&parsed, &target, key)))
+        let (text, parsed) = read_user_config(&*self.io, &self.path)?;
+        let document = text
+            .parse::<DocumentMut>()
+            .map_err(|_| UserConfigError::new("invalid user config TOML"))?;
+        let mut keys = ManagedConfigKey::for_target(target.clone()).to_vec();
+        if target == UserConfigTarget::Base {
+            let mut providers = parsed.auth.keys().cloned().collect::<Vec<_>>();
+            providers.sort();
+            for provider in providers {
+                keys.push(ManagedConfigKey::AuthHeaders(provider.clone()));
+                keys.push(ManagedConfigKey::AuthCredentialCommand(provider));
+            }
+        }
+        let values = keys
+            .into_iter()
+            .map(|key| {
+                let value = managed_value(&parsed, &target, &key, &document);
+                (key, value)
+            })
             .collect();
         Ok(UserConfigSnapshot { target, values })
     }
@@ -302,7 +316,8 @@ fn apply(
             path,
             access,
         } => {
-            let mut roots = match managed_value(parsed, &target, ManagedConfigKey::Roots) {
+            let mut roots = match managed_value(parsed, &target, &ManagedConfigKey::Roots, document)
+            {
                 Some(ManagedConfigValue::Roots(roots)) => roots,
                 _ => Vec::new(),
             };
@@ -328,14 +343,14 @@ fn apply(
             Ok(true)
         }
         UserConfigMutation::ManagedSet { target, key, value } => {
-            if managed_value(parsed, &target, key).as_ref() == Some(&value) {
+            if managed_value(parsed, &target, &key, document).as_ref() == Some(&value) {
                 return Ok(false);
             }
             apply_managed_set(document, &target, key, &value)?;
             Ok(true)
         }
         UserConfigMutation::ManagedUnset { target, key } => {
-            if managed_value(parsed, &target, key).is_none() {
+            if managed_value(parsed, &target, &key, document).is_none() {
                 return Ok(false);
             }
             apply_managed_unset(document, &target, key)?;
@@ -368,7 +383,7 @@ fn apply(
             }
             set_table_path(
                 document.as_table_mut(),
-                managed_path(ManagedConfigKey::StatuslineSegments),
+                &managed_path(&ManagedConfigKey::StatuslineSegments),
                 value(array),
             )?;
             Ok(true)
@@ -659,10 +674,31 @@ fn rule_effect_field(effect: ManagedRuleEffect) -> &'static str {
 fn managed_value(
     parsed: &ConfigLayer,
     target: &UserConfigTarget,
-    key: ManagedConfigKey,
+    key: &ManagedConfigKey,
+    document: &DocumentMut,
 ) -> Option<ManagedConfigValue> {
     match target {
         UserConfigTarget::Base => match key {
+            ManagedConfigKey::ExecPaths => {
+                parsed.exec_paths.clone().map(ManagedConfigValue::ExecPaths)
+            }
+            ManagedConfigKey::AuthHeaders(provider) => {
+                document
+                    .get("auth")?
+                    .as_table_like()?
+                    .get(provider)?
+                    .as_table_like()?
+                    .get("headers")?;
+                Some(ManagedConfigValue::AuthHeaders(
+                    parsed.auth.get(provider)?.headers.clone(),
+                ))
+            }
+            ManagedConfigKey::AuthCredentialCommand(provider) => parsed
+                .auth
+                .get(provider)?
+                .credential_command
+                .clone()
+                .map(ManagedConfigValue::AuthCredentialCommand),
             ManagedConfigKey::Roots => parsed.roots.clone().map(ManagedConfigValue::Roots),
             ManagedConfigKey::Model => parsed.model.clone().map(ManagedConfigValue::Model),
             ManagedConfigKey::Thinking => parsed.thinking.map(ManagedConfigValue::Thinking),
@@ -697,6 +733,13 @@ fn managed_value(
         UserConfigTarget::Profile(name) => {
             let profile = parsed.profile.get(name.as_str())?;
             match key {
+                ManagedConfigKey::ExecPaths => profile
+                    .exec_paths
+                    .clone()
+                    .map(ManagedConfigValue::ExecPaths),
+                ManagedConfigKey::AuthHeaders(_) | ManagedConfigKey::AuthCredentialCommand(_) => {
+                    None
+                }
                 ManagedConfigKey::Roots => profile.roots.clone().map(ManagedConfigValue::Roots),
                 ManagedConfigKey::Model => profile.model.clone().map(ManagedConfigValue::Model),
                 ManagedConfigKey::Thinking => profile.thinking.map(ManagedConfigValue::Thinking),
@@ -759,7 +802,7 @@ fn apply_managed_set(
         ))
     })?;
     let table = managed_target_table_mut(document, target)?;
-    set_table_path(table, managed_path(key), Item::Value(replacement))
+    set_table_path(table, &managed_path(&key), Item::Value(replacement))
 }
 
 fn apply_managed_unset(
@@ -767,16 +810,16 @@ fn apply_managed_unset(
     target: &UserConfigTarget,
     key: ManagedConfigKey,
 ) -> Result<(), UserConfigError> {
-    let path = managed_path(key);
+    let path = managed_path(&key);
     let removed = match target {
-        UserConfigTarget::Base => remove_table_path(document.as_table_mut(), path)?,
+        UserConfigTarget::Base => remove_table_path(document.as_table_mut(), &path)?,
         UserConfigTarget::Profile(name) => {
             let root = document.as_table_mut();
             let remove_profiles = {
                 let profiles = existing_table_like_field_mut(root, "profile")?;
                 let remove_profile = {
                     let profile = existing_table_like_field_mut(profiles, name.as_str())?;
-                    let removed = remove_table_path(profile, path)?;
+                    let removed = remove_table_path(profile, &path)?;
                     if !removed {
                         return Err(missing_managed_field(target, key));
                     }
@@ -813,22 +856,27 @@ fn managed_target_table_mut<'a>(
     }
 }
 
-fn managed_path(key: ManagedConfigKey) -> &'static [&'static str] {
+fn managed_path(key: &ManagedConfigKey) -> Vec<&str> {
     match key {
-        ManagedConfigKey::Model => &["model"],
-        ManagedConfigKey::Thinking => &["thinking"],
-        ManagedConfigKey::Mode => &["mode"],
-        ManagedConfigKey::Sandbox => &["sandbox"],
-        ManagedConfigKey::ExecEnv => &["exec", "env"],
-        ManagedConfigKey::ExecEnvAllowlist => &["exec", "env_allowlist"],
-        ManagedConfigKey::Roots => &["roots"],
-        ManagedConfigKey::Network => &["network"],
-        ManagedConfigKey::Budget => &["budget"],
-        ManagedConfigKey::Bare => &["bare"],
-        ManagedConfigKey::PermissionsJudge => &["permissions", "judge"],
-        ManagedConfigKey::StatuslineSegments => &["ui", "statusline", "segments"],
-        ManagedConfigKey::SessionDir => &["session_dir"],
-        ManagedConfigKey::ArtifactDir => &["artifact_dir"],
+        ManagedConfigKey::Model => vec!["model"],
+        ManagedConfigKey::Thinking => vec!["thinking"],
+        ManagedConfigKey::Mode => vec!["mode"],
+        ManagedConfigKey::Sandbox => vec!["sandbox"],
+        ManagedConfigKey::ExecEnv => vec!["exec", "env"],
+        ManagedConfigKey::ExecEnvAllowlist => vec!["exec", "env_allowlist"],
+        ManagedConfigKey::ExecPaths => vec!["exec_paths"],
+        ManagedConfigKey::AuthHeaders(provider) => vec!["auth", provider.as_str(), "headers"],
+        ManagedConfigKey::AuthCredentialCommand(provider) => {
+            vec!["auth", provider.as_str(), "credential_command"]
+        }
+        ManagedConfigKey::Roots => vec!["roots"],
+        ManagedConfigKey::Network => vec!["network"],
+        ManagedConfigKey::Budget => vec!["budget"],
+        ManagedConfigKey::Bare => vec!["bare"],
+        ManagedConfigKey::PermissionsJudge => vec!["permissions", "judge"],
+        ManagedConfigKey::StatuslineSegments => vec!["ui", "statusline", "segments"],
+        ManagedConfigKey::SessionDir => vec!["session_dir"],
+        ManagedConfigKey::ArtifactDir => vec!["artifact_dir"],
     }
 }
 

@@ -123,6 +123,7 @@ fn real_adapter_reads_exact_stored_values_in_canonical_order_without_writes() {
             (ManagedConfigKey::ExecEnvAllowlist, None),
             (ManagedConfigKey::Network, None),
             (ManagedConfigKey::Roots, None),
+            (ManagedConfigKey::ExecPaths, None),
         ]
     );
     assert_eq!(io.writes.load(Ordering::SeqCst), 0);
@@ -155,6 +156,7 @@ fn profile_and_ci_are_exact_authorities_and_missing_profile_is_empty() {
             (ManagedConfigKey::ExecEnvAllowlist, None),
             (ManagedConfigKey::Network, None),
             (ManagedConfigKey::Roots, None),
+            (ManagedConfigKey::ExecPaths, None),
         ]
     );
     let ci = store
@@ -181,6 +183,7 @@ fn profile_and_ci_are_exact_authorities_and_missing_profile_is_empty() {
             (ManagedConfigKey::ExecEnvAllowlist, None),
             (ManagedConfigKey::Network, None),
             (ManagedConfigKey::Roots, None),
+            (ManagedConfigKey::ExecPaths, None),
         ]
     );
     let missing = store

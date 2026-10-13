@@ -98,8 +98,8 @@ fn adapter(path: &Path, io: &Arc<FaultIo>) -> OsUserConfigStore<Arc<FaultIo>> {
 fn set(target: UserConfigTarget, key: ManagedConfigKey, raw: &str) -> UserConfigMutation {
     UserConfigMutation::ManagedSet {
         target,
-        key,
-        value: ManagedConfigValue::parse(key, raw).unwrap(),
+        key: key.clone(),
+        value: ManagedConfigValue::parse(key.clone(), raw).unwrap(),
     }
 }
 

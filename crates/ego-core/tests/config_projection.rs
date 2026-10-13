@@ -37,6 +37,7 @@ fn snapshot_has_exact_target_and_closed_canonical_schema_order() {
             ManagedConfigKey::ExecEnvAllowlist,
             ManagedConfigKey::Network,
             ManagedConfigKey::Roots,
+            ManagedConfigKey::ExecPaths,
         ]
     );
     assert_eq!(
@@ -52,6 +53,7 @@ fn snapshot_has_exact_target_and_closed_canonical_schema_order() {
             ManagedConfigKey::ExecEnvAllowlist,
             ManagedConfigKey::Network,
             ManagedConfigKey::Roots,
+            ManagedConfigKey::ExecPaths,
         ]
     );
     assert_eq!(snapshot.values[0], (ManagedConfigKey::Model, None));
@@ -70,6 +72,7 @@ fn snapshot_has_exact_target_and_closed_canonical_schema_order() {
             ManagedConfigKey::ExecEnvAllowlist,
             ManagedConfigKey::Network,
             ManagedConfigKey::Roots,
+            ManagedConfigKey::ExecPaths,
         ]
     );
 }
