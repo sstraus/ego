@@ -348,6 +348,28 @@ mod permit {
         assert!(!write.contains("ego roots add"), "{write}");
     }
 
+    /// regression. Plausible bug: the grant hint is attached to every refused
+    /// read outside the workspace, so a model that tried `~/.ssh/id_rsa` or an
+    /// `.env` is handed a ready-made `ego roots add` for a credential the
+    /// credential defaults keep denied anyway.
+    #[test]
+    fn a_refused_credential_read_outside_the_workspace_does_not_offer_a_grant() {
+        let engine = in_default_mode("/ws");
+        for path in [
+            "/home/u/.ssh/id_rsa",
+            "/home/u/.aws/credentials",
+            "/sibling/.env",
+            "/home/u/.netrc",
+        ] {
+            let denied = engine
+                .classify_settled(read_call(path))
+                .expect_err("the workspace is the boundary");
+            let text = denied.to_string();
+            assert!(text.contains(path), "{text}");
+            assert!(!text.contains("roots add"), "{text}");
+        }
+    }
+
     /// Critic regression_case. Plausible bug: the exception for a refused read drops
     /// `list` or `search` (a model listing `~/.codex` still ends the run), or
     /// widens to a mutating or spawning op outside the workspace.
