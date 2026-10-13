@@ -1,8 +1,8 @@
 use super::*;
 
-// Catches: errno-suffixed EPERM/EACCES lose the human request, or stdout/unanchored text raises one.
+// Catches: errno-suffixed EPERM/EACCES lose the human request, or stdout/trailing prose raises one.
 #[test]
-fn adaptive_errno_refusals_request_only_the_anchored_stderr_path() {
+fn adaptive_errno_refusals_request_only_absolute_stderr_paths() {
     let workspace = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let target = std::fs::canonicalize(outside.path())
@@ -16,20 +16,12 @@ fn adaptive_errno_refusals_request_only_the_anchored_stderr_path() {
         "Permission denied".to_owned(),
         std::io::Error::from_raw_os_error(2).to_string(),
     ] {
-        for (stream, suffix, anchored) in [
-            ("2", "", true),
-            ("1", "", true),
-            ("2", " ignored", true),
-            ("2", "", false),
-        ] {
+        for (stream, suffix) in [("2", ""), ("1", ""), ("2", " ignored")] {
             let seat = Seat::answering(false);
             let run = run_with(&seat, workspace.path());
             let script =
                 format!("printf '%s: %s%s\\n' '{printed}' \"$1\" \"$2\" >&{stream}; exit 1");
-            let mut argv = vec!["/bin/sh", "-c", &script, "probe", &error, suffix];
-            if anchored {
-                argv.push(printed);
-            }
+            let argv = vec!["/bin/sh", "-c", &script, "probe", &error, suffix];
             let child = SpawnSpec::new(
                 argv.into_iter().map(Into::into).collect(),
                 Some(run.workspace.clone()),
@@ -40,8 +32,7 @@ fn adaptive_errno_refusals_request_only_the_anchored_stderr_path() {
             let Err(ProcessError::Exit { result, .. }) = execute(&run, &child) else {
                 panic!("fixture must fail")
             };
-            let expected =
-                stream == "2" && suffix.is_empty() && anchored && !error.contains("os error 2");
+            let expected = stream == "2" && suffix.is_empty() && !error.contains("os error 2");
             assert_eq!(
                 seat.asked(),
                 if expected {
@@ -52,7 +43,7 @@ fn adaptive_errno_refusals_request_only_the_anchored_stderr_path() {
                 } else {
                     vec![]
                 },
-                "{error} {stream} {suffix} {anchored}"
+                "{error} {stream} {suffix}"
             );
             if expected {
                 assert!(

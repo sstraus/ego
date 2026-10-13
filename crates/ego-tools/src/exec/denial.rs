@@ -4,12 +4,11 @@
 //! the confined program sees `EPERM` and prints it. The only evidence is the
 //! program's own `<path>: Operation not permitted` line. That line is written
 //! by a process the model chose, so it is never trusted by itself. A path
-//! becomes a question for the human only when the command line the human
-//! already approved names it (or a directory above it), it resolves to a
-//! location the profile does not already open and can express, it is not
-//! inside the workspace the run owns, and it is not a place so broad that
-//! opening it would open the person's whole machine (`/`, the home directory,
-//! or any directory above the workspace).
+//! becomes a question for the human only after canonical resolution and floor
+//! checks. The command need not name a program-internal target in argv.
+//! Stderr does not prove an attempted operation: the suggested human capability
+//! below is not residual-write provenance and must never authorize a sentinel.
+//! Broad roots, workspace paths and protected floors cannot become questions.
 
 use std::path::{Path, PathBuf};
 
@@ -39,11 +38,6 @@ pub(super) fn analyze(
     if confinement.level() == ego_core::permit::Confinement::Off {
         return None;
     }
-    let argv = spec
-        .argv()
-        .iter()
-        .map(|argument| argument.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
     let stderr = result
         .content
         .iter()
@@ -65,7 +59,7 @@ pub(super) fn analyze(
             first.get_or_insert(printed);
             continue;
         }
-        let request = request_for(printed, &argv, spec, confinement, granted);
+        let request = request_for(printed, spec, confinement, granted);
         if request.is_some() {
             return Some(Denial {
                 printed: printed.to_owned(),
@@ -116,20 +110,12 @@ fn refused_program(body: &str) -> Option<&str> {
 
 fn request_for(
     printed: &str,
-    argv: &[String],
     spec: &SpawnSpec,
     confinement: &RunConfinement,
     granted: &[SandboxGrant],
 ) -> Option<SandboxGrant> {
     let workspace = confinement.workspace().as_path();
     let (path, exists) = canonical(Path::new(printed))?;
-    // The command line the human approved must name the path, or a directory
-    // above it: without this a program could print any path it likes and have
-    // the human asked about it. Names are compared by resolved path component,
-    // never as substrings (`/a/Gits` is not named by `/a/Gits-evil/f`).
-    if !argv_anchors(argv, confinement).any(|anchor| path.is_or_under(&anchor)) {
-        return None;
-    }
     if path.is_or_under(&CanonPath::new(workspace)) || too_broad(&path, confinement) {
         return None;
     }
@@ -139,12 +125,15 @@ fn request_for(
     let access = if exec_target(spec).is_some_and(|target| target == path.as_path()) {
         SandboxAccess::Exec
     } else if !exists
+        || confinement.adaptive_perimeter().is_some()
         || granted
             .iter()
             .any(|grant| grant.covers(&path, SandboxAccess::Read))
     {
-        // A path that does not exist cannot have been refused for reading,
-        // and a path that is already readable can only be refused for writing.
+        // Suggest the capability that could unblock this hint to the human:
+        // Adaptive already reads every path outside its floors, so a Read
+        // grant cannot. Nonexistence/read reach does not prove a write; no
+        // judge consumes it.
         SandboxAccess::Write
     } else {
         SandboxAccess::Read
@@ -154,28 +143,6 @@ fn request_for(
         return None;
     }
     Some(SandboxGrant::new(path, access))
-}
-
-/// The absolute paths the command line spells, resolved: whole arguments and
-/// the value of `--flag=/path`. A place too broad to grant anchors nothing
-/// either: a command line that merely names `/`, or a workspace symlink to the
-/// home directory, does not name what lies below it.
-fn argv_anchors<'a>(
-    argv: &'a [String],
-    confinement: &'a RunConfinement,
-) -> impl Iterator<Item = CanonPath> + 'a {
-    argv.iter().filter_map(|argument| {
-        let spelled = match argument.split_once('=') {
-            Some((_, value)) if value.starts_with('/') => value,
-            _ => argument.as_str(),
-        };
-        spelled
-            .starts_with('/')
-            .then(|| canonical(Path::new(spelled)))
-            .flatten()
-            .map(|(path, _)| path)
-            .filter(|path| !too_broad(path, confinement))
-    })
 }
 
 /// A grant of `/`, of the home directory, or of a directory above the
@@ -271,9 +238,8 @@ pub(super) fn note(denial: &Denial, confinement: &RunConfinement, outcome: Outco
              allowing the call does not lift it; exec can only reach the workspace, fixed system \
              paths and paths a person allowed, and a refusal after an allowance may come from \
              macOS privacy protection instead; to allow it, run in the workspace or use a \
-             looser --sandbox level{}",
-            denial.printed,
-            command::roots_command(&denial.printed, confinement).unwrap_or_default()
+             looser --sandbox level",
+            denial.printed
         ),
     }
 }

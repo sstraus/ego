@@ -158,6 +158,10 @@ fn other_errors_and_relative_paths_are_not_sandbox_questions() {
         None
     );
     assert_eq!(printed_path("Operation not permitted"), None);
+    assert_eq!(
+        printed_path("cat: /outside/f: Permission denied ignored"),
+        None
+    );
 }
 
 #[test]

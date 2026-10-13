@@ -104,57 +104,97 @@ fn adaptive_floor_denials_never_offer_an_ineffective_grant() {
     }
 }
 
-// Catches: a write refused inside a script (N4) only says "use a looser
-// sandbox" and never gives the person the exact root command; or that command
-// offers a place too broad to grant, such as the home directory.
+// Catches: a program-internal Adaptive hint is never put to the human.
 #[test]
-fn adaptive_unanchored_write_refusal_names_the_exact_roots_command() {
-    let Some(root) = isolated(
-        "adaptive_grants::adaptive_unanchored_write_refusal_names_the_exact_roots_command",
-    ) else {
+fn adaptive_unanchored_refusal_reaches_the_human() {
+    let Some(root) = isolated("adaptive_grants::adaptive_unanchored_refusal_reaches_the_human")
+    else {
         return;
     };
     let cache = root.join("outside/cache");
     std::fs::create_dir_all(&cache).unwrap();
-    let cache = std::fs::canonicalize(cache).unwrap();
-    let command = format!(
-        "ego roots add --access read-write {}",
-        cache.to_str().unwrap()
-    );
+    let target = std::fs::canonicalize(cache).unwrap().join("run.tmp");
     let policy = admit(&root.join("workspace")).unwrap();
-    for (target, expected) in [
-        (cache.join("run.tmp"), Some(command.as_str())),
-        (root.join("home/stray"), None),
-    ] {
-        let seat = Arc::new(Seat::default());
-        // The approved command line never names the path as an argument.
-        let script = format!("exec /usr/bin/touch '{}'", target.display());
-        let result = execute_with_grants(
-            policy.clone(),
-            &root,
-            vec!["/bin/sh".into(), "-c".into(), script.into()],
-            Some(seat.clone()),
-        );
-        let Err(ProcessError::Exit { result, .. }) = result else {
-            panic!(
-                "expected native refusal for {}: {result:?}",
-                target.display()
-            );
-        };
-        assert!(seat.0.lock().unwrap().is_empty(), "unanchored path asked");
-        let note = result
-            .content
-            .iter()
-            .map(|block| block.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(note.contains(target.to_str().unwrap()), "{note}");
-        match expected {
-            Some(command) => {
-                assert!(note.contains(command), "{note}");
-                assert!(note.contains("exit and resume"), "{note}");
-            }
-            None => assert!(!note.contains("ego roots add"), "{note}"),
-        }
+    let seat = Arc::new(Seat::default());
+    let result = execute_with_grants(
+        policy,
+        &root,
+        vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!("exec /usr/bin/touch '{}'", target.display()).into(),
+        ],
+        Some(seat.clone()),
+    );
+    let Err(ProcessError::Exit { result, .. }) = result else {
+        panic!("expected native refusal: {result:?}");
+    };
+    assert_eq!(
+        *seat.0.lock().unwrap(),
+        vec![SandboxGrant::new(
+            CanonPath::new(&target),
+            ego_core::permit::SandboxAccess::Write
+        )]
+    );
+    assert!(!target.exists(), "declined hint performed the write");
+    let note = result
+        .content
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(note.contains("the user declined"), "{note}");
+}
+
+/// A person who allows every question; the grants it gave are the run's.
+#[derive(Default)]
+struct AllowingSeat(Mutex<Vec<SandboxGrant>>);
+
+impl SandboxGrantPort for AllowingSeat {
+    fn granted(&self) -> Vec<SandboxGrant> {
+        self.0.lock().unwrap().clone()
     }
+
+    fn ask<'a>(&'a self, request: &'a SandboxGrant, _command: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            self.0.lock().unwrap().push(request.clone());
+            true
+        })
+    }
+}
+
+// Catches: Adaptive already reads every non-floor path, yet a program-internal
+// write to an existing outside file is first offered as a Read grant that
+// cannot unblock it, so the person answers a useless question (and "always"
+// stores a useless grant) before the Write question that works.
+#[test]
+fn adaptive_internal_write_to_an_existing_file_is_asked_as_one_write() {
+    let Some(root) = isolated(
+        "adaptive_grants::adaptive_internal_write_to_an_existing_file_is_asked_as_one_write",
+    ) else {
+        return;
+    };
+    let target = root.join("outside/notes.txt");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "old").unwrap();
+    let target = std::fs::canonicalize(target).unwrap();
+    let policy = admit(&root.join("workspace")).unwrap();
+    let seat = Arc::new(AllowingSeat::default());
+    let script = format!("printf new >> '{}'", target.display());
+    let result = execute_with_grants(
+        policy,
+        &root,
+        vec!["/bin/sh".into(), "-c".into(), script.into()],
+        Some(seat.clone()),
+    );
+    assert_eq!(
+        *seat.0.lock().unwrap(),
+        vec![SandboxGrant::new(
+            CanonPath::new(&target),
+            ego_core::permit::SandboxAccess::Write
+        )],
+        "result: {result:?}"
+    );
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "oldnew");
 }

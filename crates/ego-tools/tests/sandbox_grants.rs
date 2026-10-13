@@ -214,11 +214,10 @@ fn a_write_to_a_path_that_does_not_exist_yet_is_asked_as_a_write() {
 }
 
 #[test]
-fn a_path_the_command_line_never_named_is_not_put_to_the_person() {
-    // catches: a program (or a prompt-injected command) printing a refusal for
-    // an unrelated path to get a grant for it.
+fn an_unanchored_hint_requires_the_person_to_authorize_it() {
+    // Catches: an untrusted hint silently grants a path without human authorization.
     let workspace = tempfile::tempdir().expect("workspace");
-    let seat = Seat::answering(true);
+    let seat = Seat::answering(false);
     let run = run_with(&seat, workspace.path());
     let forged = spec(
         &run,
@@ -233,9 +232,16 @@ fn a_path_the_command_line_never_named_is_not_put_to_the_person() {
         panic!("the forged command exits unsuccessfully");
     };
 
-    assert!(seat.asked().is_empty(), "{:?}", seat.asked());
+    assert_eq!(
+        seat.asked(),
+        vec![SandboxGrant::new(
+            CanonPath::new(std::fs::canonicalize("/etc/hosts").unwrap()),
+            SandboxAccess::Read
+        )]
+    );
+    assert!(seat.granted.lock().unwrap().is_empty());
     assert!(
-        text(&result).contains("exec can only reach the workspace"),
+        text(&result).contains("the user declined"),
         "{}",
         text(&result)
     );
@@ -321,3 +327,6 @@ fn an_ordinary_failing_exit_is_not_labelled_a_sandbox_block() {
 
 #[path = "support/errno_sandbox.rs"]
 mod errno_sandbox;
+
+#[path = "support/internal_sandbox.rs"]
+mod internal_sandbox;
