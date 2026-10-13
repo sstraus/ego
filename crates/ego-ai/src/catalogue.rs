@@ -1257,8 +1257,13 @@ impl Catalogue {
         })
     }
 
+    /// The capabilities an operator supplied for `slug` (`provider/model`).
+    pub(crate) fn supplied_capabilities(&self, slug: &str) -> Option<&ModelCapabilities> {
+        self.hosted.get(slug).map(|hosted| &hosted.capabilities)
+    }
+
     /// Current supplied rows owned by `provider`, without rates or credentials.
-    pub(crate) fn enumerate_hosted(
+    pub fn enumerate_hosted(
         &self,
         provider: &str,
         metering: Option<MeteringKind>,
