@@ -31,4 +31,4 @@ The permitted local delta is intentionally narrow:
 
 Do not add εgo policy, DTOs, input handling, or rendering to this crate. The
 decision and replacement condition are recorded in
-`docs/decisions/2026-08-25-the-live-surface-pins-a-corrected-reedline.md`.
+`ARCHITECTURE.md`.

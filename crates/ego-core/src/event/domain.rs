@@ -230,19 +230,22 @@ pub struct ToolTiming {
 /// The exhaustive set of internal reducer inputs, per ARCH §1:
 ///
 /// ```text
-/// SessionTitleChanged | SessionDeleted | SessionPauseRequested | SessionPaused |
-/// SessionResumed | GoalSet | GoalTransitioned | PromptQueued |
-/// PromptDeliveryExpedited | PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
-/// ReasoningDelta | ReasoningState | ToolCallStarted |
-/// ToolCallDelta | ToolCallMeasured | ToolCallCompleted | PermissionRequested |
-/// PermissionAmended | PermissionDecided | GenerationStarted |
-/// ExecutionObserved | FallbackDecision | JudgeResponse | SandboxResidualDecided | AttemptSettled |
-/// UsageUpdated | UsageCorrected |
-/// ContextWindowUpdated | TurnCompleted | CompactionSeeded | Compacted | Forked |
+/// SessionTitleChanged | SessionDeleted | SessionPauseRequested |
+/// SessionPaused | SessionPauseObserved | SessionResumed | GoalSet |
+/// GoalTransitioned | PromptQueued | PromptDeliveryExpedited |
+/// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
+/// ReasoningDelta | ReasoningState | ToolCallStarted | ToolCallDelta |
+/// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
+/// DetachedExecSettled | QuestionRequested | QuestionSettled |
+/// PermissionRequested | PermissionAmended | PermissionDecided |
+/// GenerationStarted | FallbackDecision | ExecutionObserved |
+/// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |
+/// AttemptSettled | UsageUpdated | UsageCorrected | ContextWindowUpdated |
+/// TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
-/// HookInvocationSettled |
-/// SubagentRequested | SubagentSpawned | SubagentSettled |
-/// SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted | Error
+/// HookInvocationSettled | SubagentRequested | SubagentSpawned |
+/// SubagentSettled | SkillCatalogueAdmitted | SkillInstructionAdmitted |
+/// SkillResourceAdmitted | Error
 /// ```
 ///
 /// This is the internal representation: it evolves freely with core, and
