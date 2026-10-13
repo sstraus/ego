@@ -5,20 +5,19 @@ use super::*;
 async fn admit_saved_session_policy(
     active: &mut ActiveSession<'_>,
     observation: &ExecObservation,
-    probe_evidence: Option<ego_core::store::evidence::EvidenceRef>,
     root: &Path,
     journal_ports: (&SystemClock, &dyn EventSink),
     diagnostics: &dyn Diagnostics,
     human: Option<&dyn HumanApprover>,
 ) -> Result<(), RunTermination> {
-    let (clock, sink) = journal_ports;
-    let previous = active.state().execution_observation.clone();
-    if previous
-        .as_ref()
-        .is_some_and(|old| observation.same_measurement(old))
-    {
+    // The saved authority is the observation the last admitted turn journaled.
+    let Some(previous) = active.state().execution_observation.clone() else {
+        return Ok(());
+    };
+    if observation.same_measurement(&previous) {
         return Ok(());
     }
+    let (clock, sink) = journal_ports;
     let mut journal = Journal::new(
         active.id(),
         active.store(),
@@ -27,37 +26,22 @@ async fn admit_saved_session_policy(
         Producer::Main,
         active.state().clone(),
     );
-    if let Some(previous) = previous {
-        ego_core::run::admit_execution_policy(
-            &previous,
-            observation,
-            CanonPath::new(root),
-            human,
-            &mut journal,
-            |message| {
-                diagnostics.note(message);
-                Ok(())
-            },
-        )
-        .await
-        .map_err(|error| RunTermination::PermissionRequired {
-            action: error.to_string(),
-            by: DeniedBy::Nobody,
-        })?;
-    }
-    journal
-        .append(
-            TurnId::new(),
-            None,
-            None,
-            EventKind::ExecutionObserved {
-                observation: observation.clone(),
-                probe_evidence,
-            },
-        )
-        .map_err(|error| RunTermination::Failed {
-            message: error.to_string(),
-        })?;
+    ego_core::run::admit_execution_policy(
+        &previous,
+        observation,
+        CanonPath::new(root),
+        human,
+        &mut journal,
+        |message| {
+            diagnostics.note(message);
+            Ok(())
+        },
+    )
+    .await
+    .map_err(|error| RunTermination::PermissionRequired {
+        action: error.to_string(),
+        by: DeniedBy::Nobody,
+    })?;
     let state = journal.state().clone();
     drop(journal);
     active.replace_state(state);
@@ -440,7 +424,6 @@ pub(super) async fn drive_execution<S: EventSink>(
             admit_saved_session_policy(
                 &mut active,
                 &observation,
-                probe_evidence.clone(),
                 &root,
                 (&clock, sink),
                 diagnostics,
@@ -623,7 +606,6 @@ pub(super) async fn drive_execution<S: EventSink>(
                     admit_saved_session_policy(
                         &mut active,
                         &observation,
-                        probe_evidence.clone(),
                         &root,
                         (&clock, sink),
                         diagnostics,
