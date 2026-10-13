@@ -145,3 +145,56 @@ fn adaptive_unanchored_refusal_reaches_the_human() {
         .join("\n");
     assert!(note.contains("the user declined"), "{note}");
 }
+
+/// A person who allows every question; the grants it gave are the run's.
+#[derive(Default)]
+struct AllowingSeat(Mutex<Vec<SandboxGrant>>);
+
+impl SandboxGrantPort for AllowingSeat {
+    fn granted(&self) -> Vec<SandboxGrant> {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn ask<'a>(&'a self, request: &'a SandboxGrant, _command: &'a str) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            self.0.lock().unwrap().push(request.clone());
+            true
+        })
+    }
+}
+
+// Catches: Adaptive already reads every non-floor path, yet a program-internal
+// write to an existing outside file is first offered as a Read grant that
+// cannot unblock it, so the person answers a useless question (and "always"
+// stores a useless grant) before the Write question that works.
+#[test]
+fn adaptive_internal_write_to_an_existing_file_is_asked_as_one_write() {
+    let Some(root) = isolated(
+        "adaptive_grants::adaptive_internal_write_to_an_existing_file_is_asked_as_one_write",
+    ) else {
+        return;
+    };
+    let target = root.join("outside/notes.txt");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "old").unwrap();
+    let target = std::fs::canonicalize(target).unwrap();
+    let policy = admit(&root.join("workspace")).unwrap();
+    let seat = Arc::new(AllowingSeat::default());
+    let script = format!("printf new >> '{}'", target.display());
+    let result = execute_with_grants(
+        policy,
+        &root,
+        vec!["/bin/sh".into(), "-c".into(), script.into()],
+        Some(seat.clone()),
+    );
+    assert_eq!(
+        *seat.0.lock().unwrap(),
+        vec![SandboxGrant::new(
+            CanonPath::new(&target),
+            ego_core::permit::SandboxAccess::Write
+        )],
+        "result: {result:?}"
+    );
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "oldnew");
+}
